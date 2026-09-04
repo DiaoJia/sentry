@@ -1,43 +1,38 @@
-import {Fragment, useCallback, useMemo, useRef, useState} from 'react';
+import {Fragment, useCallback, useMemo, useState} from 'react';
 import {useTheme} from '@emotion/react';
-import styled from '@emotion/styled';
 import clamp from 'lodash/clamp';
 
+import {Button, ButtonBar} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+
 import {SectionHeading} from 'sentry/components/charts/styles';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {ArrayLinks} from 'sentry/components/profiling/arrayLinks';
+import {DataTable} from 'sentry/components/tables/dataTable';
 import {IconChevron} from 'sentry/icons/iconChevron';
 import {IconWarning} from 'sentry/icons/iconWarning';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import type EventView from 'sentry/utils/discover/eventView';
+import {defined} from 'sentry/utils/defined';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import type {RenderFunctionBaggage} from 'sentry/utils/discover/fieldRenderers';
 import {FIELD_FORMATTERS} from 'sentry/utils/discover/fieldRenderers';
 import {getShortEventId} from 'sentry/utils/events';
+import {isSampledProfile} from 'sentry/utils/profiling/guards/profile';
 import {useAggregateFlamegraphQuery} from 'sentry/utils/profiling/hooks/useAggregateFlamegraphQuery';
 import {generateProfileRouteFromProfileReference} from 'sentry/utils/profiling/routes';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {
-  Table,
-  TableBody,
-  TableBodyCell,
-  TableHead,
-  TableHeadCell,
-  TableRow,
-  TableStatus,
-  useTableStyles,
-} from 'sentry/views/explore/components/table';
-import {getProfileTargetId} from 'sentry/views/profiling/utils';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {getProfileTargetId} from 'sentry/views/explore/profiling/utils';
+
+const MAX_EXAMPLES_PER_FRAME = 5;
 
 function sortFunctions(a: Profiling.FunctionMetric, b: Profiling.FunctionMetric) {
-  return b.sum - a.sum;
+  return b.sumSelfTime - a.sumSelfTime;
 }
 
 type Column = {
@@ -76,6 +71,29 @@ const COLUMNS: Column[] = [
   },
 ];
 
+function shouldSkipFrame(
+  frame: Omit<Profiling.Frame, 'key'> | undefined,
+  frameInfo: Profiling.FrameInfo | undefined
+): boolean {
+  if (!frame || !frameInfo) {
+    return true;
+  }
+
+  if (!frameInfo.sumSelfTime) {
+    return true;
+  }
+
+  if (!frame.is_application) {
+    return true;
+  }
+
+  if (!defined(frame.fingerprint) || !frame.name || !frame.image) {
+    return true;
+  }
+
+  return false;
+}
+
 interface SuspectFunctionsTableProps {
   analyticsPageSource: 'performance_transaction' | 'profiling_transaction';
   eventView: EventView;
@@ -89,22 +107,93 @@ export function SuspectFunctionsTable({
 }: SuspectFunctionsTableProps) {
   const theme = useTheme();
   const location = useLocation();
+  const navigate = useNavigate();
   const organization = useOrganization();
 
   const flamegraphQuery = useAggregateFlamegraphQuery({
-    // User query is only permitted when using transactions.
-    // If this is to be reused for strictly continuous profiling,
-    // it'll need to be swapped to use the `profiles` data source
-    // with no user query.
-    dataSource: 'transactions',
+    // Note: the 'profiles' data source does not support user queries.
+    // If reusing this for continuous profiling, remove the query param
+    // and switch to dataSource: 'profiles'.
+    dataSource: 'spans',
     query: eventView.query,
     metrics: true,
   });
 
   const sortedMetrics = useMemo(() => {
-    const metrics = flamegraphQuery.data?.metrics || [];
+    const frames = flamegraphQuery.data?.shared?.frames ?? [];
+    const frameInfos = flamegraphQuery.data?.shared?.frame_infos ?? [];
+    const profileExamples = flamegraphQuery.data?.shared?.profiles ?? [];
+
+    const examples = Array.from<
+      Array<Profiling.ContinuousProfileReference | Profiling.TransactionProfileReference>
+    >({length: frames.length});
+
+    for (const profile of flamegraphQuery.data?.profiles ?? []) {
+      if (isSampledProfile(profile)) {
+        for (let i = 0; i < profile.samples.length; i++) {
+          const sample = profile.samples[i]!;
+          const sampleExamples = profile.samples_examples?.[i];
+          if (!defined(sampleExamples)) {
+            continue;
+          }
+          for (const frameIndex of sample) {
+            const frame = frames[frameIndex];
+            const frameInfo = frameInfos[frameIndex];
+            if (shouldSkipFrame(frame, frameInfo)) {
+              continue;
+            }
+
+            const examplesForFrame = examples[frameIndex] || [];
+            for (const sampleExampleIndex of sampleExamples) {
+              if (examplesForFrame.length >= MAX_EXAMPLES_PER_FRAME) {
+                break;
+              }
+              const sampleExample = profileExamples[sampleExampleIndex];
+              if (defined(sampleExample) && typeof sampleExample !== 'string') {
+                examplesForFrame.push(sampleExample);
+              }
+            }
+            examples[frameIndex] = examplesForFrame;
+          }
+        }
+      }
+    }
+
+    const metrics: Profiling.FunctionMetric[] = [];
+
+    for (let i = 0; i < frames.length && i < frameInfos.length; i++) {
+      const frame = frames[i]!;
+      const frameInfo = frameInfos[i];
+      if (!frameInfo) {
+        continue;
+      }
+      if (shouldSkipFrame(frame, frameInfo)) {
+        continue;
+      }
+
+      const frameExamples = examples[i];
+      if (!frameExamples?.length) {
+        continue;
+      }
+
+      metrics.push({
+        fingerprint: frame.fingerprint || 0,
+        in_app: frame.is_application || false,
+        name: frame.name,
+        package: frame.image || '',
+        avg: frameInfo.sumDuration / frameInfo.count,
+        count: frameInfo.count,
+        sum: frameInfo.sumDuration,
+        sumSelfTime: frameInfo.sumSelfTime,
+        p75: frameInfo.p75Duration,
+        p95: frameInfo.p95Duration,
+        p99: frameInfo.p99Duration,
+        examples: frameExamples,
+      });
+    }
+
     return metrics.sort(sortFunctions);
-  }, [flamegraphQuery.data?.metrics]);
+  }, [flamegraphQuery.data]);
 
   const pagination = useMemoryPagination(sortedMetrics, 5);
 
@@ -113,11 +202,10 @@ export function SuspectFunctionsTable({
   }, [sortedMetrics, pagination]);
 
   const fields = COLUMNS.map(column => column.value);
-  const tableRef = useRef<HTMLTableElement>(null);
-  const {initialTableStyles} = useTableStyles(fields, tableRef);
 
   const baggage: RenderFunctionBaggage = {
     location,
+    navigate,
     organization,
     theme,
     unit: 'nanosecond',
@@ -125,9 +213,9 @@ export function SuspectFunctionsTable({
 
   return (
     <Fragment>
-      <TableHeader>
+      <Flex justify="between" marginBottom="md">
         <SectionHeading>{t('Suspect Functions')}</SectionHeading>
-        <ButtonBar merged>
+        <ButtonBar>
           <Button
             icon={<IconChevron direction="left" />}
             aria-label={t('Previous')}
@@ -141,13 +229,13 @@ export function SuspectFunctionsTable({
             {...pagination.nextButtonProps}
           />
         </ButtonBar>
-      </TableHeader>
-      <Table ref={tableRef} style={initialTableStyles}>
-        <TableHead>
-          <TableRow>
+      </Flex>
+      <DataTable fields={fields}>
+        <DataTable.Head>
+          <DataTable.Row>
             {COLUMNS.map((column, i) => {
               return (
-                <TableHeadCell
+                <DataTable.HeadCell
                   key={i}
                   isFirst={i === 0}
                   align={
@@ -157,21 +245,21 @@ export function SuspectFunctionsTable({
                   }
                 >
                   {column.label}
-                </TableHeadCell>
+                </DataTable.HeadCell>
               );
             })}
-          </TableRow>
-        </TableHead>
-        <TableBody>
+          </DataTable.Row>
+        </DataTable.Head>
+        <DataTable.Body>
           {flamegraphQuery.isPending ? (
-            <TableStatus>
+            <DataTable.Status>
               <LoadingIndicator />
-            </TableStatus>
+            </DataTable.Status>
           ) : flamegraphQuery.isError ? (
-            <TableStatus>
-              <IconWarning data-test-id="error-indicator" color="gray300" size="lg" />
-            </TableStatus>
-          ) : flamegraphQuery.isFetched ? (
+            <DataTable.Status>
+              <IconWarning data-test-id="error-indicator" variant="muted" size="lg" />
+            </DataTable.Status>
+          ) : flamegraphQuery.isFetched && metrics.length > 0 ? (
             metrics.map((metric, i) => (
               <TableEntry
                 key={i}
@@ -183,14 +271,14 @@ export function SuspectFunctionsTable({
               />
             ))
           ) : (
-            <TableStatus>
+            <DataTable.Status>
               <EmptyStateWarning>
                 <p>{t('No functions found')}</p>
               </EmptyStateWarning>
-            </TableStatus>
+            </DataTable.Status>
           )}
-        </TableBody>
-      </Table>
+        </DataTable.Body>
+      </DataTable>
     </Fragment>
   );
 }
@@ -211,7 +299,7 @@ function TableEntry({
   project,
 }: TableEntryProps) {
   return (
-    <TableRow>
+    <DataTable.Row>
       {COLUMNS.map(column => {
         if (column.value === 'examples') {
           const items = metric[column.value].map(example => {
@@ -239,9 +327,9 @@ function TableEntry({
             };
           });
           return (
-            <TableBodyCell key={column.value}>
+            <DataTable.Cell key={column.value}>
               <ArrayLinks items={items} />
-            </TableBodyCell>
+            </DataTable.Cell>
           );
         }
 
@@ -250,12 +338,12 @@ function TableEntry({
             ? FIELD_FORMATTERS.duration.renderFunc
             : FIELD_FORMATTERS.string.renderFunc;
         return (
-          <TableBodyCell key={column.value}>
+          <DataTable.Cell key={column.value}>
             {formatter(column.value, metric, baggage)}
-          </TableBodyCell>
+          </DataTable.Cell>
         );
       })}
-    </TableRow>
+    </DataTable.Row>
   );
 }
 
@@ -292,9 +380,3 @@ function useMemoryPagination(items: any[], size: number) {
     },
   };
 }
-
-const TableHeader = styled('div')`
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: ${space(1)};
-`;

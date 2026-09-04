@@ -4,6 +4,7 @@ from typing import Any
 
 from sentry.integrations.jira_server.actions.form import JiraServerNotifyServiceForm
 from sentry.integrations.services.integration import RpcIntegration
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.rules.actions import TicketEventAction
 from sentry.utils.http import absolute_uri
 
@@ -13,7 +14,7 @@ class JiraServerCreateTicketAction(TicketEventAction):
     label = "Create a Jira Server issue in {integration} with these "
     ticket_type = "a Jira Server issue"
     link = "https://docs.sentry.io/product/integrations/issue-tracking/jira/#issue-sync"
-    provider = "jira_server"
+    provider = IntegrationProviderSlug.JIRA_SERVER.value
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -23,10 +24,7 @@ class JiraServerCreateTicketAction(TicketEventAction):
             self.data["fixVersions"] = [fix_versions]
 
     def generate_footer(self, rule_url: str) -> str:
-        return "This ticket was automatically created by Sentry via [{}|{}]".format(
-            self.rule.label,
-            absolute_uri(rule_url),
-        )
+        return f"This ticket was automatically created by Sentry via [{self.rule.label}|{absolute_uri(rule_url)}]"
 
     def translate_integration(self, integration: RpcIntegration) -> str:
         return integration.metadata.get("domain_name", integration.name)

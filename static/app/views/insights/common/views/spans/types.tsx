@@ -1,15 +1,4 @@
 import {t} from 'sentry/locale';
-import {defined} from 'sentry/utils';
-import {RATE_UNIT_TITLE, RateUnit} from 'sentry/utils/discover/fields';
-import type {SpanMetricsField, SubregionCode} from 'sentry/views/insights/types';
-
-export type ModuleFilters = {
-  [SpanMetricsField.SPAN_ACTION]?: string;
-  [SpanMetricsField.SPAN_DOMAIN]?: string;
-  [SpanMetricsField.SPAN_GROUP]?: string;
-  [SpanMetricsField.SPAN_OP]?: string;
-  [SpanMetricsField.USER_GEO_SUBREGION]?: SubregionCode[];
-};
 
 type DataKey =
   | 'change'
@@ -62,38 +51,4 @@ export const DataTitles: Record<DataKey, string> = {
   'cache_miss_rate()': t('Miss Rate'),
   'transaction.duration': t('Transaction Duration'),
   performanceScore: t('Perf Score'),
-};
-
-export const getThroughputTitle = (
-  spanOp?: string,
-  throughputUnit = RateUnit.PER_MINUTE
-) => {
-  if (spanOp?.startsWith('db')) {
-    return `${t('Queries')} ${RATE_UNIT_TITLE[throughputUnit]}`;
-  }
-  if (defined(spanOp)) {
-    return `${t('Requests')} ${RATE_UNIT_TITLE[throughputUnit]}`;
-  }
-  return '--';
-};
-
-export const getDurationChartTitle = (spanOp?: string) => {
-  if (spanOp) {
-    return t('Average Duration');
-  }
-
-  return '--';
-};
-
-export const getThroughputChartTitle = (
-  spanOp?: string,
-  throughputUnit = RateUnit.PER_MINUTE
-) => {
-  if (spanOp?.startsWith('db')) {
-    return `${t('Queries')} ${RATE_UNIT_TITLE[throughputUnit]}`;
-  }
-  if (spanOp) {
-    return `${t('Requests')} ${RATE_UNIT_TITLE[throughputUnit]}`;
-  }
-  return '--';
 };

@@ -1,19 +1,52 @@
+import logging
+import re
+
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema_field, extend_schema_serializer
+from drf_spectacular.utils import extend_schema_field
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from rest_framework import serializers
 from rest_framework.serializers import Serializer, ValidationError
 
 from sentry.api.serializers.rest_framework.base import camel_to_snake_case
+from sentry.apidocs.omissions import sentry_schema_serializer
 from sentry.apidocs.parameters import build_typed_list
 from sentry.integrations.models.integration_feature import Feature
 from sentry.models.apiscopes import ApiScopes
 from sentry.sentry_apps.api.parsers.schema import validate_ui_element_schema
 from sentry.sentry_apps.models.sentry_app import (
-    REQUIRED_EVENT_PERMISSIONS,
     UUID_CHARS_IN_SLUG,
-    VALID_EVENT_RESOURCES,
+    VALID_EVENTS,
+    required_scope_for_subscription,
 )
+from sentry.sentry_apps.utils.webhooks import VALID_EVENT_RESOURCES
+from sentry.utils.display_name_filter import is_spam_display_name
+
+# Custom webhook headers are intentionally limited to the below list and "X-*"
+# custom headers. Names are compared case-insensitively.
+ALLOWED_WEBHOOK_HEADERS = frozenset(
+    {
+        "authorization",
+        "anthropic-version",
+        "anthropic-beta",
+    }
+)
+
+# RFC 7230 §3.2.6 — header field names are "tokens": letters, digits, and
+# the limited punctuation set below. Excludes separators and control chars.
+_HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~A-Za-z0-9]+$")
+
+# X-* headers Sentry owns, or transport/proxy identity headers that must not be
+# user-controlled. These are the exceptions carved out of the X-* allowance
+# below — every other non-allowed header is already rejected by the allow list,
+# so only X-* names need to be reserved here.
+RESERVED_WEBHOOK_HEADERS = frozenset(
+    {
+        "x-forwarded",
+        "x-real-ip",
+        "x-sentry",
+    }
+)
+RESERVED_WEBHOOK_HEADER_PREFIXES = ("x-forwarded-", "x-sentry-")
 
 
 @extend_schema_field(build_typed_list(OpenApiTypes.STR))
@@ -36,11 +69,10 @@ class EventListField(serializers.Field):
         if data is None:
             return
 
-        if not set(data).issubset(VALID_EVENT_RESOURCES):
+        valid = set(VALID_EVENT_RESOURCES) | set(VALID_EVENTS)
+        if not set(data).issubset(valid):
             raise ValidationError(
-                "Invalid event subscription: {}".format(
-                    ", ".join(set(data).difference(VALID_EVENT_RESOURCES))
-                )
+                "Invalid event subscription: {}".format(", ".join(set(data).difference(valid)))
             )
         return data
 
@@ -72,7 +104,13 @@ class URLField(serializers.URLField):
         return url
 
 
-@extend_schema_serializer(exclude_fields=["popularity", "features", "status"])
+@sentry_schema_serializer(
+    omit_from_public_schema={
+        "popularity": "Internal ranking value used to order integrations in the directory.",
+        "isDisabled": "Set by Sentry when an integration is disabled; not client-settable.",
+        "status": "Only applied for elevated Sentry staff; ignored for everyone else.",
+    }
+)
 class SentryAppParser(Serializer):
     name = serializers.CharField(help_text="The name of the custom integration.")
     author = serializers.CharField(
@@ -123,8 +161,16 @@ class SentryAppParser(Serializer):
         default=False,
         help_text="Marks whether or not the custom integration can be used in an alert rule.",
     )
+    isDisabled = serializers.BooleanField(
+        required=False,
+        allow_null=True,
+        default=None,
+    )
     overview = serializers.CharField(
-        required=False, allow_null=True, help_text="The custom integration's description."
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="The custom integration's description.",
     )
     verifyInstall = serializers.BooleanField(
         required=False,
@@ -135,6 +181,14 @@ class SentryAppParser(Serializer):
         child=serializers.CharField(max_length=255),
         required=False,
         help_text="The list of allowed origins for CORS.",
+    )
+    webhookHeaders = serializers.ListField(
+        child=serializers.CharField(max_length=1024),
+        required=False,
+        help_text=(
+            "Custom headers sent with every webhook request. Each entry is a single "
+            "'Header-Name: value' pair."
+        ),
     )
     # Bounds chosen to match PositiveSmallIntegerField (https://docs.djangoproject.com/en/3.2/ref/models/fields/#positivesmallintegerfield)
     popularity = serializers.IntegerField(
@@ -167,6 +221,22 @@ class SentryAppParser(Serializer):
         max_length = 64 - UUID_CHARS_IN_SLUG - 1  # -1 comes from the - before the UUID bit
         if len(value) > max_length:
             raise ValidationError("Cannot exceed %d characters" % max_length)
+
+        if is_spam_display_name(value):
+            extra: dict[str, object] = {"attempted_name": value, "reason": "spam_filter"}
+            request = self.context.get("request")
+            if request is not None:
+                extra["user_id"] = getattr(request.user, "id", None)
+                extra["user_ip"] = request.META.get("REMOTE_ADDR")
+                extra["user_agent"] = request.META.get("HTTP_USER_AGENT")
+            if self.instance:
+                extra["sentry_app_id"] = self.instance.id
+                extra["sentry_app_slug"] = self.instance.slug
+            logging.getLogger("sentry.security").warning("spam.display-name-blocked", extra=extra)
+            raise ValidationError(
+                "This name contains disallowed content. Please choose a different name."
+            )
+
         return value
 
     def validate_allowedOrigins(self, value):
@@ -175,9 +245,60 @@ class SentryAppParser(Serializer):
                 raise ValidationError("'*' not allowed in origin")
         return value
 
+    def validate_webhookHeaders(self, value):
+        if len(value) > 20:
+            raise ValidationError("Cannot configure more than 20 custom webhook headers.")
+        seen_names = set()
+        for header in value:
+            # Reject CR/LF to prevent header injection / request splitting.
+            if "\n" in header or "\r" in header:
+                raise ValidationError("Webhook headers cannot contain newlines.")
+            name, separator, header_value = header.partition(":")
+            name = name.strip()
+            header_value = header_value.strip()
+            if not separator or not name:
+                raise ValidationError(
+                    f"Invalid webhook header '{header}'. Use the format 'Header-Name: value'."
+                )
+            # HTTP header fields are latin-1; reject unsupported characters on write.
+            try:
+                name.encode("latin-1")
+                header_value.encode("latin-1")
+            except UnicodeEncodeError:
+                raise ValidationError(
+                    "Webhook header contains unsupported characters and cannot be "
+                    "sent as an HTTP header."
+                )
+            if not _HTTP_TOKEN_RE.match(name):
+                raise ValidationError(
+                    f"'{name}' contains invalid characters. Header names must only use "
+                    "letters, digits, and the punctuation characters !#$%&'*+-.^_`|~"
+                )
+            normalized = name.lower()
+            if normalized in RESERVED_WEBHOOK_HEADERS or normalized.startswith(
+                RESERVED_WEBHOOK_HEADER_PREFIXES
+            ):
+                raise ValidationError(f"'{name}' is a reserved header and cannot be overridden.")
+            if normalized not in ALLOWED_WEBHOOK_HEADERS and not normalized.startswith("x-"):
+                raise ValidationError(
+                    f"'{name}' is not an allowed webhook header. Use Authorization "
+                    "or X-* custom headers."
+                )
+            # Reject duplicate names (case-insensitive). This keeps the masked-value
+            # round-trip unambiguous: the updater re-pairs masked entries to stored
+            # values by header name, which only works if names are unique.
+            if normalized in seen_names:
+                raise ValidationError(
+                    f"Duplicate webhook header '{name}'. Each header may only be set once."
+                )
+            seen_names.add(normalized)
+        return value
+
     def validate_scopes(self, value):
         if not value:
             return value
+
+        from sentry.conf.server import SENTRY_TOKEN_ONLY_SCOPES
 
         validation_errors = []
         for scope in value:
@@ -185,9 +306,15 @@ class SentryAppParser(Serializer):
             if self.instance and self.instance.has_scope(scope):
                 continue
 
-            assert (
-                self.access is not None
-            ), "Access is required to validate scopes in SentryAppParser"
+            # Token-only scopes can be granted even if the user doesn't have them.
+            # These are specialized scopes (like project:distribution) that are not
+            # included in any user role but can be granted to integration tokens.
+            if scope in SENTRY_TOKEN_ONLY_SCOPES:
+                continue
+
+            assert self.access is not None, (
+                "Access is required to validate scopes in SentryAppParser"
+            )
             # add an error if the requester lacks permissions being requested
             if not self.access.has_scope(scope) and not self.active_staff:
                 validation_errors.append(
@@ -203,11 +330,13 @@ class SentryAppParser(Serializer):
     def validate(self, attrs):
         # validates events against scopes
         if attrs.get("scopes"):
-            for resource in attrs.get("events", []):
-                needed_scope = REQUIRED_EVENT_PERMISSIONS[resource]
+            for subscription in attrs.get("events", []):
+                needed_scope = required_scope_for_subscription(subscription)
                 if needed_scope not in attrs["scopes"]:
                     raise ValidationError(
-                        {"events": f"{resource} webhooks require the {needed_scope} permission."}
+                        {
+                            "events": f"{subscription} webhooks require the {needed_scope} permission."
+                        }
                     )
 
         get_current_value = self.get_current_value_wrapper(attrs)
@@ -222,7 +351,7 @@ class SentryAppParser(Serializer):
                 # also check that we don't have the alert rule enabled
                 if get_current_value("isAlertable"):
                     raise ValidationError(
-                        {"webhookUrl": "webhookUrl required if alert rule action is enabled"}
+                        {"webhookUrl": "webhookUrl required if alert action is enabled"}
                     )
             else:
                 raise ValidationError({"webhookUrl": "webhookUrl required for public integrations"})

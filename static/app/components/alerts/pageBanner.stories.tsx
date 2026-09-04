@@ -3,10 +3,11 @@ import styled from '@emotion/styled';
 
 import replaysDeadRageBackground from 'sentry-images/spot/replay-dead-rage-changelog.svg';
 
-import PageBanner from 'sentry/components/alerts/pageBanner';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import ExternalLink from 'sentry/components/links/externalLink';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {InlineCode} from '@sentry/scraps/code';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {PageBanner} from 'sentry/components/alerts/pageBanner';
 import {IconBroadcast} from 'sentry/icons';
 import * as Storybook from 'sentry/stories';
 
@@ -14,8 +15,8 @@ export default Storybook.story('PageBanner', story => {
   const storiesButton = (
     <LinkButton
       external
-      href="https://sentry.io/orgredirect/organizations/:orgslug/stories"
-      priority="primary"
+      href="https://sentry.io/orgredirect/organizations/:orgslug/scraps"
+      variant="primary"
     >
       View Stories
     </LinkButton>
@@ -42,7 +43,7 @@ export default Storybook.story('PageBanner', story => {
       <Fragment>
         <p>
           This example renders an X in the top-right corner. You can wire it up with
-          something like <kbd>useDismissAlert()</kbd>.
+          something like <InlineCode>useDismissAlert()</InlineCode>.
         </p>
         <p>
           Is Dismissed? <var>{String(isDismissed)}</var>
@@ -72,7 +73,7 @@ export default Storybook.story('PageBanner', story => {
       <Fragment>
         <p>
           The banner will resize if it's shrunk really narrow. To make it expand inside a
-          flex parent set <kbd>flex-grow:1</kbd>.
+          flex parent set <InlineCode>flex-grow:1</InlineCode>.
         </p>
         <p>
           <Button size="sm" onClick={() => setFlexGrow(!flexGrow)}>
@@ -103,7 +104,7 @@ export default Storybook.story('PageBanner', story => {
           <Fragment>
             Build new products faster by exploring reusable the UI components available
             inside Sentry.{' '}
-            <ExternalLink href="https://sentry.io/orgredirect/organizations/:orgslug/stories">
+            <ExternalLink href="https://sentry.io/orgredirect/organizations/:orgslug/scraps">
               See stories
             </ExternalLink>
           </Fragment>
@@ -113,7 +114,7 @@ export default Storybook.story('PageBanner', story => {
         image={replaysDeadRageBackground}
         title={
           <Fragment>
-            UI Library Available at <Green>https://sentry.io/stories</Green>
+            UI Library Available at <Green>https://sentry.io/scraps</Green>
           </Fragment>
         }
       />
@@ -122,6 +123,6 @@ export default Storybook.story('PageBanner', story => {
 });
 
 const Green = styled('span')`
-  color: ${p => p.theme.green400};
-  font-weight: ${p => p.theme.fontWeightBold};
+  color: ${p => p.theme.colors.green500};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;

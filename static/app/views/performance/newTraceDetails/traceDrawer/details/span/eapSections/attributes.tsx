@@ -3,59 +3,55 @@ import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location, LocationDescriptorObject} from 'history';
 
-import Link from 'sentry/components/links/link';
-import BaseSearchBar from 'sentry/components/searchBar';
+import {Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {SearchBar as BaseSearchBar} from 'sentry/components/searchBar';
 import {StructuredData} from 'sentry/components/structuredEventData';
+import {UnixTimestamp} from 'sentry/components/unixTimestamp';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {RenderFunctionBaggage} from 'sentry/utils/discover/fieldRenderers';
 import {FieldKey} from 'sentry/utils/fields';
+import {getAttributeValue} from 'sentry/utils/fields/getAttributeValue';
+import {formatDollars} from 'sentry/utils/formatters';
 import {generateProfileFlamechartRoute} from 'sentry/utils/profiling/routes';
+import {ellipsize} from 'sentry/utils/string/ellipsize';
+import {looksLikeAJSONArray} from 'sentry/utils/string/looksLikeAJSONArray';
+import {looksLikeAJSONObject} from 'sentry/utils/string/looksLikeAJSONObject';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {AssertionFailureTree} from 'sentry/views/detectors/components/uptime/assertions/assertionFailure/assertionFailureTree';
 import type {AttributesFieldRendererProps} from 'sentry/views/explore/components/traceItemAttributes/attributesTree';
 import {AttributesTree} from 'sentry/views/explore/components/traceItemAttributes/attributesTree';
 import type {TraceItemResponseAttribute} from 'sentry/views/explore/hooks/useTraceItemDetails';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {FoldSection} from 'sentry/views/issueDetails/streamline/foldSection';
-import {SectionTitleWithQuestionTooltip} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/span';
+import {makeReplaysPathname} from 'sentry/views/explore/replays/pathnames';
+import {SpanFields} from 'sentry/views/insights/types';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
+import {TraceDrawerComponents} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
 import {
-  findSpanAttributeValue,
   getTraceAttributesTreeActions,
   sortAttributes,
+  tryParseJsonRecursive,
 } from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
-import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
-import type {TraceTreeNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode';
+import type {EapSpanNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/eapSpanNode';
+import type {UptimeCheckNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/uptimeCheckNode';
 import {useTraceState} from 'sentry/views/performance/newTraceDetails/traceState/traceStateProvider';
-import {makeReplaysPathname} from 'sentry/views/replays/pathnames';
+import {getTraceDetailsUrl} from 'sentry/views/performance/traceDetails/utils';
 
 type CustomRenderersProps = AttributesFieldRendererProps<RenderFunctionBaggage>;
 
 const HIDDEN_ATTRIBUTES = ['is_segment', 'project_id', 'received'];
-const JSON_ATTRIBUTES = [
-  'gen_ai.request.messages',
-  'gen_ai.response.messages',
-  'gen_ai.response.tool_calls',
-  'gen_ai.response.object',
-  'gen_ai.prompt',
-  'gen_ai.request.available_tools',
-];
-const TRUNCATED_TEXT_ATTRIBUTES = ['gen_ai.response.text'];
-
-function tryParseJson(value: unknown) {
-  if (typeof value !== 'string') {
-    return value;
-  }
-  try {
-    return JSON.parse(value);
-  } catch (error) {
-    return value;
-  }
-}
+const TRUNCATED_TEXT_ATTRIBUTES = ['gen_ai.response.text', 'gen_ai.embeddings.input'];
 
 const jsonRenderer = (props: CustomRenderersProps) => {
-  const value = tryParseJson(props.item.value);
+  const value = tryParseJsonRecursive(props.item.value);
   return <StructuredData value={value} withAnnotatedText maxDefaultDepth={0} />;
 };
 
@@ -63,27 +59,53 @@ const truncatedTextRenderer = (props: CustomRenderersProps) => {
   if (typeof props.item.value !== 'string') {
     return props.item.value;
   }
-  return props.item.value.length > 100
-    ? props.item.value.slice(0, 100) + '...'
-    : props.item.value;
+  return ellipsize(props.item.value, 100);
 };
 
-export function Attributes({
+const preciseTimestampRenderer = (props: CustomRenderersProps) => (
+  <UnixTimestamp value={props.item.value} fallback={props.basicRendered} />
+);
+
+interface AttributesProps {
+  attributes: TraceItemResponseAttribute[];
+  location: Location;
+  node: EapSpanNode | UptimeCheckNode;
+  organization: Organization;
+  project: Project | undefined;
+  theme: Theme;
+}
+
+export function AttributesSection(props: AttributesProps) {
+  return (
+    <FoldSection
+      sectionKey={SectionKey.SPAN_ATTRIBUTES}
+      title={
+        <TraceDrawerComponents.SectionTitleWithQuestionTooltip
+          title={t('Attributes')}
+          tooltipText={t(
+            'These attributes are indexed and can be queried in the Trace Explorer.'
+          )}
+        />
+      }
+      disableCollapsePersistence
+    >
+      <AttributesContent {...props} />
+    </FoldSection>
+  );
+}
+
+export function AttributesContent({
   node,
   attributes,
   theme,
   location,
   organization,
   project,
-}: {
-  attributes: TraceItemResponseAttribute[];
-  location: Location;
-  node: TraceTreeNode<TraceTree.EAPSpan>;
-  organization: Organization;
-  project: Project | undefined;
-  theme: Theme;
-}) {
+}: AttributesProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const {selection} = usePageFilters();
+  const currentLocation = useLocation();
+  const navigate = useNavigate();
   const traceState = useTraceState();
   const columnCount =
     traceState.preferences.layout === 'drawer left' ||
@@ -92,16 +114,23 @@ export function Attributes({
       : undefined;
 
   const sortedAndFilteredAttributes = useMemo(() => {
-    const sorted = sortAttributes(attributes);
+    const sortedAttributes = sortAttributes(attributes);
+
+    const onlyVisibleAttributes = sortedAttributes.filter(
+      attribute => !HIDDEN_ATTRIBUTES.includes(attribute.name)
+    );
+
     if (!searchQuery.trim()) {
-      return sorted;
+      return onlyVisibleAttributes;
     }
 
-    return sorted.filter(
-      attribute =>
-        !HIDDEN_ATTRIBUTES.includes(attribute.name) &&
-        attribute.name.toLowerCase().trim().includes(searchQuery.toLowerCase().trim())
-    );
+    const normalizedSearchQuery = searchQuery.toLowerCase().trim();
+
+    const onlyMatchingAttributes = onlyVisibleAttributes.filter(attribute => {
+      return attribute.name.toLowerCase().trim().includes(normalizedSearchQuery);
+    });
+
+    return onlyMatchingAttributes;
   }, [attributes, searchQuery]);
 
   const customRenderers: Record<
@@ -135,6 +164,21 @@ export function Attributes({
         </StyledLink>
       );
     },
+    [FieldKey.TRACE]: (props: CustomRenderersProps) => {
+      const traceSlug = String(props.item.value);
+      const target = getTraceDetailsUrl({
+        organization,
+        traceSlug,
+        spanId: node.value.event_id,
+        timestamp: node.value.start_timestamp,
+        dateSelection: normalizeDateTimeParams(selection.datetime),
+        location: {
+          ...currentLocation,
+          query: {},
+        },
+      });
+      return <StyledLink to={target}>{props.item.value}</StyledLink>;
+    },
     [FieldKey.REPLAY_ID]: (props: CustomRenderersProps) => {
       const target: LocationDescriptorObject = {
         pathname: makeReplaysPathname({
@@ -148,62 +192,81 @@ export function Attributes({
       };
       return <StyledLink to={target}>{props.item.value}</StyledLink>;
     },
+    [SpanFields.GEN_AI_COST_INPUT_TOKENS]: (props: CustomRenderersProps) => {
+      return formatDollars(+Number(props.item.value).toFixed(10));
+    },
+    [SpanFields.GEN_AI_COST_OUTPUT_TOKENS]: (props: CustomRenderersProps) => {
+      return formatDollars(+Number(props.item.value).toFixed(10));
+    },
+    [SpanFields.GEN_AI_COST_TOTAL_TOKENS]: (props: CustomRenderersProps) => {
+      return formatDollars(+Number(props.item.value).toFixed(10));
+    },
+    [SpanFields.PRECISE_START_TS]: preciseTimestampRenderer,
+    [SpanFields.PRECISE_FINISH_TS]: preciseTimestampRenderer,
+    assertion_failure_data: (props: CustomRenderersProps) => {
+      if (props.item.value === null) {
+        return <Text variant="muted">null</Text>;
+      }
+
+      return <AssertionFailureTree assertion={props.item.value.toString()} />;
+    },
   };
 
-  for (const attribute of JSON_ATTRIBUTES) {
-    customRenderers[attribute] = jsonRenderer;
-  }
+  // Some attributes (semantic or otherwise) look like they contain JSON-encoded
+  // arrays. Use a JSON renderer for any value that looks suspiciously like it's
+  // a JSON-encoded array. NOTE: This happens a lot because EAP doesn't support
+  // array values, so SDKs often store array values as JSON-encoded strings.
+  sortedAndFilteredAttributes.forEach(attribute => {
+    if (Object.hasOwn(customRenderers, attribute.name)) {
+      return;
+    }
+    if (attribute.type !== 'str') {
+      return;
+    }
+    if (!looksLikeAJSONArray(attribute.value) && !looksLikeAJSONObject(attribute.value)) {
+      return;
+    }
+
+    customRenderers[attribute.name] = jsonRenderer;
+  });
 
   for (const attribute of TRUNCATED_TEXT_ATTRIBUTES) {
     customRenderers[attribute] = truncatedTextRenderer;
   }
 
   return (
-    <FoldSection
-      sectionKey={SectionKey.SPAN_ATTRIBUTES}
-      title={
-        <SectionTitleWithQuestionTooltip
-          title={t('Attributes')}
-          tooltipText={t(
-            'These attributes are indexed and can be queried in the Trace Explorer.'
-          )}
-        />
-      }
-      disableCollapsePersistence
-    >
-      <ContentWrapper>
-        <BaseSearchBar
-          placeholder={t('Search')}
-          onChange={query => setSearchQuery(query)}
-          query={searchQuery}
-          size="sm"
-        />
-        {sortedAndFilteredAttributes.length > 0 ? (
-          <AttributesTreeWrapper>
-            <AttributesTree
-              hiddenAttributes={HIDDEN_ATTRIBUTES}
-              columnCount={columnCount}
-              attributes={sortedAndFilteredAttributes}
-              renderers={customRenderers}
-              rendererExtra={{
-                theme,
-                location,
-                organization,
-              }}
-              getCustomActions={getTraceAttributesTreeActions({
-                location,
-                organization,
-                projectIds: findSpanAttributeValue(attributes, 'project_id'),
-              })}
-            />
-          </AttributesTreeWrapper>
-        ) : (
-          <NoAttributesMessage>
-            <p>{t('No matching attributes found')}</p>
-          </NoAttributesMessage>
-        )}
-      </ContentWrapper>
-    </FoldSection>
+    <Stack gap="lg" maxWidth="100%">
+      <BaseSearchBar
+        placeholder={t('Search')}
+        onChange={query => setSearchQuery(query)}
+        query={searchQuery}
+        size="sm"
+      />
+      {sortedAndFilteredAttributes.length > 0 ? (
+        <div>
+          <AttributesTree
+            columnCount={columnCount}
+            attributes={sortedAndFilteredAttributes}
+            renderers={customRenderers}
+            rendererExtra={{
+              theme,
+              location,
+              navigate,
+              organization,
+            }}
+            getCustomActions={getTraceAttributesTreeActions({
+              location,
+              organization,
+              projectIds: getAttributeValue(attributes, 'project_id')?.toString(),
+            })}
+          />
+        </div>
+      ) : (
+        <NoAttributesMessage>
+          <p>{t('No matching attributes found')}</p>
+        </NoAttributesMessage>
+      )}
+    </Stack>
   );
 }
 
@@ -213,21 +276,10 @@ const StyledLink = styled(Link)`
   }
 `;
 
-const ContentWrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  max-width: 100%;
-  gap: ${space(1.5)};
-`;
-
-const AttributesTreeWrapper = styled('div')`
-  padding-left: ${space(1)};
-`;
-
 const NoAttributesMessage = styled('div')`
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-top: ${space(4)};
-  color: ${p => p.theme.subText};
+  margin-top: ${p => p.theme.space['3xl']};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

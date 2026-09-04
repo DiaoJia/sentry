@@ -4,14 +4,14 @@ import {render, screen} from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
 import {convertRelayPiiConfig} from 'sentry/views/settings/components/dataScrubbing/convertRelayPiiConfig';
-import Rules from 'sentry/views/settings/components/dataScrubbing/rules';
+import {Rules} from 'sentry/views/settings/components/dataScrubbing/rules';
 
 const relayPiiConfig = convertRelayPiiConfig(
   JSON.stringify(DataScrubbingRelayPiiConfigFixture())
 );
 
-describe('Rules', function () {
-  it('default render', function () {
+describe('Rules', () => {
+  it('default render', () => {
     render(<Rules rules={relayPiiConfig} onEditRule={jest.fn()} />);
 
     expect(screen.getAllByRole('button', {name: 'Edit Rule'})).toHaveLength(3);
@@ -37,7 +37,7 @@ describe('Rules', function () {
     ).toBeInTheDocument();
   });
 
-  it('render edit button only', function () {
+  it('render edit button only', () => {
     render(<Rules rules={relayPiiConfig} onEditRule={jest.fn()} />);
 
     expect(screen.getAllByRole('button', {name: 'Edit Rule'})).toHaveLength(3);
@@ -45,7 +45,7 @@ describe('Rules', function () {
     expect(screen.queryByRole('button', {name: 'Delete Rule'})).not.toBeInTheDocument();
   });
 
-  it('render delete button only', function () {
+  it('render delete button only', () => {
     render(<Rules rules={relayPiiConfig} onDeleteRule={jest.fn()} />);
 
     expect(screen.getAllByRole('button', {name: 'Delete Rule'})).toHaveLength(3);

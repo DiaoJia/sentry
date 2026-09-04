@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from arroyo.processing.strategies.abstract import ProcessingStrategy
 from arroyo.processing.strategies.run_task import RunTask
 from arroyo.processing.strategies.run_task_with_multiprocessing import (
     MultiprocessingPool as ArroyoMultiprocessingPool,
@@ -15,11 +17,15 @@ from arroyo.processing.strategies.run_task_with_multiprocessing import (
 from arroyo.processing.strategies.run_task_with_multiprocessing import TResult
 from arroyo.types import Message, TStrategyPayload
 from arroyo.utils.metrics import Metrics
+from arroyo.utils.stuck_detector import stuck_detector
 from django.conf import settings
+
+from sentry import options
 
 if TYPE_CHECKING:
     from sentry.metrics.base import MetricsBackend
 
+STUCK_DETECTOR_TIMEOUT_SECONDS = 30
 
 Tags = Mapping[str, str]
 
@@ -103,7 +109,7 @@ class MetricsWrapper(Metrics):
 
 
 def _get_arroyo_subprocess_initializer(
-    initializer: Callable[[], None] | None
+    initializer: Callable[[], None] | None,
 ) -> Callable[[], None]:
     from sentry.metrics.middleware import get_current_global_tags
 
@@ -115,9 +121,15 @@ def _get_arroyo_subprocess_initializer(
 
 
 def _initialize_arroyo_subprocess(initializer: Callable[[], None] | None, tags: Tags) -> None:
+    import logging
+
+    logger = logging.getLogger("sentry.utils.arroyo.subprocess")
+
     from sentry.runner import configure
 
+    logger.info("_initialize_arroyo_subprocess: calling configure()")
     configure()
+    logger.info("_initialize_arroyo_subprocess: configure() complete")
 
     if initializer:
         initializer()
@@ -125,7 +137,9 @@ def _initialize_arroyo_subprocess(initializer: Callable[[], None] | None, tags: 
     from sentry.metrics.middleware import add_global_tags
 
     # Inherit global tags from the parent process
-    add_global_tags(_all_threads=True, **tags)
+    logger.info("_initialize_arroyo_subprocess: calling add_global_tags()")
+    add_global_tags(all_threads=True, tags=tags)
+    logger.info("_initialize_arroyo_subprocess: add_global_tags() complete")
 
 
 def initialize_arroyo_main() -> None:
@@ -196,28 +210,77 @@ def run_task_with_multiprocessing(
     else:
         assert pool.pool is not None
 
-        return ArroyoRunTaskWithMultiprocessing(pool=pool.pool, function=function, **kwargs)
+        spawn_shared_memory_process = options.get("consumer.shared_memory_spawn_process")
+
+        return ArroyoRunTaskWithMultiprocessing(
+            pool=pool.pool,
+            function=function,
+            spawn_shared_memory_process=spawn_shared_memory_process,
+            **kwargs,
+        )
 
 
 def _import_and_run(
     initializer: Callable[[], None],
     main_fn_pickle: bytes,
     args_pickle: bytes,
+    use_stuck_detector: bool,
     *additional_args: Any,
 ) -> None:
-    initializer()
-
-    # explicitly use pickle so that we can be sure arguments get unpickled
-    # after sentry gets initialized
-    main_fn = pickle.loads(main_fn_pickle)
-    args = pickle.loads(args_pickle)
-
+    stuck_detector_context = (
+        stuck_detector(timeout_seconds=STUCK_DETECTOR_TIMEOUT_SECONDS)
+        if use_stuck_detector
+        else nullcontext()
+    )
+    with stuck_detector_context:
+        initializer()
+        # explicitly use pickle so that we can be sure arguments get unpickled
+        # after sentry gets initialized
+        main_fn = pickle.loads(main_fn_pickle)
+        args = pickle.loads(args_pickle)
     main_fn(*args, *additional_args)
 
 
-def run_with_initialized_sentry(main_fn: Callable[..., None], *args: Any) -> Callable[..., None]:
+def run_with_initialized_sentry(
+    main_fn: Callable[..., None],
+    *args: Any,
+    use_stuck_detector: bool = False,
+) -> Callable[..., None]:
     main_fn_pickle = pickle.dumps(main_fn)
     args_pickle = pickle.dumps(args)
     return partial(
-        _import_and_run, _get_arroyo_subprocess_initializer(None), main_fn_pickle, args_pickle
+        _import_and_run,
+        _get_arroyo_subprocess_initializer(None),
+        main_fn_pickle,
+        args_pickle,
+        use_stuck_detector,
     )
+
+
+class SetJoinTimeout(ProcessingStrategy[TStrategyPayload]):
+    """
+    A strategy for setting and re-setting the join timeout for individual
+    sub-sections of the processing chain. This way one can granularly disable
+    join() for steps that are idempotent anyway, making rebalancing faster and simpler.
+    """
+
+    def __init__(
+        self, timeout: float | None, next_step: ProcessingStrategy[TStrategyPayload]
+    ) -> None:
+        self.timeout = timeout
+        self.next_step = next_step
+
+    def submit(self, message: Message[TStrategyPayload]) -> None:
+        self.next_step.submit(message)
+
+    def poll(self) -> None:
+        self.next_step.poll()
+
+    def join(self, timeout: float | None = None) -> None:
+        self.next_step.join(self.timeout)
+
+    def close(self) -> None:
+        self.next_step.close()
+
+    def terminate(self) -> None:
+        self.next_step.terminate()

@@ -1,15 +1,13 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
+import {Button, LinkButton} from '@sentry/scraps/button';
+
+import {Confirm} from 'sentry/components/confirm';
 import {DateTime} from 'sentry/components/dateTime';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconDelete} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {InternalAppApiToken} from 'sentry/types/user';
-import getDynamicText from 'sentry/utils/getDynamicText';
 import {tokenPreview} from 'sentry/views/settings/organizationAuthTokens';
 
 type Props = {
@@ -17,37 +15,29 @@ type Props = {
   token: InternalAppApiToken;
   canEdit?: boolean;
   onRemoveConfirmMessage?: string;
-  tokenPrefix?: string;
 };
 
-function ApiTokenRow({
+export function ApiTokenRow({
   token,
   onRemove,
-  tokenPrefix = '',
   canEdit = false,
   onRemoveConfirmMessage,
 }: Props) {
   return (
-    <Fragment>
-      <div>
+    <SimpleTable.Row>
+      <SimpleTable.RowCell>
         {token.name}
         <TokenPreview aria-label={t('Token preview')}>
-          {tokenPreview(
-            getDynamicText({
-              value: token.tokenLastCharacters,
-              fixed: 'ABCD',
-            }),
-            tokenPrefix
-          )}
+          {tokenPreview(token.tokenLastCharacters)}
         </TokenPreview>
-      </div>
-      <div>
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell>
         <DateTime date={token.dateCreated} />
-      </div>
-      <div>
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell>
         <ScopeList>{token.scopes.join(', ')}</ScopeList>
-      </div>
-      <Actions gap={1}>
+      </SimpleTable.RowCell>
+      <Actions>
         {canEdit && (
           <LinkButton size="sm" to={`/settings/account/api/auth-tokens/${token.id}/`}>
             {t('Edit')}
@@ -59,7 +49,7 @@ function ApiTokenRow({
             onRemoveConfirmMessage ||
             t(
               'Are you sure you want to revoke %s token? It will not be usable anymore, and this cannot be undone.',
-              tokenPreview(token.tokenLastCharacters, tokenPrefix)
+              tokenPreview(token.tokenLastCharacters)
             )
           }
         >
@@ -68,22 +58,21 @@ function ApiTokenRow({
           </Button>
         </Confirm>
       </Actions>
-    </Fragment>
+    </SimpleTable.Row>
   );
 }
 
 const ScopeList = styled('div')`
-  font-family: ${p => p.theme.text.familyMono};
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
+  font-family: ${p => p.theme.font.family.mono};
+  font-size: ${p => p.theme.font.size.sm};
   max-width: 400px;
 `;
 
-const Actions = styled(ButtonBar)`
+const Actions = styled(SimpleTable.RowCell)`
   justify-content: flex-end;
+  gap: ${p => p.theme.space.md};
 `;
 
 const TokenPreview = styled('div')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
-
-export default ApiTokenRow;

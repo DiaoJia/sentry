@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import sentry_sdk
 from snuba_sdk import Column, Condition, Function, Op
 
 from sentry.api.event_search import SearchFilter, SearchKey, SearchValue
@@ -19,6 +20,7 @@ from sentry.search.events.filter import (
 )
 from sentry.search.events.types import WhereType
 from sentry.search.utils import DEVICE_CLASS, parse_release, validate_snuba_array_parameter
+from sentry.utils.glob import glob_match
 from sentry.utils.strings import oxfordize_list
 
 
@@ -59,7 +61,7 @@ def release_filter_converter(
                 for part in parse_release(
                     v,
                     builder.params.project_ids,
-                    builder.params.environments,
+                    [e for e in builder.params.environments if e is not None],
                     builder.params.organization.id if builder.params.organization else None,
                 )
             ]
@@ -68,26 +70,49 @@ def release_filter_converter(
     return builder.default_filter_converter(SearchFilter(search_filter.key, operator, value))
 
 
+def matches_slug_pattern(slug_pattern: str, slug: str) -> bool:
+    try:
+        return glob_match(slug, slug_pattern, allow_newline=False)
+    except Exception as err:
+        sentry_sdk.capture_exception(err)
+        return slug == slug_pattern
+
+
+def matches_slug_patterns(slug_patterns: list[str], slug: str) -> bool:
+    return any(matches_slug_pattern(slug_pattern, slug) for slug_pattern in slug_patterns)
+
+
 def project_slug_converter(
     builder: BaseQueryBuilder, search_filter: SearchFilter
 ) -> WhereType | None:
     """Convert project slugs to ids and create a filter based on those.
     This is cause we only store project ids in clickhouse.
     """
-    value = search_filter.value.value
+    # Raw value without regex conversion
+    value = search_filter.value.raw_value
+    if not isinstance(value, (str, list)):
+        raise InvalidSearchQuery("Invalid value for project filter")
 
     if Op(search_filter.operator) == Op.EQ and value == "":
         raise InvalidSearchQuery(
             'Cannot query for has:project or project:"" as every event will have a project'
         )
 
-    slugs = to_list(value)
+    slug_patterns: list[str] = to_list(value)
+
     project_slugs: Mapping[str, int] = {
         slug: project_id
         for slug, project_id in builder.params.project_slug_map.items()
-        if slug in slugs
+        if matches_slug_patterns(slug_patterns, slug)
     }
-    missing: list[str] = [slug for slug in slugs if slug not in project_slugs]
+    missing: list[str] = [
+        slug_pattern
+        for slug_pattern in slug_patterns
+        if not any(
+            matches_slug_pattern(slug_pattern, project_slug)
+            for project_slug in project_slugs.keys()
+        )
+    ]
     if missing and search_filter.operator in constants.EQUALITY_OPERATORS:
         raise InvalidSearchQuery(
             f"Invalid query. Project(s) {oxfordize_list(missing)} do not exist or are not actively selected."
@@ -115,13 +140,14 @@ def span_is_segment_converter(search_filter: SearchFilter) -> WhereType | None:
     """Convert the search filter from a string to a boolean
     and unalias the filter key.
     """
-    if search_filter.value.raw_value not in ["0", "1"]:
+    raw_value = search_filter.value.raw_value
+    if not isinstance(raw_value, str) or raw_value not in ("0", "1"):
         raise ValueError("is_segment must be 0 or 1")
 
     return Condition(
         Column("is_segment"),
         Op.NEQ if search_filter.operator == "!=" else Op.EQ,
-        int(search_filter.value.raw_value),
+        int(raw_value),
     )
 
 
@@ -142,7 +168,7 @@ def release_stage_filter_converter(
             search_filter.operator,
             search_filter.value.value,
             project_ids=builder.params.project_ids,
-            environments=builder.params.environments,
+            environments=[e.name for e in builder.params.environments if e is not None],
         )
         .values_list("version", flat=True)
         .order_by("date_added")[: constants.MAX_SEARCH_RELEASES]
@@ -183,8 +209,13 @@ def semver_filter_converter(
         raise ValueError("organization is a required param")
     organization_id: int = builder.params.organization.id
     # We explicitly use `raw_value` here to avoid converting wildcards to shell values
-    version: str = search_filter.value.raw_value
-    operator: str = search_filter.operator
+    raw_value = search_filter.value.raw_value
+    if not isinstance(raw_value, (str, list)):
+        raise InvalidSearchQuery("Invalid value for semver filter")
+
+    raw_values: list[str] = to_list(raw_value)
+    is_negated = search_filter.operator == "NOT IN"
+    operator: str = "=" if search_filter.operator in ("IN", "NOT IN") else search_filter.operator
 
     # Note that we sort this such that if we end up fetching more than
     # MAX_SEMVER_SEARCH_RELEASES, we will return the releases that are closest to
@@ -192,48 +223,68 @@ def semver_filter_converter(
     order_by = Release.SEMVER_COLS
     if operator.startswith("<"):
         order_by = list(map(_flip_field_sort, order_by))
-    qs = (
-        Release.objects.filter_by_semver(
-            organization_id,
-            parse_semver(version, operator),
-            project_ids=builder.params.project_ids,
-        )
-        .values_list("version", flat=True)
-        .order_by(*order_by)[: constants.MAX_SEARCH_RELEASES]
-    )
-    versions = list(qs)
-    final_operator = Op.IN
-    if len(versions) == constants.MAX_SEARCH_RELEASES:
-        # We want to limit how many versions we pass through to Snuba. If we've hit
-        # the limit, make an extra query and see whether the inverse has fewer ids.
-        # If so, we can do a NOT IN query with these ids instead. Otherwise, we just
-        # do our best.
-        operator = constants.OPERATOR_NEGATION_MAP[operator]
-        # Note that the `order_by` here is important for index usage. Postgres seems
-        # to seq scan with this query if the `order_by` isn't included, so we
-        # include it even though we don't really care about order for this query
-        qs_flipped = (
-            Release.objects.filter_by_semver(organization_id, parse_semver(version, operator))
-            .order_by(*map(_flip_field_sort, order_by))
-            .values_list("version", flat=True)[: constants.MAX_SEARCH_RELEASES]
-        )
 
-        exclude_versions = list(qs_flipped)
-        if exclude_versions and len(exclude_versions) < len(versions):
-            # Do a negative search instead
-            final_operator = Op.NOT_IN
-            versions = exclude_versions
+    all_versions: list[str] = []
+    final_operator = Op.NOT_IN if is_negated else Op.IN
+    if len(raw_values) == 1:
+        qs = (
+            Release.objects.filter_by_semver(
+                organization_id,
+                parse_semver(raw_values[0], operator),
+                project_ids=builder.params.project_ids,
+            )
+            .values_list("version", flat=True)
+            .order_by(*order_by)[: constants.MAX_SEARCH_RELEASES]
+        )
+        versions = list(qs)
+        if len(versions) == constants.MAX_SEARCH_RELEASES:
+            # We want to limit how many versions we pass through to Snuba. If we've hit
+            # the limit, make an extra query and see whether the inverse has fewer ids.
+            # If so, we can do a NOT IN query with these ids instead. Otherwise, we just
+            # do our best.
+            negated_operator = constants.OPERATOR_NEGATION_MAP[operator]
+            # Note that the `order_by` here is important for index usage. Postgres seems
+            # to seq scan with this query if the `order_by` isn't included, so we
+            # include it even though we don't really care about order for this query
+            qs_flipped = (
+                Release.objects.filter_by_semver(
+                    organization_id, parse_semver(raw_values[0], negated_operator)
+                )
+                .order_by(*map(_flip_field_sort, order_by))
+                .values_list("version", flat=True)[: constants.MAX_SEARCH_RELEASES]
+            )
 
-    if not validate_snuba_array_parameter(versions):
+            exclude_versions = list(qs_flipped)
+            if exclude_versions and len(exclude_versions) < len(versions):
+                # Do a negative search instead
+                final_operator = Op.IN if is_negated else Op.NOT_IN
+                versions = exclude_versions
+        all_versions.extend(versions)
+    else:
+        # TODO: filter_by_semver has no bulk lookup for multiple versions, so each value is a separate query.
+        # Adding __in support or Q-object composition to filter_by_semver would reduce the query count.
+        for version in raw_values:
+            qs = (
+                Release.objects.filter_by_semver(
+                    organization_id,
+                    parse_semver(version, "="),
+                    project_ids=builder.params.project_ids,
+                )
+                .values_list("version", flat=True)
+                .order_by(*order_by)[: constants.MAX_SEARCH_RELEASES]
+            )
+            all_versions.extend(qs)
+
+    if not validate_snuba_array_parameter(all_versions):
         raise InvalidSearchQuery(
             "There are too many releases that match your release.version filter, please try again with a narrower range"
         )
 
-    if not versions:
+    if not all_versions:
         # XXX: Just return a filter that will return no results if we have no versions
-        versions = [constants.SEMVER_EMPTY_RELEASE]
+        all_versions = [constants.SEMVER_EMPTY_RELEASE]
 
-    return Condition(builder.column("release"), final_operator, versions)
+    return Condition(builder.column("release"), final_operator, all_versions)
 
 
 def semver_package_filter_converter(
@@ -245,7 +296,10 @@ def semver_package_filter_converter(
     """
     if builder.params.organization is None:
         raise ValueError("organization is a required param")
-    package: str = search_filter.value.raw_value
+    raw_value = search_filter.value.raw_value
+    if not isinstance(raw_value, (str, list)):
+        raise InvalidSearchQuery("Invalid value for semver package filter")
+    package: str | list[str] = raw_value
 
     versions = list(
         Release.objects.filter_by_semver(
@@ -276,33 +330,48 @@ def semver_build_filter_converter(
     """
     if builder.params.organization is None:
         raise ValueError("organization is a required param")
-    build: str = search_filter.value.raw_value
+    raw_value = search_filter.value.raw_value
+    if not isinstance(raw_value, (str, list)):
+        raise InvalidSearchQuery("Invalid value for semver build filter")
 
-    operator, negated = handle_operator_negation(search_filter.operator)
+    raw_values: list[str] = to_list(raw_value)
+    effective_operator = (
+        "=" if search_filter.operator in ("IN", "NOT IN") else search_filter.operator
+    )
+    operator, negated = handle_operator_negation(effective_operator)
     try:
         django_op = constants.OPERATOR_TO_DJANGO[operator]
     except KeyError:
         raise InvalidSearchQuery("Invalid operation 'IN' for semantic version filter.")
-    versions = list(
-        Release.objects.filter_by_semver_build(
-            builder.params.organization.id,
-            django_op,
-            build,
-            project_ids=builder.params.project_ids,
-            negated=negated,
-        ).values_list("version", flat=True)[: constants.MAX_SEARCH_RELEASES]
-    )
 
-    if not validate_snuba_array_parameter(versions):
+    # TODO: filter_by_semver_build has no bulk lookup for multiple builds, so each value is a separate query.
+    # Adding __in support or Q-object composition to filter_by_semver_build would reduce the query count.
+    all_versions: list[str] = []
+    for build in raw_values:
+        versions = list(
+            Release.objects.filter_by_semver_build(
+                builder.params.organization.id,
+                django_op,
+                build,
+                project_ids=builder.params.project_ids,
+                negated=negated,
+            )
+            .values_list("version", flat=True)
+            .order_by("-date_added")[: constants.MAX_SEARCH_RELEASES]
+        )
+        all_versions.extend(versions)
+
+    if not validate_snuba_array_parameter(all_versions):
         raise InvalidSearchQuery(
             "There are too many releases that match your release.build filter, please try again with a narrower range"
         )
 
-    if not versions:
+    if not all_versions:
         # XXX: Just return a filter that will return no results if we have no versions
-        versions = [constants.SEMVER_EMPTY_RELEASE]
+        all_versions = [constants.SEMVER_EMPTY_RELEASE]
 
-    return Condition(builder.column("release"), Op.IN, versions)
+    final_operator = Op.NOT_IN if search_filter.operator == "NOT IN" else Op.IN
+    return Condition(builder.column("release"), final_operator, all_versions)
 
 
 def device_class_converter(
@@ -323,18 +392,23 @@ def lowercase_search(builder: BaseQueryBuilder, search_filter: SearchFilter) -> 
     """Convert the search value to lower case"""
     raw_value = search_filter.value.raw_value
     if isinstance(raw_value, list):
-        raw_value = [val.lower() for val in raw_value]
+        lowered: str | list[str] = [str(val).lower() for val in raw_value]
+    elif isinstance(raw_value, str):
+        lowered = raw_value.lower()
     else:
-        raw_value = raw_value.lower()
+        return builder.default_filter_converter(search_filter)
     return builder.default_filter_converter(
-        SearchFilter(search_filter.key, search_filter.operator, SearchValue(raw_value))
+        SearchFilter(search_filter.key, search_filter.operator, SearchValue(lowered))
     )
 
 
 def span_module_filter_converter(
     builder: BaseQueryBuilder, search_filter: SearchFilter
 ) -> WhereType | None:
-    module_value = search_filter.value.raw_value.lower()
+    raw_value = search_filter.value.raw_value
+    if not isinstance(raw_value, str):
+        return builder.default_filter_converter(search_filter)
+    module_value = raw_value.lower()
 
     if module_value != "cache" and module_value in constants.SPAN_MODULE_CATEGORY_VALUES:
         # Creating the condition this way hits the tags index for span_module if using an actual value
@@ -354,11 +428,14 @@ def span_status_filter_converter(
             builder.resolve_field(search_filter.key.name),
             Op.IS_NULL if search_filter.operator == "=" else Op.IS_NOT_NULL,
         )
-    internal_value = (
-        [translate_transaction_status(val) for val in search_filter.value.raw_value]
-        if search_filter.is_in_filter
-        else translate_transaction_status(search_filter.value.raw_value)
-    )
+    raw_value = search_filter.value.raw_value
+    internal_value: int | list[int]
+    if search_filter.is_in_filter and isinstance(raw_value, (list, tuple)):
+        internal_value = [translate_transaction_status(str(val)) for val in raw_value]
+    elif isinstance(raw_value, str):
+        internal_value = translate_transaction_status(raw_value)
+    else:
+        raise InvalidSearchQuery("Invalid value for span status filter")
     return Condition(
         builder.resolve_field(search_filter.key.name),
         Op(search_filter.operator),

@@ -28,6 +28,11 @@ TEAM_KEY_TRANSACTION_ALIAS = "team_key_transaction"
 ERROR_UNHANDLED_ALIAS = "error.unhandled"
 ERROR_HANDLED_ALIAS = "error.handled"
 EVENT_TYPE_ALIAS = "event.type"
+# On errors/issue platform events `profiler.id` resolves to a contexts map lookup rather
+# than a real column, so a missing value reads as '' instead of NULL - needs its own
+# converter that always targets the raw contexts expression, not the dataset-resolved alias.
+PROFILER_ID_ALIAS = "profiler.id"
+PROFILER_ID_CONTEXT_COLUMN = "contexts[profile.profiler_id]"
 USER_DISPLAY_ALIAS = "user.display"
 PROJECT_ALIAS = "project"
 PROJECT_NAME_ALIAS = "project.name"
@@ -66,6 +71,7 @@ SPAN_OP = "span.op"
 SPAN_DESCRIPTION = "span.description"
 SPAN_STATUS = "span.status"
 SPAN_CATEGORY = "span.category"
+TRACE = "trace"
 REPLAY_ALIAS = "replay"
 MESSAGING_OPERATION_TYPE_ALIAS = "messaging.operation.type"
 MESSAGING_OPERATION_NAME_ALIAS = "messaging.operation.name"
@@ -186,7 +192,14 @@ SIZE_UNITS: dict[SizeUnit, float] = {
 }
 
 DurationUnit = Literal[
-    "nanosecond", "microsecond", "millisecond", "second", "minute", "hour", "day", "week"
+    "nanosecond",
+    "microsecond",
+    "millisecond",
+    "second",
+    "minute",
+    "hour",
+    "day",
+    "week",
 ]
 
 # event_search normalizes to seconds
@@ -207,7 +220,11 @@ PERCENT_UNITS = {"ratio", "percent"}
 NO_CONVERSION_FIELDS = {"start", "end"}
 # Skip total_count_alias since it queries the total count and therefore doesn't make sense in a filter
 # In these cases we should instead treat it as a tag instead
-SKIP_FILTER_RESOLUTION = {TOTAL_COUNT_ALIAS, TOTAL_TRANSACTION_DURATION_ALIAS}
+# "duration" is an internal Snuba column name for transaction.duration (UInt32).
+# Bare `duration:>3s` (without the `transaction.` prefix) causes a 500 because
+# the parser produces a string value while resolve_column maps to the raw numeric
+# column.  Forcing tag resolution makes the filter harmless instead of crashing.
+SKIP_FILTER_RESOLUTION = {TOTAL_COUNT_ALIAS, TOTAL_TRANSACTION_DURATION_ALIAS, "duration"}
 EQUALITY_OPERATORS = frozenset(["=", "IN"])
 INEQUALITY_OPERATORS = frozenset(["!=", "NOT IN"])
 ARRAY_FIELDS = {
@@ -232,6 +249,7 @@ TIMESTAMP_FIELDS = {
     "timestamp",
     "timestamp.to_hour",
     "timestamp.to_day",
+    "error.received",
 }
 NON_FAILURE_STATUS = {"ok", "cancelled", "unknown"}
 HTTP_SERVER_ERROR_STATUS = {
@@ -271,6 +289,7 @@ SEARCH_MAP = {
     "first_seen": "first_seen",
     "last_seen": "last_seen",
     "times_seen": "times_seen",
+    "user_count": "user_count",
     SEMVER_ALIAS: SEMVER_ALIAS,
     RELEASE_STAGE_ALIAS: RELEASE_STAGE_ALIAS,
 }
@@ -292,6 +311,21 @@ OPERATOR_NEGATION_MAP = {
     "NOT IN": "IN",
 }
 OPERATOR_TO_DJANGO = {">=": "gte", "<=": "lte", ">": "gt", "<": "lt", "=": "exact"}
+
+# This is a unicode character from the reserved space of unicode characters, see:
+# https://en.wikipedia.org/wiki/Private_Use_Areas for more details.
+#
+# We use this character as a prefix and suffix with our wildcard operators to avoid
+# introducing breaking changes, and leave the possibility open down to the road to add in
+# new operators. These operators are internal implementation details and should
+# not be included in product docs. Users should use `*` instead.
+WILDCARD_UNICODE = "\uf00d"
+
+WILDCARD_OPERATOR_MAP = {
+    "contains": f"{WILDCARD_UNICODE}Contains{WILDCARD_UNICODE}",
+    "starts_with": f"{WILDCARD_UNICODE}StartsWith{WILDCARD_UNICODE}",
+    "ends_with": f"{WILDCARD_UNICODE}EndsWith{WILDCARD_UNICODE}",
+}
 
 MAX_SEARCH_RELEASES = 1000
 SEMVER_EMPTY_RELEASE = "____SENTRY_EMPTY_RELEASE____"
@@ -450,29 +484,7 @@ METRIC_PERCENTILES = {
 }
 
 CUSTOM_MEASUREMENT_PATTERN = re.compile(r"^measurements\..+$")
-METRIC_FUNCTION_LIST_BY_TYPE = {
-    "generic_distribution": [
-        "apdex",
-        "avg",
-        "p50",
-        "p75",
-        "p90",
-        "p95",
-        "p99",
-        "p100",
-        "max",
-        "min",
-        "sum",
-        "percentile",
-        "http_error_count",
-        "http_error_rate",
-    ],
-    "generic_set": [
-        "count_miserable",
-        "user_misery",
-        "count_unique",
-    ],
-}
+
 
 # The limit in snuba currently for a single query is 131,535bytes, including room for other parameters picking 120,000
 # for now
@@ -486,6 +498,8 @@ SPANS_METRICS_FUNCTIONS = {
     "http_response_rate",
 }
 
+# Functions that are defined as SnQLFunction and need special parsing in incidents/logic.py.
+# These are not supported in the older resolve_field logic.
 METRICS_LAYER_UNSUPPORTED_TRANSACTION_METRICS_FUNCTIONS = {
     "performance_score",
     "weighted_performance_score",

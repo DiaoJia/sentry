@@ -8,9 +8,11 @@ import {
 import type {Client} from 'sentry/api';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {handleXhrErrorResponse} from 'sentry/utils/handleXhrErrorResponse';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
 
-import TrialRequestedActions from 'getsentry/actions/trialRequestedActions';
+import {TrialRequestedActions} from 'getsentry/actions/trialRequestedActions';
 import type {EventType} from 'getsentry/components/addEventsCTA';
 
 export async function sendReplayOnboardRequest({
@@ -28,12 +30,17 @@ export async function sendReplayOnboardRequest({
   orgSlug?: Organization['slug'];
 }) {
   try {
-    await api.requestPromise(`/organizations/${orgSlug}/replay-onboard-request/`, {
-      method: 'POST',
-      data: {
-        name: currentPlan,
-      },
-    });
+    await api.requestPromise(
+      getApiUrl('/organizations/$organizationIdOrSlug/replay-onboard-request/', {
+        path: {organizationIdOrSlug: String(orgSlug)},
+      }),
+      {
+        method: 'POST',
+        data: {
+          name: currentPlan,
+        },
+      }
+    );
 
     addSuccessMessage(
       tct('An owner has been [annoyed] notified!', {annoyed: <s>annoyed</s>})
@@ -41,7 +48,7 @@ export async function sendReplayOnboardRequest({
     onSuccess?.();
   } catch (error) {
     const message = t('Oh shit');
-    handleXhrErrorResponse(message, error);
+    handleXhrErrorResponse(message, error as RequestError);
     addErrorMessage(message);
     onError?.();
   }

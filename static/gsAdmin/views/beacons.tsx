@@ -1,13 +1,11 @@
 import moment from 'moment-timezone';
 
-import Link from 'sentry/components/links/link';
-import Truncate from 'sentry/components/truncate';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {Link} from '@sentry/scraps/link';
 
-import PageHeader from 'admin/components/pageHeader';
-import ResultGrid from 'admin/components/resultGrid';
+import {Truncate} from 'sentry/components/truncate';
 
-type Props = RouteComponentProps<unknown, unknown>;
+import {PageHeader} from 'admin/components/pageHeader';
+import {ResultGrid} from 'admin/components/resultGrid';
 
 const getRow = (row: any) => [
   <td key="beacon">
@@ -38,7 +36,7 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function Beacons(props: Props) {
+export function Beacons() {
   return (
     <div>
       <PageHeader title="Beacons" />
@@ -75,10 +73,7 @@ function Beacons(props: Props) {
           ['projects', 'Projects'],
         ]}
         defaultSort="date"
-        {...props}
       />
     </div>
   );
 }
-
-export default Beacons;

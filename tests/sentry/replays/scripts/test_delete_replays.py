@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 from io import BytesIO
+from unittest.mock import patch
 from uuid import uuid4
 from zlib import compress
 
@@ -26,10 +27,10 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
         self,
         replay_id: str,
         project_id: int,
-        timestamp,
+        timestamp: datetime.datetime,
         environment: str | None = None,
-        tags: dict | None = None,
-    ):
+        tags: dict[str, str] | None = None,
+    ) -> None:
         if tags is None:
             tags = {}
 
@@ -62,15 +63,15 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
                 file_id=f.id,
             )
 
-    def assert_recording_deleted(self, replay_id: str):
+    def assert_recording_deleted(self, replay_id: str) -> None:
         replay_recordings = ReplayRecordingSegment.objects.filter(replay_id=replay_id)
         assert len(replay_recordings) == 0
 
-    def assert_recording_not_deleted(self, replay_id: str):
+    def assert_recording_not_deleted(self, replay_id: str) -> None:
         replay_recordings = ReplayRecordingSegment.objects.filter(replay_id=replay_id)
         assert len(replay_recordings) == 5  # we create 5 segments for each replay in this test
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.other_project = self.create_project(name="some_project")
@@ -79,7 +80,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
         self.default_end_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=5)
         self.small_batch_size = 10
 
-    def test_deletion_replays_basic(self):
+    def test_deletion_replays_basic(self) -> None:
         # store replay to be deleted
         to_delete = uuid4().hex
         self.store_replay_segments(
@@ -118,7 +119,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
         self.assert_recording_not_deleted(replay_id_kept_other_project)
         self.assert_recording_not_deleted(replay_id_kept_outside_timerange)
 
-    def test_deletion_replays_dry_run(self):
+    def test_deletion_replays_dry_run(self) -> None:
         not_deleted = uuid4().hex
         self.store_replay_segments(
             not_deleted,
@@ -139,7 +140,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
 
         self.assert_recording_not_deleted(not_deleted)
 
-    def test_deletion_replays_env_filter(self):
+    def test_deletion_replays_env_filter(self) -> None:
         replay_with_env = uuid4().hex
         self.store_replay_segments(
             replay_id=replay_with_env,
@@ -174,7 +175,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
 
         self.assert_recording_deleted(replay_with_env)
 
-    def test_deletion_replays_tags(self):
+    def test_deletion_replays_tags(self) -> None:
         replay_id_no_tags = uuid4().hex
         self.store_replay_segments(
             replay_id=replay_id_no_tags,
@@ -218,7 +219,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
         self.assert_recording_deleted(replay_id_tags)
         self.assert_recording_not_deleted(replay_id_no_tags)
 
-    def test_deletion_replays_multitags(self):
+    def test_deletion_replays_multitags(self) -> None:
         replay_id_tags = uuid4().hex
         self.store_replay_segments(
             replay_id=replay_id_tags,
@@ -258,7 +259,7 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
         self.assert_recording_not_deleted(replay_id_only_one_tag)
         self.assert_recording_not_deleted(replay_id_two_tags_not_deleted)
 
-    def test_deletion_replays_batch_size_all_deleted(self):
+    def test_deletion_replays_batch_size_all_deleted(self) -> None:
         replay_ids = [uuid4().hex for _ in range(self.small_batch_size + 1)]
 
         for replay_id in replay_ids:
@@ -281,3 +282,92 @@ class TestDeleteReplays(ReplaysSnubaTestCase):
 
         replay_recordings = ReplayRecordingSegment.objects.all()
         assert len(replay_recordings) == 0
+
+    def test_deletion_replays_multi_page_keyset_pagination(self) -> None:
+        # Store several full pages worth of deletable replays so the keyset cursor has to walk
+        # past multiple pages. This guards the property that seek pagination never skips or
+        # double-processes a replay across page boundaries.
+        num_pages = 3
+        to_delete = [uuid4().hex for _ in range(self.small_batch_size * num_pages + 1)]
+        for replay_id in to_delete:
+            self.store_replay_segments(
+                replay_id=replay_id,
+                project_id=self.project.id,
+                timestamp=datetime.datetime.now() - datetime.timedelta(seconds=10),
+            )
+
+        # Keepers that fall inside the id space but must not be touched: a replay in another
+        # project and a replay outside the deletion time range.
+        replay_id_other_project = uuid4().hex
+        self.store_replay_segments(
+            replay_id_other_project,
+            self.other_project.id,
+            datetime.datetime.now() - datetime.timedelta(seconds=10),
+        )
+        replay_id_outside_timerange = uuid4().hex
+        self.store_replay_segments(
+            replay_id_outside_timerange,
+            self.project.id,
+            datetime.datetime.now() + datetime.timedelta(seconds=10),
+        )
+
+        with TaskRunner():
+            delete_replays(
+                project_id=self.project.id,
+                batch_size=self.small_batch_size,
+                tags=[],
+                start_utc=self.default_start_time,
+                end_utc=self.default_end_time,
+                dry_run=False,
+                environment=[],
+            )
+
+        for replay_id in to_delete:
+            self.assert_recording_deleted(replay_id)
+        self.assert_recording_not_deleted(replay_id_other_project)
+        self.assert_recording_not_deleted(replay_id_outside_timerange)
+
+    @patch("sentry.replays.scripts.delete_replays.delete_seer_replay_data")
+    def test_deletion_replays_seer_delete_gated(self, mock_delete_seer: object) -> None:
+        to_delete = uuid4().hex
+        self.store_replay_segments(
+            to_delete,
+            self.project.id,
+            datetime.datetime.now() - datetime.timedelta(seconds=10),
+        )
+
+        # Without the feature flag Seer deletion is not attempted.
+        with TaskRunner():
+            delete_replays(
+                project_id=self.project.id,
+                batch_size=self.small_batch_size,
+                environment=[],
+                tags=[],
+                start_utc=self.default_start_time,
+                end_utc=self.default_end_time,
+                dry_run=False,
+            )
+        assert mock_delete_seer.call_count == 0  # type: ignore[attr-defined]
+
+        # With the feature flag we call Seer with the canonical dashed replay ids.
+        deletable = uuid4().hex
+        self.store_replay_segments(
+            deletable,
+            self.project.id,
+            datetime.datetime.now() - datetime.timedelta(seconds=10),
+        )
+        with self.feature("organizations:replay-ai-summaries"), TaskRunner():
+            delete_replays(
+                project_id=self.project.id,
+                batch_size=self.small_batch_size,
+                environment=[],
+                tags=[],
+                start_utc=self.default_start_time,
+                end_utc=self.default_end_time,
+                dry_run=False,
+            )
+        assert mock_delete_seer.call_count >= 1  # type: ignore[attr-defined]
+        # The replay ids passed to Seer are canonical dashed UUIDs.
+        _, _, passed_ids = mock_delete_seer.call_args[0]  # type: ignore[attr-defined]
+        for replay_id in passed_ids:
+            assert "-" in replay_id

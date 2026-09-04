@@ -3,7 +3,7 @@ import {EventAttachmentFixture} from 'sentry-fixture/eventAttachment';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 
-import {render, screen} from 'sentry-test/reactTestingLibrary';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
 import {EventViewHierarchy} from './eventViewHierarchy';
 
@@ -52,10 +52,10 @@ const organization = OrganizationFixture({
 });
 const event = EventFixture();
 
-describe('Event View Hierarchy', function () {
+describe('Event View Hierarchy', () => {
   let mockAttachment!: ReturnType<typeof EventAttachmentFixture>;
   let mockProject!: ReturnType<typeof ProjectFixture>;
-  beforeEach(function () {
+  beforeEach(() => {
     mockAttachment = EventAttachmentFixture({type: 'event.view_hierarchy'});
     mockProject = ProjectFixture();
     MockApiClient.addMockResponse({
@@ -63,8 +63,9 @@ describe('Event View Hierarchy', function () {
       body: [mockAttachment],
     });
     MockApiClient.addMockResponse({
-      url: `/projects/${organization.slug}/${mockProject.slug}/events/${mockAttachment.event_id}/attachments/${mockAttachment.id}/?download`,
+      url: `/projects/${organization.slug}/${mockProject.slug}/events/${mockAttachment.event_id}/attachments/${mockAttachment.id}/`,
       body: MOCK_DATA,
+      match: [MockApiClient.matchQuery({download: true})],
     });
   });
 
@@ -88,7 +89,7 @@ describe('Event View Hierarchy', function () {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('does not collapse all nodes when update triggers re-render', async function () {
+  it('does not collapse all nodes when update triggers re-render', async () => {
     const {rerender} = render(
       <EventViewHierarchy project={mockProject} event={event} />,
       {
@@ -101,5 +102,25 @@ describe('Event View Hierarchy', function () {
     rerender(<EventViewHierarchy project={mockProject} event={event} />);
 
     expect(await screen.findByText('Nested Container - nested')).toBeInTheDocument();
+  });
+
+  it('renders an error without automatically retrying when the download fails', async () => {
+    const downloadMock = MockApiClient.addMockResponse({
+      url: `/projects/${organization.slug}/${mockProject.slug}/events/${mockAttachment.event_id}/attachments/${mockAttachment.id}/`,
+      body: {detail: 'View hierarchy attachment is unavailable.'},
+      statusCode: 500,
+      match: [MockApiClient.matchQuery({download: true})],
+    });
+
+    render(<EventViewHierarchy project={mockProject} event={event} />, {organization});
+
+    expect(
+      await screen.findByText('View hierarchy attachment is unavailable.')
+    ).toBeInTheDocument();
+    expect(downloadMock).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole('button', {name: 'Retry'}));
+
+    await waitFor(() => expect(downloadMock).toHaveBeenCalledTimes(2));
   });
 });

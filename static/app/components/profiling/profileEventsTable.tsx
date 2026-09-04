@@ -1,37 +1,41 @@
 import {useCallback} from 'react';
 import type {Location} from 'history';
 
-import Count from 'sentry/components/count';
+import {Link} from '@sentry/scraps/link';
+
+import {Count} from 'sentry/components/count';
 import {DateTime} from 'sentry/components/dateTime';
-import type {GridColumnOrder, GridColumnSortBy} from 'sentry/components/gridEditable';
-import GridEditable, {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import Link from 'sentry/components/links/link';
-import PerformanceDuration from 'sentry/components/performanceDuration';
-import UserMisery from 'sentry/components/userMisery';
-import Version from 'sentry/components/version';
+import {PerformanceDuration} from 'sentry/components/performanceDuration';
+import type {
+  GridColumnOrder,
+  GridColumnSortBy,
+} from 'sentry/components/tables/gridEditable';
+import {COL_WIDTH_UNDEFINED, GridEditable} from 'sentry/components/tables/gridEditable';
+import {UserMisery} from 'sentry/components/userMisery';
+import {Version} from 'sentry/components/version';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {getTimeStampFromTableDateField} from 'sentry/utils/dates';
-import EventView from 'sentry/utils/discover/eventView';
+import {defined} from 'sentry/utils/defined';
+import {EventView} from 'sentry/utils/discover/eventView';
 import {DURATION_UNITS} from 'sentry/utils/discover/fieldRenderers';
 import {Container, NumberContainer} from 'sentry/utils/discover/styles';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
 import {getShortEventId} from 'sentry/utils/events';
 import type {EventsResults} from 'sentry/utils/profiling/hooks/types';
 import {generateProfileFlamechartRoute} from 'sentry/utils/profiling/routes';
-import {renderTableHead} from 'sentry/utils/profiling/tableRenderer';
+import {getTableColumnSort} from 'sentry/utils/profiling/tableRenderer';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {QuickContextHoverWrapper} from 'sentry/views/discover/table/quickContext/quickContextWrapper';
 import {ContextType} from 'sentry/views/discover/table/quickContext/utils';
 import {
-  type DomainView,
   useDomainViewFilters,
+  type DomainView,
 } from 'sentry/views/insights/pages/useFilters';
 import {getTraceDetailsUrl} from 'sentry/views/performance/traceDetails/utils';
 import {profilesRouteWithQuery} from 'sentry/views/performance/transactionSummary/transactionProfiles/utils';
@@ -75,19 +79,20 @@ export function ProfileEventsTable<F extends FieldType>(
       isLoading={props.isLoading}
       error={props.error}
       data={props.data?.data ?? []}
-      columnOrder={props.columns.map(field => getColumnOrder<F>(field))}
-      columnSortBy={[props.sort]}
+      columnOrder={props.columns.map(field => getColumnOrder(field))}
       grid={{
-        renderHeadCell: renderTableHead<F>({
+        getColumnSort: getTableColumnSort<F>({
           currentSort: props.sort,
           generateSortLink,
           rightAlignedColumns: getRightAlignedColumns(props.columns),
           sortableColumns: props.sortableColumns,
         }),
-        renderBodyCell: renderTableBody(
-          props.data?.meta ?? ({fields: {}, units: {}} as EventsResults<F>['meta']),
-          {location, organization, projects, view: domainViewFilters?.view}
-        ),
+        renderBodyCell: renderTableBody(props.data?.meta ?? {fields: {}, units: {}}, {
+          location,
+          organization,
+          projects,
+          view: domainViewFilters?.view,
+        }),
       }}
     />
   );
@@ -200,12 +205,10 @@ function ProfileEventsCell<F extends FieldType>(props: ProfileEventsCellProps<F>
       <Container>
         <Link
           to={generateLinkToEventInTraceView({
-            projectSlug: project.slug,
             eventId: props.dataRow[key],
             traceSlug: props.dataRow.trace,
             timestamp: props.dataRow.timestamp,
             location: props.baggage.location,
-            transactionName: props.dataRow.transaction,
             organization: props.baggage.organization,
           })}
         >
@@ -319,7 +322,7 @@ function getProjectForRow<F extends FieldType>(
   baggage: ProfileEventsCellProps<F>['baggage'],
   dataRow: ProfileEventsCellProps<F>['dataRow']
 ) {
-  let project: Project | undefined = undefined;
+  let project: Project | undefined;
 
   if (defined(dataRow['project.id'])) {
     const projectId = dataRow['project.id'].toString();

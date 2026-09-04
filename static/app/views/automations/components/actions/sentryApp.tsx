@@ -1,12 +1,13 @@
 import {Fragment} from 'react';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
+import {Button} from '@sentry/scraps/button';
+import {useModal} from '@sentry/scraps/modal';
+
 import {IconSettings} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {ActionHandler} from 'sentry/types/workflowEngine/actions';
-import SentryAppRuleModal from 'sentry/views/alerts/rules/issue/sentryAppRuleModal';
 import {useActionNodeContext} from 'sentry/views/automations/components/actionNodes';
+import {SentryAppRuleModal} from 'sentry/views/automations/components/actions/sentryAppRuleModal';
 import type {SchemaFormConfig} from 'sentry/views/settings/organizationIntegrations/sentryAppExternalForm';
 
 export function SentryAppDetails({handler}: {handler: ActionHandler}) {
@@ -30,6 +31,8 @@ export function SentryAppNode() {
 }
 
 function SentryAppActionSettingsButton() {
+  const {openModal} = useModal();
+
   const {action, handler, onUpdate} = useActionNodeContext();
   const sentryApp = handler.sentryApp;
 
@@ -48,9 +51,9 @@ function SentryAppActionSettingsButton() {
               {...deps}
               sentryAppInstallationUuid={sentryApp.installationUuid}
               config={sentryApp.settings as SchemaFormConfig}
-              appName={sentryApp.title ?? sentryApp.name}
-              onSubmitSuccess={(formData: Record<string, string>) =>
-                onUpdate({data: formData})
+              appName={sentryApp.name}
+              onSubmitSuccess={(formData: Record<string, any>) =>
+                onUpdate({data: {settings: formData.settings}})
               }
               resetValues={action.data}
             />

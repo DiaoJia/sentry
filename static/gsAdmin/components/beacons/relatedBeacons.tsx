@@ -1,10 +1,11 @@
 import moment from 'moment-timezone';
 
-import Link from 'sentry/components/links/link';
-import Truncate from 'sentry/components/truncate';
+import {Link} from '@sentry/scraps/link';
+
+import {Truncate} from 'sentry/components/truncate';
 
 import type {BeaconData} from 'admin/components/beacons/beaconOverview';
-import ResultGrid from 'admin/components/resultGrid';
+import {ResultGrid} from 'admin/components/resultGrid';
 
 type Props = {
   data: BeaconData;
@@ -39,7 +40,7 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function RelatedBeacons({data}: Props) {
+export function RelatedBeacons({data}: Props) {
   return (
     <ResultGrid
       inPanel
@@ -71,5 +72,3 @@ function RelatedBeacons({data}: Props) {
     />
   );
 }
-
-export default RelatedBeacons;

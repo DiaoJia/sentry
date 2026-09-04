@@ -1,25 +1,11 @@
-import useOrganization from 'sentry/utils/useOrganization';
-import {prefersStackedNav} from 'sentry/views/nav/prefersStackedNav';
-import AccountSettingsNavigation from 'sentry/views/settings/account/accountSettingsNavigation';
-import SettingsLayout from 'sentry/views/settings/components/settingsLayout';
+import {Outlet} from 'react-router-dom';
 
-interface Props extends React.ComponentProps<typeof SettingsLayout> {}
+import {SettingsLayout} from 'sentry/views/settings/components/settingsLayout';
 
-function AccountSettingsLayout({children, ...props}: Props) {
-  const organization = useOrganization({allowNull: true}) ?? undefined;
-
+export default function AccountSettingsLayout() {
   return (
-    <SettingsLayout
-      {...props}
-      renderNavigation={
-        organization && prefersStackedNav(organization)
-          ? undefined
-          : () => <AccountSettingsNavigation organization={organization} />
-      }
-    >
-      {children}
+    <SettingsLayout>
+      <Outlet />
     </SettingsLayout>
   );
 }
-
-export default AccountSettingsLayout;

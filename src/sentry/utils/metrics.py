@@ -30,6 +30,8 @@ __all__ = [
     "timer",
     "timing",
     "gauge",
+    "distribution",
+    "set",
     "backend",
     "MutableTags",
     "ensure_crash_rate_in_bounds",
@@ -49,13 +51,6 @@ def get_default_backend() -> MetricsBackend:
 
 
 backend = get_default_backend()
-
-
-def _get_key(key: str) -> str:
-    prefix = settings.SENTRY_METRICS_PREFIX
-    if prefix:
-        return f"{prefix}{key}"
-    return key
 
 
 def _should_sample(sample_rate: float) -> bool:
@@ -187,6 +182,21 @@ def distribution(
 ) -> None:
     try:
         backend.distribution(key, value, instance, tags, sample_rate, unit, stacklevel + 1)
+    except Exception:
+        logger = logging.getLogger("sentry.errors")
+        logger.exception("Unable to record backend metric")
+
+
+def set(
+    key: str,
+    value: str | int,
+    instance: str | None = None,
+    tags: Tags | None = None,
+    sample_rate: float = settings.SENTRY_METRICS_SAMPLE_RATE,
+    stacklevel: int = 0,
+) -> None:
+    try:
+        backend.set(key, value, instance, tags, sample_rate, stacklevel + 1)
     except Exception:
         logger = logging.getLogger("sentry.errors")
         logger.exception("Unable to record backend metric")

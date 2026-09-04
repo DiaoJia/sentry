@@ -3,12 +3,18 @@ from typing import Any
 from drf_spectacular.plumbing import build_array_type, build_basic_type
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
-from rest_framework import serializers
 
-from sentry.constants import SentryAppStatus
+from sentry import constants
+from sentry.api.helpers.projects import PROJECT_ID_OR_SLUG_SCHEMA
+from sentry.search.eap.types import SupportedTraceItemType
+from sentry.snuba.dataset import Dataset
 from sentry.snuba.sessions import STATS_PERIODS
 
 # NOTE: Please add new params by path vs query, then in alphabetical order
+
+# Some Sentry IDs are 32-char hex, rather than the UUID dashed form.
+# Those cases match this pattern with OpenApiTypes.STR
+SENTRY_HEX_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 def build_typed_list(type: Any):
@@ -40,7 +46,7 @@ class GlobalParams:
     )
     PROJECT_ID_OR_SLUG = OpenApiParameter(
         name="project_id_or_slug",
-        description="The ID or slug of the project the resource belongs to.",
+        description="The ID or slug of the project the resource belongs to. Project slugs are unique within each organization.",
         required=True,
         type=str,
         location="path",
@@ -95,6 +101,20 @@ For example, `24h`, to mean query data starting from 24 hours ago to now.""",
         type=str,
         description="The name of environments to filter by.",
     )
+    REFERRER = OpenApiParameter(
+        name="referrer",
+        location="query",
+        required=False,
+        type=str,
+        description="Internal referrer identifier used for query tracing. Most clients can omit this.",
+    )
+    EVENT_ID = OpenApiParameter(
+        name="event_id",
+        location="path",
+        required=True,
+        type=str,
+        description="The event ID to look up.",
+    )
 
     @staticmethod
     def member_id(description: str) -> OpenApiParameter:
@@ -132,7 +152,18 @@ class OrganizationParams:
         required=False,
         many=True,
         type=str,
-        description="""The project slugs to filter by. Use `$all` to include all available projects. For example, the following are valid parameters:
+        description="""The legacy project slug filter. Prefer `project`, which accepts project IDs or slugs. Use `$all` to include all available projects. For example, the following are valid parameters:
+- `/?projectSlug=$all`
+- `/?projectSlug=android&projectSlug=javascript-react`
+""",
+    )
+    PROJECT_SLUG = OpenApiParameter(
+        name="projectSlug",
+        location="query",
+        required=False,
+        many=True,
+        type=str,
+        description="""The project slugs to filter by. This legacy parameter takes precedence over `project` if both are provided. Prefer `project`, which accepts project IDs or slugs. Use `$all` to include all available projects. For example, the following are valid parameters:
 - `/?projectSlug=$all`
 - `/?projectSlug=android&projectSlug=javascript-react`
 """,
@@ -141,11 +172,11 @@ class OrganizationParams:
         name="project",
         location="query",
         required=False,
-        many=True,
-        type=int,
-        description="""The IDs of projects to filter by. `-1` means all available projects.
+        type={"type": "array", "items": PROJECT_ID_OR_SLUG_SCHEMA},
+        description="""The IDs or slugs of projects to filter by. Project slugs are unique within each organization. Omit this parameter to include all accessible projects. `-1` is also accepted to include all accessible projects.
 For example, the following are valid parameters:
 - `/?project=1234&project=56789`
+- `/?project=android&project=javascript-react`
 - `/?project=-1`
 """,
     )
@@ -177,7 +208,6 @@ Valid query fields include:
 - `slug`: The organization slug
 - `status`: The organization's current status (one of `active`, `pending_deletion`, or `deletion_in_progress`)
 - `email` or `member_id`: Filter your organizations by the emails or [organization member IDs](/api/organizations/list-an-organizations-members/) of specific members included
-- `platform`: Filter your organizations to those with at least one project using this platform
 - `query`: Filter your organizations by name, slug, and members that contain this substring
 
 Example: `query=(slug:foo AND status:active) OR (email:[thing-one@example.com,thing-two@example.com] AND query:bar)`
@@ -192,9 +222,29 @@ Example: `query=(slug:foo AND status:active) OR (email:[thing-one@example.com,th
 
 Valid fields include:
 - `members`: By number of members
-- `projects`: By number of projects
 - `events`: By number of events in the past 24 hours
 """,
+    )
+
+    MEMBER_QUERY = OpenApiParameter(
+        name="query",
+        location="query",
+        required=False,
+        type=str,
+        description=(
+            "Limit results to members matching the given query. `id, `user.id`, ... are supported prefixes "
+            "match on: `id`, `user.id`, `email`, `role`, `scope`, `isInvited`, `ssoLinked`, "
+            "`has2fa`, `hasExternalUsers`. For example, `query=user.id:1234`. An unrecognized "
+            "field returns no results."
+        ),
+    )
+
+    PROJECT_QUERY = OpenApiParameter(
+        name="query",
+        location="query",
+        required=False,
+        type=str,
+        description="Filter projects by name or slug.",
     )
 
     EXTERNAL_USER_ID = OpenApiParameter(
@@ -221,6 +271,20 @@ class ReleaseParams:
         required=True,
         type=str,
         description="The version identifier of the release",
+    )
+    FILE_ID = OpenApiParameter(
+        name="file_id",
+        location="path",
+        required=True,
+        type=str,
+        description="The ID of the release file.",
+    )
+    QUERY = OpenApiParameter(
+        name="query",
+        location="query",
+        required=False,
+        type=OpenApiTypes.STR,
+        description="Case-insensitive substring match against the release version.",
     )
     PROJECT_ID = OpenApiParameter(
         name="project_id",
@@ -297,7 +361,7 @@ class IssueParams:
         name="issue_id",
         location="path",
         required=True,
-        type=int,
+        type=str,
         description="The ID of the issue you'd like to query.",
     )
 
@@ -318,6 +382,19 @@ class IssueParams:
         type=OpenApiTypes.STR,
         required=False,
     )
+    PROJECT_GROUP_STATS_PERIOD = OpenApiParameter(
+        name="statsPeriod",
+        description=(
+            "The timeline on which stats for the groups should be presented. "
+            'Defaults to `"24h"`. Pass `""` to omit stats entirely. Unlike the '
+            "organization-wide issues endpoint, this does not filter the query "
+            "window and does not accept arbitrary periods."
+        ),
+        enum=["", "24h", "14d"],
+        location=OpenApiParameter.QUERY,
+        type=OpenApiTypes.STR,
+        required=False,
+    )
 
     SHORT_ID_LOOKUP = OpenApiParameter(
         name="shortIdLookup",
@@ -331,7 +408,7 @@ class IssueParams:
     DEFAULT_QUERY = OpenApiParameter(
         name="query",
         description="An optional search query for filtering issues. A default query will apply if no view/query is set. For all results use this parameter with an empty string.",
-        default="is:unresolved issue.priority:[high,medium]",
+        default="is:unresolved",
         location=OpenApiParameter.QUERY,
         type=OpenApiTypes.STR,
         required=False,
@@ -345,11 +422,21 @@ class IssueParams:
         required=False,
     )
 
-    VIEW_SORT = OpenApiParameter(
+    ORGANIZATION_VIEW_SORT = OpenApiParameter(
         name="sort",
-        description="The sort order of the view. Options include 'Last Seen' (`date`), 'First Seen' (`new`), 'Trends' (`trends`), 'Events' (`freq`), 'Users' (`user`), and 'Date Added' (`inbox`).",
+        description="The sort order of the view. Options include 'Last Seen' (`date`), 'First Seen' (`new`), 'Trends' (`trends`), 'Events' (`freq`), 'Users' (`user`), 'Date Added' (`inbox`), and 'Recommended' (`recommended`).",
         default="date",
-        enum=["date", "new", "trends", "freq", "user", "inbox"],
+        enum=["date", "new", "trends", "freq", "user", "inbox", "recommended"],
+        location=OpenApiParameter.QUERY,
+        type=OpenApiTypes.STR,
+        required=False,
+    )
+
+    PROJECT_VIEW_SORT = OpenApiParameter(
+        name="sort",
+        description="The sort order of the view. Options include 'Last Seen' (`date`), 'First Seen' (`new`), 'Trends' (`trends`), 'Events' (`freq`), 'Users' (`user`), and 'Recommended' (`recommended`).",
+        default="date",
+        enum=["date", "new", "trends", "freq", "user", "recommended"],
         location=OpenApiParameter.QUERY,
         type=OpenApiTypes.STR,
         required=False,
@@ -371,8 +458,6 @@ class IssueParams:
             "inbox",
             "owners",
             "sessions",
-            "pluginActions",
-            "pluginIssues",
             "integrationIssues",
             "sentryAppIssues",
             "latestEventHasAttachments",
@@ -387,6 +472,33 @@ class IssueParams:
         name="collapse",
         description="Fields to remove from the response to improve query performance.",
         enum=["stats", "lifetime", "base", "unhandled", "filtered"],
+        location=OpenApiParameter.QUERY,
+        type=OpenApiTypes.STR,
+        required=False,
+        many=True,
+    )
+
+    GROUP_DETAILS_EXPAND = OpenApiParameter(
+        name="expand",
+        description="Additional data to include in the response.",
+        enum=[
+            "inbox",
+            "owners",
+            "forecast",
+            "integrationIssues",
+            "sentryAppIssues",
+            "latestEventHasAttachments",
+        ],
+        location=OpenApiParameter.QUERY,
+        type=OpenApiTypes.STR,
+        required=False,
+        many=True,
+    )
+
+    GROUP_DETAILS_COLLAPSE = OpenApiParameter(
+        name="collapse",
+        description="Fields to remove from the response to improve query performance.",
+        enum=["release", "tags", "stats"],
         location=OpenApiParameter.QUERY,
         type=OpenApiTypes.STR,
         required=False,
@@ -416,7 +528,7 @@ class DetectorParams:
         location="path",
         required=True,
         type=int,
-        description="The ID of the detector you'd like to query.",
+        description="The ID of the monitor you'd like to query.",
     )
 
     QUERY = OpenApiParameter(
@@ -424,7 +536,13 @@ class DetectorParams:
         location="query",
         required=False,
         type=str,
-        description="An optional search query for filtering detectors.",
+        description="""An optional search query for filtering monitors.
+
+Available fields are:
+- `name`
+- `type`: e.g. `error`, `metric_issue`, `issue_stream`
+- `assignee`: email, username, #team, me, none
+        """,
     )
 
     SORT = OpenApiParameter(
@@ -439,6 +557,8 @@ Available fields are:
 - `id`
 - `type`
 - `connectedWorkflows`
+- `latestGroup`
+- `openIssues`
 
 Prefix with `-` to sort in descending order.
         """,
@@ -448,8 +568,17 @@ Prefix with `-` to sort in descending order.
         location="query",
         required=False,
         type=int,
-        description="The ID of the detector you'd like to query.",
+        description="The ID of the monitor you'd like to query.",
         many=True,
+    )
+
+    TYPE = OpenApiParameter(
+        name="type",
+        location="query",
+        required=False,
+        type=str,
+        many=True,
+        description="Filter by monitor type(s). Can be specified multiple times.",
     )
 
 
@@ -459,7 +588,16 @@ class WorkflowParams:
         location="path",
         required=True,
         type=int,
-        description="The ID of the workflow you'd like to query.",
+        description="The ID of the alert you'd like to query.",
+    )
+
+    DETECTOR = OpenApiParameter(
+        name="detector",
+        location="query",
+        required=False,
+        type=int,
+        many=True,
+        description="The IDs of monitors connected to the alerts you'd like to query.",
     )
 
     QUERY = OpenApiParameter(
@@ -467,7 +605,7 @@ class WorkflowParams:
         location="query",
         required=False,
         type=str,
-        description="An optional search query for filtering workflows.",
+        description="An optional search query for filtering alerts.",
     )
 
     SORT_BY = OpenApiParameter(
@@ -484,6 +622,7 @@ Available fields are:
 - `dateUpdated`
 - `connectedDetectors`
 - `actions`
+- `priorityDetector`
 
 Prefix with `-` to sort in descending order.
     """,
@@ -493,7 +632,7 @@ Prefix with `-` to sort in descending order.
         location="query",
         required=False,
         type=int,
-        description="The ID of the workflow you'd like to query.",
+        description="The ID of the alert you'd like to query.",
         many=True,
     )
 
@@ -518,13 +657,13 @@ class IssueAlertParams:
     )
 
 
-class MetricAlertParams:
-    METRIC_RULE_ID = OpenApiParameter(
-        name="alert_rule_id",
+class DataForwarderParams:
+    DATA_FORWARDER_ID = OpenApiParameter(
+        name="data_forwarder_id",
         location="path",
         required=True,
         type=int,
-        description="The ID of the rule you'd like to query.",
+        description="The ID of the data forwarder you'd like to query.",
     )
 
 
@@ -537,6 +676,13 @@ class SentryAppParams:
         type=str,
         description="The ID or slug of the custom integration.",
     )
+    INSTALLATION_UUID = OpenApiParameter(
+        name="uuid",
+        location="path",
+        required=True,
+        type=str,
+        description="The UUID of the Sentry App installation.",
+    )
 
 
 class SentryAppStatusParams:
@@ -546,12 +692,19 @@ class SentryAppStatusParams:
         required=False,
         many=False,
         type=int,
-        description=f"The status of the custom integration, values translate to the following: {SentryAppStatus.as_choices()}",
-        enum=SentryAppStatus.as_int_choices(),
+        description=f"The status of the custom integration, values translate to the following: {constants.SentryAppStatus.as_choices()}",
+        enum=constants.SentryAppStatus.as_int_choices(),
     )
 
 
 class VisibilityParams:
+    ALLOW_AGGREGATE_CONDITIONS = OpenApiParameter(
+        name="allowAggregateConditions",
+        location="query",
+        required=False,
+        type=OpenApiTypes.BOOL,
+        description="If false, aggregate conditions in the query string are disallowed. Defaults to true.",
+    )
     QUERY = OpenApiParameter(
         name="query",
         location="query",
@@ -569,10 +722,11 @@ Example: `query=(transaction:foo AND release:abc) OR (transaction:[bar,baz] AND 
         type=str,
         many=True,
         description="""The fields, functions, or equations to request for the query. At most 20 fields can be selected per request. Each field can be one of the following types:
-- A built-in key field. See possible fields in the [properties table](/product/sentry-basics/search/searchable-properties/#properties-table), under any field that is an event property.
+- A built-in key field. See possible fields in the [properties table](/concepts/search/searchable-properties/), under any field that matches the dataset passed to the dataset parameter
     - example: `field=transaction`
-- A tag. Tags should use the `tag[]` formatting to avoid ambiguity with any fields
-    - example: `field=tag[isEnterprise]`
+- A tag. Tags should use the `tag[{name}, {type}]` formatting to avoid ambiguity with any fields,
+    - example: `field=tag[isEnterprise, string]`
+    - example: `field=tag[numberOfBytes, number]`
 - A function which will be in the format of `function_name(parameters,...)`. See possible functions in the [query builder documentation](/product/discover-queries/query-builder/#stacking-functions).
     - when a function is included, Discover will group by any tags or fields
     - example: `field=count_if(transaction.duration,greater,300)`
@@ -594,13 +748,123 @@ Example: `query=(transaction:foo AND release:abc) OR (transaction:[bar,baz] AND 
         type=int,
         description="Limit the number of rows to return in the result. Default and maximum allowed is 100.",
     )
-
-
-class CursorQueryParam(serializers.Serializer):
-    cursor = serializers.CharField(
-        help_text="A pointer to the last object fetched and its sort order; used to retrieve the next or previous results.",
+    TOP_EVENTS = OpenApiParameter(
+        name="topEvents",
+        location="query",
         required=False,
+        type=int,
+        description=f"""The number of top event results to return, must be between 1 and {constants.MAX_TOP_EVENTS}.
+When TopEvents is passed, both sort and groupBy are required parameters""",
     )
+    COMPARISON_DELTA = OpenApiParameter(
+        name="comparisonDelta",
+        location="query",
+        required=False,
+        type=int,
+        description="The delta in seconds to return additional offset timeseries by",
+    )
+    DATASET = OpenApiParameter(
+        name="dataset",
+        location="query",
+        required=True,
+        type=str,
+        enum=[
+            "errors",
+            "logs",
+            "profile_functions",
+            "spans",
+            "tracemetrics",
+            "uptime_results",
+        ],
+        # Not every key in DATASET_OPTIONS is listed here — internal,
+        # metrics-layer, and deprecated aliases (e.g. "ourlogs",
+        # "metricsEnhanced") are intentionally omitted so
+        # the public API surface stays stable as backends migrate to EAP.
+        description="""Which dataset to query. The chosen dataset determines which fields are queryable.
+- `errors` - Error events.
+- `logs` - Structured log events.
+- `profile_functions` - Function-level Profiling data.
+- `spans` - Distributed tracing span events.
+- `tracemetrics` - Application Metrics.
+- `uptime_results` - Uptime monitoring check results.
+""",
+    )
+    INTERVAL = OpenApiParameter(
+        name="interval",
+        location="query",
+        required=False,
+        type=int,
+        description="""The size of the bucket for the timeseries to have, must be a value smaller than the window being
+queried. If the interval is invalid a default interval will be selected instead""",
+    )
+    GROUP_BY = OpenApiParameter(
+        name="groupBy",
+        location="query",
+        required=False,
+        type=str,
+        many=True,
+        description="""List of fields to group by, *Required* for topEvents queries as this and sort determine what the
+top events are""",
+    )
+    Y_AXIS = OpenApiParameter(
+        name="yAxis",
+        location="query",
+        required=False,
+        type=str,
+        description="""The aggregate field to create the timeseries for, defaults to `count()` when
+        not included.
+- `count()` - Total count of events over the period.
+- `avg(field)` - Average value of the field over the period.
+- `pXX(field)` - Percentile value of the field over the period. One of: `p50`, `p75`, `p90`, `p95`, `p99`, `p100`.
+- `sum(field)` - Sum of all values for the field over the period.
+- `min(field)` - Lowest value observed for the field over the period.
+- `max(field)` - Highest value observed for the field over the period.
+- `count_unique(field)` - Count of unique values observed for the field over the period. See *Note:* regarding accuracy on sampled data.
+- `epm` - Average number of events received per minute.
+- `eps` - Average number of events received per second.
+- `failure_rate()` - Percentage of events whose `status` indicates failure.
+- `failure_count()` - Total count of events with an error `status` over period.
+- `performance_score(field)` - Web Vitals performance score for the selected measurement.
+- `opportunity_score(field)` - Web Vitals opportunity score for the selected measurement.
+""",
+    )
+    DISABLE_AGGREGATE_EXTRAPOLATION = OpenApiParameter(
+        name="disableAggregateExtrapolation",
+        location="query",
+        required=False,
+        type=str,
+        description="""Whether to disable the use of extrapolation and return the sampled values, due to sampling the
+number returned may be less than the actual values sent to Sentry""",
+        enum=["0", "1"],
+    )
+    PREVENT_METRIC_AGGREGATES = OpenApiParameter(
+        name="preventMetricAggregates",
+        location="query",
+        required=False,
+        type=str,
+        description="Whether to throw an error when aggregates are passed in the query or groupBy",
+        enum=["0", "1"],
+    )
+    EXCLUDE_OTHER = OpenApiParameter(
+        name="excludeOther",
+        location="query",
+        required=False,
+        type=str,
+        description="""Only applicable with TopEvents, whether to include the 'other' timeseries which represents all the
+events that aren't in the top groups.""",
+        enum=["0", "1"],
+    )
+
+
+CursorQueryParam = OpenApiParameter(
+    name="cursor",
+    location="query",
+    required=False,
+    type=str,
+    allow_blank=False,
+    description="A pointer to the last object fetched and its sort order; used to retrieve the next or previous results.",
+    extensions={"x-learn-more": "https://docs.sentry.io/api/pagination/"},
+)
 
 
 class MonitorParams:
@@ -636,14 +900,15 @@ class MonitorParams:
         name="processing_error_id",
         location="path",
         required=False,
-        type=OpenApiTypes.UUID,
-        description="The ID of the processing error.",
+        type=OpenApiTypes.STR,
+        pattern=SENTRY_HEX_ID_PATTERN,
+        description="The ID of the processing error. It is a 32-character hexadecimal string.",
     )
 
 
 class UptimeParams:
     UPTIME_ALERT_ID = OpenApiParameter(
-        name="uptime_subscription_id",
+        name="uptime_detector_id",
         location="path",
         required=True,
         type=int,
@@ -663,8 +928,9 @@ class EventParams:
         name="event_id",
         location="path",
         required=True,
-        type=OpenApiTypes.UUID,
-        description="The ID of the event.",
+        type=OpenApiTypes.STR,
+        pattern=SENTRY_HEX_ID_PATTERN,
+        description="The ID of the event. It is a 32-character hexadecimal string as reported by the client.",
     )
 
     FRAME_IDX = OpenApiParameter(
@@ -714,7 +980,11 @@ class EventParams:
         name="query",
         location=OpenApiParameter.QUERY,
         type=OpenApiTypes.STR,
-        description="An optional search query for filtering events.",
+        description=(
+            "An optional search query for filtering events. "
+            "See [search syntax](https://docs.sentry.io/concepts/search/) and queryable event properties at "
+            "[Sentry Search Documentation](https://docs.sentry.io/concepts/search/searchable-properties/events/) for more information. An example query might be `query=transaction:foo AND release:abc`"
+        ),
         required=False,
     )
 
@@ -771,6 +1041,13 @@ keys if not specified.
 
 
 class TeamParams:
+    QUERY = OpenApiParameter(
+        name="query",
+        location="query",
+        required=False,
+        type=str,
+        description="Filter teams by name or slug.",
+    )
     DETAILED = OpenApiParameter(
         name="detailed",
         location="query",
@@ -806,8 +1083,9 @@ class ReplayParams:
         name="replay_id",
         location="path",
         required=True,
-        type=OpenApiTypes.UUID,
-        description="""The ID of the replay you'd like to retrieve.""",
+        type=OpenApiTypes.STR,
+        pattern=SENTRY_HEX_ID_PATTERN,
+        description="""The ID of the replay you'd like to retrieve. It is a 32-character hexadecimal string.""",
     )
 
     SEGMENT_ID = OpenApiParameter(
@@ -816,6 +1094,35 @@ class ReplayParams:
         required=True,
         type=OpenApiTypes.INT,
         description="""The ID of the segment you'd like to retrieve.""",
+    )
+
+    JOB_ID = OpenApiParameter(
+        name="job_id",
+        location="path",
+        required=True,
+        type=OpenApiTypes.INT,
+        description="""The ID of the replay deletion job you'd like to retrieve.""",
+    )
+
+    DATA_SOURCE = OpenApiParameter(
+        name="data_source",
+        location="query",
+        required=True,
+        type=OpenApiTypes.STR,
+        enum=[
+            Dataset.Events.value,
+            Dataset.IssuePlatform.value,
+            SupportedTraceItemType.SPANS.value,
+        ],
+        description="The data source to query replays from.",
+    )
+
+    RETURN_IDS = OpenApiParameter(
+        name="returnIds",
+        location="query",
+        required=False,
+        type=OpenApiTypes.BOOL,
+        description="If true, return issue IDs rather than counts.",
     )
 
 
@@ -951,6 +1258,58 @@ class DashboardParams:
         description="""The ID of the dashboard you'd like to retrieve.""",
     )
 
+    FILTER = OpenApiParameter(
+        name="filter",
+        location="query",
+        required=False,
+        many=True,
+        type=str,
+        enum=[
+            "excludeFavorites",
+            "excludePrebuilt",
+            "onlyFavorites",
+            "onlyPrebuilt",
+            "owned",
+            "shared",
+            "showHidden",
+        ],
+        description="Filter the dashboards returned. Repeat this parameter to apply multiple filters.",
+    )
+
+    PIN = OpenApiParameter(
+        name="pin",
+        location="query",
+        required=False,
+        type=str,
+        enum=["favorites"],
+        description="Pin favorited dashboards to the top of the results.",
+    )
+
+    QUERY = OpenApiParameter(
+        name="query",
+        location="query",
+        required=False,
+        type=str,
+        description="Filter dashboards by title.",
+    )
+
+    SORT = OpenApiParameter(
+        name="sort",
+        location="query",
+        required=False,
+        type=str,
+        description="""The property to sort results by. Prefix the value with `-` to sort in descending order.
+
+Available fields are:
+- `title`
+- `dateCreated`
+- `mostPopular`
+- `recentlyViewed`
+- `mydashboards`
+- `myDashboardsAndRecentlyViewed`
+""",
+    )
+
 
 class DiscoverSavedQueryParams:
     DISCOVER_SAVED_QUERY_ID = OpenApiParameter(
@@ -1022,96 +1381,5 @@ Available fields are:
 - `mostPopular`
 - `recentlyViewed`
 - `myqueries`
-        """,
-    )
-
-
-class PreventParams:
-    OWNER = OpenApiParameter(
-        name="owner",
-        location="path",
-        required=True,
-        type=str,
-        description="The owner of the repository.",
-    )
-    REPOSITORY = OpenApiParameter(
-        name="repository",
-        location="path",
-        required=True,
-        type=str,
-        description="The name of the repository.",
-    )
-    INTERVAL = OpenApiParameter(
-        name="interval",
-        location="query",
-        required=False,
-        type=str,
-        description="""The time interval to search for results by.
-
-Available fields are:
-- `INTERVAL_30_DAY`
-- `INTERVAL_7_DAY`
-- `INTERVAL_1_DAY`
-""",
-    )
-    BRANCH = OpenApiParameter(
-        name="branch",
-        location="query",
-        required=False,
-        type=str,
-        description="""The branch to search for results by. If not specified, the default is `main`.
-        """,
-    )
-    TEST_RESULTS_FILTER_BY = OpenApiParameter(
-        name="filterBy",
-        location="query",
-        required=False,
-        type=str,
-        description="""An optional field to filter by, which will constrain the results to only include tests that match the filter.
-
-Available fields are:
-- `FLAKY_TESTS`
-- `FAILED_TESTS`
-- `SLOWEST_TESTS`
-- `SKIPPED_TESTS`
-        """,
-    )
-    TEST_RESULTS_SORT_BY = OpenApiParameter(
-        name="sortBy",
-        location="query",
-        required=False,
-        type=str,
-        description="""The property to sort results by. If not specified, the default is `COMMITS_WHERE_FAIL` in descending order. Use `-`
-        for descending order.
-
-Available fields are:
-- `AVG_DURATION`
-- `FLAKE_RATE`
-- `FAILURE_RATE`
-- `COMMITS_WHERE_FAIL`
-- `UPDATED_AT`
-        """,
-    )
-    FIRST = OpenApiParameter(
-        name="first",
-        location="query",
-        required=False,
-        type=int,
-        default=20,
-        description="""The number of results to return from the start of the list.""",
-    )
-    LAST = OpenApiParameter(
-        name="last",
-        location="query",
-        required=False,
-        type=int,
-        description="""The number of results to return from the end of the list.""",
-    )
-    CURSOR = OpenApiParameter(
-        name="cursor",
-        location="query",
-        required=False,
-        type=str,
-        description="""The cursor to start the query from. Will return results after the cursor if used with `first` or before the cursor if used with `last`.
         """,
     )

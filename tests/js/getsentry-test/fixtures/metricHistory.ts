@@ -22,15 +22,17 @@ export function MetricHistoryFixture(
     onDemandSpendUsed: 0,
     paygCpe: 0,
     onDemandQuantity: 0,
-    sentUsageWarning: false,
     softCapType: null,
     order,
     prepaid: 5_000,
     reserved: 5_000,
-    trueForward: false,
     usage: 0,
     usageExceeded: false,
     customPrice: 0,
+    retention: {
+      standard: 90,
+      downsampled: null,
+    },
     ...params,
   };
 }

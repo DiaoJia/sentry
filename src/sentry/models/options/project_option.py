@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from django.db import models
+from django.db import models, router, transaction
 
 from sentry import projectoptions
 from sentry.backup.dependencies import ImportKind
 from sentry.backup.helpers import ImportFlags
 from sentry.backup.scopes import ImportScope, RelocationScope
-from sentry.db.models import FlexibleForeignKey, Model, region_silo_model, sane_repr
-from sentry.db.models.fields import PickledObjectField
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.option import OptionManager
 from sentry.utils.cache import cache
 
@@ -38,11 +38,14 @@ OPTION_KEYS = frozenset(
         "sentry:blacklisted_ips",
         "sentry:releases",
         "sentry:error_messages",
+        "sentry:log_messages",
+        "sentry:trace_metric_names",
         "sentry:scrape_javascript",
         "sentry:replay_hydration_error_issues",
         "sentry:replay_rage_click_issues",
         "sentry:feedback_user_report_notifications",
         "sentry:feedback_ai_spam_detection",
+        "sentry:enable_auto_release_creation",
         "sentry:toolbar_allowed_origins",
         "sentry:token",
         "sentry:token_header",
@@ -50,24 +53,44 @@ OPTION_KEYS = frozenset(
         "sentry:scrub_ip_address",
         "sentry:grouping_config",
         "sentry:grouping_enhancements",
-        "sentry:grouping_enhancements_base",
         "sentry:derived_grouping_enhancements",
         "sentry:secondary_grouping_config",
         "sentry:secondary_grouping_expiry",
         "sentry:similarity_backfill_completed",
+        "sentry:group_action_log_backfill_completed",
         "sentry:fingerprinting_rules",
         "sentry:relay_pii_config",
         "sentry:dynamic_sampling",
         "sentry:dynamic_sampling_biases",
-        "sentry:dynamic_sampling_minimum_sample_rate",
         "sentry:target_sample_rate",
         "sentry:tempest_fetch_screenshots",
-        "sentry:tempest_fetch_dumps",
         "sentry:breakdowns",
         "sentry:transaction_name_cluster_rules",
         "sentry:uptime_autodetection",
         "sentry:autofix_automation_tuning",
         "sentry:seer_scanner_automation",
+        "sentry:seer_nightshift_tweaks",
+        "sentry:debug_files_role",
+        "sentry:preprod_size_status_checks_enabled",
+        "sentry:preprod_size_status_checks_rules",
+        "sentry:preprod_size_pr_comments_enabled",
+        "sentry:preprod_size_pr_comments_rules",
+        "sentry:preprod_size_enabled_query",
+        "sentry:preprod_distribution_enabled_query",
+        "sentry:preprod_size_enabled_by_customer",
+        "sentry:preprod_distribution_enabled_by_customer",
+        "sentry:preprod_snapshot_status_checks_enabled",
+        "sentry:preprod_snapshot_status_checks_fail_on_added",
+        "sentry:preprod_snapshot_status_checks_fail_on_removed",
+        "sentry:preprod_snapshot_status_checks_fail_on_changed",
+        "sentry:preprod_snapshot_status_checks_fail_on_renamed",
+        "sentry:preprod_distribution_pr_comments_enabled_by_customer",
+        "sentry:preprod_snapshot_pr_comments_enabled",
+        "sentry:preprod_snapshot_pr_comments_post_on_added",
+        "sentry:preprod_snapshot_pr_comments_post_on_removed",
+        "sentry:preprod_snapshot_pr_comments_post_on_changed",
+        "sentry:preprod_snapshot_pr_comments_post_on_renamed",
+        "sentry:scm_source_context_enabled",
         "quotas:spike-protection-disabled",
         "feedback:branding",
         "digests:mail:minimum_delay",
@@ -76,7 +99,6 @@ OPTION_KEYS = frozenset(
         "mail:subject_template",
         "filters:react-hydration-errors",
         "filters:chunk-load-error",
-        "relay.cardinality-limiter.limits",
     ]
 )
 
@@ -116,20 +138,38 @@ class ProjectOptionManager(OptionManager["ProjectOption"]):
 
     def unset_value(self, project: Project, key: str) -> None:
         self.filter(project=project, key=key).delete()
-        self.reload_cache(project.id, "projectoption.unset_value")
+        self.reload_cache(project.id, "projectoption.unset_value", key)
 
     def set_value(self, project: int | Project, key: str, value: Any) -> bool:
+        """
+        Sets a project option for the given project.
+        """
+
         if isinstance(project, models.Model):
             project_id = project.id
         else:
             project_id = project
 
-        inst, created = self.create_or_update(
-            project_id=project_id, key=key, values={"value": value}
-        )
-        self.reload_cache(project_id, "projectoption.set_value")
+        is_value_changed = False
+        with transaction.atomic(router.db_for_write(ProjectOption)):
+            # select_for_update lock rows until the end of the transaction
+            obj, created = self.select_for_update().get_or_create(
+                project_id=project_id, key=key, defaults={"value": value}
+            )
+            if created:
+                is_value_changed = True
+            elif obj.value != value:
+                # update the value via ORM update() to avoid post save signals which
+                # might cause cache reload when it is not needed (e.g. post_save signal)
+                self.filter(id=obj.id).update(value=value)
+                is_value_changed = True
 
-        return created or inst > 0
+        if is_value_changed:
+            # invalidate the cached project config only if the value has changed,
+            # and reload_cache is set to True
+            self.reload_cache(project_id, "projectoption.set_value", key)
+
+        return is_value_changed
 
     def get_all_values(self, project: Project | int) -> Mapping[str, Any]:
         if isinstance(project, models.Model):
@@ -147,11 +187,15 @@ class ProjectOptionManager(OptionManager["ProjectOption"]):
 
         return self._option_cache.get(cache_key, {})
 
-    def reload_cache(self, project_id: int, update_reason: str) -> Mapping[str, Any]:
+    def reload_cache(
+        self, project_id: int, update_reason: str, option_key: str | None = None
+    ) -> Mapping[str, Any]:
         from sentry.tasks.relay import schedule_invalidate_project_config
 
         if update_reason != "projectoption.get_all_values":
-            schedule_invalidate_project_config(project_id=project_id, trigger=update_reason)
+            schedule_invalidate_project_config(
+                project_id=project_id, trigger=update_reason, trigger_details=option_key
+            )
         cache_key = self._make_key(project_id)
         result = {i.key: i.value for i in self.filter(project=project_id)}
         cache.set(cache_key, result)
@@ -159,16 +203,16 @@ class ProjectOptionManager(OptionManager["ProjectOption"]):
         return result
 
     def post_save(self, *, instance: ProjectOption, created: bool, **kwargs: object) -> None:
-        self.reload_cache(instance.project_id, "projectoption.post_save")
+        self.reload_cache(instance.project_id, "projectoption.post_save", option_key=instance.key)
 
     def post_delete(self, instance: ProjectOption, **kwargs: Any) -> None:
-        self.reload_cache(instance.project_id, "projectoption.post_delete")
+        self.reload_cache(instance.project_id, "projectoption.post_delete", option_key=instance.key)
 
     def isset(self, project: Project, key: str) -> bool:
         return self.get_value(project, key, default=Ellipsis) is not Ellipsis
 
 
-@region_silo_model
+@cell_silo_model
 class ProjectOption(Model):
     """
     Project options apply only to an instance of a project.
@@ -181,7 +225,7 @@ class ProjectOption(Model):
 
     project = FlexibleForeignKey("sentry.Project")
     key = models.CharField(max_length=64)
-    value = PickledObjectField(null=True)
+    value = LegacyTextJSONField(null=True)
 
     objects: ClassVar[ProjectOptionManager] = ProjectOptionManager()
 
@@ -191,6 +235,11 @@ class ProjectOption(Model):
         unique_together = (("project", "key"),)
         indexes = [
             models.Index(fields=["key"]),
+            models.Index(
+                fields=["value", "id"],
+                condition=models.Q(key="sentry:group_action_log_backfill_completed"),
+                name="sentry_proj_gal_val_id_idx",
+            ),
         ]
 
     __repr__ = sane_repr("project_id", "key", "value")
@@ -209,3 +258,12 @@ class ProjectOption(Model):
             self.save()
 
         return (self.pk, ImportKind.Inserted)
+
+
+def get_option(
+    project: int | Project,
+    key: str,
+    default: Any | None = None,
+    validate: Callable[[object], bool] | None = None,
+) -> Any:
+    return ProjectOption.objects.get_value(project, key, default, validate)

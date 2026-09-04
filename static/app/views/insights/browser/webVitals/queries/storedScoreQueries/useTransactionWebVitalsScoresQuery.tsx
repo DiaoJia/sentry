@@ -1,19 +1,19 @@
 import type {Sort} from 'sentry/utils/discover/fields';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {getWebVitalScoresFromTableDataRow} from 'sentry/views/insights/browser/webVitals/queries/storedScoreQueries/getWebVitalScoresFromTableDataRow';
+import {Referrer} from 'sentry/views/insights/browser/webVitals/referrers';
+import {DEFAULT_QUERY_FILTER} from 'sentry/views/insights/browser/webVitals/settings';
 import type {
   Opportunity,
   Score,
   WebVitals,
 } from 'sentry/views/insights/browser/webVitals/types';
 import type {BrowserType} from 'sentry/views/insights/browser/webVitals/utils/queryParameterDecoders/browserType';
-import {useDefaultWebVitalsQuery} from 'sentry/views/insights/browser/webVitals/utils/useDefaultQuery';
 import {useWebVitalsSort} from 'sentry/views/insights/browser/webVitals/utils/useWebVitalsSort';
-import {useMetrics} from 'sentry/views/insights/common/queries/useDiscover';
-import {useInsightsEap} from 'sentry/views/insights/common/utils/useEap';
+import {useSpans} from 'sentry/views/insights/common/queries/useDiscover';
 import {
-  type MetricsProperty,
-  SpanIndexedField,
+  SpanFields,
+  type SpanProperty,
   type SubregionCode,
 } from 'sentry/views/insights/types';
 
@@ -23,45 +23,29 @@ type Props = {
   enabled?: boolean;
   limit?: number;
   query?: string;
-  shouldEscapeFilters?: boolean;
   sortName?: string;
   subregions?: SubregionCode[];
-  transaction?: string | null;
   webVital?: WebVitals | 'total';
 };
 
 export const useTransactionWebVitalsScoresQuery = ({
   limit,
-  transaction,
   defaultSort,
   sortName = 'sort',
   webVital = 'total',
   enabled,
   query,
-  shouldEscapeFilters = true,
   browserTypes,
   subregions,
 }: Props) => {
   const sort = useWebVitalsSort({sortName, defaultSort});
-  const defaultQuery = useDefaultWebVitalsQuery();
 
-  const useEap = useInsightsEap();
-
-  const totalOpportunityScoreField = (
-    useEap ? 'opportunity_score(measurements.score.total)' : 'total_opportunity_score()'
-  ) satisfies MetricsProperty;
+  const totalOpportunityScoreField =
+    'opportunity_score(measurements.score.total)' satisfies SpanProperty;
 
   if (sort !== undefined) {
     if (sort.field === 'avg(measurements.score.total)') {
       sort.field = 'performance_score(measurements.score.total)';
-    }
-    if (
-      [
-        'opportunity_score(measurements.score.total)',
-        'total_opportunity_score()',
-      ].includes(sort.field)
-    ) {
-      sort.field = totalOpportunityScoreField;
     }
   }
 
@@ -69,47 +53,44 @@ export const useTransactionWebVitalsScoresQuery = ({
     'avg(measurements.score.total):>=0',
     ...(query ? [query] : []),
   ]);
-  if (transaction) {
-    search.addFilterValue('transaction', transaction, shouldEscapeFilters);
-  }
   if (browserTypes) {
-    search.addDisjunctionFilterValues(SpanIndexedField.BROWSER_NAME, browserTypes);
+    search.addDisjunctionFilterValues(SpanFields.BROWSER_NAME, browserTypes);
   }
   if (subregions) {
-    search.addDisjunctionFilterValues(SpanIndexedField.USER_GEO_SUBREGION, subregions);
+    search.addDisjunctionFilterValues(SpanFields.USER_GEO_SUBREGION, subregions);
   }
 
-  const {data, isPending, ...rest} = useMetrics(
+  const {data, isPending, ...rest} = useSpans(
     {
       limit: limit ?? 50,
-      search: [defaultQuery, search.formatString()].join(' ').trim(),
+      search: [DEFAULT_QUERY_FILTER, search.formatString()].join(' ').trim(),
       sorts: [sort],
       enabled,
       fields: [
         'project.id',
         'project',
         'transaction',
-        'p75(measurements.lcp)',
-        'p75(measurements.fcp)',
-        'p75(measurements.cls)',
-        'p75(measurements.ttfb)',
-        'p75(measurements.inp)',
+        `p75(${SpanFields.BROWSER_WEB_VITAL_LCP_VALUE})`,
+        `p75(${SpanFields.BROWSER_WEB_VITAL_FCP_VALUE})`,
+        `p75(${SpanFields.BROWSER_WEB_VITAL_CLS_VALUE})`,
+        `p75(${SpanFields.BROWSER_WEB_VITAL_TTFB_VALUE})`,
+        `p75(${SpanFields.BROWSER_WEB_VITAL_INP_VALUE})`,
         ...(webVital === 'total'
           ? []
           : [`performance_score(measurements.score.${webVital})` as const]),
         `opportunity_score(measurements.score.${webVital})`,
         'performance_score(measurements.score.total)',
         'count()',
-        `count_scores(measurements.score.lcp)`,
-        `count_scores(measurements.score.fcp)`,
-        `count_scores(measurements.score.cls)`,
-        `count_scores(measurements.score.inp)`,
-        `count_scores(measurements.score.ttfb)`,
-        `count_scores(measurements.score.total)`,
+        'count_scores(measurements.score.lcp)',
+        'count_scores(measurements.score.fcp)',
+        'count_scores(measurements.score.cls)',
+        'count_scores(measurements.score.inp)',
+        'count_scores(measurements.score.ttfb)',
+        'count_scores(measurements.score.total)',
         totalOpportunityScoreField,
       ],
     },
-    'api.performance.browser.web-vitals.transactions-scores'
+    Referrer.WEB_VITAL_TRANSACTIONS_SCORES
   );
 
   const tableData: Array<

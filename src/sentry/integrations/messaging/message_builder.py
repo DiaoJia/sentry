@@ -4,20 +4,18 @@ from collections.abc import Iterable, Sequence
 from typing import Any, Literal, TypedDict
 
 from sentry import features
-from sentry.eventstore.models import Event, GroupEvent
 from sentry.integrations.messaging.types import LEVEL_TO_COLOR
 from sentry.integrations.types import EXTERNAL_PROVIDERS, ExternalProviders
-from sentry.issues.grouptype import GroupCategory
 from sentry.models.environment import Environment
 from sentry.models.group import Group
-from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.models.rule import Rule
 from sentry.models.team import Team
 from sentry.notifications.notifications.base import BaseNotification
 from sentry.notifications.notifications.rules import AlertRuleNotification
 from sentry.notifications.utils.links import create_link_to_workflow
-from sentry.notifications.utils.rules import get_key_from_rule_data
+from sentry.notifications.utils.rules import get_key_from_rule_data, get_rule_or_workflow_id
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.users.services.user import RpcUser
 from sentry.utils.http import absolute_uri
 
@@ -77,7 +75,7 @@ def build_attachment_title(obj: Group | Event | GroupEvent) -> str:
         title = ev_metadata["type"]
 
     elif ev_type == "csp":
-        title = f'{ev_metadata["directive"]} - {ev_metadata["uri"]}'
+        title = f"{ev_metadata['directive']} - {ev_metadata['uri']}"
     else:
         if isinstance(obj, GroupEvent):
             if obj.occurrence is not None:
@@ -105,29 +103,13 @@ def fetch_environment_name(rule_env: int) -> str | None:
         return env.name
 
 
-def get_rule_environment_param_from_rule(
-    rule_id: int, rule_environment_id: int | None, organization: Organization
-) -> dict[str, str]:
+def get_rule_environment_param_from_rule(rule_environment_id: int | None) -> dict[str, str]:
     params = {}
-    if features.has("organizations:workflow-engine-trigger-actions", organization):
-        if (
-            rule_environment_id is not None
-            and (environment_name := fetch_environment_name(rule_environment_id)) is not None
-        ):
-            params["environment"] = environment_name
-    else:
-        try:
-            rule = Rule.objects.get(id=rule_id)
-        except Rule.DoesNotExist:
-            rule_env = None
-        else:
-            rule_env = rule.environment_id
-
-        if (
-            rule_env is not None
-            and (environment_name := fetch_environment_name(rule_env)) is not None
-        ):
-            params["environment"] = environment_name
+    if (
+        rule_environment_id is not None
+        and (environment_name := fetch_environment_name(rule_environment_id)) is not None
+    ):
+        params["environment"] = environment_name
     return params
 
 
@@ -145,9 +127,7 @@ def get_title_link(
     other_params = {}
     # add in rule id if we have it
     if rule_id:
-        other_params.update(
-            get_rule_environment_param_from_rule(rule_id, rule_environment_id, group.organization)
-        )
+        other_params.update(get_rule_environment_param_from_rule(rule_environment_id))
         # hard code for issue alerts
         other_params["alert_rule_id"] = str(rule_id)
         other_params["alert_type"] = "issue"
@@ -161,8 +141,10 @@ def get_title_link(
     elif issue_details and notification:
         referrer = notification.get_referrer(provider)
         notification_uuid = notification.notification_uuid
+        event_id = getattr(notification, "regression_event_id", None)
         url = group.get_absolute_url(
-            params={"referrer": referrer, "notification_uuid": notification_uuid, **other_params}
+            params={"referrer": referrer, "notification_uuid": notification_uuid, **other_params},
+            event_id=event_id,
         )
     elif notification_uuid:
         url = group.get_absolute_url(
@@ -212,8 +194,10 @@ def get_title_link_workflow_engine_ui(
     elif issue_details and notification:
         referrer = notification.get_referrer(provider)
         notification_uuid = notification.notification_uuid
+        event_id = getattr(notification, "regression_event_id", None)
         url = group.get_absolute_url(
-            params={"referrer": referrer, "notification_uuid": notification_uuid, **other_params}
+            params={"referrer": referrer, "notification_uuid": notification_uuid, **other_params},
+            event_id=event_id,
         )
     elif notification_uuid:
         url = group.get_absolute_url(
@@ -254,10 +238,7 @@ def build_attachment_replay_link(
     group: Group, url_format: str, event: Event | GroupEvent | None = None
 ) -> str | None:
     has_replay = features.has("organizations:session-replay", group.organization)
-    has_slack_links = features.has(
-        "organizations:session-replay-slack-new-issue", group.organization
-    )
-    if has_replay and has_slack_links and group.has_replays():
+    if has_replay and group.has_replays():
         referrer = EXTERNAL_PROVIDERS[ExternalProviders.SLACK]
         replay_url = f"{group.get_absolute_url()}replays/?referrer={referrer}"
 
@@ -269,11 +250,8 @@ def build_attachment_replay_link(
 def build_rule_url(rule: Any, group: Group, project: Project) -> str:
     org_slug = group.organization.slug
     project_slug = project.slug
-    if features.has("organizations:workflow-engine-trigger-actions", group.organization):
-        rule_id = get_key_from_rule_data(rule, "legacy_rule_id")
-        rule_url = f"/organizations/{org_slug}/alerts/rules/{project_slug}/{rule_id}/details/"
-    else:
-        rule_url = f"/organizations/{org_slug}/alerts/rules/{project_slug}/{rule.id}/details/"
+    rule_id = get_key_from_rule_data(rule, "legacy_rule_id")
+    rule_url = f"/organizations/{org_slug}/issues/alerts/rules/{project_slug}/{rule_id}/details/"
 
     return absolute_uri(rule_url)
 
@@ -286,14 +264,12 @@ def build_footer(
 ) -> str:
     footer = f"{group.qualified_short_id}"
     if rules:
-        if features.has("organizations:workflow-engine-ui-links", group.organization):
-            rule_url = absolute_uri(
-                create_link_to_workflow(
-                    group.organization.id, get_key_from_rule_data(rules[0], "workflow_id")
-                )
-            )
-        else:
-            rule_url = build_rule_url(rules[0], group, project)
+        key, value = get_rule_or_workflow_id(rules[0])
+        match key:
+            case "workflow_id":
+                rule_url = absolute_uri(create_link_to_workflow(group.organization.slug, value))
+            case "legacy_rule_id":
+                rule_url = build_rule_url(rules[0], group, project)
 
         # If this notification is triggered via the "Send Test Notification"
         # button then the label is not defined, but the url works.
@@ -327,9 +303,5 @@ def get_color(
             color = event_for_tags.occurrence.level
         if color and color in LEVEL_TO_COLOR.keys():
             return color
-    if group.issue_category == GroupCategory.PERFORMANCE:
-        # XXX(CEO): this shouldn't be needed long term, but due to a race condition
-        # the group's latest event is not found and we end up with no event_for_tags here for perf issues
-        return "info"
 
     return "error"

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import timedelta
 from unittest.mock import patch
+from uuid import uuid4
 
 from sentry.grouping.grouptype import ErrorGroupType
 from sentry.issues.grouptype import (
@@ -9,16 +10,15 @@ from sentry.issues.grouptype import (
     GroupCategory,
     GroupType,
     GroupTypeRegistry,
-    MetricIssuePOC,
     NoiseConfig,
-    PerformanceGroupTypeDefaults,
     PerformanceNPlusOneGroupType,
     PerformanceSlowDBQueryGroupType,
     get_group_type_by_slug,
     get_group_types_by_category,
+    should_create_group,
 )
 from sentry.testutils.cases import TestCase
-from sentry.uptime.grouptype import UptimeDomainCheckFailure
+from sentry.utils.redis import redis_clusters
 
 
 class BaseGroupTypeTest(TestCase):
@@ -26,6 +26,18 @@ class BaseGroupTypeTest(TestCase):
         super().setUp()
         self.registry_patcher = patch("sentry.issues.grouptype.registry", new=GroupTypeRegistry())
         self.registry_patcher.__enter__()
+
+        class ErrorGroupType(GroupType):
+            type_id = -1
+            slug = "error"
+            description = "Error"
+            category = GroupCategory.TEST_NOTIFICATION.value
+
+        class IssueStreamGroupType(GroupType):
+            type_id = 0
+            slug = "issue_stream"
+            description = "Issue Stream"
+            category = GroupCategory.TEST_NOTIFICATION.value
 
     def tearDown(self) -> None:
         super().tearDown()
@@ -40,7 +52,6 @@ class GroupTypeTest(BaseGroupTypeTest):
             slug = "test"
             description = "Test"
             category = GroupCategory.ERROR.value
-            category_v2 = GroupCategory.ERROR.value
             ignore_limit = 0
 
         @dataclass(frozen=True)
@@ -48,18 +59,16 @@ class GroupTypeTest(BaseGroupTypeTest):
             type_id = 2
             slug = "hellboy"
             description = "Hellboy"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
 
         @dataclass(frozen=True)
         class TestGroupType3(GroupType):
             type_id = 3
             slug = "angelgirl"
             description = "AngelGirl"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
 
-        assert get_group_types_by_category(GroupCategory.PERFORMANCE.value) == {2, 3}
+        assert get_group_types_by_category(GroupCategory.DB_QUERY.value) == {2, 3}
         assert get_group_types_by_category(GroupCategory.ERROR.value) == {1}
 
     def test_get_group_type_by_slug(self) -> None:
@@ -69,26 +78,22 @@ class GroupTypeTest(BaseGroupTypeTest):
             slug = "test"
             description = "Test"
             category = GroupCategory.ERROR.value
-            category_v2 = GroupCategory.ERROR.value
             ignore_limit = 0
 
         assert get_group_type_by_slug(TestGroupType.slug) == TestGroupType
         assert get_group_type_by_slug("meow") is None
 
     def test_category_validation(self) -> None:
-        @dataclass(frozen=True)
-        class TestGroupType(GroupType):
-            type_id = 1
-            slug = "error"
-            description = "Error"
-            category = 22
-            category_v2 = 22
-
         with self.assertRaisesMessage(
             ValueError,
             f"Category must be one of {[category.value for category in GroupCategory]} from GroupCategory",
         ):
-            TestGroupType(1, "error", "Error", 22, 22)
+
+            class TestGroupType(GroupType):
+                type_id = 1
+                slug = "error"
+                description = "Error"
+                category = 22
 
     def test_default_noise_config(self) -> None:
         @dataclass(frozen=True)
@@ -97,15 +102,14 @@ class GroupTypeTest(BaseGroupTypeTest):
             slug = "test"
             description = "Test"
             category = GroupCategory.ERROR.value
-            category_v2 = GroupCategory.ERROR.value
 
         @dataclass(frozen=True)
-        class TestGroupType2(PerformanceGroupTypeDefaults, GroupType):
+        class TestGroupType2(GroupType):
             type_id = 2
             slug = "hellboy"
             description = "Hellboy"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
+            noise_config = NoiseConfig()
 
         assert TestGroupType.noise_config is None
         assert TestGroupType2.noise_config == NoiseConfig()
@@ -114,27 +118,66 @@ class GroupTypeTest(BaseGroupTypeTest):
 
     def test_noise_config(self) -> None:
         @dataclass(frozen=True)
-        class TestGroupType(PerformanceGroupTypeDefaults, GroupType):
+        class TestGroupType(GroupType):
             type_id = 2
             slug = "hellboy"
             description = "Hellboy"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
             noise_config = NoiseConfig(ignore_limit=100, expiry_time=timedelta(hours=12))
 
         assert TestGroupType.noise_config.ignore_limit == 100
         assert TestGroupType.noise_config.expiry_time == timedelta(hours=12)
 
 
+class ShouldCreateGroupTest(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.redis_client = redis_clusters.get("default")
+        self.grouphash = uuid4().hex
+        self.key = f"grouphash:{self.grouphash}:{self.project.id}"
+        self.addCleanup(self.redis_client.delete, self.key)
+
+    def test_no_noise_config_leaves_no_key(self) -> None:
+        with patch.object(PerformanceSlowDBQueryGroupType, "noise_config", None):
+            assert should_create_group(
+                PerformanceSlowDBQueryGroupType, self.redis_client, self.grouphash, self.project
+            )
+
+        assert not self.redis_client.exists(self.key)
+
+    def test_below_ignore_limit_key_expires(self) -> None:
+        with patch.object(
+            PerformanceSlowDBQueryGroupType, "noise_config", NoiseConfig(ignore_limit=2)
+        ):
+            assert not should_create_group(
+                PerformanceSlowDBQueryGroupType, self.redis_client, self.grouphash, self.project
+            )
+
+        assert self.redis_client.ttl(self.key) > 0
+
+    def test_at_ignore_limit_key_is_deleted(self) -> None:
+        with patch.object(
+            PerformanceSlowDBQueryGroupType, "noise_config", NoiseConfig(ignore_limit=2)
+        ):
+            assert not should_create_group(
+                PerformanceSlowDBQueryGroupType, self.redis_client, self.grouphash, self.project
+            )
+            assert should_create_group(
+                PerformanceSlowDBQueryGroupType, self.redis_client, self.grouphash, self.project
+            )
+
+        assert not self.redis_client.exists(self.key)
+
+
 class GroupTypeReleasedTest(BaseGroupTypeTest):
     def test_released(self) -> None:
         @dataclass(frozen=True)
-        class TestGroupType(PerformanceGroupTypeDefaults, GroupType):
+        class TestGroupType(GroupType):
             type_id = 1
             slug = "test"
             description = "Test"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
+            noise_config = NoiseConfig()
             released = True
 
         assert TestGroupType.allow_post_process_group(self.organization)
@@ -142,12 +185,12 @@ class GroupTypeReleasedTest(BaseGroupTypeTest):
 
     def test_not_released(self) -> None:
         @dataclass(frozen=True)
-        class TestGroupType(PerformanceGroupTypeDefaults, GroupType):
+        class TestGroupType(GroupType):
             type_id = 1
             slug = "test"
             description = "Test"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
+            noise_config = NoiseConfig()
             released = False
 
         assert not TestGroupType.allow_post_process_group(self.organization)
@@ -155,12 +198,12 @@ class GroupTypeReleasedTest(BaseGroupTypeTest):
 
     def test_not_released_features(self) -> None:
         @dataclass(frozen=True)
-        class TestGroupType(PerformanceGroupTypeDefaults, GroupType):
+        class TestGroupType(GroupType):
             type_id = 1
             slug = "test"
             description = "Test"
-            category = GroupCategory.PERFORMANCE.value
-            category_v2 = GroupCategory.DB_QUERY.value
+            category = GroupCategory.DB_QUERY.value
+            noise_config = NoiseConfig()
             released = False
 
         with self.feature(TestGroupType.build_post_process_group_feature_name()):
@@ -171,16 +214,22 @@ class GroupTypeReleasedTest(BaseGroupTypeTest):
 
 class GroupRegistryTest(BaseGroupTypeTest):
     def test_get_visible(self) -> None:
+        class UnreleasedGroupType(GroupType):
+            type_id = 9999
+            slug = "unreleased_group_type"
+            description = "Mock unreleased issue group"
+            released = False
+            category = GroupCategory.ERROR.value
+
         registry = GroupTypeRegistry()
-        registry.add(UptimeDomainCheckFailure)
-        registry.add(MetricIssuePOC)
+        registry.add(UnreleasedGroupType)
         assert registry.get_visible(self.organization) == []
-        with self.feature(UptimeDomainCheckFailure.build_visible_feature_name()):
-            assert registry.get_visible(self.organization) == [UptimeDomainCheckFailure]
+        with self.feature(UnreleasedGroupType.build_visible_feature_name()):
+            assert registry.get_visible(self.organization) == [UnreleasedGroupType]
         registry.add(ErrorGroupType)
-        with self.feature(UptimeDomainCheckFailure.build_visible_feature_name()):
+        with self.feature(UnreleasedGroupType.build_visible_feature_name()):
             assert set(registry.get_visible(self.organization)) == {
-                UptimeDomainCheckFailure,
+                UnreleasedGroupType,
                 ErrorGroupType,
             }
 
@@ -190,14 +239,7 @@ class GroupRegistryTest(BaseGroupTypeTest):
         registry.add(PerformanceSlowDBQueryGroupType)
         registry.add(PerformanceNPlusOneGroupType)
 
-        # Works for old category mapping
         assert registry.get_by_category(GroupCategory.ERROR.value) == {ErrorGroupType.type_id}
-        assert registry.get_by_category(GroupCategory.PERFORMANCE.value) == {
-            PerformanceSlowDBQueryGroupType.type_id,
-            PerformanceNPlusOneGroupType.type_id,
-        }
-
-        # Works for new category mapping
         assert registry.get_by_category(GroupCategory.DB_QUERY.value) == {
             PerformanceSlowDBQueryGroupType.type_id,
             PerformanceNPlusOneGroupType.type_id,

@@ -1,83 +1,137 @@
-import {Fragment, useEffect} from 'react';
+import {Fragment, useEffect, useState} from 'react';
 import styled from '@emotion/styled';
+import * as Sentry from '@sentry/react';
+import {mutationOptions, useQuery, useQueryClient} from '@tanstack/react-query';
 
-import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import Access from 'sentry/components/acl/access';
-import Confirm from 'sentry/components/confirm';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import Form from 'sentry/components/forms/form';
-import JsonForm from 'sentry/components/forms/jsonForm';
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {Alert} from '@sentry/scraps/alert';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {FieldGroup} from '@sentry/scraps/form';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+import {Text} from '@sentry/scraps/text';
+
+import {BackendJsonAutoSaveForm} from 'sentry/components/backendJsonFormAdapter/backendJsonAutoSaveForm';
+import type {FieldValue} from 'sentry/components/backendJsonFormAdapter/types';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {IconAdd, IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {
+  Integration,
   IntegrationProvider,
   OrganizationIntegration,
-  PluginWithProjectList,
 } from 'sentry/types/integrations';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {Organization} from 'sentry/types/organization';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useAddIntegration} from 'sentry/utils/integrations/useAddIntegration';
+import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
 import {singleLineRenderer} from 'sentry/utils/marked/marked';
-import type {ApiQueryKey} from 'sentry/utils/queryClient';
-import {setApiQueryData, useApiQuery, useQueryClient} from 'sentry/utils/queryClient';
-import useRouteAnalyticsEventNames from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
-import useRouteAnalyticsParams from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import BreadcrumbTitle from 'sentry/views/settings/components/settingsBreadcrumb/breadcrumbTitle';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
+import {fetchMutation, useApiQuery} from 'sentry/utils/queryClient';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {useRouteAnalyticsEventNames} from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
+import {buildGcpVerifyPayload} from 'sentry/utils/seer/gcpConnection';
+import {unreachable} from 'sentry/utils/unreachable';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {useProjects} from 'sentry/utils/useProjects';
+import {CrumbLink} from 'sentry/views/settings/components/settingsBreadcrumb';
+import {BreadcrumbTitle} from 'sentry/views/settings/components/settingsBreadcrumb/breadcrumbTitle';
+import {Divider} from 'sentry/views/settings/components/settingsBreadcrumb/divider';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 
-import AddIntegration from './addIntegration';
-import IntegrationAlertRules from './integrationAlertRules';
-import IntegrationCodeMappings from './integrationCodeMappings';
-import IntegrationExternalTeamMappings from './integrationExternalTeamMappings';
-import IntegrationExternalUserMappings from './integrationExternalUserMappings';
-import IntegrationItem from './integrationItem';
-import IntegrationMainSettings from './integrationMainSettings';
-import IntegrationRepos from './integrationRepos';
+import {GcpConnectionStatus} from './gcpConnectionStatus';
+import {IntegrationAlertRules} from './integrationAlertRules';
+import {IntegrationCodeMappings} from './integrationCodeMappings';
+import {IntegrationExternalTeamMappings} from './integrationExternalTeamMappings';
+import {IntegrationExternalUserMappings} from './integrationExternalUserMappings';
+import {IntegrationIcon} from './integrationIcon';
 import {IntegrationServerlessFunctions} from './integrationServerlessFunctions';
 
-type Props = RouteComponentProps<{
+type Tab = 'settings' | 'codeMappings' | 'userMappings' | 'teamMappings';
+
+function organizationIntegrationApiOptions({
+  organizationSlug,
+  integrationId,
+}: {
   integrationId: string;
+  organizationSlug: string;
+}) {
+  return apiOptions.as<OrganizationIntegration>()(
+    '/organizations/$organizationIdOrSlug/integrations/$integrationId/',
+    {
+      path: {organizationIdOrSlug: organizationSlug, integrationId},
+      staleTime: 0,
+    }
+  );
+}
+
+function organizationIntegrationsApiOptions({
+  organizationSlug,
+  providerKey,
+}: {
+  organizationSlug: string;
   providerKey: string;
-}>;
+}) {
+  return apiOptions.as<Integration[]>()(
+    '/organizations/$organizationIdOrSlug/integrations/',
+    {
+      path: {organizationIdOrSlug: organizationSlug},
+      query: {provider_key: providerKey, includeConfig: 0},
+      staleTime: 0,
+    }
+  );
+}
 
-const TABS = [
-  'repos',
-  'codeMappings',
-  'userMappings',
-  'teamMappings',
-  'settings',
-] as const;
-type Tab = (typeof TABS)[number];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
-const makeIntegrationQuery = (
-  organization: Organization,
-  integrationId: string
-): ApiQueryKey => {
-  return [`/organizations/${organization.slug}/integrations/${integrationId}/`];
-};
+function withJiraStatusMappingRemovals(
+  data: Record<string, unknown>,
+  previousMappings: unknown
+): Record<string, unknown> {
+  if (!Object.hasOwn(data, 'sync_status_forward')) {
+    return data;
+  }
 
-const makePluginQuery = (organization: Organization): ApiQueryKey => {
-  return [`/organizations/${organization.slug}/plugins/configs/`];
-};
+  const submittedMappings = data.sync_status_forward;
+  if (!isRecord(submittedMappings) || !isRecord(previousMappings)) {
+    return data;
+  }
 
-function ConfigureIntegration({params, router, routes, location}: Props) {
-  const api = useApi();
+  const removedMappings = Object.fromEntries(
+    Object.keys(previousMappings)
+      .filter(key => !Object.hasOwn(submittedMappings, key))
+      .map(key => [key, null])
+  );
+
+  return {
+    ...data,
+    sync_status_forward: {
+      ...submittedMappings,
+      ...removedMappings,
+    },
+  };
+}
+
+function ConfigureIntegration() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const organization = useOrganization();
-  const tab: Tab = TABS.includes(location.query.tab) ? location.query.tab : 'repos';
-  const {integrationId, providerKey} = params;
+  const {integrationId, providerKey} = useParams<{
+    integrationId: string;
+    providerKey: string;
+  }>();
   const {
     data: config = {providers: []},
     isPending: isLoadingConfig,
@@ -85,27 +139,54 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
     refetch: refetchConfig,
   } = useApiQuery<{
     providers: IntegrationProvider[];
-  }>([`/organizations/${organization.slug}/config/integrations/`], {staleTime: 0});
+  }>(
+    [
+      getApiUrl('/organizations/$organizationIdOrSlug/config/integrations/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
+    ],
+    {staleTime: 0}
+  );
   const {
     data: integration,
     isPending: isLoadingIntegration,
     isError: isErrorIntegration,
+    isPlaceholderData,
     refetch: refetchIntegration,
-  } = useApiQuery<OrganizationIntegration>(
-    makeIntegrationQuery(organization, integrationId),
-    {staleTime: 0}
-  );
-  const {
-    data: plugins,
-    isPending: isLoadingPlugins,
-    isError: isErrorPlugins,
-    refetch: refetchPlugins,
-  } = useApiQuery<PluginWithProjectList[] | null>(makePluginQuery(organization), {
-    staleTime: 0,
+  } = useQuery({
+    ...organizationIntegrationApiOptions({
+      organizationSlug: organization.slug,
+      integrationId,
+    }),
+    placeholderData: () => {
+      const listData = queryClient.getQueryData(
+        organizationIntegrationsApiOptions({
+          organizationSlug: organization.slug,
+          providerKey,
+        }).queryKey
+      );
+      const cachedIntegration = listData?.json.find(item => item.id === integrationId);
+
+      // The summary only supplies the breadcrumb while the full configuration loads.
+      return cachedIntegration
+        ? {
+            json: {
+              ...cachedIntegration,
+              configData: null,
+              configOrganization: [],
+              organizationId: Number(organization.id),
+              externalId: cachedIntegration.externalId ?? '',
+            },
+            headers: {},
+          }
+        : undefined;
+    },
   });
 
   const provider = config.providers.find(p => p.key === integration?.provider.key);
   const {projects} = useProjects();
+
+  const [isVerifyingGcp, setIsVerifyingGcp] = useState(false);
 
   useRouteAnalyticsEventNames(
     'integrations.details_viewed',
@@ -127,32 +208,97 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
   useEffect(() => {
     // This page should not be accessible by members (unless its github or gitlab)
     const allowMemberConfiguration = ['github', 'gitlab'].includes(providerKey);
-    if (!allowMemberConfiguration && !organization.access.includes('org:integrations')) {
-      router.push(
+    if (
+      !allowMemberConfiguration &&
+      !organization.access.includes('org:integrations') &&
+      !isActiveSuperuser()
+    ) {
+      navigate(
         normalizeUrl({
           pathname: `/settings/${organization.slug}/integrations/${providerKey}/`,
         })
       );
     }
-  }, [router, organization, providerKey]);
+  }, [navigate, organization, providerKey]);
 
-  if (isLoadingConfig || isLoadingIntegration || isLoadingPlugins) {
-    return <LoadingIndicator />;
+  if (isErrorConfig || isErrorIntegration) {
+    return <LoadingError />;
   }
 
-  if (isErrorConfig || isErrorIntegration || isErrorPlugins) {
-    return <LoadingError />;
+  if (isLoadingConfig || isLoadingIntegration || isPlaceholderData) {
+    return (
+      <Fragment>
+        {integration && <IntegrationNavigationHeader integration={integration} />}
+        <LoadingIndicator />
+      </Fragment>
+    );
   }
 
   if (!provider || !integration) {
     return null;
   }
 
+  const usesExplicitMappingRemovals =
+    provider.key === 'jira' &&
+    organization.features.includes('jira-explicit-mapping-removals');
+
+  // The Settings tab only has content when there is something to render in
+  // renderMainTab(). When empty, the tab is hidden entirely.
+  const settingsInstructions =
+    integration.dynamicDisplayInformation?.configure_integration?.instructions;
+  const hasSettingsTabContent =
+    (integration.configOrganization?.length ?? 0) > 0 ||
+    (settingsInstructions?.length ?? 0) > 0 ||
+    provider.features.includes('alert-rule') ||
+    provider.features.includes('serverless');
+
+  const hasStacktraceLinking = provider.features.includes('stacktrace-link');
+  const hasCodeOwners =
+    provider.features.includes('codeowners') &&
+    organization.features.includes('integrations-codeowners');
+  const hasUserMapping = provider.features.includes('user-mapping');
+
+  // The Settings tab is paired with stacktrace linking or user mapping; it is
+  // only shown when renderMainTab() would actually have content.
+  const settingsTabs: Array<[Tab, string]> =
+    hasSettingsTabContent && (hasStacktraceLinking || hasUserMapping)
+      ? [['settings', t('Settings')]]
+      : [];
+
+  const stackTraceLinkingTabs: Array<[Tab, string]> = hasStacktraceLinking
+    ? [['codeMappings', t('Code Mappings')]]
+    : [];
+
+  const codeOwnerTabs: Array<[Tab, string]> = hasCodeOwners
+    ? [
+        ['userMappings', t('User Mappings')],
+        ['teamMappings', t('Team Mappings')],
+      ]
+    : [];
+
+  // User mappings are mutually exclusive with stacktrace linking
+  // and code owners, so only render the main settings tab and user mappings.
+  const userMappingTabs: Array<[Tab, string]> = hasUserMapping
+    ? [['userMappings', t('User Mappings')]]
+    : [];
+
+  const allTabs = [
+    ...settingsTabs,
+    ...stackTraceLinkingTabs,
+    ...codeOwnerTabs,
+    ...userMappingTabs,
+  ];
+
+  const tabParam = decodeScalar(location.query.tab) as Tab | undefined;
+  const tab =
+    tabParam && allTabs.some(([key]) => key === tabParam)
+      ? tabParam
+      : (allTabs[0]?.[0] ?? 'settings');
+
   const onTabChange = (value: Tab) => {
     // XXX: Omit the cursor to prevent paginating the next tab's queries.
     const {cursor: _, ...query} = location.query;
-    router.push({
-      pathname: location.pathname,
+    navigate({
       query: {...query, tab: value},
     });
   };
@@ -161,92 +307,28 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
    * Refetch everything, this could be improved to reload only the right thing
    */
   const onUpdateIntegration = () => {
-    queryClient.removeQueries({queryKey: makePluginQuery(organization)});
-    refetchPlugins();
-
     queryClient.removeQueries({
       queryKey: [`/organizations/${organization.slug}/config/integrations/`],
     });
     refetchConfig();
 
-    queryClient.removeQueries({
-      queryKey: makeIntegrationQuery(organization, integrationId),
-    });
-    refetchIntegration();
-  };
-
-  const handleOpsgenieMigration = async () => {
-    try {
-      await api.requestPromise(
-        `/organizations/${organization.slug}/integrations/${integrationId}/migrate-opsgenie/`,
-        {
-          method: 'PUT',
-        }
-      );
-      setApiQueryData<PluginWithProjectList[] | null>(
-        queryClient,
-        makePluginQuery(organization),
-        oldData => {
-          return oldData?.filter(({id}) => id === 'opsgenie') ?? [];
-        }
-      );
-      addSuccessMessage(t('Migration in progress.'));
-    } catch (error) {
-      addErrorMessage(t('Something went wrong! Please try again.'));
-    }
-  };
-
-  const handleJiraMigration = async () => {
-    try {
-      await api.requestPromise(
-        `/organizations/${organization.slug}/integrations/${integrationId}/issues/`,
-        {
-          method: 'PUT',
-          data: {},
-        }
-      );
-      setApiQueryData<PluginWithProjectList[] | null>(
-        queryClient,
-        makePluginQuery(organization),
-        oldData => {
-          return oldData?.filter(({id}) => id === 'jira') ?? [];
-        }
-      );
-      addSuccessMessage(t('Migration in progress.'));
-    } catch (error) {
-      addErrorMessage(t('Something went wrong! Please try again.'));
-    }
-  };
-
-  const isOpsgeniePluginInstalled = () => {
-    return (plugins || []).some(
-      p =>
-        p.id === 'opsgenie' &&
-        p.projectList.length >= 1 &&
-        p.projectList.some(({enabled}) => enabled === true)
+    queryClient.removeQueries(
+      organizationIntegrationApiOptions({
+        organizationSlug: organization.slug,
+        integrationId,
+      })
     );
+    refetchIntegration();
   };
 
   const getAction = () => {
     if (provider.key === 'pagerduty') {
       return (
-        <AddIntegration
+        <PagerdutyAddServicesButton
           provider={provider}
           onInstall={onUpdateIntegration}
-          account={integration.domainName}
           organization={organization}
-        >
-          {onClick => (
-            <Button
-              priority="primary"
-              size="sm"
-              icon={<IconAdd isCircled />}
-              onClick={() => onClick()}
-            >
-              {t('Add Services')}
-            </Button>
-          )}
-        </AddIntegration>
+        />
       );
     }
 
@@ -262,89 +344,6 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
       );
     }
 
-    const canMigrateJiraPlugin =
-      ['jira', 'jira_server'].includes(provider.key) &&
-      (plugins || []).find(({id}) => id === 'jira');
-    if (canMigrateJiraPlugin) {
-      return (
-        <Access access={['org:integrations']}>
-          {({hasAccess}) => (
-            <Confirm
-              disabled={!hasAccess}
-              header="Migrate Linked Issues from Jira Plugins"
-              renderMessage={() => (
-                <Fragment>
-                  <p>
-                    {t(
-                      'This will automatically associate all the Linked Issues of your Jira Plugins to this integration.'
-                    )}
-                  </p>
-                  <p>
-                    {t(
-                      'If the Jira Plugins had the option checked to automatically create a Jira ticket for every new Sentry issue checked, you will need to create alert rules to recreate this behavior. Jira Server does not have this feature.'
-                    )}
-                  </p>
-                  <p>
-                    {t(
-                      'Once the migration is complete, your Jira Plugins will be disabled.'
-                    )}
-                  </p>
-                </Fragment>
-              )}
-              onConfirm={() => {
-                handleJiraMigration();
-              }}
-            >
-              <Button priority="primary" disabled={!hasAccess}>
-                {t('Migrate Plugin')}
-              </Button>
-            </Confirm>
-          )}
-        </Access>
-      );
-    }
-
-    const canMigrateOpsgeniePlugin =
-      provider.key === 'opsgenie' && isOpsgeniePluginInstalled();
-    if (canMigrateOpsgeniePlugin) {
-      return (
-        <Access access={['org:integrations']}>
-          {({hasAccess}) => (
-            <Confirm
-              disabled={!hasAccess}
-              header="Migrate API Keys and Alert Rules from Opsgenie"
-              renderMessage={() => (
-                <Fragment>
-                  <p>
-                    {t(
-                      'This will automatically associate all the API keys and Alert Rules of your Opsgenie Plugins to this integration.'
-                    )}
-                  </p>
-                  <p>
-                    {t(
-                      'API keys will be automatically named after one of the projects with which they were associated.'
-                    )}
-                  </p>
-                  <p>
-                    {t(
-                      'Once the migration is complete, your Opsgenie Plugins will be disabled.'
-                    )}
-                  </p>
-                </Fragment>
-              )}
-              onConfirm={() => {
-                handleOpsgenieMigration();
-              }}
-            >
-              <Button priority="primary" disabled={!hasAccess}>
-                {t('Migrate Plugin')}
-              </Button>
-            </Confirm>
-          )}
-        </Access>
-      );
-    }
-
     return null;
   };
 
@@ -357,30 +356,116 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
     const instructions =
       integration.dynamicDisplayInformation?.configure_integration?.instructions;
 
+    const integrationEndpoint = getApiUrl(
+      '/organizations/$organizationIdOrSlug/integrations/$integrationId/',
+      {path: {organizationIdOrSlug: organization.slug, integrationId: integration.id}}
+    );
+
+    const integrationQueryOptions = organizationIntegrationApiOptions({
+      organizationSlug: organization.slug,
+      integrationId,
+    });
+
+    const verifyGcpConnection = async () => {
+      const savedConfig = queryClient.getQueryData(integrationQueryOptions.queryKey)?.json
+        .configData;
+      const payload = buildGcpVerifyPayload(savedConfig);
+      if (!payload) {
+        return;
+      }
+
+      await fetchMutation({
+        method: 'POST',
+        url: getApiUrl(
+          '/organizations/$organizationIdOrSlug/monitoring-providers/gcp/verify-connection/',
+          {path: {organizationIdOrSlug: organization.slug}}
+        ),
+        data: payload,
+      });
+    };
+
+    const integrationMutationOptions = mutationOptions({
+      mutationFn: (data: Record<string, unknown>) => {
+        let requestData = data;
+        if (usesExplicitMappingRemovals) {
+          requestData = withJiraStatusMappingRemovals(
+            data,
+            integration.configData?.sync_status_forward
+          );
+        }
+
+        return fetchMutation({
+          method: 'POST',
+          url: integrationEndpoint,
+          data: requestData,
+        });
+      },
+      onSuccess: async () => {
+        const verifiesConnection = provider.key === 'gcp';
+        if (verifiesConnection) {
+          setIsVerifyingGcp(true);
+        }
+
+        try {
+          // it's important that we keep the mutation pending while the refetch is happening by awaiting it.
+          // Otherwise, clicking toggles again while the invalidation is running won't do anything because they still see old defaultValues.
+          // this makes the mutations seem to run longer than before. We could do optimistic updates here too, but I'm not sure it's worth the added complexity.
+          await queryClient.invalidateQueries(integrationQueryOptions);
+
+          if (verifiesConnection) {
+            try {
+              await verifyGcpConnection();
+              await queryClient.invalidateQueries(integrationQueryOptions);
+            } catch (error) {
+              // The save itself succeeded; the connection stays recorded as unverified
+              // and the customer can re-test, so don't report this as a failed save.
+              Sentry.captureException(error);
+            }
+          }
+        } finally {
+          if (verifiesConnection) {
+            setIsVerifyingGcp(false);
+          }
+        }
+      },
+    });
+
     return (
       <Fragment>
-        {integration.configOrganization.length > 0 && (
-          <Form
-            hideFooter
-            saveOnBlur
-            allowUndo
-            apiMethod="POST"
-            initialData={integration.configData || {}}
-            apiEndpoint={`/organizations/${organization.slug}/integrations/${integration.id}/`}
+        {provider.key === 'gcp' && (
+          <GcpConnectionStatus
+            configData={integration.configData}
+            organization={organization}
+            isVerifying={isVerifyingGcp}
+            onRetested={() => queryClient.invalidateQueries(integrationQueryOptions)}
+          />
+        )}
+
+        {(integration.configOrganization?.length ?? 0) > 0 && (
+          <FieldGroup
+            title={
+              integration.provider.aspects.configure_integration?.title ||
+              t('Organization Integration Settings')
+            }
           >
-            <JsonForm
-              fields={integration.configOrganization}
-              title={
-                integration.provider.aspects.configure_integration?.title ||
-                t('Organization Integration Settings')
-              }
-            />
-          </Form>
+            {integration.configOrganization?.map(fieldConfig => (
+              <BackendJsonAutoSaveForm
+                key={fieldConfig.name}
+                field={fieldConfig}
+                initialValue={
+                  integration.configData?.[fieldConfig.name] as FieldValue<
+                    typeof fieldConfig
+                  >
+                }
+                mutationOptions={integrationMutationOptions}
+              />
+            ))}
+          </FieldGroup>
         )}
 
         {instructions && instructions.length > 0 && (
           <Alert.Container>
-            <Alert type="info">
+            <Alert variant="info" showIcon={false}>
               {instructions.length === 1 ? (
                 <span
                   dangerouslySetInnerHTML={{__html: singleLineRenderer(instructions[0]!)}}
@@ -404,10 +489,6 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
 
         {provider.features.includes('alert-rule') && <IntegrationAlertRules />}
 
-        {provider.features.includes('commits') && (
-          <IntegrationRepos integration={integration} />
-        )}
-
         {provider.features.includes('serverless') && (
           <IntegrationServerlessFunctions integration={integration} />
         )}
@@ -422,61 +503,19 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
     switch (tab) {
       case 'codeMappings':
         return <IntegrationCodeMappings integration={integration} />;
-      case 'repos':
+      case 'settings':
         return renderMainTab();
       case 'userMappings':
         return <IntegrationExternalUserMappings integration={integration} />;
       case 'teamMappings':
         return <IntegrationExternalTeamMappings integration={integration} />;
-      case 'settings':
-        return (
-          <IntegrationMainSettings
-            onUpdate={onUpdateIntegration}
-            organization={organization}
-            integration={integration}
-          />
-        );
       default:
+        unreachable(tab);
         return renderMainTab();
     }
   }
 
   function renderMainContent() {
-    const hasStacktraceLinking = provider!.features.includes('stacktrace-link');
-    const hasCodeOwners =
-      provider!.features.includes('codeowners') &&
-      organization.features.includes('integrations-codeowners');
-    const hasUserMapping = provider!.features.includes('user-mapping');
-
-    const tabs: Array<[Tab, string]> = [];
-    const stackTraceLinkingTabs: Array<[Tab, string]> = hasStacktraceLinking
-      ? [
-          ['repos', t('Repositories')],
-          ['codeMappings', t('Code Mappings')],
-        ]
-      : [];
-
-    const codeOwnerTabs: Array<[Tab, string]> = hasCodeOwners
-      ? [
-          ['userMappings', t('User Mappings')],
-          ['teamMappings', t('Team Mappings')],
-        ]
-      : [];
-
-    // User mappings are mutually exclusive with stacktrace linking
-    // and code owners, so only render the main settings tab and user mappings.
-    const userMappingTabs: Array<[Tab, string]> = hasUserMapping
-      ? [
-          ['repos', t('Settings')],
-          ['userMappings', t('User Mappings')],
-        ]
-      : [];
-
-    const allTabs = tabs
-      .concat(stackTraceLinkingTabs)
-      .concat(codeOwnerTabs)
-      .concat(userMappingTabs);
-
     if (allTabs.length === 0) {
       return renderMainTab();
     }
@@ -499,39 +538,95 @@ function ConfigureIntegration({params, router, routes, location}: Props) {
 
   return (
     <Fragment>
-      <SentryDocumentTitle
-        title={integration ? integration.provider.name : 'Configure Integration'}
-      />
-      <BackButtonWrapper>
-        <LinkButton
-          icon={<IconArrow direction="left" size="sm" />}
-          size="sm"
-          to={`/settings/${organization.slug}/integrations/${provider.key}/`}
-        >
-          {t('Back')}
-        </LinkButton>
-      </BackButtonWrapper>
-      <SettingsPageHeader
-        noTitleStyles
-        title={<IntegrationItem integration={integration} />}
-        action={getAction()}
-      />
+      <IntegrationNavigationHeader integration={integration} action={getAction()} />
       {renderMainContent()}
-      <BreadcrumbTitle
-        routes={routes}
-        title={t('Configure %s', integration.provider.name)}
-      />
     </Fragment>
   );
 }
 
+function IntegrationNavigationHeader({
+  integration,
+  action,
+}: {
+  integration: Integration;
+  action?: React.ReactNode;
+}) {
+  const organization = useOrganization();
+  const {providerKey} = useParams<{providerKey: string}>();
+  const externalUrl = getIntegrationExternalUrl(integration);
+  const configurationsHref = `/settings/${organization.slug}/integrations/${providerKey}/?tab=configurations`;
+
+  return (
+    <Fragment>
+      <SentryDocumentTitle title={integration.provider.name} />
+      <SettingsPageHeader
+        title={
+          <Flex align="center" gap="sm">
+            <CrumbLink to={configurationsHref}>{t('Configurations')}</CrumbLink>
+            <Divider />
+            <IntegrationIcon size={18} integration={integration} />
+            {externalUrl ? (
+              <Text>
+                {textProps => (
+                  <ExternalLink {...textProps} href={externalUrl}>
+                    {integration.name}
+                  </ExternalLink>
+                )}
+              </Text>
+            ) : (
+              <Text>{integration.name}</Text>
+            )}
+          </Flex>
+        }
+        action={action}
+      />
+      <BreadcrumbTitle title={integration.provider.name} />
+    </Fragment>
+  );
+}
+
+function getIntegrationExternalUrl(integration: Integration): string | null {
+  const {domainName} = integration;
+  if (!domainName) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(domainName)) {
+    return domainName;
+  }
+
+  if (integration.provider.key === 'pagerduty') {
+    return null;
+  }
+
+  return `https://${domainName}`;
+}
+
+function PagerdutyAddServicesButton({
+  provider,
+  onInstall,
+  organization,
+}: {
+  onInstall: () => void;
+  organization: Organization;
+  provider: IntegrationProvider;
+}) {
+  const {startFlow} = useAddIntegration();
+
+  return (
+    <Button
+      variant="primary"
+      size="sm"
+      icon={<IconAdd />}
+      onClick={() => startFlow({provider, onInstall, organization})}
+    >
+      {t('Add Services')}
+    </Button>
+  );
+}
+
 const TabsContainer = styled('div')`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 export default ConfigureIntegration;
-
-const BackButtonWrapper = styled('div')`
-  margin-bottom: ${space(2)};
-  width: 100%;
-`;

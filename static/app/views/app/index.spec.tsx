@@ -1,35 +1,46 @@
 import {InstallWizardFixture} from 'sentry-fixture/installWizard';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
-import {act, render, screen, waitFor} from 'sentry-test/reactTestingLibrary';
+import {act, render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import AlertStore from 'sentry/stores/alertStore';
-import ConfigStore from 'sentry/stores/configStore';
-import HookStore from 'sentry/stores/hookStore';
-import OrganizationsStore from 'sentry/stores/organizationsStore';
-import App from 'sentry/views/app';
+import {getOverride, registerOverride} from 'sentry/overrideRegistry';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {App} from 'sentry/views/app';
 
-function HookWrapper(props: any) {
+function OverrideWrapper(props: any) {
   return (
-    <div data-test-id="hook-wrapper">
+    <div data-test-id="override-wrapper">
       {props.children}
       <span>{JSON.stringify(props?.organization ?? {}, null, 2)}</span>
     </div>
   );
 }
 
-describe('App', function () {
-  const configState = ConfigStore.getState();
-  const {routerProps} = initializeOrg();
+function PlaceholderContent() {
+  return <div>placeholder content</div>;
+}
 
-  beforeEach(function () {
+const defaultRouterConfig = {
+  location: {pathname: '/organizations/org-slug/'},
+  children: [
+    {
+      index: true,
+      element: <PlaceholderContent />,
+    },
+  ],
+  route: '/organizations/:orgSlug/',
+};
+
+describe('App', () => {
+  const configState = ConfigStore.getState();
+
+  beforeEach(() => {
     const organization = OrganizationFixture();
 
     ConfigStore.init();
     ConfigStore.loadInitialData(configState);
-
-    HookStore.init();
 
     MockApiClient.addMockResponse({
       url: '/organizations/',
@@ -57,50 +68,52 @@ describe('App', function () {
     });
 
     MockApiClient.addMockResponse({
-      url: '/internal/options/?query=is:required',
+      url: '/internal/options/',
       body: InstallWizardFixture(),
+      match: [MockApiClient.matchQuery({query: 'is:required'})],
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     jest.clearAllMocks();
   });
 
-  it('renders', async function () {
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+  it('renders', async () => {
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
     expect(screen.getByText('placeholder content')).toBeInTheDocument();
-    expect(window.location.replace).not.toHaveBeenCalled();
+    expect(testableWindowLocation.replace).not.toHaveBeenCalled();
   });
 
-  it('renders NewsletterConsent', async function () {
+  it('requires an explicit NewsletterConsent choice', async () => {
     const user = ConfigStore.get('user');
     user.flags.newsletter_consent_prompt = true;
 
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
 
-    const updatesViaEmail = await screen.findByText(
-      'Yes, I would like to receive updates via email',
-      undefined,
+    const yes = await screen.findByRole(
+      'radio',
+      {name: 'Yes, I would like to receive updates via email'},
       {timeout: 2000, interval: 100}
     );
-    expect(updatesViaEmail).toBeInTheDocument();
+    const no = screen.getByRole('radio', {
+      name: "No, I'd prefer not to receive these updates",
+    });
+
+    expect(yes).not.toBeChecked();
+    expect(no).not.toBeChecked();
+
+    await userEvent.click(screen.getByRole('button', {name: 'Continue'}));
+
+    expect(await screen.findByText('Please select an option')).toBeInTheDocument();
 
     user.flags.newsletter_consent_prompt = false;
   });
 
-  it('renders BeaconConsent', async function () {
+  it('renders BeaconConsent', async () => {
     ConfigStore.set('shouldShowBeaconConsentPrompt', true);
     ConfigStore.get('user').isSuperuser = true;
     ConfigStore.set('isSelfHosted', true);
@@ -112,11 +125,7 @@ describe('App', function () {
       },
     });
 
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
 
@@ -128,38 +137,34 @@ describe('App', function () {
     expect(beaconConsentText).toBeInTheDocument();
   });
 
-  it('renders PartnershipAgreement', async function () {
+  it('renders PartnershipAgreement', async () => {
     ConfigStore.set('partnershipAgreementPrompt', {
       partnerDisplayName: 'Foo',
       agreements: ['standard', 'partner_presence'],
     });
-    HookStore.add('component:partnership-agreement', () => <HookWrapper key={0} />);
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    registerOverride('component:partnership-agreement', () => (
+      <OverrideWrapper key={0} />
+    ));
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
-    expect(HookStore.get('component:partnership-agreement')).toHaveLength(1);
-    expect(screen.getByTestId('hook-wrapper')).toBeInTheDocument();
+    expect(getOverride('component:partnership-agreement')).toBeDefined();
+    expect(screen.getByTestId('override-wrapper')).toBeInTheDocument();
   });
 
-  it('does not render PartnerAgreement for non-partnered orgs', async function () {
+  it('does not render PartnerAgreement for non-partnered orgs', async () => {
     ConfigStore.set('partnershipAgreementPrompt', null);
-    HookStore.add('component:partnership-agreement', () => <HookWrapper key={0} />);
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    registerOverride('component:partnership-agreement', () => (
+      <OverrideWrapper key={0} />
+    ));
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
     expect(screen.getByText('placeholder content')).toBeInTheDocument();
-    expect(screen.queryByTestId('hook-wrapper')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('override-wrapper')).not.toBeInTheDocument();
   });
 
-  it('renders InstallWizard for self-hosted', async function () {
+  it('renders InstallWizard for self-hosted', async () => {
     ConfigStore.get('user').isSuperuser = true;
     ConfigStore.set('needsUpgrade', true);
     ConfigStore.set('isSelfHosted', true);
@@ -171,11 +176,7 @@ describe('App', function () {
       },
     });
 
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
 
@@ -185,38 +186,44 @@ describe('App', function () {
     expect(completeSetup).toBeInTheDocument();
   });
 
-  it('does not render InstallWizard for non-self-hosted', async function () {
+  it('does not render InstallWizard for non-self-hosted', async () => {
     ConfigStore.get('user').isSuperuser = true;
     ConfigStore.set('needsUpgrade', true);
     ConfigStore.set('isSelfHosted', false);
 
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
     expect(screen.getByText('placeholder content')).toBeInTheDocument();
-    expect(window.location.replace).not.toHaveBeenCalled();
+    expect(testableWindowLocation.replace).not.toHaveBeenCalled();
   });
 
-  it('redirects to sentryUrl on invalid org slug', async function () {
+  it('redirects to sentryUrl on invalid org slug', async () => {
     const {sentryUrl} = ConfigStore.get('links');
-    render(
-      <App {...routerProps} params={{orgId: 'albertos%2fapples'}}>
-        <div>placeholder content</div>
-      </App>
-    );
+    // Avoid mounting OrganizationContextProvider and related preloads which
+    // would issue org-specific requests for the invalid slug
+    ConfigStore.set('shouldPreloadData', false);
+    render(<App />, {
+      initialRouterConfig: {
+        location: {pathname: '/organizations/albertos%2fapples/'},
+        route: '/organizations/:orgId/',
+        children: [
+          {
+            index: true,
+            element: <PlaceholderContent />,
+          },
+        ],
+      },
+    });
 
-    await waitFor(() => OrganizationsStore.getAll().length === 1);
+    await waitFor(() => expect(testableWindowLocation.replace).toHaveBeenCalled());
     expect(screen.queryByText('placeholder content')).not.toBeInTheDocument();
     expect(sentryUrl).toBe('https://sentry.io');
-    expect(window.location.replace).toHaveBeenCalledWith('https://sentry.io');
-    expect(window.location.replace).toHaveBeenCalledTimes(1);
+    expect(testableWindowLocation.replace).toHaveBeenCalledWith('https://sentry.io');
+    expect(testableWindowLocation.replace).toHaveBeenCalledTimes(1);
   });
 
-  it('adds health issues to alertstore', async function () {
+  it('fetches health issues for self-hosted', async () => {
     const getMock = MockApiClient.addMockResponse({
       url: '/internal/health/',
       body: {
@@ -233,26 +240,11 @@ describe('App', function () {
     const restore = ConfigStore.get('isSelfHosted');
     ConfigStore.set('isSelfHosted', true);
 
-    render(
-      <App {...routerProps}>
-        <div>placeholder content</div>
-      </App>
-    );
+    render(<App />, {initialRouterConfig: defaultRouterConfig});
     act(() => ConfigStore.set('isSelfHosted', restore));
 
     await waitFor(() => OrganizationsStore.getAll().length === 1);
 
     expect(getMock).toHaveBeenCalled();
-
-    await waitFor(() => {
-      expect(AlertStore.getState()).toEqual([
-        expect.objectContaining({
-          id: 'abc123',
-          message: 'Celery workers have not checked in',
-          opaque: true,
-          type: 'error',
-        }),
-      ]);
-    });
   });
 });

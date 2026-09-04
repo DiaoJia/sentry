@@ -1,6 +1,5 @@
 from unittest import TestCase
 
-from sentry.data_secrecy.models import DataSecrecyWaiver
 from sentry.db.models import DefaultFieldsModelExisting
 from sentry.integrations.models import Integration, RepositoryProjectPathConfig
 from sentry.models.groupsearchview import GroupSearchView
@@ -10,7 +9,6 @@ from sentry.models.importchunk import (
     ControlImportChunkReplica,
     RegionImportChunk,
 )
-from sentry.models.projecttemplate import ProjectTemplate
 from sentry.models.transaction_threshold import (
     ProjectTransactionThreshold,
     ProjectTransactionThresholdOverride,
@@ -25,7 +23,7 @@ from sentry.relocation.models.relocation import (
     RelocationValidationAttempt,
 )
 from sentry.sentry_apps.models import SentryAppInstallationForProvider
-from sentry.uptime.models import ProjectUptimeSubscription, UptimeSubscription
+from sentry.uptime.models import UptimeSubscription
 
 
 class PreventDefaultFieldsModelExistingUseTest(TestCase):
@@ -34,21 +32,18 @@ class PreventDefaultFieldsModelExistingUseTest(TestCase):
             [s for c in cls.__subclasses__() for s in self.all_subclasses(c)]
         )
 
-    def test(self):
+    def test(self) -> None:
         assert self.all_subclasses(DefaultFieldsModelExisting) == {
             BaseImportChunk,
             ControlImportChunk,
             ControlImportChunkReplica,
-            DataSecrecyWaiver,
             GroupSearchView,
             Integration,
             NotificationSettingBase,
             NotificationSettingOption,
             NotificationSettingProvider,
-            ProjectTemplate,
             ProjectTransactionThreshold,
             ProjectTransactionThresholdOverride,
-            ProjectUptimeSubscription,
             RegionImportChunk,
             Relocation,
             RelocationFile,

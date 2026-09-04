@@ -1,16 +1,18 @@
 import logging
+from datetime import timedelta
 from typing import ClassVar, cast
 
 import rb
 from django.conf import settings
 from django.db import IntegrityError, models, router, transaction
 from django.utils import timezone
-from rediscluster import RedisCluster
+from sentry_redis_tools.clients import RedisCluster
 
 from sentry.adoption import manager
 from sentry.adoption.manager import UnknownFeature
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, JSONField, Model, region_silo_model, sane_repr
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base import BaseManager
 from sentry.utils.redis import (
     get_dynamic_cluster_from_options,
@@ -22,6 +24,7 @@ from sentry.utils.services import build_instance_from_options
 logger = logging.getLogger(__name__)
 
 FEATURE_ADOPTION_REDIS_KEY = "organization-feature-adoption:{}"
+FEATURE_ADOPTION_CACHE_TTL = int(timedelta(days=90).total_seconds())
 
 # Languages
 manager.add(0, "python", "Python", "language")
@@ -148,7 +151,10 @@ class FeatureAdoptionRedisBackend:
             return False
 
         org_key = self.key_tpl.format(organization_id)
-        self.get_client(org_key).sadd(org_key, *args)
+        pipe = self.get_client(org_key).pipeline()
+        pipe.sadd(org_key, *args)
+        pipe.expire(org_key, FEATURE_ADOPTION_CACHE_TTL)
+        pipe.execute()
         return True
 
 
@@ -178,8 +184,10 @@ class FeatureAdoptionManager(BaseManager["FeatureAdoption"]):
             return False
 
         if not self.in_cache(organization_id, feature_id):
-            row, created = self.create_or_update(
-                organization_id=organization_id, feature_id=feature_id, complete=True
+            _, created = self.update_or_create(
+                organization_id=organization_id,
+                feature_id=feature_id,
+                defaults={"complete": True},
             )
             self.set_cache(organization_id, feature_id)
             return created
@@ -209,13 +217,9 @@ class FeatureAdoptionManager(BaseManager["FeatureAdoption"]):
 
         try:
             with transaction.atomic(router.db_for_write(FeatureAdoption)):
-                self.bulk_create(features)
+                # Skip existing rows and keep the new ones
+                self.bulk_create(features, ignore_conflicts=True)
         except IntegrityError:
-            # This can occur if redis somehow loses the set of complete features and
-            # we attempt to insert duplicate (org_id, feature_id) rows
-            # This also will happen if we get parallel processes running `bulk_record` and
-            # `get_all_cache` returns in the second process before the first process
-            # can `bulk_set_cache`.
             pass
 
         return self.bulk_set_cache(organization_id, *incomplete_feature_ids)
@@ -226,7 +230,7 @@ class FeatureAdoptionManager(BaseManager["FeatureAdoption"]):
         ).first()
 
 
-@region_silo_model
+@cell_silo_model
 class FeatureAdoption(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -235,7 +239,7 @@ class FeatureAdoption(Model):
     date_completed = models.DateTimeField(default=timezone.now)
     complete = models.BooleanField(default=False)
     applicable = models.BooleanField(default=True)  # Is this feature applicable to this team?
-    data = JSONField()
+    data = LegacyTextJSONField(default=dict)
 
     objects: ClassVar[FeatureAdoptionManager] = FeatureAdoptionManager()
 

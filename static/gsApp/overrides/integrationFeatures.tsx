@@ -1,0 +1,403 @@
+import {Fragment} from 'react';
+import styled from '@emotion/styled';
+import groupBy from 'lodash/groupBy';
+import partition from 'lodash/partition';
+
+import {IconCheckmark} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {IntegrationProvider} from 'sentry/types/integrations';
+import type {Organization} from 'sentry/types/organization';
+import type {Overrides} from 'sentry/types/overrides';
+import {getIntegrationType} from 'sentry/utils/integrationUtil';
+
+import {UpsellButton} from 'getsentry/components/upsellButton';
+import {withSubscription} from 'getsentry/components/withSubscription';
+import {useBillingConfig} from 'getsentry/hooks/useBillingConfig';
+import type {BillingConfig, Plan, Subscription} from 'getsentry/types';
+import {
+  displayPlanName,
+  isBizPlanFamily,
+  isDeveloperPlan,
+  isTeamPlanFamily,
+} from 'getsentry/utils/billing';
+
+/**
+ * Plan types an integration feature can be grouped under, ordered from least to
+ * most capable. Enterprise plans are not user selectable and so never appear in
+ * the candidate list here.
+ */
+const ORDERED_PLAN_TYPES = ['developer', 'team', 'business'] as const;
+
+type PlanType = (typeof ORDERED_PLAN_TYPES)[number];
+
+/**
+ * The cheapest plan type that offers each integration feature.
+ *
+ * Used to group the features of an integration under the plan a customer would
+ * need in order to get them. Keys are `featureGate` values, which correspond to
+ * the integration features the billing config exposes in `featureList`.
+ *
+ * A feature missing from this map cannot be attributed to a plan, so it is left
+ * out of the grouped list entirely.
+ */
+const INTEGRATION_FEATURE_PLAN_TYPE: Record<string, PlanType> = {
+  'integrations-stacktrace-link': 'developer',
+  'integrations-alert-rule': 'team',
+  'integrations-chat-unfurl': 'team',
+  'integrations-incident-management': 'team',
+  'integrations-issue-basic': 'team',
+  'integrations-issue-sync': 'team',
+  'integrations-codeowners': 'business',
+  'integrations-enterprise-alert-rule': 'business',
+  'integrations-enterprise-incident-management': 'business',
+  'integrations-event-hooks': 'business',
+  'integrations-scm-multi-org': 'business',
+  'integrations-ticket-rules': 'business',
+};
+
+function planType(plan: Plan): PlanType | null {
+  if (isDeveloperPlan(plan)) {
+    return 'developer';
+  }
+  if (isBizPlanFamily(plan)) {
+    return 'business';
+  }
+  if (isTeamPlanFamily(plan)) {
+    return 'team';
+  }
+  return null;
+}
+
+/**
+ * Whether `plan` is capable enough to include `featureGate`.
+ */
+function planOffers(plan: Plan, featureGate: string) {
+  const required = INTEGRATION_FEATURE_PLAN_TYPE[featureGate];
+  const type = planType(plan);
+
+  if (required === undefined || type === null) {
+    return false;
+  }
+
+  return ORDERED_PLAN_TYPES.indexOf(type) >= ORDERED_PLAN_TYPES.indexOf(required);
+}
+
+type IntegrationFeature = {
+  description: React.ReactNode;
+  featureGate: string;
+};
+
+type GatedFeatureGroup = {
+  features: IntegrationFeature[];
+  hasFeatures: boolean;
+  plan?: Plan;
+};
+
+type MapFeatureGroupsOpts = {
+  billingConfig: BillingConfig;
+  features: IntegrationFeature[];
+  organization: Organization;
+  subscription: Subscription;
+};
+
+/**
+ * Given a users subscription, billing config, and organization, determine from
+ * a set of features three things:
+ *
+ * - What features are free ungated features.
+ *
+ * - Group together features that *are* gated by plan type, and indicate if the
+ *   current plan type supports that set of features
+ *
+ * - Does the user current plan support *any* of the features, or are they
+ *   required to upgrade to receive any features.
+ */
+function mapFeatureGroups({
+  features,
+  organization,
+  subscription,
+  billingConfig,
+}: MapFeatureGroupsOpts) {
+  if (billingConfig === null || subscription === null) {
+    return {
+      disabled: false,
+      disabledReason: null,
+      ungatedFeatures: [],
+      gatedFeatureGroups: [],
+    };
+  }
+
+  // Group integration by if their features are part of a paid subscription.
+  const [ungatedFeatures, premiumFeatures] = partition(
+    features,
+    (feature: IntegrationFeature) =>
+      billingConfig.featureList[feature.featureGate] === undefined
+  );
+
+  // TODO: use sortPlansForUpgrade here
+  // Filter plans down to just user selectable plans types of the orgs current
+  // contract interval. Sorted by price as features will become progressively
+  // more available.
+  let plans = billingConfig.planList
+    .sort((a, b) => a.totalPrice - b.totalPrice)
+    .filter(p => p.userSelectable && p.billingInterval === subscription.billingInterval);
+
+  // If we're dealing with plans that are *not part of a tier* Then we can
+  // assume special case that there is only one plan.
+  if (billingConfig.id === null && plans.length === 0) {
+    plans = billingConfig.planList;
+  }
+
+  // Group premium features by the plans they belong to. `plans` is price
+  // sorted, so the first match is the cheapest plan offering the feature.
+  const groupedPlanFeatures = groupBy(
+    premiumFeatures,
+    feature => plans.find(p => planOffers(p, feature.featureGate))?.id
+  );
+
+  // Transform our grouped plan features into a list of feature groups
+  // including the plan. For each feature group it is determined if all
+  // features also have associated organization feature flags, indicating that
+  // the features are enabled.
+  const gatedFeatureGroups = plans
+    .filter(plan => groupedPlanFeatures[plan.id] !== undefined)
+    .map<GatedFeatureGroup>(plan => ({
+      plan,
+      features: groupedPlanFeatures[plan.id]!,
+      hasFeatures: !groupedPlanFeatures[plan.id]!.map(f => f.featureGate)
+        .map(f => organization.features.includes(f))
+        .some(v => !v),
+    }));
+
+  // Are any features available for the current users plan?
+  const disabled =
+    ungatedFeatures.length === 0 && !gatedFeatureGroups.some(group => group.hasFeatures);
+
+  // Checks if 'disabled' and if there are any gatedFeatureGroups with plans,
+  // then takes the cheapest tiered plan and generates the first error message.
+  // If gatedFeatureGroups do not exist and is disabled, then give generic error message.
+  // There are some deprecated plugins that require this logic that some customers may see.
+  const disabledReason =
+    disabled && gatedFeatureGroups.length && gatedFeatureGroups[0]!.plan
+      ? tct('Requires [planName] Plan or above', {
+          planName: displayPlanName(gatedFeatureGroups[0]!.plan),
+        })
+      : disabled
+        ? t('Integration unavailable on your billing plan.')
+        : null;
+
+  return {ungatedFeatures, gatedFeatureGroups, disabled, disabledReason};
+}
+
+type RenderProps = {
+  /**
+   * Boolean false if the integration may be installed on the current users
+   * plan, or a string describing why it cannot be installed.
+   */
+  disabled: boolean;
+  /**
+   * The text (translated) reason the integration cannot be installed.
+   */
+  disabledReason: React.ReactNode;
+  /**
+   * Features grouped by what plan they belong to.
+   */
+  gatedFeatureGroups: GatedFeatureGroup[];
+  /**
+   * A list of features that are available for free.
+   */
+  ungatedFeatures: IntegrationFeature[];
+};
+
+type IntegrationFeaturesProps = {
+  children: (props: RenderProps) => React.ReactElement;
+  features: IntegrationFeature[];
+  organization: Organization;
+  subscription: Subscription;
+};
+
+function IntegrationFeaturesBase({
+  features,
+  organization,
+  subscription,
+  children,
+}: IntegrationFeaturesProps) {
+  const {data: billingConfig} = useBillingConfig({organization});
+
+  if (!billingConfig) {
+    return null;
+  }
+
+  const opts = mapFeatureGroups({
+    features,
+    organization,
+    subscription,
+    billingConfig,
+  });
+
+  return children(opts);
+}
+
+const IntegrationFeatures = withSubscription(IntegrationFeaturesBase);
+
+type FeatureListProps = Omit<IntegrationFeaturesProps, 'children'> & {
+  provider: Pick<IntegrationProvider, 'key'>;
+};
+
+function FeatureListBase(props: FeatureListProps) {
+  const {provider, subscription, organization} = props;
+  return (
+    <IntegrationFeatures {...props}>
+      {({ungatedFeatures, gatedFeatureGroups}) => (
+        <Fragment>
+          <IntegrationFeatureGroup
+            message={tct('For [plans:All billing plans]', {plans: <strong />})}
+            features={ungatedFeatures}
+            hasFeatures
+          />
+          {gatedFeatureGroups.map(({plan, features, hasFeatures}) => {
+            const planText = tct('[planName] billing plans', {
+              planName: displayPlanName(plan),
+            });
+
+            const action = (
+              <UpsellButton
+                source="integration-features"
+                size="xs"
+                subscription={subscription}
+                organization={organization}
+                variant="primary"
+                extraAnalyticsParams={{
+                  integration: provider.key,
+                  integration_type: getIntegrationType(provider as IntegrationProvider),
+                  integration_tab: 'overview',
+                  plan: plan?.name,
+                }}
+              />
+            );
+
+            const message = (
+              <Fragment>
+                {tct('For [plan] and above', {plan: <strong>{planText}</strong>})}
+              </Fragment>
+            );
+
+            return (
+              <IntegrationFeatureGroup
+                key={plan?.id}
+                message={message}
+                features={features}
+                hasFeatures={hasFeatures}
+                action={!hasFeatures && action}
+              />
+            );
+          })}
+        </Fragment>
+      )}
+    </IntegrationFeatures>
+  );
+}
+
+const FeatureList = withSubscription(FeatureListBase);
+
+const HasFeatureIndicator = styled((p: any) => (
+  <div {...p}>
+    Enabled
+    <IconCheckmark />
+  </div>
+))`
+  display: grid;
+  grid-auto-flow: column;
+  gap: ${p => p.theme.space.md};
+  align-items: center;
+  color: ${p => p.theme.colors.green400};
+  font-weight: bold;
+  text-transform: uppercase;
+  font-size: 0.8em;
+  margin-right: 4px;
+`;
+
+type GroupProps = {
+  features: IntegrationFeature[];
+  hasFeatures: boolean;
+  message: React.ReactNode;
+  action?: React.ReactNode;
+  className?: string;
+};
+
+const IntegrationFeatureGroup = styled((p: GroupProps) => {
+  if (p.features.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className={p.className}>
+      <FeatureGroupHeading>
+        <div>{p.message}</div>
+        {p.action && p.action}
+        {p.hasFeatures && <HasFeatureIndicator />}
+      </FeatureGroupHeading>
+      <GroupFeatureList features={p.features} />
+    </div>
+  );
+})`
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  margin-bottom: ${p => p.theme.space.xl};
+`;
+
+const FeatureGroupHeading = styled('div')`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid ${p => p.theme.colors.gray200};
+  background: ${p => p.theme.tokens.background.secondary};
+  font-size: 0.9em;
+  padding: 8px 8px 8px 12px;
+`;
+
+type GroupListProps = Pick<GroupProps, 'features' | 'className'>;
+
+const GroupFeatureList = styled(({features, className}: GroupListProps) => (
+  <ul className={className}>
+    {features.map((feature, i) => (
+      <FeatureDescription key={i}>{feature.description}</FeatureDescription>
+    ))}
+  </ul>
+))`
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  background-color: ${p => p.theme.tokens.background.primary};
+`;
+
+const FeatureDescription = styled('li')`
+  padding: 8px 12px;
+
+  &:not(:last-child) {
+    border-bottom: 1px solid ${p => p.theme.colors.gray200};
+  }
+`;
+
+/**
+ * This hook provides integration feature components used to determine what
+ * features an organization currently has access too.
+ *
+ * All components exported through this hook require the organization and
+ * integration features list to be passed
+ *
+ * Provides two components:
+ *
+ * - IntegrationFeatures
+ *   This is a render-prop style component that given a set of integration
+ *   features will call children as a render-prop. See the proptypes
+ *   descriptions above.
+ *
+ * - FeatureList
+ *   Renders a list of integration features grouped by plan.
+ */
+export const hookIntegrationFeatures: Overrides['integrations:feature-gates'] = () => ({
+  IntegrationFeatures,
+  FeatureList,
+});

@@ -9,7 +9,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import KeyTransactionBase
 from sentry.api.bases.organization import OrganizationPermission
 from sentry.api.helpers.teams import get_teams
@@ -18,6 +18,7 @@ from sentry.api.serializers import Serializer, register, serialize
 from sentry.discover.endpoints import serializers
 from sentry.discover.models import TeamKeyTransaction
 from sentry.exceptions import InvalidParams
+from sentry.models.organization import Organization
 from sentry.models.projectteam import ProjectTeam
 from sentry.models.team import Team
 
@@ -31,7 +32,7 @@ class KeyTransactionPermission(OrganizationPermission):
     }
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class KeyTransactionEndpoint(KeyTransactionBase):
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
@@ -40,7 +41,7 @@ class KeyTransactionEndpoint(KeyTransactionBase):
     }
     permission_classes = (KeyTransactionPermission,)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return Response(status=404)
 
@@ -143,14 +144,14 @@ class KeyTransactionEndpoint(KeyTransactionBase):
         return Response(serializer.errors, status=400)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class KeyTransactionListEndpoint(KeyTransactionBase):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
     permission_classes = (KeyTransactionPermission,)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return Response(status=404)
 

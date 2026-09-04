@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TypedDict
 
 import sentry_sdk
-from snuba_sdk import Column, Condition, Function, Identifier, Op, OrderBy
+from snuba_sdk import Column, Condition, Direction, Function, Identifier, Op, OrderBy
 
 from sentry.api.event_search import SearchFilter
 from sentry.exceptions import IncompatibleMetricsQuery, InvalidSearchQuery
@@ -87,8 +87,6 @@ class SpansMetricsDatasetConfig(DatasetConfig):
         """While the final functions in clickhouse must have their -Merge combinators in order to function, we don't
         need to add them here since snuba has a FunctionMapper that will add it for us. Basically it turns expressions
         like quantiles(0.9)(value) into quantilesMerge(0.9)(percentiles)
-        Make sure to update METRIC_FUNCTION_LIST_BY_TYPE when adding functions here, can't be a dynamic list since the
-        Metric Layer will actually handle which dataset each function goes to
         """
         resolve_metric_id = {
             "name": "metric_id",
@@ -328,7 +326,8 @@ class SpansMetricsDatasetConfig(DatasetConfig):
                         ),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args, alias=alias, fixed_percentile=0.50
                     ),
                     is_percentile=True,
@@ -347,7 +346,8 @@ class SpansMetricsDatasetConfig(DatasetConfig):
                         ),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args, alias=alias, fixed_percentile=0.75
                     ),
                     is_percentile=True,
@@ -366,7 +366,8 @@ class SpansMetricsDatasetConfig(DatasetConfig):
                         ),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args, alias=alias, fixed_percentile=0.95
                     ),
                     is_percentile=True,
@@ -385,7 +386,8 @@ class SpansMetricsDatasetConfig(DatasetConfig):
                         ),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args, alias=alias, fixed_percentile=0.99
                     ),
                     is_percentile=True,
@@ -404,7 +406,8 @@ class SpansMetricsDatasetConfig(DatasetConfig):
                         ),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args, alias=alias, fixed_percentile=1
                     ),
                     is_percentile=True,
@@ -851,6 +854,7 @@ class SpansMetricsDatasetConfig(DatasetConfig):
             selected_columns=[f"sum({column})"],
         )
         sentry_sdk.set_tag("query.resolved_total", scope)
+        sentry_sdk.set_attribute("query.resolved_total", scope)
 
         total_results = total_query.run_query(
             Referrer.API_DISCOVER_TOTAL_SUM_TRANSACTION_DURATION_FIELD.value
@@ -886,7 +890,6 @@ class SpansMetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         return self._resolve_count_if(
             Function(
                 "equals",
@@ -910,7 +913,6 @@ class SpansMetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         return self._resolve_count_if(
             Function(
                 "equals",
@@ -934,7 +936,6 @@ class SpansMetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         statuses = [self.builder.resolve_tag_value(status) for status in constants.CACHE_HIT_STATUS]
 
         return self._resolve_count_if(
@@ -1564,5 +1565,10 @@ class SpansMetricsDatasetConfig(DatasetConfig):
         )
 
     @property
-    def orderby_converter(self) -> Mapping[str, OrderBy]:
-        return {}
+    def orderby_converter(self) -> Mapping[str, Callable[[Direction], OrderBy]]:
+        return {
+            constants.DEVICE_CLASS_ALIAS: self._device_class_orderby_converter,
+        }
+
+    def _device_class_orderby_converter(self, direction: Direction) -> OrderBy:
+        return OrderBy(self.builder.column("device.class"), direction)

@@ -2,13 +2,13 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 import {TeamFixture} from 'sentry-fixture/team';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import OrganizationTeamProjects from 'sentry/views/settings/organizationTeams/teamProjects';
 
-describe('OrganizationTeamProjects', function () {
-  let getMock!: jest.Mock;
+describe('OrganizationTeamProjects', () => {
+  let linkedProjectsMock!: jest.Mock;
+  let unlinkedProjectsMock!: jest.Mock;
   let putMock!: jest.Mock;
   let postMock!: jest.Mock;
   let deleteMock!: jest.Mock;
@@ -25,16 +25,35 @@ describe('OrganizationTeamProjects', function () {
     access: ['project:read', 'project:write', 'project:admin'],
   });
 
-  const {routerProps, organization} = initializeOrg({
-    organization: OrganizationFixture({slug: 'org-slug'}),
-    projects: [project, project2],
-    router: {params: {teamId: team.slug}},
-  });
+  const organization = OrganizationFixture({slug: 'org-slug'});
 
-  beforeEach(function () {
-    getMock = MockApiClient.addMockResponse({
+  const initialRouterConfig = {
+    location: {
+      pathname: `/settings/${organization.slug}/teams/${team.slug}/projects/`,
+    },
+    route: '/settings/:orgId/teams/:teamId/projects/',
+  };
+
+  beforeEach(() => {
+    linkedProjectsMock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/projects/',
       body: [project, project2],
+      match: [
+        MockApiClient.matchQuery({
+          query: 'team:team-slug',
+          collapse: ['latestDeploys', 'unusedFeatures'],
+        }),
+      ],
+    });
+    unlinkedProjectsMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/projects/',
+      body: [project, project2],
+      match: [
+        MockApiClient.matchQuery({
+          query: '!team:team-slug',
+          collapse: ['latestDeploys', 'unusedFeatures'],
+        }),
+      ],
     });
 
     putMock = MockApiClient.addMockResponse({
@@ -58,26 +77,28 @@ describe('OrganizationTeamProjects', function () {
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('should fetch linked and unlinked projects', async function () {
-    render(<OrganizationTeamProjects {...routerProps} team={team} />, {
+  it('should fetch linked and unlinked projects', async () => {
+    render(<OrganizationTeamProjects />, {
       organization,
+      initialRouterConfig,
+      outletContext: {team},
     });
 
     expect(await screen.findByText('project-slug')).toBeInTheDocument();
 
-    expect(getMock).toHaveBeenCalledTimes(2);
-
-    expect(getMock.mock.calls[0][1].query.query).toBe('team:team-slug');
-    expect(getMock.mock.calls[1][1].query.query).toBe('!team:team-slug');
+    expect(linkedProjectsMock).toHaveBeenCalledTimes(1);
+    expect(unlinkedProjectsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('should allow bookmarking', async function () {
-    render(<OrganizationTeamProjects {...routerProps} team={team} />, {
+  it('should allow bookmarking', async () => {
+    render(<OrganizationTeamProjects />, {
       organization,
+      initialRouterConfig,
+      outletContext: {team},
     });
 
     const stars = await screen.findAllByRole('button', {name: 'Bookmark'});
@@ -97,12 +118,15 @@ describe('OrganizationTeamProjects', function () {
     );
   });
 
-  it('should allow adding and removing projects', async function () {
-    render(<OrganizationTeamProjects {...routerProps} team={team} />, {
+  it('should allow adding and removing projects', async () => {
+    render(<OrganizationTeamProjects />, {
       organization,
+      initialRouterConfig,
+      outletContext: {team},
     });
 
-    expect(getMock).toHaveBeenCalledTimes(2);
+    expect(linkedProjectsMock).toHaveBeenCalledTimes(1);
+    expect(unlinkedProjectsMock).toHaveBeenCalledTimes(1);
 
     await userEvent.click(await screen.findByText('Add Project'));
     await userEvent.click(screen.getByRole('option', {name: 'project-slug-2'}));
@@ -116,25 +140,31 @@ describe('OrganizationTeamProjects', function () {
     expect(deleteMock).toHaveBeenCalledTimes(1);
   });
 
-  it('handles filtering unlinked projects', async function () {
-    render(<OrganizationTeamProjects {...routerProps} team={team} />, {
-      organization,
+  it('handles filtering unlinked projects', async () => {
+    const filteredMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/projects/',
+      body: [project2],
+      match: [
+        MockApiClient.matchQuery({
+          query: '!team:team-slug a',
+          collapse: ['latestDeploys', 'unusedFeatures'],
+        }),
+      ],
     });
 
-    expect(getMock).toHaveBeenCalledTimes(2);
+    render(<OrganizationTeamProjects />, {
+      organization,
+      initialRouterConfig,
+      outletContext: {team},
+    });
+
+    expect(linkedProjectsMock).toHaveBeenCalledTimes(1);
+    expect(unlinkedProjectsMock).toHaveBeenCalledTimes(1);
 
     await userEvent.click(await screen.findByText('Add Project'));
 
     await userEvent.type(screen.getByRole('textbox'), 'a');
 
-    expect(getMock).toHaveBeenCalledTimes(3);
-    expect(getMock).toHaveBeenCalledWith(
-      '/organizations/org-slug/projects/',
-      expect.objectContaining({
-        query: expect.objectContaining({
-          query: '!team:team-slug a',
-        }),
-      })
-    );
+    expect(filteredMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -18,7 +18,6 @@ class DatasetQuery(Protocol):
         orderby: list[str] | None = None,
         offset: int | None = None,
         limit: int = 50,
-        referrer: str | None = None,
         auto_fields: bool = False,
         auto_aggregations: bool = False,
         include_equation_fields: bool = False,
@@ -29,7 +28,6 @@ class DatasetQuery(Protocol):
         transform_alias_to_input_format: bool = False,
         sample: float | None = None,
         has_metrics: bool = False,
-        use_metrics_layer: bool = False,
         skip_tag_resolution: bool = False,
         extra_columns: list[Column] | None = None,
         on_demand_metrics_enabled: bool = False,
@@ -37,5 +35,6 @@ class DatasetQuery(Protocol):
         dataset: Dataset = Dataset.Discover,
         fallback_to_transactions: bool = False,
         query_source: QuerySource | None = None,
-        debug: bool = False,
+        *,
+        referrer: str,
     ) -> EventsResponse: ...

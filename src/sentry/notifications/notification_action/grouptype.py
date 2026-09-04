@@ -6,13 +6,14 @@ from hashlib import md5
 from uuid import uuid4
 
 from sentry.event_manager import set_tag
-from sentry.eventstore.models import GroupEvent
 from sentry.issues.grouptype import GroupCategory, GroupType
 from sentry.issues.issue_occurrence import IssueOccurrence
 from sentry.issues.occurrence_consumer import process_event_and_issue_occurrence
 from sentry.models.organization import Organization
 from sentry.ratelimits.sliding_windows import Quota
+from sentry.services.eventstore.models import GroupEvent
 from sentry.utils.samples import load_data
+from sentry.workflow_engine.tasks.utils import fetch_event
 
 
 @dataclass(frozen=True)
@@ -21,13 +22,12 @@ class SendTestNotification(GroupType):
     slug = "send-test-notification"
     description = "Send test notification"
     category = GroupCategory.TEST_NOTIFICATION.value
-    category_v2 = GroupCategory.TEST_NOTIFICATION.value
     released = False
     in_default_search = False
     enable_auto_resolve = True
     enable_escalation_detection = False
     enable_status_change_workflow_notifications = True
-    creation_quota = Quota(3600, 60, 1000)  # 1000 per hour, sliding window of 60 seconds
+    creation_quota = Quota(3600, 60, 100)  # 100 per hour, sliding window of 60 seconds
 
     @classmethod
     def allow_post_process_group(cls, organization: Organization) -> bool:
@@ -39,7 +39,6 @@ class SendTestNotification(GroupType):
 
 
 def get_test_notification_event_data(project) -> GroupEvent | None:
-
     occurrence = IssueOccurrence(
         id=uuid4().hex,
         project_id=project.id,
@@ -73,6 +72,12 @@ def get_test_notification_event_data(project) -> GroupEvent | None:
         return None
 
     generic_group = group_info.group
-    group_event = generic_group.get_latest_event()
 
+    event = fetch_event(occurrence.event_id, occurrence.project_id)
+
+    if event is None:
+        return None
+
+    group_event = GroupEvent.from_event(event, generic_group)
+    group_event.occurrence = occurrence
     return group_event

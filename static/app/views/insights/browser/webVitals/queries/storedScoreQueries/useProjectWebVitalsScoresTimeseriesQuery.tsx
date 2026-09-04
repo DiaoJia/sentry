@@ -1,19 +1,8 @@
 import type {SeriesDataUnit} from 'sentry/types/echarts';
-import type {Tag} from 'sentry/types/group';
+import {useFetchSpanTimeSeries} from 'sentry/utils/timeSeries/useFetchEventsTimeSeries';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import type {BrowserType} from 'sentry/views/insights/browser/webVitals/utils/queryParameterDecoders/browserType';
-import {useDefaultWebVitalsQuery} from 'sentry/views/insights/browser/webVitals/utils/useDefaultQuery';
-import {useMetricsSeries} from 'sentry/views/insights/common/queries/useDiscoverSeries';
-import {SpanMetricsField, type SubregionCode} from 'sentry/views/insights/types';
-
-type Props = {
-  browserTypes?: BrowserType[];
-  enabled?: boolean;
-  subregions?: SubregionCode[];
-  tag?: Tag;
-  transaction?: string | null;
-  weighted?: boolean;
-};
+import {Referrer} from 'sentry/views/insights/browser/webVitals/referrers';
+import {DEFAULT_QUERY_FILTER} from 'sentry/views/insights/browser/webVitals/settings';
 
 export type WebVitalsScoreBreakdown = {
   cls: SeriesDataUnit[];
@@ -24,31 +13,12 @@ export type WebVitalsScoreBreakdown = {
   ttfb: SeriesDataUnit[];
 };
 
-export const useProjectWebVitalsScoresTimeseriesQuery = ({
-  transaction,
-  tag,
-  browserTypes,
-  subregions,
-}: Props) => {
-  const defaultQuery = useDefaultWebVitalsQuery();
+export const useProjectWebVitalsScoresTimeseriesQuery = () => {
+  const search = new MutableSearch(['has:measurements.score.total']);
 
-  const search = new MutableSearch([
-    'has:measurements.score.total',
-    ...(tag ? [`${tag.key}:"${tag.name}"`] : []),
-  ]);
-  if (transaction) {
-    search.addFilterValue('transaction', transaction);
-  }
-  if (subregions) {
-    search.addDisjunctionFilterValues(SpanMetricsField.USER_GEO_SUBREGION, subregions);
-  }
-  if (browserTypes) {
-    search.addDisjunctionFilterValues(SpanMetricsField.BROWSER_NAME, browserTypes);
-  }
-
-  const result = useMetricsSeries(
+  const result = useFetchSpanTimeSeries(
     {
-      search: [defaultQuery, search.formatString()].join(' ').trim(),
+      query: [DEFAULT_QUERY_FILTER, search.formatString()].join(' ').trim(),
       yAxis: [
         'performance_score(measurements.score.lcp)',
         'performance_score(measurements.score.fcp)',
@@ -58,20 +28,29 @@ export const useProjectWebVitalsScoresTimeseriesQuery = ({
         'count()',
       ],
     },
-    'api.performance.browser.web-vitals.timeseries-scores'
+    Referrer.WEB_VITAL_TIMESERIES_SCORES
   );
 
   const multiplyBy100 = (data: SeriesDataUnit[]) =>
     data.map(({name, value}) => ({name, value: value * 100}));
 
-  const data: WebVitalsScoreBreakdown = {
-    lcp: multiplyBy100(result.data['performance_score(measurements.score.lcp)'].data),
-    fcp: multiplyBy100(result.data['performance_score(measurements.score.fcp)'].data),
-    cls: multiplyBy100(result.data['performance_score(measurements.score.cls)'].data),
-    ttfb: multiplyBy100(result.data['performance_score(measurements.score.ttfb)'].data),
-    inp: multiplyBy100(result.data['performance_score(measurements.score.inp)'].data),
-    total: result.data['count()'].data,
+  const timeSeries = result.data?.timeSeries || [];
+
+  const getSeriesData = (yAxis: string) => {
+    const series = timeSeries.find(ts => ts.yAxis === yAxis);
+    return series
+      ? series.values.map(v => ({name: v.timestamp, value: v.value || 0}))
+      : [];
   };
 
-  return {...result, data};
+  const data: WebVitalsScoreBreakdown = {
+    lcp: multiplyBy100(getSeriesData('performance_score(measurements.score.lcp)')),
+    fcp: multiplyBy100(getSeriesData('performance_score(measurements.score.fcp)')),
+    cls: multiplyBy100(getSeriesData('performance_score(measurements.score.cls)')),
+    ttfb: multiplyBy100(getSeriesData('performance_score(measurements.score.ttfb)')),
+    inp: multiplyBy100(getSeriesData('performance_score(measurements.score.inp)')),
+    total: getSeriesData('count()'),
+  };
+
+  return {data, isLoading: result.isLoading};
 };

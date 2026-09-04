@@ -1,48 +1,36 @@
-import {useEffect} from 'react';
+import {useContext, useEffect} from 'react';
+import {useMatches} from 'react-router-dom';
 import styled from '@emotion/styled';
 import type {Scope} from '@sentry/core';
 import * as Sentry from '@sentry/react';
 
+import {Alert} from '@sentry/scraps/alert';
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {getLastEventId} from 'sentry/bootstrap/initializeSdk';
-import {Alert} from 'sentry/components/core/alert';
-import ExternalLink from 'sentry/components/links/externalLink';
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
 import {t, tct} from 'sentry/locale';
-import OrganizationStore from 'sentry/stores/organizationStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import {space} from 'sentry/styles/space';
-import type {Project} from 'sentry/types/project';
-import getRouteStringFromRoutes from 'sentry/utils/getRouteStringFromRoutes';
-import {useRoutes} from 'sentry/utils/useRoutes';
-import withProject from 'sentry/utils/withProject';
+import {getRouteStringFromRoutes} from 'sentry/utils/getRouteStringFromRoutes';
+import {ProjectRouteContext} from 'sentry/views/projects/projectRouteContext';
 
-type Props = {
-  /**
-   * Disable logging to Sentry
-   */
-  disableLogSentry?: boolean;
-  /**
-   * Disable the report dialog
-   */
-  disableReport?: boolean;
+interface RouteErrorProps {
   error?: Error;
-  project?: Project;
-};
+}
 
-function RouteError({error, disableLogSentry, disableReport, project}: Props) {
-  const routes = useRoutes();
+export function RouteError({error}: RouteErrorProps) {
+  const matches = useMatches();
   const {organization} = useLegacyStore(OrganizationStore);
+  const project = useContext(ProjectRouteContext);
 
   useEffect(() => {
-    if (disableLogSentry) {
-      return undefined;
-    }
     if (!error) {
-      return undefined;
+      return;
     }
 
-    const route = getRouteStringFromRoutes(routes);
+    const route = getRouteStringFromRoutes({matches});
     const enrichScopeContext = (scope: Scope) => {
       scope.setExtra('route', route);
       scope.setExtra('orgFeatures', organization?.features ?? []);
@@ -76,24 +64,21 @@ function RouteError({error, disableLogSentry, disableReport, project}: Props) {
         Sentry.captureException(error);
       });
 
-      if (!disableReport) {
-        Sentry.showReportDialog({eventId: getLastEventId() || ''});
-      }
+      Sentry.showReportDialog({eventId: getLastEventId() || ''});
     });
 
     return function cleanup() {
       window.clearTimeout(reportDialogTimeout);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [error, disableLogSentry]);
+  }, [error]);
 
   // Remove the report dialog on unmount
   useEffect(() => () => document.querySelector('.sentry-error-embed-wrapper')?.remove());
 
-  // TODO(dcramer): show additional resource links
   return (
     <Alert.Container>
-      <Alert type="error">
+      <Alert variant="danger" showIcon={false}>
         <Heading>{t('Oops! Something went wrong')}</Heading>
         <p>
           {t(`
@@ -101,7 +86,9 @@ function RouteError({error, disableLogSentry, disableReport, project}: Props) {
           We use Sentry to monitor Sentry and it's likely we're already looking into this!
           `)}
         </p>
-        <p>{t("If you're daring, you may want to try the following:")}</p>
+        <p style={{marginBottom: 0}}>
+          {t("If you're daring, you may want to try the following:")}
+        </p>
         <List symbol="bullet">
           {window?.adblockSuspected && (
             <ListItem>
@@ -111,7 +98,7 @@ function RouteError({error, disableLogSentry, disableReport, project}: Props) {
             </ListItem>
           )}
           <ListItem>
-            {tct(`Give it a few seconds and [link:reload the page].`, {
+            {tct('Give it a few seconds and [link:reload the page].', {
               link: (
                 <a
                   onClick={() => {
@@ -122,11 +109,35 @@ function RouteError({error, disableLogSentry, disableReport, project}: Props) {
             })}
           </ListItem>
           <ListItem>
-            {tct(`If all else fails, [link:contact us] with more details.`, {
-              link: (
-                <ExternalLink href="https://github.com/getsentry/sentry/issues/new/choose" />
-              ),
-            })}
+            {tct(
+              'Still stuck? Our [link:troubleshooting guide] has tips for common browser-related issues.',
+              {
+                link: (
+                  <ExternalLink href="https://www.sentry.help/en/articles/13964425-why-sentry-io-is-not-loading" />
+                ),
+              }
+            )}
+          </ListItem>
+        </List>
+        <p style={{marginTop: '1em', marginBottom: 0}}>
+          {tct(
+            'If the guide does not help, [link:contact support] — include as many of these details as you can:',
+            {
+              link: <ExternalLink href="https://www.sentry.help" />,
+            }
+          )}
+        </p>
+        <List symbol="bullet">
+          <ListItem>{t('Browser logs (console and network tab errors)')}</ListItem>
+          <ListItem>
+            {t(
+              'Whether anyone else in your organization sees the same error on that page'
+            )}
+          </ListItem>
+          <ListItem>{t('Which browser(s) and version(s) you are using')}</ListItem>
+          <ListItem>{t('Whether the error is intermittent or consistent')}</ListItem>
+          <ListItem>
+            {t('Whether the error only appears on that page, or on other pages too')}
           </ListItem>
         </List>
       </Alert>
@@ -135,9 +146,7 @@ function RouteError({error, disableLogSentry, disableReport, project}: Props) {
 }
 
 const Heading = styled('h1')`
-  font-size: ${p => p.theme.fontSize.lg};
+  font-size: ${p => p.theme.font.size.lg};
   line-height: 1.4;
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;
-
-export default withProject(RouteError);

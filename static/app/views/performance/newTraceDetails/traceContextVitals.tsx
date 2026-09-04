@@ -1,15 +1,18 @@
 import {Fragment} from 'react';
-import {type Theme, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Flex, type Responsive, useResponsivePropValue} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
-import getDuration from 'sentry/utils/duration/getDuration';
-import type {MobileVital, WebVital} from 'sentry/utils/fields';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {getDuration} from 'sentry/utils/duration/getDuration';
+import {MobileVital, type WebVital} from 'sentry/utils/fields';
 import {VITAL_DETAILS} from 'sentry/utils/performance/vitals/constants';
 import type {Vital, Vital as VitalDetails} from 'sentry/utils/performance/vitals/types';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {VITAL_DESCRIPTIONS} from 'sentry/views/insights/browser/webVitals/components/webVitalDescription';
 import {WEB_VITALS_METERS_CONFIG} from 'sentry/views/insights/browser/webVitals/components/webVitalMeters';
 import type {WebVitals} from 'sentry/views/insights/browser/webVitals/types';
@@ -21,49 +24,51 @@ import {
   scoreToStatus,
   STATUS_TEXT,
 } from 'sentry/views/insights/browser/webVitals/utils/scoreToStatus';
-import {SectionDivider} from 'sentry/views/issueDetails/streamline/foldSection';
+import {SectionDivider} from 'sentry/views/issueDetails/foldSection';
 import type {TraceRootEventQueryResults} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceRootEvent';
-import {isTraceItemDetailsResponse} from 'sentry/views/performance/newTraceDetails/traceApi/utils';
-import {isEAPTraceNode} from 'sentry/views/performance/newTraceDetails/traceGuards';
 import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
 import {
   TRACE_VIEW_MOBILE_VITALS,
   TRACE_VIEW_WEB_VITALS,
 } from 'sentry/views/performance/newTraceDetails/traceModels/traceTree.measurements';
 import {useTraceContextSections} from 'sentry/views/performance/newTraceDetails/useTraceContextSections';
+import {TraceLayoutTabKeys} from 'sentry/views/performance/newTraceDetails/useTraceLayoutTabs';
 
 type Props = {
-  containerWidth: number | undefined;
   rootEventResults: TraceRootEventQueryResults;
   tree: TraceTree;
 };
 
-export function TraceContextVitals({rootEventResults, tree, containerWidth}: Props) {
-  const {hasVitals} = useTraceContextSections({tree, rootEventResults, logs: undefined});
+export function TraceContextVitals({rootEventResults, tree}: Props) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const organization = useOrganization();
+  const {hasVitals} = useTraceContextSections({
+    tree,
+    logs: undefined,
+    metrics: undefined,
+  });
   const traceNode = tree.root.children[0];
-  const theme = useTheme();
+
+  const isWeb = tree.vital_types.has('web');
+  const vitalsToDisplay = isWeb ? TRACE_VIEW_WEB_VITALS : TRACE_VIEW_MOBILE_VITALS;
+  const totalCount = vitalsToDisplay.length;
+
+  // How many vitals fit inline before collapsing into "+N more", resolved
+  // against the container width. Web shows all from xl up; mobile ramps 2 → 3
+  // and stays at 3 — showing all 7 mobile vitals inline crowds/overflows the row.
+  const primaryCountByBreakpoint: Responsive<number> = isWeb
+    ? {zero: 2, xl: totalCount}
+    : {zero: 2, xl: 3};
+  const primaryVitalsCount = useResponsivePropValue(primaryCountByBreakpoint);
 
   // TODO Abdullah Khan: Ignoring loading/error states for now
   if (!hasVitals || !rootEventResults.data || !traceNode) {
     return null;
   }
 
-  const vitalsToDisplay = tree.vital_types.has('web')
-    ? TRACE_VIEW_WEB_VITALS
-    : TRACE_VIEW_MOBILE_VITALS;
+  const collectedVitals = Array.from(tree.vitals.values()).flat();
 
-  const isEAPTrace = isEAPTraceNode(traceNode);
-  const collectedVitals =
-    isEAPTrace && tree.vital_types.has('mobile')
-      ? getMobileVitalsFromRootEventResults(rootEventResults.data)
-      : Array.from(tree.vitals.values()).flat();
-
-  const primaryVitalsCount = getPrimaryVitalsCount(
-    vitalsToDisplay,
-    tree.vital_types.has('web') ? 'web' : 'mobile',
-    containerWidth,
-    theme
-  );
   const [primaryVitals, secondaryVitals] = [
     vitalsToDisplay.slice(0, primaryVitalsCount),
     vitalsToDisplay.slice(primaryVitalsCount),
@@ -72,13 +77,17 @@ export function TraceContextVitals({rootEventResults, tree, containerWidth}: Pro
   const tooltipTitle = (
     <SecondaryVitalsCountContainer>
       {secondaryVitals.map(vitalKey => {
-        const {vitalDetails, vital} = getVitalInfo(vitalKey, collectedVitals);
+        const {vitalDetails, vital} = getVitalInfo(
+          vitalKey,
+          collectedVitals,
+          tree.indicators
+        );
         const formattedValue = getFormattedValue(vital, vitalDetails);
 
         return (
           <div key={vitalKey}>
             <strong>
-              {`${vitalDetails.acronym ? vitalDetails.acronym : vitalDetails.name}`}:
+              {vitalDetails.acronym ? vitalDetails.acronym : vitalDetails.name}:
             </strong>{' '}
             <span>{formattedValue}</span>
             {vital?.score !== undefined &&
@@ -90,10 +99,42 @@ export function TraceContextVitals({rootEventResults, tree, containerWidth}: Pro
   );
 
   return (
-    <VitalMetersContainer>
+    <Flex align="center" gap="md">
       {primaryVitals.map(vitalKey => {
-        const {vitalDetails, vital} = getVitalInfo(vitalKey, collectedVitals);
-        return <VitalPill key={vitalKey} vitalDetails={vitalDetails} vital={vital} />;
+        const {vitalDetails, vital} = getVitalInfo(
+          vitalKey,
+          collectedVitals,
+          tree.indicators
+        );
+        return (
+          <VitalPill
+            key={vitalKey}
+            vitalDetails={vitalDetails}
+            vital={vital}
+            onClick={
+              vital
+                ? () => {
+                    trackAnalytics('trace.trace_layout.zoom_to_fill', {
+                      organization,
+                    });
+                    navigate(
+                      {
+                        pathname: location.pathname,
+                        query: {
+                          ...location.query,
+                          tab: TraceLayoutTabKeys.WATERFALL,
+                          zoomToNode: vital.node.pathToNode()[0],
+                          zoomToTimestamp: vital.timestamp,
+                          zoomToVital: vital.key,
+                        },
+                      },
+                      {replace: true}
+                    );
+                  }
+                : undefined
+            }
+          />
+        );
       })}
       {secondaryVitals.length > 0 && (
         <Tooltip showUnderline title={tooltipTitle}>
@@ -102,16 +143,17 @@ export function TraceContextVitals({rootEventResults, tree, containerWidth}: Pro
           </SecondaryVitalsCount>
         </Tooltip>
       )}
-    </VitalMetersContainer>
+    </Flex>
   );
 }
 
 type VitalPillProps = {
+  onClick: (() => void) | undefined;
   vital: TraceTree.CollectedVital | undefined;
   vitalDetails: VitalDetails;
 };
 
-function VitalPill({vital, vitalDetails}: VitalPillProps) {
+function VitalPill({onClick, vital, vitalDetails}: VitalPillProps) {
   const status = vital?.score === undefined ? 'none' : scoreToStatus(vital.score);
 
   const formattedMeterValueText = getFormattedValue(vital, vitalDetails);
@@ -128,7 +170,7 @@ function VitalPill({vital, vitalDetails}: VitalPillProps) {
       <div>{description}</div>
       {status === 'none' ? null : (
         <Fragment>
-          <SectionDivider />
+          <SectionDivider orientation="horizontal" />
           <div>
             {formattedMeterValueText} - {STATUS_TEXT[status]}
           </div>
@@ -138,125 +180,91 @@ function VitalPill({vital, vitalDetails}: VitalPillProps) {
   );
 
   const acronym = vitalDetails.acronym ?? vitalDetails.name;
-  return (
-    <VitalPillContainer>
-      <Tooltip title={toolTipTitle}>
-        <VitalPillName status={status}>{`${acronym}`}</VitalPillName>
-      </Tooltip>
+  const contents = (
+    <Fragment>
+      <VitalPillName status={status}>
+        <Tooltip title={toolTipTitle}>{acronym}</Tooltip>
+      </VitalPillName>
       <VitalPillValue>{formattedMeterValueText}</VitalPillValue>
-    </VitalPillContainer>
+    </Fragment>
+  );
+
+  return onClick ? (
+    <VitalPillButton type="button" onClick={onClick}>
+      {contents}
+    </VitalPillButton>
+  ) : (
+    <Flex>{contents}</Flex>
   );
 }
 
-const VitalPillContainer = styled('div')`
+const VitalPillButton = styled('button')`
   display: flex;
-  flex-direction: row;
-  max-width: 'auto';
-  height: 28px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
 `;
 
 const VitalPillName = styled('div')<{status: PerformanceScore}>`
   display: flex;
   align-items: center;
-  position: relative;
-  width: max-content;
-
-  height: 100%;
-  padding: 0 ${space(1)};
+  justify-content: center;
   border: solid 1px
     ${p =>
       p.status === 'none'
-        ? p.theme.border
+        ? p.theme.tokens.border.primary
         : makePerformanceScoreColors(p.theme)[p.status].border};
-  border-radius: ${p => p.theme.borderRadius} 0 0 ${p => p.theme.borderRadius};
-
+  border-radius: ${p => p.theme.radius.md} 0 0 ${p => p.theme.radius.md};
   background-color: ${p => makePerformanceScoreColors(p.theme)[p.status].light};
   color: ${p => makePerformanceScoreColors(p.theme)[p.status].normal};
-
-  font-size: ${p => p.theme.fontSize.sm};
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-size: ${p => p.theme.font.size.sm};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   text-decoration: underline;
   text-decoration-style: dotted;
-  text-underline-offset: ${space(0.25)};
+  text-underline-offset: ${p => p.theme.space['2xs']};
   text-decoration-thickness: 1px;
-
-  cursor: pointer;
+  padding: 0 ${p => p.theme.space.md};
 `;
 
 const VitalPillValue = styled('div')`
   display: flex;
-  flex: 1;
   align-items: center;
-  justify-content: flex-end;
-
-  height: 100%;
-  padding: 0 ${space(0.5)};
-  border: 1px solid ${p => p.theme.border};
+  justify-content: center;
+  border: 1px solid ${p => p.theme.tokens.border.primary};
   border-left: none;
-  border-radius: 0 ${p => p.theme.borderRadius} ${p => p.theme.borderRadius} 0;
-
-  background: ${p => p.theme.background};
-  color: ${p => p.theme.textColor};
-
-  font-size: ${p => p.theme.fontSize.lg};
-`;
-
-const VitalMetersContainer = styled('div')`
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: ${space(1)};
-  width: 'auto';
+  background: ${p => p.theme.tokens.background.primary};
+  border-radius: 0 ${p => p.theme.radius.md} ${p => p.theme.radius.md} 0;
+  color: ${p => p.theme.tokens.content.primary};
+  font-size: ${p => p.theme.font.size.lg};
+  padding: 0 ${p => p.theme.space.md};
 `;
 
 const SecondaryVitalsCount = styled('span')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.sm};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const SecondaryVitalsCountContainer = styled('div')`
   display: flex;
   flex-direction: column;
   white-space: nowrap;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
   text-align: left;
 `;
 
-function getPrimaryVitalsCount(
-  primaryVitals: WebVital[] | MobileVital[],
-  type: 'web' | 'mobile',
-  containerWidth: number | undefined,
-  theme: Theme
-) {
-  const totalCount = primaryVitals.length;
-
-  if (!containerWidth) {
-    return totalCount;
-  }
-
-  if (containerWidth > parseInt(theme.breakpoints.xxlarge, 10)) {
-    return totalCount;
-  }
-
-  if (containerWidth > parseInt(theme.breakpoints.small, 10)) {
-    if (type === 'web') {
-      return totalCount;
-    }
-
-    return 3;
-  }
-
-  return 2;
-}
-
 const getVitalInfo = (
   vitalKey: WebVital | MobileVital,
-  collectedVitals: TraceTree.CollectedVital[]
+  collectedVitals: TraceTree.CollectedVital[],
+  indicators: TraceTree['indicators'] = []
 ) => {
   const vitalDetails = getVitalDetails(vitalKey);
+  const key = vitalKey.replace('measurements.', '');
+  const indicator = indicators.find(candidate => candidate.type === key);
   const vital = collectedVitals.find(
-    v => v.key === vitalKey.replace('measurements.', '')
+    candidate =>
+      candidate.key === key && (!indicator || candidate.node === indicator.node)
   );
   return {vitalDetails, vital};
 };
@@ -276,30 +284,6 @@ function getFormattedValue(
         )
       : defaultVitalValueFormatter(vitalDetails, vital.measurement.value)
     : '\u2014';
-}
-
-function getMobileVitalsFromRootEventResults(
-  data: TraceRootEventQueryResults['data']
-): TraceTree.CollectedVital[] {
-  if (!data || !isTraceItemDetailsResponse(data)) {
-    return [];
-  }
-
-  return data.attributes
-    .map(attribute => {
-      if (
-        TRACE_VIEW_MOBILE_VITALS.includes(attribute.name as MobileVital) &&
-        typeof attribute.value === 'number'
-      ) {
-        return {
-          key: attribute.name.replace('measurements.', ''),
-          measurement: {value: attribute.value},
-          score: undefined,
-        };
-      }
-      return undefined;
-    })
-    .filter(defined);
 }
 
 function defaultVitalValueFormatter(vital: Vital, value: number) {

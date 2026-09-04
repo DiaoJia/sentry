@@ -7,7 +7,7 @@ from sentry.testutils.silo import control_silo_test
 
 @control_silo_test
 class BroadcastListTest(APITestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         broadcast1 = Broadcast.objects.create(message="bar", is_active=True)
         Broadcast.objects.create(message="foo", is_active=False)
 
@@ -19,7 +19,7 @@ class BroadcastListTest(APITestCase):
         assert len(response.data) == 1
         assert response.data[0]["id"] == str(broadcast1.id)
 
-    def test_superuser_with_all(self):
+    def test_superuser_with_all(self) -> None:
         Broadcast.objects.create(message="bar", is_active=True)
         Broadcast.objects.create(message="foo", is_active=False)
 
@@ -50,7 +50,7 @@ class BroadcastListTest(APITestCase):
         assert response.status_code == 200
         assert len(response.data) == 0
 
-    def test_basic_user_with_all(self):
+    def test_basic_user_with_all(self) -> None:
         broadcast1 = Broadcast.objects.create(message="bar", is_active=True)
         Broadcast.objects.create(message="foo", is_active=False, created_by_id=self.user)
 
@@ -63,7 +63,59 @@ class BroadcastListTest(APITestCase):
         assert response.data[0]["id"] == str(broadcast1.id)
         assert "createdBy" not in response.data[0]
 
-    def test_organization_filtering(self):
+    def test_show_latest_returns_only_active(self) -> None:
+        active_broadcast = Broadcast.objects.create(message="active", is_active=True)
+        Broadcast.objects.create(message="inactive", is_active=False)
+
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest")
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        assert response.data[0]["id"] == str(active_broadcast.id)
+
+    def test_show_latest_default_limit(self) -> None:
+        for i in range(5):
+            Broadcast.objects.create(message=f"broadcast {i}", is_active=True)
+
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest")
+        assert response.status_code == 200
+        assert len(response.data) == 3
+
+    def test_show_latest_custom_limit(self) -> None:
+        for i in range(5):
+            Broadcast.objects.create(message=f"broadcast {i}", is_active=True)
+
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest&per_page=2")
+        assert response.status_code == 200
+        assert len(response.data) == 2
+
+    def test_show_latest_invalid_limit(self) -> None:
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest&per_page=abc")
+        assert response.status_code == 400
+
+    def test_show_latest_negative_limit(self) -> None:
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest&per_page=-1")
+        assert response.status_code == 400
+
+    def test_show_latest_does_not_require_admin(self) -> None:
+        Broadcast.objects.create(message="active", is_active=True)
+
+        self.login_as(user=self.user)
+
+        response = self.client.get("/api/0/broadcasts/?show=latest")
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+    def test_organization_filtering(self) -> None:
         broadcast1 = Broadcast.objects.create(message="foo", is_active=True)
         broadcast2 = Broadcast.objects.create(message="bar", is_active=True)
 
@@ -81,7 +133,7 @@ class BroadcastListTest(APITestCase):
 
 @control_silo_test
 class BroadcastCreateTest(APITestCase):
-    def test_basic_user(self):
+    def test_basic_user(self) -> None:
         self.add_user_permission(user=self.user, permission="broadcasts.admin")
         self.login_as(user=self.user, superuser=False)
 
@@ -99,7 +151,7 @@ class BroadcastCreateTest(APITestCase):
 
         assert response.status_code == 401
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         self.add_user_permission(user=self.user, permission="broadcasts.admin")
         self.login_as(user=self.user, superuser=True)
 
@@ -124,7 +176,7 @@ class BroadcastCreateTest(APITestCase):
         assert broadcast.category == "announcement"
         assert broadcast.created_by_id == self.user
 
-    def test_validation(self):
+    def test_validation(self) -> None:
         self.add_user_permission(user=self.user, permission="broadcasts.admin")
         self.login_as(user=self.user, superuser=True)
 
@@ -182,7 +234,7 @@ class BroadcastCreateTest(APITestCase):
 
         assert response.status_code == 200, response.data
 
-    def test_not_required_cta(self):
+    def test_not_required_cta(self) -> None:
         self.add_user_permission(user=self.user, permission="broadcasts.admin")
         self.login_as(user=self.user, superuser=True)
 
@@ -202,7 +254,7 @@ class BroadcastCreateTest(APITestCase):
 
 @control_silo_test
 class BroadcastUpdateTest(APITestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         broadcast1 = Broadcast.objects.create(message="bar", is_active=True)
         broadcast2 = Broadcast.objects.create(message="foo", is_active=False)
 

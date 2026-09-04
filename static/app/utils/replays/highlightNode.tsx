@@ -2,8 +2,8 @@ import type {Replayer} from '@sentry-internal/rrweb';
 
 const DEFAULT_HIGHLIGHT_COLOR = 'rgba(168, 196, 236, 0.75)';
 
-const highlightsByNodeIds: Map<number, {canvas: HTMLCanvasElement}> = new Map();
-const highlightsBySelector: Map<string, {canvas: HTMLCanvasElement}> = new Map();
+const highlightsByNodeIds = new Map<number, {canvas: HTMLCanvasElement}>();
+const highlightsBySelector = new Map<string, {canvas: HTMLCanvasElement}>();
 
 type DrawProps = {annotation: string; color: string; spotlight: boolean};
 
@@ -43,15 +43,19 @@ export function removeHighlightedNode(replayer: Replayer, props: RemoveHighlight
   if ('nodeIds' in props) {
     for (const nodeId of props.nodeIds) {
       const highlightObj = highlightsByNodeIds.get(nodeId);
-      if (highlightObj && replayer.wrapper.contains(highlightObj.canvas)) {
-        replayer.wrapper.removeChild(highlightObj.canvas);
+      if (highlightObj) {
+        if (replayer.wrapper?.contains(highlightObj.canvas)) {
+          replayer.wrapper.removeChild(highlightObj.canvas);
+        }
         highlightsByNodeIds.delete(nodeId);
       }
     }
   } else {
     const highlightObj = highlightsBySelector.get(props.selector);
-    if (highlightObj && replayer.wrapper.contains(highlightObj.canvas)) {
-      replayer.wrapper.removeChild(highlightObj.canvas);
+    if (highlightObj) {
+      if (replayer.wrapper?.contains(highlightObj.canvas)) {
+        replayer.wrapper.removeChild(highlightObj.canvas);
+      }
       highlightsBySelector.delete(props.selector);
     }
   }

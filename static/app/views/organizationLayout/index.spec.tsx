@@ -1,26 +1,25 @@
+import {Fragment, useEffect} from 'react';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {UserFixture} from 'sentry-fixture/user';
 
-import {render, screen} from 'sentry-test/reactTestingLibrary';
+import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import AlertStore from 'sentry/stores/alertStore';
-import ConfigStore from 'sentry/stores/configStore';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import {OrganizationContext} from 'sentry/views/organizationContext';
-import OrganizationLayout from 'sentry/views/organizationLayout';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
+import {type GlobalAlert, useGlobalAlerts} from 'sentry/views/app/globalAlerts';
+import {OrganizationLayout} from 'sentry/views/organizationLayout';
 
-jest.mock(
-  'sentry/components/sidebar',
-  () =>
-    function () {
-      return <div />;
-    }
-);
+function AlertSeeder({alert}: {alert: GlobalAlert}) {
+  const {addAlert} = useGlobalAlerts();
+  useEffect(() => addAlert(alert), [addAlert, alert]);
+  return null;
+}
 
-describe('OrganizationLayout', function () {
-  beforeEach(function () {
+describe('OrganizationLayout', () => {
+  beforeEach(() => {
     OrganizationStore.reset();
     ProjectsStore.reset();
     PageFiltersStore.reset();
@@ -35,10 +34,26 @@ describe('OrganizationLayout', function () {
       url: '/organizations/org-slug/environments/',
       body: [],
     });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/explore/saved/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/group-search-views/starred/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/dashboards/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/assistant/',
+      body: [],
+    });
   });
 
   describe('deletion states', () => {
-    it('should render a restoration prompt', async function () {
+    it('should render a restoration prompt', async () => {
       const organization = OrganizationFixture({
         status: {
           id: 'pending_deletion',
@@ -47,25 +62,29 @@ describe('OrganizationLayout', function () {
       });
       OrganizationStore.onUpdate(organization);
 
-      render(
-        <OrganizationLayout>
-          <div />
-        </OrganizationLayout>,
-        {
-          organization,
-        }
-      );
+      const restoreRequest = MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/`,
+        method: 'PUT',
+        body: organization,
+      });
+
+      render(<OrganizationLayout />, {
+        organization,
+      });
 
       expect(await screen.findByText('Deletion Scheduled')).toBeInTheDocument();
-      expect(screen.getByLabelText('Restore Organization')).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          'Would you like to cancel this process and restore the organization back to the original state?'
-        )
-      ).toBeInTheDocument();
+
+      const restoreButton = screen.getByLabelText('Restore Organization');
+      expect(restoreButton).toBeInTheDocument();
+
+      await userEvent.click(restoreButton);
+      expect(restoreRequest).toHaveBeenCalledWith(
+        `/organizations/${organization.slug}/`,
+        expect.objectContaining({data: {cancelDeletion: true}})
+      );
     });
 
-    it('should render a restoration prompt without action for members', async function () {
+    it('should render a restoration prompt without action for members', async () => {
       const organization = OrganizationFixture({
         access: [],
         status: {
@@ -75,19 +94,15 @@ describe('OrganizationLayout', function () {
       });
       OrganizationStore.onUpdate(organization);
 
-      render(
-        <OrganizationLayout>
-          <div />
-        </OrganizationLayout>,
-        {
-          organization,
-        }
-      );
+      render(<OrganizationLayout />, {
+        organization,
+      });
 
       expect(await screen.findByText('Deletion Scheduled')).toBeInTheDocument();
 
       const mistakeText = screen.getByText(
-        'If this is a mistake, contact an organization owner and ask them to restore this organization.'
+        'If this is a mistake, contact an organization owner and ask them to restore this organization.',
+        {exact: false}
       );
 
       expect(mistakeText).toBeInTheDocument();
@@ -95,7 +110,7 @@ describe('OrganizationLayout', function () {
     });
   });
 
-  it('should render a deletion in progress prompt', async function () {
+  it('should render a deletion in progress prompt', async () => {
     const organization = OrganizationFixture({
       status: {
         id: 'deletion_in_progress',
@@ -104,14 +119,9 @@ describe('OrganizationLayout', function () {
     });
     OrganizationStore.onUpdate(organization);
 
-    render(
-      <OrganizationLayout>
-        <div />
-      </OrganizationLayout>,
-      {
-        organization,
-      }
-    );
+    render(<OrganizationLayout />, {
+      organization,
+    });
 
     const inProgress = await screen.findByText(
       'currently in the process of being deleted from Sentry.',
@@ -122,20 +132,21 @@ describe('OrganizationLayout', function () {
     expect(screen.queryByLabelText('Restore Organization')).not.toBeInTheDocument();
   });
 
-  it('displays system alerts', async function () {
+  it('displays system alerts', async () => {
     OrganizationStore.onUpdate(OrganizationFixture());
 
-    AlertStore.addAlert({
-      id: 'abc123',
-      message: 'Celery workers have not checked in',
-      type: 'error',
-      url: '/internal/health/',
-    });
-
     render(
-      <OrganizationLayout>
-        <div />
-      </OrganizationLayout>
+      <Fragment>
+        <AlertSeeder
+          alert={{
+            id: 'abc123',
+            message: 'Celery workers have not checked in',
+            variant: 'danger',
+            url: '/internal/health/',
+          }}
+        />
+        <OrganizationLayout />
+      </Fragment>
     );
 
     expect(
@@ -145,14 +156,6 @@ describe('OrganizationLayout', function () {
 
   describe('new navigation layout', () => {
     beforeEach(() => {
-      ConfigStore.set('user', {
-        ...ConfigStore.get('user'),
-        options: {
-          ...ConfigStore.get('user').options,
-          prefersStackedNavigation: true,
-        },
-      });
-
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/group-search-views/starred/',
         body: [],
@@ -163,14 +166,12 @@ describe('OrganizationLayout', function () {
       });
     });
 
-    it('can render navigation without an organization', async function () {
+    it('can render navigation without an organization', async () => {
       OrganizationStore.setNoOrganization();
 
       render(
         <OrganizationContext.Provider value={null}>
-          <OrganizationLayout>
-            <div />
-          </OrganizationLayout>
+          <OrganizationLayout />
         </OrganizationContext.Provider>
       );
 

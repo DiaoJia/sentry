@@ -1,73 +1,66 @@
 import {Fragment, useCallback, useEffect, useMemo} from 'react';
-import styled from '@emotion/styled';
 import pick from 'lodash/pick';
 
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex, Grid, Stack, Container} from '@sentry/scraps/layout';
+
 import {fetchOrganizationDetails} from 'sentry/actionCreators/organization';
-import {updateProjects} from 'sentry/actionCreators/pageFilters';
 import {fetchTagValues} from 'sentry/actionCreators/tags';
-import Feature from 'sentry/components/acl/feature';
 import {Breadcrumbs} from 'sentry/components/breadcrumbs';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import CreateAlertButton from 'sentry/components/createAlertButton';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import FeedbackWidgetButton from 'sentry/components/feedback/widget/feedbackWidgetButton';
-import GlobalEventProcessingAlert from 'sentry/components/globalEventProcessingAlert';
-import IdBadge from 'sentry/components/idBadge';
+import {CreateAlertButton} from 'sentry/components/createAlertButton';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {FeedbackButton} from 'sentry/components/feedbackButton/feedbackButton';
+import {IdBadge} from 'sentry/components/idBadge';
 import * as Layout from 'sentry/components/layouts/thirds';
-import LoadingError from 'sentry/components/loadingError';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import PageFiltersContainer from 'sentry/components/organizations/pageFilters/container';
-import MissingProjectMembership from 'sentry/components/projects/missingProjectMembership';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {LoadingError} from 'sentry/components/loadingError';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {updateProjects} from 'sentry/components/pageFilters/actions';
+import {PageFiltersContainer} from 'sentry/components/pageFilters/container';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {MissingProjectMembership} from 'sentry/components/projects/missingProjectMembership';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {DEFAULT_RELATIVE_PERIODS} from 'sentry/constants';
 import {IconSettings} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
-import routeTitleGen from 'sentry/utils/routeTitle';
-import useApi from 'sentry/utils/useApi';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {defined} from 'sentry/utils/defined';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {routeTitleGen} from 'sentry/utils/routeTitle';
+import {useApi} from 'sentry/utils/useApi';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
-import useProjects from 'sentry/utils/useProjects';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
+import {useProjects} from 'sentry/utils/useProjects';
+import {TopBar} from 'sentry/views/navigation/topBar';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
 import {ERRORS_BASIC_CHART_PERIODS} from './charts/projectErrorsBasicChart';
-import ProjectScoreCards from './projectScoreCards/projectScoreCards';
-import ProjectCharts from './projectCharts';
-import ProjectFilters from './projectFilters';
-import ProjectIssues from './projectIssues';
-import ProjectLatestAlerts from './projectLatestAlerts';
-import ProjectLatestReleases from './projectLatestReleases';
-import ProjectQuickLinks from './projectQuickLinks';
-import ProjectTeamAccess from './projectTeamAccess';
+import {ProjectScoreCards} from './projectScoreCards/projectScoreCards';
+import {ProjectCharts} from './projectCharts';
+import {ProjectFilters} from './projectFilters';
+import {ProjectIssues} from './projectIssues';
+import {ProjectLatestReleases} from './projectLatestReleases';
+import {ProjectQuickLinks} from './projectQuickLinks';
+import {ProjectTeamAccess} from './projectTeamAccess';
 
-type RouteParams = {
-  orgId: string;
-  projectId: string;
-};
-
-type Props = RouteComponentProps<RouteParams> & {
-  organization: Organization;
-};
-
-export default function ProjectDetail({router, location, organization}: Props) {
+export function ProjectDetail() {
   const api = useApi();
-  const params = useParams();
+  const params = useParams<{orgId: string; projectId: string}>();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const organization = useOrganization();
   const {projects, fetching: loadingProjects} = useProjects();
   const {selection} = usePageFilters();
   const project = projects.find(p => p.slug === params.projectId);
-  const {query} = location.query;
+  const query = decodeScalar(location.query.query, '');
+  const projectQueryParam = decodeScalar(location.query.project);
   const hasPerformance = organization.features.includes('performance-view');
   const hasDiscover = organization.features.includes('discover-basic');
   const hasTransactions = hasPerformance && project?.firstTransactionEvent;
   const projectId = project?.id;
   const isProjectStabilized =
     defined(project?.id) &&
-    project.id === location.query.project &&
+    project.id === projectQueryParam &&
     project.id === String(selection.projects[0]);
   const hasSessions = project?.hasSessions ?? null;
   const hasOnlyBasicChart = !hasPerformance && !hasDiscover && !hasSessions;
@@ -76,8 +69,6 @@ export default function ProjectDetail({router, location, organization}: Props) {
     organization.slug,
     false
   );
-  const prefersStackedNav = usePrefersStackedNav();
-
   const visibleCharts = useMemo(() => {
     if (hasTransactions || hasSessions) {
       return ['chart1', 'chart2'];
@@ -86,20 +77,23 @@ export default function ProjectDetail({router, location, organization}: Props) {
   }, [hasTransactions, hasSessions]);
 
   const onRetryProjects = useCallback(() => {
-    fetchOrganizationDetails(api, params.orgId!);
+    fetchOrganizationDetails(api, params.orgId);
   }, [api, params.orgId]);
 
   const handleSearch = useCallback(
     (searchQuery: string) => {
-      router.replace({
-        pathname: location.pathname,
-        query: {
-          ...location.query,
-          query: searchQuery,
+      navigate(
+        {
+          pathname: location.pathname,
+          query: {
+            ...location.query,
+            query: searchQuery,
+          },
         },
-      });
+        {replace: true}
+      );
     },
-    [router, location.query, location.pathname]
+    [navigate, location.query, location.pathname]
   );
 
   const tagValueLoader = useCallback(
@@ -109,39 +103,43 @@ export default function ProjectDetail({router, location, organization}: Props) {
         orgSlug: organization.slug,
         tagKey: key,
         search,
-        projectIds: location.query.project ? [location.query.project] : undefined,
+        projectIds: projectQueryParam ? [projectQueryParam] : undefined,
         endpointParams: location.query,
       });
     },
-    [api, organization.slug, location.query]
+    [api, organization.slug, location.query, projectQueryParam]
   );
 
   useEffect(() => {
     function syncProjectWithSlug() {
-      if (projectId && projectId !== location.query.project) {
+      if (projectId && projectId !== projectQueryParam) {
         // if someone visits /organizations/sentry/projects/javascript/ (without ?project=XXX) we need to update URL and globalSelection with the right project ID
-        updateProjects([Number(projectId)], router);
+        updateProjects([Number(projectId)], undefined, undefined);
+        navigate(
+          {pathname: location.pathname, query: {...location.query, project: projectId}},
+          {replace: true}
+        );
       }
     }
     syncProjectWithSlug();
-  }, [location.query.project, router, projectId]);
+  }, [projectQueryParam, projectId, navigate, location.pathname, location.query]);
 
   if (!loadingProjects && !project) {
     return (
-      <Layout.Page withPadding>
+      <Stack flex={1} padding="2xl 3xl">
         <LoadingError
           message={t('This project could not be found.')}
           onRetry={onRetryProjects}
         />
-      </Layout.Page>
+      </Stack>
     );
   }
 
   if (!loadingProjects && project && !project.hasAccess) {
     return (
-      <Layout.Page>
+      <Stack flex={1}>
         <MissingProjectMembership organization={organization} project={project} />
-      </Layout.Page>
+      </Stack>
     );
   }
 
@@ -152,36 +150,46 @@ export default function ProjectDetail({router, location, organization}: Props) {
         skipLoadLastUsed
         showAbsolute={!hasOnlyBasicChart}
       >
-        <Layout.Page>
+        <Stack flex={1}>
           <NoProjectMessage organization={organization}>
-            <Layout.Header unified={prefersStackedNav}>
-              <Layout.HeaderContent unified={prefersStackedNav}>
+            <Layout.Header unified>
+              <TopBar.Slot name="title">
                 <Breadcrumbs
                   crumbs={[
                     {
                       to: makeProjectsPathname({path: '/', organization}),
                       label: t('Projects'),
                     },
-                    {label: t('Project Details')},
+                    {
+                      label: (
+                        <Flex align="center" gap="xs">
+                          {project ? (
+                            <IdBadge
+                              project={project}
+                              avatarSize={16}
+                              hideOverflow="100%"
+                              disableLink
+                              hideName
+                            />
+                          ) : null}
+                          {project?.slug}
+                        </Flex>
+                      ),
+                    },
                   ]}
                 />
-                <Layout.Title>
-                  {project ? (
-                    <IdBadge
-                      project={project}
-                      avatarSize={28}
-                      hideOverflow="100%"
-                      disableLink
-                      hideName
-                    />
-                  ) : null}
-                  {project?.slug}
-                </Layout.Title>
-              </Layout.HeaderContent>
+              </TopBar.Slot>
 
               <Layout.HeaderActions>
-                <ButtonBar gap={1}>
-                  <FeedbackWidgetButton />
+                <Grid flow="column" align="center" justify="end" gap="md">
+                  <TopBar.Slot name="feedback">
+                    <FeedbackButton
+                      aria-label={t('Give Feedback')}
+                      tooltipProps={{title: t('Give Feedback')}}
+                    >
+                      {null}
+                    </FeedbackButton>
+                  </TopBar.Slot>
                   <LinkButton
                     size="sm"
                     to={
@@ -205,16 +213,13 @@ export default function ProjectDetail({router, location, organization}: Props) {
                     aria-label={t('Settings')}
                     to={`/settings/${params.orgId}/projects/${params.projectId}/`}
                   />
-                </ButtonBar>
+                </Grid>
               </Layout.HeaderActions>
             </Layout.Header>
 
             <Layout.Body noRowGap>
-              <ErrorBoundary customComponent={null}>
-                {project && <StyledGlobalEventProcessingAlert projects={[project]} />}
-              </ErrorBoundary>
               <Layout.Main>
-                <ProjectFiltersWrapper>
+                <Container marginBottom="xl">
                   <ProjectFilters
                     query={query}
                     onSearch={handleSearch}
@@ -225,7 +230,7 @@ export default function ProjectDetail({router, location, organization}: Props) {
                     }
                     tagValueLoader={tagValueLoader}
                   />
-                </ProjectFiltersWrapper>
+                </Container>
 
                 <ProjectScoreCards
                   organization={organization}
@@ -267,41 +272,19 @@ export default function ProjectDetail({router, location, organization}: Props) {
               </Layout.Main>
               <Layout.Side>
                 <ProjectTeamAccess organization={organization} project={project} />
-                <Feature features="incidents" organization={organization}>
-                  <ProjectLatestAlerts
-                    organization={organization}
-                    projectSlug={params.projectId!}
-                    location={location}
-                    isProjectStabilized={isProjectStabilized}
-                  />
-                </Feature>
                 <ProjectLatestReleases
                   organization={organization}
-                  projectSlug={params.projectId!}
+                  projectSlug={params.projectId}
                   location={location}
                   isProjectStabilized={isProjectStabilized}
                   project={project}
                 />
-                <ProjectQuickLinks
-                  organization={organization}
-                  project={project}
-                  location={location}
-                />
+                <ProjectQuickLinks organization={organization} project={project} />
               </Layout.Side>
             </Layout.Body>
           </NoProjectMessage>
-        </Layout.Page>
+        </Stack>
       </PageFiltersContainer>
     </SentryDocumentTitle>
   );
 }
-
-const ProjectFiltersWrapper = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
-const StyledGlobalEventProcessingAlert = styled(GlobalEventProcessingAlert)`
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    margin-bottom: 0;
-  }
-`;

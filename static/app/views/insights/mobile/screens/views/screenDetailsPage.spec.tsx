@@ -1,55 +1,46 @@
-import type {Location} from 'history';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {PageFilterStateFixture} from 'sentry-fixture/pageFilters';
 import {ProjectFixture} from 'sentry-fixture/project';
+import {TimeSeriesFixture} from 'sentry-fixture/timeSeries';
 
 import {render, screen, within} from 'sentry-test/reactTestingLibrary';
 
-import {useLocation} from 'sentry/utils/useLocation';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
 import ScreenDetailsPage from 'sentry/views/insights/mobile/screens/views/screenDetailsPage';
 
-jest.mock('sentry/utils/usePageFilters');
-jest.mock('sentry/utils/useLocation');
+jest.mock('sentry/views/dashboards/prebuiltDashboardRenderer', () => ({
+  PrebuiltDashboardRenderer: () => <div data-test-id="prebuilt-dashboard" />,
+}));
 
-describe('ScreenDetailsPage', function () {
+describe('ScreenDetailsPage', () => {
   const organization = OrganizationFixture({
-    features: ['insights-addon-modules'],
+    features: ['insight-modules'],
   });
   const project = ProjectFixture();
 
-  jest.mocked(useLocation).mockReturnValue({
-    action: 'PUSH',
-    hash: '',
-    key: '',
-    pathname: '/organizations/org-slug/performance/mobile/mobile-vitals/details',
-    query: {
-      project: project.id,
-      transaction: 'HomeActivity',
-    },
-    search: '',
-    state: undefined,
-  } as Location);
-
-  jest.mocked(usePageFilters).mockReturnValue(
-    PageFilterStateFixture({
-      selection: {
-        datetime: {
-          period: '10d',
-          start: null,
-          end: null,
-          utc: false,
-        },
-        environments: [],
-        projects: [parseInt(project.id, 10)],
+  beforeEach(() => {
+    PageFiltersStore.onInitializeUrlState({
+      projects: [parseInt(project.id, 10)],
+      environments: [],
+      datetime: {
+        period: '10d',
+        start: null,
+        end: null,
+        utc: false,
       },
-    })
-  );
+    });
+  });
 
-  describe('Tabs', function () {
+  describe('Tabs', () => {
     beforeEach(() => {
       MockApiClient.addMockResponse({
-        url: `/organizations/${organization.slug}/events-stats/`,
+        url: `/organizations/${organization.slug}/events-timeseries/`,
+        body: {
+          timeSeries: [
+            TimeSeriesFixture({
+              yAxis: 'epm()',
+            }),
+          ],
+        },
       });
 
       MockApiClient.addMockResponse({
@@ -66,19 +57,7 @@ describe('ScreenDetailsPage', function () {
       jest.clearAllMocks();
     });
 
-    it('renders the tabs correctly', async function () {
-      jest.mocked(useLocation).mockReturnValue({
-        action: 'PUSH',
-        hash: '',
-        key: '',
-        pathname: '/organizations/org-slug/performance/mobile/mobile-vitals/details',
-        query: {
-          project: project.id,
-        },
-        search: '',
-        state: undefined,
-      } as Location);
-
+    it('renders the tabs correctly', async () => {
       render(<ScreenDetailsPage />, {organization});
 
       const tabs: string[] = ['App Start', 'Screen Load', 'Screen Rendering'];

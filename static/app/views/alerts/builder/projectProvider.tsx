@@ -1,36 +1,44 @@
-import {cloneElement, Fragment, isValidElement, useEffect, useState} from 'react';
+import {Outlet, useOutletContext} from 'react-router-dom';
+import {useQuery} from '@tanstack/react-query';
 
-import {fetchOrgMembers} from 'sentry/actionCreators/members';
+import {Alert} from '@sentry/scraps/alert';
+
 import {navigateTo} from 'sentry/actionCreators/navigation';
-import {Alert} from 'sentry/components/core/alert';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {t} from 'sentry/locale';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Member, Organization} from 'sentry/types/organization';
-import useApi from 'sentry/utils/useApi';
-import {useIsMountedRef} from 'sentry/utils/useIsMountedRef';
-import useProjects from 'sentry/utils/useProjects';
-import useScrollToTop from 'sentry/utils/useScrollToTop';
+import type {Member} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
+import {useProjectMembersQueryOptions} from 'sentry/utils/members/projectMembers';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {useProjects} from 'sentry/utils/useProjects';
+import {useScrollToTop} from 'sentry/utils/useScrollToTop';
 import {makeAlertsPathname} from 'sentry/views/alerts/pathnames';
 
-type Props = RouteComponentProps<RouteParams> & {
-  hasMetricAlerts: boolean;
-  organization: Organization;
-  children?: React.ReactNode;
+type AlertBuilderOutletContext = {
+  members: Member[] | undefined;
+  project: Project;
 };
 
-type RouteParams = {
-  projectId?: string;
-};
+function AlertBuilderOutlet(props: AlertBuilderOutletContext) {
+  return <Outlet context={props} />;
+}
 
-function AlertBuilderProjectProvider(props: Props) {
-  const api = useApi();
-  const isMountedRef = useIsMountedRef();
-  const [members, setMembers] = useState<Member[] | undefined>(undefined);
-  useScrollToTop({location: props.location});
+export function useAlertBuilderOutlet() {
+  return useOutletContext<AlertBuilderOutletContext>();
+}
 
-  const {children, params, organization, ...other} = props;
-  const projectId = params.projectId || props.location.query.project;
+export default function AlertBuilderProjectProvider() {
+  const organization = useOrganization();
+  const location = useLocation();
+  const params = useParams<{projectId?: string}>();
+  const navigate = useNavigate();
+  useScrollToTop({location});
+
+  const projectId = params.projectId || decodeScalar(location.query.project);
   const useFirstProject = projectId === undefined;
 
   const {projects, initiallyLoaded, fetching, fetchError} = useProjects();
@@ -38,18 +46,10 @@ function AlertBuilderProjectProvider(props: Props) {
     ? (projects.find(p => p.isMember) ?? (projects.length && projects[0]))
     : projects.find(({slug}) => slug === projectId);
 
-  useEffect(() => {
-    if (!project) {
-      return;
-    }
-
-    // fetch members list for mail action fields
-    fetchOrgMembers(api, organization.slug, [project.id]).then(mem => {
-      if (isMountedRef.current) {
-        setMembers(mem);
-      }
-    });
-  }, [api, organization, isMountedRef, project]);
+  const {data: members} = useQuery({
+    ...useProjectMembersQueryOptions(project ? [project.id] : undefined),
+    enabled: Boolean(project),
+  });
 
   if (!initiallyLoaded || fetching) {
     return <LoadingIndicator />;
@@ -61,8 +61,9 @@ function AlertBuilderProjectProvider(props: Props) {
       makeAlertsPathname({
         path: '/wizard/',
         organization,
-      }) + `?referrer=${props.location.query.referrer}&project=:projectId`,
-      props.router
+      }) + `?referrer=${location.query.referrer}&project=:projectId`,
+      navigate,
+      location
     );
   }
 
@@ -70,27 +71,12 @@ function AlertBuilderProjectProvider(props: Props) {
   if (!project || fetchError) {
     return (
       <Alert.Container>
-        <Alert type="warning">
+        <Alert variant="warning" showIcon={false}>
           {t('The project you were looking for was not found.')}
         </Alert>
       </Alert.Container>
     );
   }
 
-  return (
-    <Fragment>
-      {children && isValidElement(children)
-        ? cloneElement(children, {
-            ...other,
-            ...(children as any).props,
-            project,
-            projectId: useFirstProject ? project.slug : projectId,
-            organization,
-            members,
-          })
-        : children}
-    </Fragment>
-  );
+  return <AlertBuilderOutlet project={project} members={members} />;
 }
-
-export default AlertBuilderProjectProvider;

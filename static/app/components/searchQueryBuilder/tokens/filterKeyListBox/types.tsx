@@ -3,13 +3,15 @@ import type {ReactNode} from 'react';
 import type {
   SelectOptionWithKey,
   SelectSectionWithKey,
-} from 'sentry/components/core/compactSelect/types';
+} from '@sentry/scraps/compactSelect';
+
+import type {Tag} from 'sentry/types/group';
 
 export interface KeyItem extends SelectOptionWithKey<string> {
   description: string;
-  details: React.ReactNode;
   hideCheck: boolean;
   showDetailsInOverlay: boolean;
+  tag: Tag;
   textValue: string;
   type: 'item';
   value: string;
@@ -31,6 +33,11 @@ export interface FilterValueItem extends SelectOptionWithKey<string> {
   value: string;
 }
 
+export interface RawSearchFilterIsValueItem extends SelectOptionWithKey<string> {
+  type: 'raw-search-filter-is-value';
+  value: string;
+}
+
 interface RecentFilterItem extends SelectOptionWithKey<string> {
   type: 'recent-filter';
   value: string;
@@ -42,15 +49,39 @@ export interface RecentQueryItem extends SelectOptionWithKey<string> {
   value: string;
 }
 
-export type SearchKeyItem = KeySectionItem | KeyItem | RawSearchItem | FilterValueItem;
+/**
+ * A suggestion that converts "humanized ESQ" the user typed (e.g. "is unresolved
+ * assigned is me") into real ESQ ("is:unresolved assigned:me").
+ */
+export interface ConvertHumanizedItem extends SelectOptionWithKey<string> {
+  hideCheck: boolean;
+  type: 'convert-humanized';
+  value: string;
+}
+
+export interface LogicFilterItem extends SelectOptionWithKey<string> {
+  type: 'logic-filter';
+  value: 'AND' | 'OR' | '(' | ')';
+}
+
+export type SearchKeyItem =
+  | KeySectionItem
+  | KeyItem
+  | RawSearchItem
+  | FilterValueItem
+  | RawSearchFilterIsValueItem
+  | LogicFilterItem;
 
 export type FilterKeyItem =
   | KeyItem
   | RecentFilterItem
   | KeySectionItem
   | RecentQueryItem
+  | ConvertHumanizedItem
   | RawSearchItem
-  | FilterValueItem;
+  | FilterValueItem
+  | RawSearchFilterIsValueItem
+  | LogicFilterItem;
 
 export type Section = {
   label: ReactNode;

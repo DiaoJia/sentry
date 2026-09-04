@@ -1,31 +1,34 @@
-import {Fragment, useCallback} from 'react';
-import {css} from '@emotion/react';
+import {Fragment, useCallback, useMemo} from 'react';
 import styled from '@emotion/styled';
+import {keepPreviousData, useQuery} from '@tanstack/react-query';
+
+import {Tag} from '@sentry/scraps/badge';
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
 import {useRole} from 'sentry/components/acl/useRole';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import FileSize from 'sentry/components/fileSize';
-import Link from 'sentry/components/links/link';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import SearchBar from 'sentry/components/searchBar';
-import TimeSince from 'sentry/components/timeSince';
+import {FileSize} from 'sentry/components/fileSize';
+import {Panel} from 'sentry/components/panels/panel';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconClock, IconDownload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {Project} from 'sentry/types/project';
-import type {Artifact} from 'sentry/types/release';
+import type {Artifact, Release} from 'sentry/types/release';
 import type {DebugIdBundleArtifact} from 'sentry/types/sourceMaps';
-import {keepPreviousData, useApiQuery} from 'sentry/utils/queryClient';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {isUUID} from 'sentry/utils/string/isUUID';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
+import {useApi} from 'sentry/utils/useApi';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 import {DebugIdBundleDeleteButton} from 'sentry/views/settings/projectSourceMaps/debugIdBundleDeleteButton';
 import {DebugIdBundleDetails} from 'sentry/views/settings/projectSourceMaps/debugIdBundleDetails';
 import {useDeleteDebugIdBundle} from 'sentry/views/settings/projectSourceMaps/useDeleteDebugIdBundle';
@@ -38,7 +41,7 @@ enum DebugIdBundleArtifactType {
   INDEXED_RAM_BUNDLE = 4,
 }
 
-const debugIdBundleTypeLabels = {
+const debugIdBundleTypeLabels: Record<number, string> = {
   [DebugIdBundleArtifactType.INVALID]: t('Invalid'),
   [DebugIdBundleArtifactType.SOURCE]: t('Source'),
   [DebugIdBundleArtifactType.MINIFIED_SOURCE]: t('Minified'),
@@ -64,15 +67,17 @@ function ArtifactsTableRow({
   const {hasRole, roleRequired: downloadRole} = useRole({role: 'debugFilesRole'});
 
   return (
-    <Fragment>
-      <ArtifactColumn>
-        <Name>{name || `(${t('empty')})`}</Name>
+    <SimpleTable.Row>
+      <ArtifactColumn align="stretch" direction="column" justify="center">
+        <Flex justify="start" align="center">
+          {name || `(${t('empty')})`}
+        </Flex>
         {artifactColumnDetails}
       </ArtifactColumn>
-      {type && <TypeColumn>{type}</TypeColumn>}
-      <SizeColumn>
+      {type && <AlignedRightColumn>{type}</AlignedRightColumn>}
+      <AlignedRightColumn>
         <FileSize bytes={size} />
-      </SizeColumn>
+      </AlignedRightColumn>
       <ActionsColumn>
         <Tooltip
           title={tct(
@@ -91,76 +96,115 @@ function ArtifactsTableRow({
             icon={<IconDownload size="sm" />}
             disabled={!hasRole}
             href={downloadUrl}
-            title={hasRole ? t('Download Artifact') : undefined}
+            tooltipProps={{title: hasRole ? t('Download Artifact') : undefined}}
             aria-label={t('Download Artifact')}
           />
         </Tooltip>
       </ActionsColumn>
-    </Fragment>
+    </SimpleTable.Row>
   );
 }
 
-type Props = RouteComponentProps<{bundleId: string; orgId: string; projectId: string}> & {
+type Props = {
+  bundleId: string;
   project: Project;
 };
 
-export function SourceMapsDetails({params, location, router, project}: Props) {
+export function SourceMapsDetails({bundleId, project}: Props) {
   const api = useApi();
   const organization = useOrganization();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   // query params
   const query = decodeScalar(location.query.query);
-  const cursor = location.query.cursor ?? '';
+  const cursor = decodeScalar(location.query.cursor);
 
-  // endpoints
-  const artifactsEndpoint = `/projects/${organization.slug}/${
-    project.slug
-  }/releases/${encodeURIComponent(params.bundleId)}/files/`;
-  const debugIdBundlesArtifactsEndpoint = `/projects/${organization.slug}/${
-    project.slug
-  }/artifact-bundles/${encodeURIComponent(params.bundleId)}/files/`;
+  const isDebugIdBundle = isUUID(bundleId);
 
-  const isDebugIdBundle = isUUID(params.bundleId);
-
-  const {
-    data: artifactsData,
-    getResponseHeader: artifactsHeaders,
-    isPending: artifactsLoading,
-  } = useApiQuery<Artifact[]>(
-    [
-      artifactsEndpoint,
+  const {data: artifactsResponse, isPending: artifactsLoading} = useQuery({
+    ...apiOptions.as<Artifact[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/releases/$version/files/',
       {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: project.slug,
+          version: bundleId,
+        },
         query: {query, cursor},
-      },
-    ],
-    {
-      staleTime: 0,
-      placeholderData: keepPreviousData,
-      enabled: !isDebugIdBundle,
-    }
-  );
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+    placeholderData: keepPreviousData,
+    enabled: !isDebugIdBundle,
+  });
+
+  const artifactsData = artifactsResponse?.json;
 
   const {
-    data: debugIdBundlesArtifactsData,
-    getResponseHeader: debugIdBundlesArtifactsHeaders,
+    data: debugIdBundlesArtifactsResponse,
     isPending: debugIdBundlesArtifactsLoading,
-  } = useApiQuery<DebugIdBundleArtifact>(
-    [
-      debugIdBundlesArtifactsEndpoint,
+  } = useQuery({
+    ...apiOptions.as<DebugIdBundleArtifact>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/artifact-bundles/$bundleId/files/',
       {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: project.slug,
+          bundleId,
+        },
         query: {query, cursor},
-      },
-    ],
-    {
-      staleTime: 0,
-      placeholderData: keepPreviousData,
-      enabled: isDebugIdBundle,
-    }
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+    placeholderData: keepPreviousData,
+    enabled: isDebugIdBundle,
+  });
+
+  const debugIdBundlesArtifacts = debugIdBundlesArtifactsResponse?.json;
+
+  const releaseVersions = debugIdBundlesArtifacts?.associations.map(
+    association => `"${association.release}"`
   );
+
+  const {data: releasesData, isPending: releasesLoading} = useQuery({
+    ...apiOptions.as<Release[]>()('/organizations/$organizationIdOrSlug/releases/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        project: [project.id],
+        query: `release:[${releaseVersions?.join(',')}]`,
+      },
+      staleTime: Infinity,
+    }),
+    retry: false,
+    enabled: !!releaseVersions?.length,
+  });
+
+  const debugIdBundlesArtifactsData = useMemo(() => {
+    if (releasesLoading) {
+      return debugIdBundlesArtifacts;
+    }
+
+    if (!debugIdBundlesArtifacts) {
+      return;
+    }
+
+    const existingReleaseNames = new Set((releasesData ?? []).map(r => r.version));
+
+    return {
+      ...debugIdBundlesArtifacts,
+      associations: debugIdBundlesArtifacts.associations.map(association => ({
+        ...association,
+        exists: existingReleaseNames.has(association.release),
+      })),
+    };
+  }, [releasesLoading, releasesData, debugIdBundlesArtifacts]);
 
   const {mutate: deleteDebugIdArtifacts} = useDeleteDebugIdBundle({
     onSuccess: () =>
-      router.push(`/settings/${organization.slug}/projects/${project.slug}/source-maps/`),
+      navigate(`/settings/${organization.slug}/projects/${project.slug}/source-maps/`),
   });
 
   const handleDeleteDebugIdBundle = useCallback(() => {
@@ -175,30 +219,31 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
 
   const handleSearch = useCallback(
     (newQuery: string) => {
-      router.push({
+      navigate({
         ...location,
         query: {...location.query, cursor: undefined, query: newQuery},
       });
     },
-    [router, location]
+    [navigate, location]
   );
 
   return (
     <Fragment>
       <SettingsPageHeader
-        title={isDebugIdBundle ? params.bundleId : t('Release Bundle')}
+        title={isDebugIdBundle ? bundleId : t('Release Bundle')}
+        subtitle={!isDebugIdBundle && <VersionAndDetails>{bundleId}</VersionAndDetails>}
         action={
           isDebugIdBundle && (
             <DebugIdBundleDeleteButton size="sm" onDelete={handleDeleteDebugIdBundle} />
           )
         }
-        subtitle={
-          !isDebugIdBundle && <VersionAndDetails>{params.bundleId}</VersionAndDetails>
-        }
       />
       {isDebugIdBundle && debugIdBundlesArtifactsData && (
         <DetailsPanel>
-          <DebugIdBundleDetails debugIdBundle={debugIdBundlesArtifactsData} />
+          <DebugIdBundleDetails
+            debugIdBundle={debugIdBundlesArtifactsData}
+            projectId={project.id}
+          />
         </DetailsPanel>
       )}
       <SearchBarWithMarginBottom
@@ -206,32 +251,38 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
         onSearch={handleSearch}
         query={query}
       />
-      <StyledPanelTable
-        hasTypeColumn={isDebugIdBundle}
-        headers={[
-          t('Artifact'),
-          ...(isDebugIdBundle ? [<TypeColumn key="type">{t('Type')}</TypeColumn>] : []),
-          <SizeColumn key="file-size">{t('File Size')}</SizeColumn>,
-          '',
-        ]}
-        emptyMessage={
-          query
-            ? t('No artifacts match your search query.')
-            : t('There are no artifacts in this upload.')
+      <SimpleTable
+        columns={isDebugIdBundle ? ARTIFACT_COLUMNS : ARTIFACT_COLUMNS_WITHOUT_TYPE}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Artifact')}</SimpleTable.HeaderCell>
+            {isDebugIdBundle && (
+              <SimpleTable.HeaderCell>{t('Type')}</SimpleTable.HeaderCell>
+            )}
+            <SimpleTable.HeaderCell>{t('File Size')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell />
+          </SimpleTable.HeaderRow>
         }
-        isEmpty={
+      >
+        {(isDebugIdBundle ? debugIdBundlesArtifactsLoading : artifactsLoading) && (
+          <SimpleTable.Loading />
+        )}
+        {!(isDebugIdBundle ? debugIdBundlesArtifactsLoading : artifactsLoading) &&
           (isDebugIdBundle
             ? (debugIdBundlesArtifactsData?.files ?? [])
             : (artifactsData ?? [])
-          ).length === 0
-        }
-        isLoading={isDebugIdBundle ? debugIdBundlesArtifactsLoading : artifactsLoading}
-      >
+          ).length === 0 && (
+            <SimpleTable.Empty>
+              {query
+                ? t('No artifacts match your search query.')
+                : t('There are no artifacts in this upload.')}
+            </SimpleTable.Empty>
+          )}
         {isDebugIdBundle
           ? (debugIdBundlesArtifactsData?.files ?? []).map(data => {
               const downloadUrl = `${api.baseUrl}/projects/${organization.slug}/${
                 project.slug
-              }/artifact-bundles/${encodeURIComponent(params.bundleId)}/files/${
+              }/artifact-bundles/${encodeURIComponent(bundleId)}/files/${
                 data.id
               }/?download=1`;
 
@@ -240,9 +291,7 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
                   key={data.id}
                   size={data.fileSize}
                   name={data.filePath}
-                  type={
-                    debugIdBundleTypeLabels[data.fileType as DebugIdBundleArtifactType]
-                  }
+                  type={debugIdBundleTypeLabels[data.fileType]}
                   downloadUrl={downloadUrl}
                   orgSlug={organization.slug}
                   artifactColumnDetails={
@@ -265,9 +314,7 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
           : artifactsData?.map(data => {
               const downloadUrl = `${api.baseUrl}/projects/${organization.slug}/${
                 project.slug
-              }/releases/${encodeURIComponent(params.bundleId)}/files/${
-                data.id
-              }/?download=1`;
+              }/releases/${encodeURIComponent(bundleId)}/files/${data.id}/?download=1`;
 
               return (
                 <ArtifactsTableRow
@@ -277,7 +324,7 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
                   downloadUrl={downloadUrl}
                   orgSlug={organization.slug}
                   artifactColumnDetails={
-                    <TimeAndDistWrapper>
+                    <Flex align="center" marginTop="md" width="100%">
                       <TimeWrapper>
                         <IconClock size="sm" />
                         <TimeSince date={data.dateCreated} />
@@ -286,44 +333,39 @@ export function SourceMapsDetails({params, location, router, project}: Props) {
                         title={data.dist ? undefined : t('No distribution set')}
                         skipWrapper
                       >
-                        <StyledTag type={data.dist ? 'info' : undefined}>
+                        <StyledTag variant={data.dist ? 'info' : 'muted'}>
                           {data.dist ?? t('none')}
                         </StyledTag>
                       </Tooltip>
-                    </TimeAndDistWrapper>
+                    </Flex>
                   }
                 />
               );
             })}
-      </StyledPanelTable>
+      </SimpleTable>
       <Pagination
         pageLinks={
           isDebugIdBundle
-            ? (debugIdBundlesArtifactsHeaders?.('Link') ?? '')
-            : (artifactsHeaders?.('Link') ?? '')
+            ? (debugIdBundlesArtifactsResponse?.headers.Link ?? '')
+            : (artifactsResponse?.headers.Link ?? '')
         }
       />
     </Fragment>
   );
 }
 
-const StyledPanelTable = styled(PanelTable)<{hasTypeColumn: boolean}>`
-  grid-template-columns: minmax(220px, 1fr) minmax(120px, max-content) minmax(
-      74px,
-      max-content
-    );
-  ${p =>
-    p.hasTypeColumn &&
-    css`
-      grid-template-columns:
-        minmax(220px, 1fr) minmax(120px, max-content) minmax(120px, max-content)
-        minmax(74px, max-content);
-    `}
-`;
+const ARTIFACT_COLUMNS: TableColumnConfig[] = [
+  {key: 'artifact', width: 'minmax(220px, 1fr)'},
+  {key: 'type', width: 'minmax(120px, max-content)'},
+  {key: 'fileSize', width: 'minmax(120px, max-content)'},
+  {key: 'actions', width: 'minmax(74px, max-content)'},
+];
 
-const Column = styled('div')`
-  display: flex;
-  align-items: center;
+const ARTIFACT_COLUMNS_WITHOUT_TYPE = ARTIFACT_COLUMNS.filter(
+  column => column.key !== 'type'
+);
+
+const Column = styled(SimpleTable.RowCell)`
   overflow: hidden;
 `;
 
@@ -332,71 +374,47 @@ const ActionsColumn = styled(Column)`
 `;
 
 const SearchBarWithMarginBottom = styled(SearchBar)`
-  margin-bottom: ${space(3)};
+  margin-bottom: ${p => p.theme.space['2xl']};
 `;
 
 const DetailsPanel = styled(Panel)`
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
 `;
 
-const ArtifactColumn = styled('div')`
+const ArtifactColumn = styled(SimpleTable.RowCell)`
   overflow-wrap: break-word;
   word-break: break-all;
   line-height: 140%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
 `;
 
-const Name = styled('div')`
-  display: flex;
-  justify-content: flex-start;
-  align-items: center;
-`;
-
-const TypeColumn = styled('div')`
+const AlignedRightColumn = styled(SimpleTable.RowCell)`
   display: flex;
   justify-content: flex-end;
   text-align: right;
   align-items: center;
-  color: ${p => p.theme.subText};
-`;
-
-const SizeColumn = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  text-align: right;
-  align-items: center;
-  color: ${p => p.theme.subText};
-`;
-
-const TimeAndDistWrapper = styled('div')`
-  width: 100%;
-  display: flex;
-  margin-top: ${space(1)};
-  align-items: center;
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const TimeWrapper = styled('div')`
   display: grid;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
   grid-template-columns: min-content 1fr;
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
   align-items: center;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledTag = styled(Tag)`
-  margin-left: ${space(1)};
+  margin-left: ${p => p.theme.space.md};
 `;
 
 const SubText = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const VersionAndDetails = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   word-break: break-word;
 `;

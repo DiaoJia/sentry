@@ -1,32 +1,38 @@
 import {useState} from 'react';
 import styled from '@emotion/styled';
 
+import {
+  DocIntegrationAvatar,
+  OrganizationAvatar,
+  SentryAppAvatar,
+  TeamAvatar,
+  UserAvatar,
+} from '@sentry/scraps/avatar';
+import type {AvatarProps} from '@sentry/scraps/avatar';
+import {Button} from '@sentry/scraps/button';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import type {BaseAvatarProps} from 'sentry/components/core/avatar/baseAvatar';
-import {OrganizationAvatar} from 'sentry/components/core/avatar/organizationAvatar';
-import {SentryAppAvatar} from 'sentry/components/core/avatar/sentryAppAvatar';
-import {UserAvatar} from 'sentry/components/core/avatar/userAvatar';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
 import type {RadioOption} from 'sentry/components/forms/controls/radioGroup';
-import RadioGroup from 'sentry/components/forms/controls/radioGroup';
+import {RadioGroup} from 'sentry/components/forms/controls/radioGroup';
 import {Hovercard} from 'sentry/components/hovercard';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Panel from 'sentry/components/panels/panel';
-import PanelFooter from 'sentry/components/panels/panelFooter';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import {IconImage, IconOpen, IconUpload} from 'sentry/icons';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelFooter} from 'sentry/components/panels/panelFooter';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {IconUpload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Avatar} from 'sentry/types/core';
 import type {
+  DocIntegration,
   SentryApp,
-  SentryAppAvatar as SentryAppAvatarType,
   SentryAppAvatarPhotoType,
+  SentryAppAvatar as SentryAppAvatarType,
 } from 'sentry/types/integrations';
-import type {Organization} from 'sentry/types/organization';
+import type {Organization, Team} from 'sentry/types/organization';
 import type {AvatarUser} from 'sentry/types/user';
-import useApi from 'sentry/utils/useApi';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
 
 import {AvatarCropper} from './avatarCropper';
 import {useUploader} from './useUploader';
@@ -37,29 +43,56 @@ interface SimpleAvatar {
 
 type AvatarType = Avatar['avatarType'];
 
-type AvatarChooserType =
-  | 'user'
-  | 'organization'
-  | 'sentryAppColor'
-  | 'sentryAppSimple'
-  | 'docIntegration';
+type AvatarModel =
+  | AvatarUser
+  | Team
+  | Organization
+  | SentryApp
+  | DocIntegration
+  | SimpleAvatar;
 
 type DefaultChoice = {
   description?: React.ReactNode;
   label?: string;
 };
 
-interface AvatarChooserProps {
+interface AvatarChooserBaseProps {
   endpoint: string;
-  model: SimpleAvatar | SentryApp;
   supportedTypes: AvatarType[];
   defaultChoice?: DefaultChoice;
   disabled?: boolean;
   help?: React.ReactNode;
-  onSave?: (model: SimpleAvatar) => void;
   title?: string;
-  type?: AvatarChooserType;
 }
+
+type AvatarChooserProps = AvatarChooserBaseProps &
+  (
+    | {
+        model: AvatarUser;
+        type: 'user';
+        onSave?: (model: AvatarUser) => void;
+      }
+    | {
+        model: Team;
+        type: 'team';
+        onSave?: (model: Team) => void;
+      }
+    | {
+        model: Organization;
+        type: 'organization';
+        onSave?: (model: Organization) => void;
+      }
+    | {
+        model: SentryApp;
+        type: 'sentryAppColor' | 'sentryAppSimple';
+        onSave?: (model: SimpleAvatar) => void;
+      }
+    | {
+        model: DocIntegration;
+        type: 'docIntegration';
+        onSave?: (model: SimpleAvatar) => void;
+      }
+  );
 
 // These values must be synced with the avatar endpoint in backend.
 const MIN_DIMENSION = 256;
@@ -69,14 +102,14 @@ const MAX_DIMENSION = 1024;
 // makes a lot of assumptions otherwise about how avatar are stored. We should
 // refactor the interface and split this up more.
 
-function AvatarChooser({
+export function AvatarChooser({
   endpoint,
   model: propsModel,
   disabled,
   title,
   help,
   supportedTypes,
-  type = 'user',
+  type,
   onSave,
   defaultChoice = {},
 }: AvatarChooserProps) {
@@ -89,7 +122,7 @@ function AvatarChooser({
   const isSentryApp = ['sentryAppColor', 'sentryAppSimple'].includes(type);
 
   const replaceAvatar = (avatar: Avatar) => {
-    if (['user', 'organization', 'docIntegration'].includes(type)) {
+    if (['user', 'team', 'organization', 'docIntegration'].includes(type)) {
       setModel(prevModel => ({...prevModel, avatar}));
       return;
     }
@@ -114,7 +147,7 @@ function AvatarChooser({
         } else {
           avatars[avatarIndex] = replacmentAvatar;
         }
-        return {...sentryApp, avatars} as SimpleAvatar;
+        return {...sentryApp, avatars};
       });
       return;
     }
@@ -122,7 +155,7 @@ function AvatarChooser({
     throw new Error('Invalid avatar chooser type');
   };
 
-  const getAvatar = (targetModel: SimpleAvatar | SentryApp) => {
+  const getAvatar = (targetModel: AvatarModel) => {
     if ('avatar' in targetModel) {
       return targetModel.avatar;
     }
@@ -133,7 +166,7 @@ function AvatarChooser({
       return sentryApp.avatars?.find(appAvatar => appAvatar.color === isColor);
     }
 
-    return undefined;
+    return;
   };
 
   const resetToType = (avatarType: AvatarType) => {
@@ -146,7 +179,7 @@ function AvatarChooser({
     });
   };
 
-  const handleSaveAvatar = () => {
+  const handleSaveAvatar = async () => {
     const avatarType = getAvatar(model)?.avatarType;
     const base64Data = croppedAvatar?.split(',')[1];
     setCroppedAvatar(null);
@@ -164,28 +197,29 @@ function AvatarChooser({
       data.avatar_photo = base64Data;
     }
 
-    if (type?.startsWith('sentryApp')) {
+    if (type.startsWith('sentryApp')) {
       data.color = type === 'sentryAppColor';
       data.photoType = data.color ? 'logo' : 'icon';
     }
 
-    api.request(endpoint, {
-      method: 'PUT',
-      data,
-      success: resp => {
-        setModel(resp);
-        onSave?.(resp);
-        addSuccessMessage(t('Successfully saved avatar preferences'));
-      },
-      error: resp => {
-        const avatarPhotoErrors = resp?.responseJSON?.avatar_photo || [];
-        if (avatarPhotoErrors.length) {
-          avatarPhotoErrors.map(addErrorMessage);
-        } else {
-          addErrorMessage(t('There was an error saving your preferences.'));
-        }
-      },
-    });
+    try {
+      const resp = await api.requestPromise(endpoint, {
+        method: 'PUT',
+        data,
+      });
+      setModel(resp);
+      onSave?.(resp);
+      addSuccessMessage(t('Successfully saved avatar preferences'));
+    } catch (error) {
+      const requestError = error as RequestError;
+      const avatarPhotoErrors = (requestError?.responseJSON?.avatar_photo ||
+        []) as string[];
+      if (avatarPhotoErrors.length) {
+        avatarPhotoErrors.forEach(msg => addErrorMessage(msg));
+      } else {
+        addErrorMessage(t('There was an error saving your preferences.'));
+      }
+    }
   };
 
   const {fileInput, openUpload, objectUrl} = useUploader({
@@ -213,62 +247,34 @@ function AvatarChooser({
   const choices = options.filter(([key]) => supportedTypes.includes(key));
 
   const uploadActions = (
-    <AvatarActions>
+    <Container position="absolute" bottom="-6px" margin="auto">
       <Button
-        aria-label={t('Replace image')}
-        title={t('Replace image')}
-        size="zero"
-        borderless
+        aria-label={t('Upload')}
         icon={<IconUpload />}
         onClick={openUpload}
-      />
-    </AvatarActions>
-  );
-
-  const gravatarActions = (
-    <AvatarActions>
-      <LinkButton
-        external
-        href="https://gravatar.com"
-        size="zero"
-        borderless
-        icon={<IconOpen />}
-        aria-label={t('Go to gravatar.com')}
-        title={t('Visit gravatar.com to upload your Gravatar to be used on Sentry.')}
-      />
-    </AvatarActions>
-  );
-
-  const emptyGravatar = (
-    <BlankAvatar>
-      <IconImage size="xl" />
-    </BlankAvatar>
-  );
-
-  const emptyUploader = (
-    <BlankUploader>
-      <Button size="xs" icon={<IconUpload />} onClick={openUpload}>
+        size="xs"
+      >
         {t('Upload')}
       </Button>
-    </BlankUploader>
+    </Container>
   );
 
-  const backupAvatars: Partial<Record<AvatarType, React.ReactNode>> = {
-    gravatar: emptyGravatar,
-    upload: emptyUploader,
-  };
-
-  const sharedAvatarProps: Partial<Omit<BaseAvatarProps, 'ref'>> = {
-    type: avatarType,
-    backupAvatar: backupAvatars[avatarType],
+  const sharedAvatarProps: Partial<Omit<AvatarProps, 'ref'>> = {
     size: 90,
   };
 
   const avatarPreview =
     type === 'user' ? (
       <UserAvatar {...sharedAvatarProps} user={model as AvatarUser} />
+    ) : type === 'team' ? (
+      <TeamAvatar {...sharedAvatarProps} team={model as Team} />
     ) : type === 'organization' ? (
       <OrganizationAvatar {...sharedAvatarProps} organization={model as Organization} />
+    ) : type === 'docIntegration' ? (
+      <DocIntegrationAvatar
+        {...sharedAvatarProps}
+        docIntegration={model as DocIntegration}
+      />
     ) : isSentryApp ? (
       <SentryAppAvatar
         {...sharedAvatarProps}
@@ -278,7 +284,7 @@ function AvatarChooser({
     ) : null;
 
   const cropper = (
-    <CropperContainer>
+    <Stack gap="xl">
       <AvatarCropper
         minDimension={MIN_DIMENSION}
         maxDimension={MAX_DIMENSION}
@@ -293,10 +299,10 @@ function AvatarChooser({
           setCroppedAvatar(dataUrl ?? null);
         }}
       />
-      <CropperActions>
+      <Flex justify="end" gap="md">
         <Button
           size="xs"
-          priority="danger"
+          variant="danger"
           onClick={() => {
             resetToType('upload');
             setCropperOpen(false);
@@ -307,7 +313,7 @@ function AvatarChooser({
         </Button>
         <Button
           size="xs"
-          priority="primary"
+          variant="primary"
           onClick={() => {
             setCropperOpen(false);
             handleSaveAvatar();
@@ -315,8 +321,8 @@ function AvatarChooser({
         >
           {t('Looks good')}
         </Button>
-      </CropperActions>
-    </CropperContainer>
+      </Flex>
+    </Stack>
   );
 
   return (
@@ -332,7 +338,6 @@ function AvatarChooser({
         >
           <AvatarPreview>
             {avatarPreview}
-            {avatarType === 'gravatar' && gravatarActions}
             {avatarType === 'upload' && !disabled && uploadActions}
           </AvatarPreview>
         </CropperHovercard>
@@ -349,7 +354,7 @@ function AvatarChooser({
       </AvatarChooserBody>
       <AvatarChooserFooter>
         {help && <AvatarHelp>{help}</AvatarHelp>}
-        <Button priority="primary" onClick={handleSaveAvatar} disabled={disabled}>
+        <Button variant="primary" onClick={handleSaveAvatar} disabled={disabled}>
           {t('Save Avatar')}
         </Button>
       </AvatarChooserFooter>
@@ -358,7 +363,7 @@ function AvatarChooser({
 }
 
 const AvatarChooserFooter = styled(PanelFooter)`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
 `;
 
 const AvatarPreview = styled('div')`
@@ -366,83 +371,53 @@ const AvatarPreview = styled('div')`
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: ${space(1)};
-  border-radius: ${p => p.theme.borderRadius};
+  padding: ${p => p.theme.space.md};
+  border-radius: ${p => p.theme.radius.md};
   background-size: 20px 20px;
   background-position:
     0 0,
     0 10px,
     10px -10px,
     -10px 0px;
-  background-color: ${p => p.theme.background};
+  background-color: ${p => p.theme.tokens.background.primary};
   background-image:
-    linear-gradient(45deg, ${p => p.theme.backgroundSecondary} 25%, rgba(0, 0, 0, 0) 25%),
     linear-gradient(
-      -45deg,
-      ${p => p.theme.backgroundSecondary} 25%,
+      45deg,
+      ${p => p.theme.tokens.background.secondary} 25%,
       rgba(0, 0, 0, 0) 25%
     ),
-    linear-gradient(45deg, rgba(0, 0, 0, 0) 75%, ${p => p.theme.backgroundSecondary} 75%),
-    linear-gradient(-45deg, rgba(0, 0, 0, 0) 75%, ${p => p.theme.backgroundSecondary} 75%);
+    linear-gradient(
+      -45deg,
+      ${p => p.theme.tokens.background.secondary} 25%,
+      rgba(0, 0, 0, 0) 25%
+    ),
+    linear-gradient(
+      45deg,
+      rgba(0, 0, 0, 0) 75%,
+      ${p => p.theme.tokens.background.secondary} 75%
+    ),
+    linear-gradient(
+      -45deg,
+      rgba(0, 0, 0, 0) 75%,
+      ${p => p.theme.tokens.background.secondary} 75%
+    );
 `;
 
 const AvatarChooserBody = styled('div')`
-  margin: ${space(2)};
+  margin: ${p => p.theme.space.xl};
   display: grid;
   grid-template-columns: max-content 1fr;
   align-items: center;
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
 `;
 
 const CropperHovercard = styled(Hovercard)`
   width: 300px;
 `;
 
-const CropperContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-`;
-
-const CropperActions = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  gap: ${space(1)};
-`;
-
 const AvatarHelp = styled('p')`
   margin-right: auto;
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.md};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.md};
   width: 50%;
 `;
-
-const BlankAvatar = styled('div')`
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: ${p => p.theme.gray200};
-  background: ${p => p.theme.backgroundSecondary};
-  height: 90px;
-  width: 90px;
-`;
-
-const BlankUploader = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-`;
-
-const AvatarActions = styled('div')`
-  position: absolute;
-  top: ${space(0.25)};
-  right: ${space(0.25)};
-  display: flex;
-  background: ${p => p.theme.translucentSurface200};
-  padding: ${space(0.25)};
-  border-radius: 3px;
-`;
-
-export default AvatarChooser;

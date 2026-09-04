@@ -1,10 +1,11 @@
 import {useCallback, useId} from 'react';
 import styled from '@emotion/styled';
 
+import {InputGroup} from '@sentry/scraps/input';
+import type {InputProps} from '@sentry/scraps/input';
+
 import {CopyToClipboardButton} from 'sentry/components/copyToClipboardButton';
-import type {InputProps} from 'sentry/components/core/input/inputGroup';
-import {InputGroup} from 'sentry/components/core/input/inputGroup';
-import {space} from 'sentry/styles/space';
+import {t} from 'sentry/locale';
 import {selectText} from 'sentry/utils/selectText';
 
 interface Props extends Omit<InputProps, 'onCopy'> {
@@ -14,6 +15,10 @@ interface Props extends Omit<InputProps, 'onCopy'> {
   children: string;
   className?: string;
   disabled?: boolean;
+  /**
+   * Icon displayed before the copied text.
+   */
+  icon?: React.ReactNode;
   onCopy?: (value: string) => void;
   /**
    * Always show the ending of a long overflowing text in input
@@ -22,9 +27,10 @@ interface Props extends Omit<InputProps, 'onCopy'> {
   style?: React.CSSProperties;
 }
 
-function TextCopyInput({
+export function TextCopyInput({
   className,
   disabled,
+  icon,
   style,
   onCopy,
   rtl,
@@ -60,6 +66,9 @@ function TextCopyInput({
 
   return (
     <InputGroup className={className}>
+      {icon && (
+        <InputGroup.LeadingItems disablePointerEvents>{icon}</InputGroup.LeadingItems>
+      )}
       <StyledInput
         id={textNodeId}
         readOnly
@@ -73,8 +82,9 @@ function TextCopyInput({
       />
       <InputGroup.TrailingItems>
         <StyledCopyButton
-          borderless
-          iconSize={size === 'xs' ? 'xs' : 'sm'}
+          aria-label={t('Copy to clipboard')}
+          variant="transparent"
+          size={size === 'xs' ? 'xs' : 'sm'}
           onCopy={onCopy}
           text={children}
         />
@@ -83,14 +93,12 @@ function TextCopyInput({
   );
 }
 
-export default TextCopyInput;
-
 const StyledInput = styled(InputGroup.Input)<{rtl?: boolean}>`
   direction: ${p => (p.rtl ? 'rtl' : 'ltr')};
 `;
 
 const StyledCopyButton = styled(CopyToClipboardButton)`
-  padding: ${space(0.5)};
+  padding: ${p => p.theme.space.xs};
   min-height: 0;
   height: auto;
 `;

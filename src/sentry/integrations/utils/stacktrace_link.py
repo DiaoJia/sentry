@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from sentry.constants import ObjectStatus
@@ -10,7 +11,6 @@ from sentry.integrations.source_code_management.repository import RepositoryInte
 from sentry.issues.auto_source_code_config.code_mapping import (
     convert_stacktrace_frame_path_to_source_path,
 )
-from sentry.models.organization import Organization
 from sentry.models.repository import Repository
 from sentry.shared_integrations.exceptions import ApiError
 from sentry.utils.event_frames import EventFrame
@@ -29,9 +29,14 @@ class RepositoryLinkOutcome(TypedDict):
 
 
 def get_link(
-    config: RepositoryProjectPathConfig, src_path: str, version: str | None = None
+    config: RepositoryProjectPathConfig,
+    src_path: str,
+    version: str | None = None,
 ) -> RepositoryLinkOutcome:
     result: RepositoryLinkOutcome = {}
+
+    project = config.project_repository.project
+    repository = config.project_repository.repository
 
     integration = integration_service.get_integration(
         organization_integration_id=config.organization_integration_id, status=ObjectStatus.ACTIVE
@@ -40,13 +45,13 @@ def get_link(
         result["error"] = "integration_not_found"
         return result
 
-    install = integration.get_installation(organization_id=config.project.organization_id)
+    install = integration.get_installation(organization_id=project.organization_id)
 
     link = None
     try:
         if isinstance(install, RepositoryIntegration):
             link = install.get_stacktrace_link(
-                config.repository, src_path, str(config.default_branch or ""), version
+                repository, src_path, str(config.default_branch or ""), version
             )
     except ApiError as e:
         if e.code != 403:
@@ -60,7 +65,7 @@ def get_link(
         result["error"] = result.get("error") or "file_not_found"
         assert isinstance(install, RepositoryIntegration)
         result["attemptedUrl"] = install.format_source_url(
-            config.repository, src_path, str(config.default_branch or "")
+            repository, src_path, str(config.default_branch or "")
         )
     result["sourcePath"] = src_path
 
@@ -82,9 +87,8 @@ class StacktraceLinkOutcome(TypedDict):
 
 
 def get_stacktrace_config(
-    configs: list[RepositoryProjectPathConfig],
+    configs: Sequence[RepositoryProjectPathConfig],
     ctx: StacktraceLinkContext,
-    organization: Organization | None = None,
 ) -> StacktraceLinkOutcome:
     result: StacktraceLinkOutcome = {
         "source_url": None,
@@ -105,13 +109,18 @@ def get_stacktrace_config(
             result["error"] = "stack_root_mismatch"
             continue
 
-        outcome = get_link(config, src_path, ctx["commit_id"])
+        outcome = get_link(
+            config,
+            src_path,
+            ctx["commit_id"],
+        )
         result["iteration_count"] += 1
 
+        repository = config.project_repository.repository
         result["current_config"] = {
             "config": config,
             "outcome": outcome,
-            "repository": config.repository,
+            "repository": repository,
         }
 
         # Stop processing if a match is found

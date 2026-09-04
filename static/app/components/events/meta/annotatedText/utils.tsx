@@ -1,10 +1,11 @@
 import styled from '@emotion/styled';
 
-import Link from 'sentry/components/links/link';
+import {Link} from '@sentry/scraps/link';
+
 import {tct} from 'sentry/locale';
 import type {ChunkType} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
-import type {Project} from 'sentry/types/project';
+import type {DetailedProject} from 'sentry/types/project';
 import {convertRelayPiiConfig} from 'sentry/views/settings/components/dataScrubbing/convertRelayPiiConfig';
 import {getRuleDescription} from 'sentry/views/settings/components/dataScrubbing/utils';
 
@@ -25,12 +26,12 @@ const NON_DATA_SCRUBBING_RULES = {
 
 export function getTooltipText({
   remark = '',
-  rule_id = '',
+  rule_id,
   organization,
   project,
 }: Pick<ChunkType, 'remark' | 'rule_id'> & {
   organization?: Organization;
-  project?: Project;
+  project?: DetailedProject;
 }) {
   // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
   const method = REMARKS[remark];
@@ -156,5 +157,5 @@ export function getTooltipText({
 }
 
 const Wrapper = styled('div')`
-  line-height: ${p => p.theme.text.lineHeightBody};
+  line-height: ${p => p.theme.font.lineHeight.comfortable};
 `;

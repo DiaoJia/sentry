@@ -6,7 +6,7 @@ from django.urls import reverse
 from rest_framework.response import Response
 
 from sentry.discover.models import DatasetSourcesTypes, TeamKeyTransaction
-from sentry.models.dashboard_widget import DashboardWidgetTypes
+from sentry.models.dashboard_widget import DashboardWidget, DashboardWidgetTypes
 from sentry.models.projectteam import ProjectTeam
 from sentry.models.transaction_threshold import (
     ProjectTransactionThreshold,
@@ -16,23 +16,26 @@ from sentry.models.transaction_threshold import (
 from sentry.search.events import constants
 from sentry.search.utils import map_device_class_level
 from sentry.snuba.metrics.extraction import (
-    SPEC_VERSION_TWO_FLAG,
     MetricSpecType,
     OnDemandMetricSpec,
-    OnDemandMetricSpecVersioning,
 )
-from sentry.snuba.metrics.naming_layer.mri import TransactionMRI
-from sentry.snuba.metrics.naming_layer.public import TransactionMetricKey
-from sentry.snuba.utils import DATASET_OPTIONS
+from sentry.snuba.utils import PUBLIC_DATASET_LABELS
 from sentry.testutils.cases import MetricsEnhancedPerformanceTestCase
 from sentry.testutils.helpers.datetime import before_now
-from sentry.testutils.helpers.discover import user_misery_formula
 from sentry.testutils.helpers.on_demand import create_widget
 from sentry.utils.samples import load_data
 
-pytestmark = pytest.mark.sentry_metrics
+pytestmark = [
+    pytest.mark.sentry_metrics,
+    pytest.mark.skip(
+        reason="Generic metrics sets, gauges, and distributions are no longer queryable"
+    ),
+]
 
 
+@pytest.mark.skip(
+    reason="Ordinary metricsEnhanced queries no longer hit generic metrics; keep on-demand coverage."
+)
 class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPerformanceTestCase):
     viewname = "sentry-api-0-organization-events"
 
@@ -55,12 +58,10 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         "d:transactions/measurements.custom_type@somethingcustom",
     ]
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.transaction_data = load_data("transaction", timestamp=before_now(minutes=1))
-        self.features = {
-            "organizations:performance-use-metrics": True,
-        }
+        self.features: dict[str, bool] = {}
 
     def do_request(self, query, features=None):
         if features is None:
@@ -74,7 +75,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         with self.feature(features):
             return self.client.get(url, query, format="json")
 
-    def test_no_projects(self):
+    def test_no_projects(self) -> None:
         response = self.do_request(
             {
                 "dataset": "metricsEnhanced",
@@ -83,7 +84,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert response.status_code == 200, response.content
 
-    def test_invalid_dataset(self):
+    def test_invalid_dataset(self) -> None:
         response = self.do_request(
             {
                 "dataset": "aFakeDataset",
@@ -93,11 +94,10 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert response.status_code == 400, response.content
         assert (
-            response.data["detail"]
-            == f"dataset must be one of: {', '.join([key for key in DATASET_OPTIONS.keys()])}"
+            response.data["detail"] == f"dataset must be one of: {', '.join(PUBLIC_DATASET_LABELS)}"
         )
 
-    def test_out_of_retention(self):
+    def test_out_of_retention(self) -> None:
         self.create_project()
         with self.options({"system.event-retention-days": 10}):
             query = {
@@ -112,7 +112,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert response.status_code == 400, response.content
         assert response.data["detail"] == "Invalid date range. Please try a more recent date range."
 
-    def test_invalid_search_terms(self):
+    def test_invalid_search_terms(self) -> None:
         response = self.do_request(
             {
                 "field": ["epm()"],
@@ -127,7 +127,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
             == "Parse error at 'hi \n ther' (column 4). This is commonly caused by unmatched parentheses. Enclose any text in double quotes."
         )
 
-    def test_percentile_with_no_data(self):
+    def test_percentile_with_no_data(self) -> None:
         response = self.do_request(
             {
                 "field": ["p50()"],
@@ -141,7 +141,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert len(data) == 1
         assert data[0]["p50()"] == 0
 
-    def test_project_name(self):
+    def test_project_name(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging"},
@@ -171,7 +171,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["environment"] == "string"
         assert field_meta["epm()"] == "rate"
 
-    def test_project_id(self):
+    def test_project_id(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging"},
@@ -200,7 +200,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["environment"] == "string"
         assert field_meta["epm()"] == "rate"
 
-    def test_project_dot_id(self):
+    def test_project_dot_id(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging"},
@@ -229,7 +229,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["environment"] == "string"
         assert field_meta["epm()"] == "rate"
 
-    def test_title_alias(self):
+    def test_title_alias(self) -> None:
         """title is an alias to transaction name"""
         self.store_transaction_metric(
             1,
@@ -258,7 +258,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["title"] == "string"
         assert field_meta["p50()"] == "duration"
 
-    def test_having_condition(self):
+    def test_having_condition(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging", "transaction": "foo_transaction"},
@@ -294,7 +294,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["project"] == "string"
         assert field_meta["p50(transaction.duration)"] == "duration"
 
-    def test_having_condition_with_preventing_aggregates(self):
+    def test_having_condition_with_preventing_aggregates(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging", "transaction": "foo_transaction"},
@@ -325,7 +325,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["project"] == "string"
         assert field_meta["p50(transaction.duration)"] == "duration"
 
-    def test_having_condition_with_preventing_aggregate_metrics_only(self):
+    def test_having_condition_with_preventing_aggregate_metrics_only(self) -> None:
         """same as the previous test, but with the dataset on explicit metrics
         which should throw a 400 error instead"""
         response = self.do_request(
@@ -340,7 +340,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         )
         assert response.status_code == 400, response.content
 
-    def test_having_condition_not_selected(self):
+    def test_having_condition_not_selected(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging", "transaction": "foo_transaction"},
@@ -376,7 +376,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["project"] == "string"
         assert field_meta["p50(transaction.duration)"] == "duration"
 
-    def test_non_metrics_tag_with_implicit_format(self):
+    def test_non_metrics_tag_with_implicit_format(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging", "transaction": "foo_transaction"},
@@ -395,7 +395,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert len(response.data["data"]) == 0
         assert not response.data["meta"]["isMetricsData"]
 
-    def test_non_metrics_tag_with_implicit_format_metrics_dataset(self):
+    def test_non_metrics_tag_with_implicit_format_metrics_dataset(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"environment": "staging", "transaction": "foo_transaction"},
@@ -413,7 +413,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert response.status_code == 400, response.content
 
     @pytest.mark.querybuilder
-    def test_performance_homepage_query(self):
+    def test_performance_homepage_query(self) -> None:
         self.store_transaction_metric(
             1,
             tags={
@@ -513,7 +513,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
             assert meta["units"]["tpm()"] == "1/minute"
 
-    def test_user_misery_and_team_key_sort(self):
+    def test_user_misery_and_team_key_sort(self) -> None:
         self.store_transaction_metric(
             1,
             tags={
@@ -611,7 +611,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["failure_rate()"] == "percentage"
         assert field_meta["failure_count()"] == "integer"
 
-    def test_no_team_key_transactions(self):
+    def test_no_team_key_transactions(self) -> None:
         self.store_transaction_metric(
             1, tags={"transaction": "foo_transaction"}, timestamp=self.min_ago
         )
@@ -653,7 +653,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["team_key_transaction"] == "boolean"
         assert field_meta["transaction"] == "string"
 
-    def test_team_key_transactions_my_teams(self):
+    def test_team_key_transactions_my_teams(self) -> None:
         team1 = self.create_team(organization=self.organization, name="Team A")
         self.create_team_membership(team1, user=self.user)
         self.project.add_team(team1)
@@ -751,7 +751,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["team_key_transaction"] == "boolean"
         assert field_meta["transaction"] == "string"
 
-    def test_team_key_transactions_orderby(self):
+    def test_team_key_transactions_orderby(self) -> None:
         team1 = self.create_team(organization=self.organization, name="Team A")
         team2 = self.create_team(organization=self.organization, name="Team B")
 
@@ -833,7 +833,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["team_key_transaction"] == "boolean"
         assert field_meta["transaction"] == "string"
 
-    def test_team_key_transactions_query(self):
+    def test_team_key_transactions_query(self) -> None:
         team1 = self.create_team(organization=self.organization, name="Team A")
         team2 = self.create_team(organization=self.organization, name="Team B")
 
@@ -945,7 +945,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["team_key_transaction"] == "boolean"
         assert field_meta["transaction"] == "string"
 
-    def test_team_key_transaction_not_exists(self):
+    def test_team_key_transaction_not_exists(self) -> None:
         team1 = self.create_team(organization=self.organization, name="Team A")
         team2 = self.create_team(organization=self.organization, name="Team B")
 
@@ -1053,7 +1053,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["team_key_transaction"] == "boolean"
         assert field_meta["transaction"] == "string"
 
-    def test_too_many_team_key_transactions(self):
+    def test_too_many_team_key_transactions(self) -> None:
         MAX_QUERYABLE_TEAM_KEY_TRANSACTIONS = 1
         with mock.patch(
             "sentry.search.events.fields.MAX_QUERYABLE_TEAM_KEY_TRANSACTIONS",
@@ -1110,7 +1110,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
             )
             assert meta["isMetricsData"]
 
-    def test_measurement_rating(self):
+    def test_measurement_rating(self) -> None:
         self.store_transaction_metric(
             50,
             metric="measurements.lcp",
@@ -1179,7 +1179,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["count_web_vitals(measurements.cls, good)"] == "integer"
         assert field_meta["count_web_vitals(measurements.lcp, any)"] == "integer"
 
-    def test_measurement_rating_that_does_not_exist(self):
+    def test_measurement_rating_that_does_not_exist(self) -> None:
         self.store_transaction_metric(
             1,
             metric="measurements.lcp",
@@ -1205,7 +1205,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["isMetricsData"]
         assert meta["fields"]["count_web_vitals(measurements.lcp, poor)"] == "integer"
 
-    def test_count_web_vitals_invalid_vital(self):
+    def test_count_web_vitals_invalid_vital(self) -> None:
         query = {
             "field": [
                 "count_web_vitals(measurements.foo, poor)",
@@ -1246,7 +1246,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         response = self.do_request(query)
         assert response.status_code == 400, response.content
 
-    def test_count_unique_user_returns_zero(self):
+    def test_count_unique_user_returns_zero(self) -> None:
         self.store_transaction_metric(
             50,
             metric="user",
@@ -1288,7 +1288,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[1]["count_unique(user)"] == 0
         assert meta["isMetricsData"]
 
-    def test_sum_transaction_duration(self):
+    def test_sum_transaction_duration(self) -> None:
         self.store_transaction_metric(
             50,
             tags={"transaction": "foo_transaction"},
@@ -1326,7 +1326,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["sum(transaction.duration)"] == 300
         assert meta["isMetricsData"]
 
-    def test_custom_measurements_simple(self):
+    def test_custom_measurements_simple(self) -> None:
         self.store_transaction_metric(
             1,
             metric="measurements.something_custom",
@@ -1366,7 +1366,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["fields"]["p50(measurements.something_custom)"] == "duration"
         assert meta["units"]["p50(measurements.something_custom)"] == "millisecond"
 
-    def test_custom_measurement_size_meta_type(self):
+    def test_custom_measurement_size_meta_type(self) -> None:
         self.store_transaction_metric(
             100,
             metric="measurements.custom_type",
@@ -1424,7 +1424,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["fields"]["p50(measurements.custom_type)"] == "number"
         assert meta["units"]["p50(measurements.custom_type)"] is None
 
-    def test_custom_measurement_none_type(self):
+    def test_custom_measurement_none_type(self) -> None:
         self.store_transaction_metric(
             1,
             metric="measurements.cls",
@@ -1450,8 +1450,8 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         self.wait_for_metric_count(
             self.project,
             1,
-            metric=TransactionMetricKey.MEASUREMENTS_CLS.value,
-            mri=TransactionMRI.MEASUREMENTS_CLS.value,
+            metric="transaction.measurements.cls",
+            mri="d:transactions/measurements.cls@none",
         )
         response = self.do_request(query)
         assert response.status_code == 200, response.content
@@ -1471,7 +1471,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["fields"]["max(measurements.cls)"] == "number"
         assert meta["units"]["max(measurements.cls)"] is None
 
-    def test_custom_measurement_duration_filtering(self):
+    def test_custom_measurement_duration_filtering(self) -> None:
         self.store_transaction_metric(
             1,
             metric="measurements.runtime",
@@ -1511,7 +1511,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["max(measurements.runtime)"] == 180
         assert meta["isMetricsData"]
 
-    def test_custom_measurement_size_filtering(self):
+    def test_custom_measurement_size_filtering(self) -> None:
         self.store_transaction_metric(
             1,
             metric="measurements.datacenter_memory",
@@ -1553,7 +1553,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["fields"]["max(measurements.datacenter_memory)"] == "size"
         assert meta["isMetricsData"]
 
-    def test_has_custom_measurement(self):
+    def test_has_custom_measurement(self) -> None:
         self.store_transaction_metric(
             33,
             metric="measurements.datacenter_memory",
@@ -1590,7 +1590,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert response.status_code == 200, response.content
         assert len(response.data["data"]) == 0
 
-    def test_environment_param(self):
+    def test_environment_param(self) -> None:
         self.create_environment(self.project, name="staging")
         self.store_transaction_metric(
             1,
@@ -1629,7 +1629,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["isMetricsData"]
 
     @pytest.mark.xfail(reason="Started failing on ClickHouse 21.8")
-    def test_environment_query(self):
+    def test_environment_query(self) -> None:
         self.create_environment(self.project, name="staging")
         self.store_transaction_metric(
             1,
@@ -1669,7 +1669,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["p50(transaction.duration)"] == 100
         assert meta["isMetricsData"]
 
-    def test_has_transaction(self):
+    def test_has_transaction(self) -> None:
         self.store_transaction_metric(
             1,
             tags={},
@@ -1724,7 +1724,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         response = self.do_request(query)
         assert response.status_code == 400, response.content
 
-    def test_apdex_transaction_threshold(self):
+    def test_apdex_transaction_threshold(self) -> None:
         ProjectTransactionThresholdOverride.objects.create(
             transaction="foo_transaction",
             project=self.project,
@@ -1785,7 +1785,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["transaction"] == "string"
         assert field_meta["apdex()"] == "number"
 
-    def test_apdex_project_threshold(self):
+    def test_apdex_project_threshold(self) -> None:
         ProjectTransactionThreshold.objects.create(
             project=self.project,
             organization=self.project.organization,
@@ -1839,7 +1839,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["transaction"] == "string"
         assert field_meta["apdex()"] == "number"
 
-    def test_apdex_satisfaction_param(self):
+    def test_apdex_satisfaction_param(self) -> None:
         for function in ["apdex(300)", "user_misery(300)", "count_miserable(user, 300)"]:
             query = {
                 "project": [self.project.id],
@@ -1873,7 +1873,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
             assert response.status_code == 400, function
             assert b"threshold parameter" in response.content, function
 
-    def test_mobile_metrics(self):
+    def test_mobile_metrics(self) -> None:
         self.store_transaction_metric(
             0.4,
             "measurements.frames_frozen_rate",
@@ -1899,7 +1899,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert len(response.data["data"]) == 1
         assert response.data["data"][0]["p50(measurements.frames_frozen_rate)"] == 0.4
 
-    def test_merge_null_unparam(self):
+    def test_merge_null_unparam(self) -> None:
         self.store_transaction_metric(
             1,
             # Transaction: unparam
@@ -1932,7 +1932,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert len(response.data["data"]) == 1
         assert response.data["data"][0]["p50(transaction.duration)"] == 1.5
 
-    def test_unparam_filter(self):
+    def test_unparam_filter(self) -> None:
         self.store_transaction_metric(
             1,
             # Transaction: unparam
@@ -1976,7 +1976,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert response.data["data"][0]["transaction"] == "<< unparameterized >>"
         assert response.data["data"][0]["count()"] == 2
 
-    def test_custom_measurements_without_function(self):
+    def test_custom_measurements_without_function(self) -> None:
         self.store_transaction_metric(
             33,
             metric="measurements.datacenter_memory",
@@ -2012,7 +2012,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert unit_meta[measurement] == "petabyte"
         assert not meta["isMetricsData"]
 
-    def test_custom_measurements_with_function(self):
+    def test_custom_measurements_with_function(self) -> None:
         self.store_transaction_metric(
             33,
             metric="measurements.datacenter_memory",
@@ -2048,7 +2048,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert unit_meta[measurement] == "petabyte"
         assert not meta["isMetricsData"]
 
-    def test_custom_measurements_equation(self):
+    def test_custom_measurements_equation(self) -> None:
         self.store_transaction_metric(
             33,
             metric="measurements.datacenter_memory",
@@ -2084,7 +2084,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         meta = response.data["meta"]
         assert not meta["isMetricsData"]
 
-    def test_transaction_wildcard(self):
+    def test_transaction_wildcard(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction"},
@@ -2114,7 +2114,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["isMetricsData"]
         assert data[0]["transaction"] == "foo_transaction"
 
-    def test_transaction_status_wildcard(self):
+    def test_transaction_status_wildcard(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction", "transaction.status": "foobar"},
@@ -2138,7 +2138,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         meta = response.data["meta"]
         assert meta["isMetricsData"]
 
-    def test_http_error_rate(self):
+    def test_http_error_rate(self) -> None:
         self.store_transaction_metric(
             1,
             tags={
@@ -2171,7 +2171,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         meta = response.data["meta"]
         assert meta["isMetricsData"]
 
-    def test_time_spent(self):
+    def test_time_spent(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction", "transaction.status": "foobar"},
@@ -2201,7 +2201,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         meta = response.data["meta"]
         assert meta["isMetricsData"]
 
-    def test_has_filter(self):
+    def test_has_filter(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction", "transaction.status": "foobar"},
@@ -2245,7 +2245,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         meta = response.data["meta"]
         assert meta["isMetricsData"]
 
-    def test_not_has_filter(self):
+    def test_not_has_filter(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction", "transaction.status": "foobar"},
@@ -2280,7 +2280,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert response.status_code == 400, response.content
 
-    def test_p50_with_count(self):
+    def test_p50_with_count(self) -> None:
         """Implicitly test the fact that percentiles are their own 'dataset'"""
         self.store_transaction_metric(
             1,
@@ -2312,7 +2312,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["p50()"] == "duration"
         assert field_meta["count()"] == "integer"
 
-    def test_p75_with_count_and_more_groupby(self):
+    def test_p75_with_count_and_more_groupby(self) -> None:
         """Implicitly test the fact that percentiles are their own 'dataset'"""
         self.store_transaction_metric(
             1,
@@ -2364,7 +2364,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["p75()"] == "duration"
         assert field_meta["count()"] == "integer"
 
-    def test_title_and_transaction_alias(self):
+    def test_title_and_transaction_alias(self) -> None:
         # Title and transaction are aliases to the same column
         self.store_transaction_metric(
             1,
@@ -2401,7 +2401,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["transaction"] == "string"
         assert field_meta["p75()"] == "duration"
 
-    def test_maintain_sort_order_across_datasets(self):
+    def test_maintain_sort_order_across_datasets(self) -> None:
         self.store_transaction_metric(
             1,
             tags={"transaction": "foo_transaction"},
@@ -2459,7 +2459,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert field_meta["count()"] == "integer"
         assert field_meta["count_unique(user)"] == "integer"
 
-    def test_avg_compare(self):
+    def test_avg_compare(self) -> None:
         self.store_transaction_metric(
             100,
             timestamp=self.min_ago,
@@ -2494,7 +2494,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
             assert meta["dataset"] == "metrics"
             assert meta["fields"][function_name] == "percent_change"
 
-    def test_avg_if(self):
+    def test_avg_if(self) -> None:
         self.store_transaction_metric(
             100,
             timestamp=self.min_ago,
@@ -2529,7 +2529,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["dataset"] == "metrics"
         assert meta["fields"]["avg_if(transaction.duration, release, foo)"] == "duration"
 
-    def test_count_if(self):
+    def test_count_if(self) -> None:
         self.store_transaction_metric(
             100,
             timestamp=self.min_ago,
@@ -2572,7 +2572,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["fields"][countIfRelease1] == "integer"
         assert meta["fields"][countIfRelease2] == "integer"
 
-    def test_device_class(self):
+    def test_device_class(self) -> None:
         self.store_transaction_metric(
             100,
             timestamp=self.min_ago,
@@ -2607,7 +2607,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[2]["device.class"] == "Unknown"
         assert meta["fields"]["device.class"] == "string"
 
-    def test_device_class_filter(self):
+    def test_device_class_filter(self) -> None:
         self.store_transaction_metric(
             300,
             timestamp=self.min_ago,
@@ -2631,7 +2631,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["device.class"] == level
         assert meta["fields"]["device.class"] == "string"
 
-    def test_performance_score(self):
+    def test_performance_score(self) -> None:
         self.store_transaction_metric(
             0.03,
             metric="measurements.score.ttfb",
@@ -2755,7 +2755,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["isMetricsData"]
         assert field_meta["performance_score(measurements.score.ttfb)"] == "number"
 
-    def test_performance_score_boundaries(self):
+    def test_performance_score_boundaries(self) -> None:
         # Scores shouldn't exceed 1 or go below 0, but we can test these boundaries anyways
         self.store_transaction_metric(
             0.65,
@@ -2812,7 +2812,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["isMetricsData"]
         assert field_meta["performance_score(measurements.score.ttfb)"] == "number"
 
-    def test_invalid_performance_score_column(self):
+    def test_invalid_performance_score_column(self) -> None:
         self.store_transaction_metric(
             0.03,
             metric="measurements.score.total",
@@ -2833,7 +2833,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         )
         assert response.status_code == 400, response.content
 
-    def test_opportunity_score(self):
+    def test_opportunity_score(self) -> None:
         self.store_transaction_metric(
             0.03,
             metric="measurements.score.ttfb",
@@ -2935,7 +2935,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert meta["isMetricsData"]
 
-    def test_opportunity_score_with_fixed_weights_and_missing_vitals(self):
+    def test_opportunity_score_with_fixed_weights_and_missing_vitals(self) -> None:
         self.store_transaction_metric(
             0.5,
             metric="measurements.score.inp",
@@ -3030,7 +3030,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[1]["total_opportunity_score()"] == 0.6
         assert meta["isMetricsData"]
 
-    def test_total_performance_score(self):
+    def test_total_performance_score(self) -> None:
         self.store_transaction_metric(
             0.03,
             metric="measurements.score.lcp",
@@ -3109,7 +3109,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["performance_score(measurements.score.total)"] == 0.48
         assert meta["isMetricsData"]
 
-    def test_total_performance_score_with_missing_vitals(self):
+    def test_total_performance_score_with_missing_vitals(self) -> None:
         self.store_transaction_metric(
             0.03,
             metric="measurements.score.lcp",
@@ -3152,7 +3152,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["performance_score(measurements.score.total)"] == 0.4
         assert meta["isMetricsData"]
 
-    def test_count_scores(self):
+    def test_count_scores(self) -> None:
         self.store_transaction_metric(
             0.1,
             metric="measurements.score.total",
@@ -3214,7 +3214,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert meta["isMetricsData"]
 
-    def test_count_starts(self):
+    def test_count_starts(self) -> None:
         self.store_transaction_metric(
             200,
             metric="measurements.app_start_warm",
@@ -3256,7 +3256,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert meta["isMetricsData"]
 
-    def test_count_starts_returns_all_counts_when_no_arg_is_passed(self):
+    def test_count_starts_returns_all_counts_when_no_arg_is_passed(self) -> None:
         self.store_transaction_metric(
             200,
             metric="measurements.app_start_warm",
@@ -3296,7 +3296,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
 
         assert meta["isMetricsData"]
 
-    def test_timestamp_groupby(self):
+    def test_timestamp_groupby(self) -> None:
         self.store_transaction_metric(
             0.03,
             tags={"transaction": "foo_transaction", "user": "foo"},
@@ -3324,7 +3324,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["transaction"] == "foo_transaction"
         assert meta["dataset"] == "metricsEnhanced"
 
-    def test_on_demand_with_mep(self):
+    def test_on_demand_with_mep(self) -> None:
         # Store faketag as an OnDemandMetricSpec, which will put faketag into the metrics indexer
         spec = OnDemandMetricSpec(
             field="count()",
@@ -3340,18 +3340,17 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         transaction_data["tags"].append(("faketag", "foo"))
         self.store_event(transaction_data, self.project.id)
 
-        with self.feature({"organizations:mep-use-default-tags": True}):
-            response = self.do_request(
-                {
-                    "field": [
-                        "faketag",
-                        "count()",
-                    ],
-                    "query": "event.type:transaction",
-                    "dataset": "metricsEnhanced",
-                    "per_page": 50,
-                }
-            )
+        response = self.do_request(
+            {
+                "field": [
+                    "faketag",
+                    "count()",
+                ],
+                "query": "event.type:transaction",
+                "dataset": "metricsEnhanced",
+                "per_page": 50,
+            }
+        )
         assert response.status_code == 200, response.content
         assert len(response.data["data"]) == 1
         data = response.data["data"]
@@ -3360,7 +3359,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["faketag"] == "foo"
         assert not meta["isMetricsData"]
 
-    def test_filtering_by_org_id_is_not_compatible(self):
+    def test_filtering_by_org_id_is_not_compatible(self) -> None:
         """Implicitly test the fact that percentiles are their own 'dataset'"""
         self.store_transaction_metric(
             1,
@@ -3379,7 +3378,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         )
         assert response.status_code == 400, response.content
 
-    def test_cache_miss_rate(self):
+    def test_cache_miss_rate(self) -> None:
         self.store_span_metric(
             1,
             timestamp=self.min_ago,
@@ -3416,7 +3415,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["dataset"] == "metrics"
         assert meta["fields"]["cache_miss_rate()"] == "percentage"
 
-    def test_http_response_rate(self):
+    def test_http_response_rate(self) -> None:
         self.store_span_metric(
             1,
             timestamp=self.min_ago,
@@ -3473,7 +3472,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert meta["dataset"] == "metrics"
         assert meta["fields"]["http_response_rate(200)"] == "percentage"
 
-    def test_avg_span_self_time(self):
+    def test_avg_span_self_time(self) -> None:
         self.store_span_metric(
             1,
             timestamp=self.min_ago,
@@ -3515,7 +3514,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert len(data) == 1
         assert data[0]["avg(span.self_time)"] == 3.2
 
-    def test_avg_message_receive_latency_gauge_functions(self):
+    def test_avg_message_receive_latency_gauge_functions(self) -> None:
         self.store_span_metric(
             {
                 "min": 5,
@@ -3585,7 +3584,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[0]["min(g:spans/messaging.message.receive.latency@millisecond)"] == 5.0
         assert data[0]["max(g:spans/messaging.message.receive.latency@millisecond)"] == 15.0
 
-    def test_span_module_filter(self):
+    def test_span_module_filter(self) -> None:
         self.store_span_metric(
             1,
             timestamp=self.min_ago,
@@ -3637,7 +3636,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTest(MetricsEnhancedPe
         assert data[2]["span.module"] == "other"
         assert data[2]["avg(span.self_time)"] == 4
 
-    def test_metrics_enhanced_with_has_filter_falls_back_to_indexed_data(self):
+    def test_metrics_enhanced_with_has_filter_falls_back_to_indexed_data(self) -> None:
         transaction_data = load_data("transaction")
         self.store_event(
             {
@@ -3738,138 +3737,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
         response = self._make_on_demand_request(params)
         self._assert_on_demand_response(response)
 
-    def test_on_demand_user_misery(self) -> None:
-        user_misery_field = "user_misery(300)"
-        query = "transaction.duration:>=100"
-
-        # We store data for both specs, however, when the query builders try to query
-        # for the data it will not query on-demand data
-        for spec_version in OnDemandMetricSpecVersioning.get_spec_versions():
-            spec = OnDemandMetricSpec(
-                field=user_misery_field,
-                query=query,
-                spec_type=MetricSpecType.DYNAMIC_QUERY,
-                # We only allow querying the function in the latest spec version,
-                # otherwise, the data returned by the endpoint would be 0.05
-                spec_version=spec_version,
-            )
-            tags = {"satisfaction": "miserable"}
-            self.store_on_demand_metric(1, spec=spec, additional_tags=tags, timestamp=self.min_ago)
-            self.store_on_demand_metric(2, spec=spec, timestamp=self.min_ago)
-
-        params = {"field": [user_misery_field], "project": self.project.id, "query": query}
-        self._create_specs(params)
-
-        # We expect it to be False because we're not using the extra feature flag
-        response = self._make_on_demand_request(params)
-        self._assert_on_demand_response(response, expected_on_demand_query=False)
-
-        # Since we're using the extra feature flag we expect user_misery to be an on-demand metric
-        response = self._make_on_demand_request(params, {SPEC_VERSION_TWO_FLAG: True})
-        self._assert_on_demand_response(response, expected_on_demand_query=True)
-        assert response.data["data"] == [{user_misery_field: user_misery_formula(1, 2)}]
-
-    def test_on_demand_user_misery_discover_split_with_widget_id_unsaved(self) -> None:
-        user_misery_field = "user_misery(300)"
-        query = "transaction.duration:>=100"
-
-        _, widget, __ = create_widget(["count()"], "", self.project, discover_widget_split=None)
-
-        # We store data for both specs, however, when the query builders try to query
-        # for the data it will not query on-demand data
-        for spec_version in OnDemandMetricSpecVersioning.get_spec_versions():
-            spec = OnDemandMetricSpec(
-                field=user_misery_field,
-                query=query,
-                spec_type=MetricSpecType.DYNAMIC_QUERY,
-                # We only allow querying the function in the latest spec version,
-                # otherwise, the data returned by the endpoint would be 0.05
-                spec_version=spec_version,
-            )
-            tags = {"satisfaction": "miserable"}
-            self.store_on_demand_metric(1, spec=spec, additional_tags=tags, timestamp=self.min_ago)
-            self.store_on_demand_metric(2, spec=spec, timestamp=self.min_ago)
-
-        params = {"field": [user_misery_field], "project": self.project.id, "query": query}
-        self._create_specs(params)
-
-        params["dashboardWidgetId"] = widget.id
-
-        # Since we're using the extra feature flag we expect user_misery to be an on-demand metric
-        with mock.patch.object(widget, "save") as mock_widget_save:
-            response = self._make_on_demand_request(params, {SPEC_VERSION_TWO_FLAG: True})
-            assert bool(mock_widget_save.assert_called_once)
-
-        self._assert_on_demand_response(response, expected_on_demand_query=True)
-        assert response.data["data"] == [{user_misery_field: user_misery_formula(1, 2)}]
-
-    def test_on_demand_user_misery_discover_split_with_widget_id_saved(self) -> None:
-        user_misery_field = "user_misery(300)"
-        query = "transaction.duration:>=100"
-
-        _, widget, __ = create_widget(
-            ["count()"],
-            "",
-            self.project,
-            discover_widget_split=DashboardWidgetTypes.TRANSACTION_LIKE,  # Transactions like uses on-demand
-        )
-
-        # We store data for both specs, however, when the query builders try to query
-        # for the data it will not query on-demand data
-        for spec_version in OnDemandMetricSpecVersioning.get_spec_versions():
-            spec = OnDemandMetricSpec(
-                field=user_misery_field,
-                query=query,
-                spec_type=MetricSpecType.DYNAMIC_QUERY,
-                # We only allow querying the function in the latest spec version,
-                # otherwise, the data returned by the endpoint would be 0.05
-                spec_version=spec_version,
-            )
-            tags = {"satisfaction": "miserable"}
-            self.store_on_demand_metric(1, spec=spec, additional_tags=tags, timestamp=self.min_ago)
-            self.store_on_demand_metric(2, spec=spec, timestamp=self.min_ago)
-
-        params = {"field": [user_misery_field], "project": self.project.id, "query": query}
-        self._create_specs(params)
-
-        params["dashboardWidgetId"] = widget.id
-
-        # Since we're using the extra feature flag we expect user_misery to be an on-demand metric
-        with mock.patch.object(widget, "save") as mock_widget_save:
-            response = self._make_on_demand_request(params, {SPEC_VERSION_TWO_FLAG: True})
-            assert bool(mock_widget_save.assert_not_called)
-
-        self._assert_on_demand_response(response, expected_on_demand_query=True)
-        assert response.data["data"] == [{user_misery_field: user_misery_formula(1, 2)}]
-
-    def test_on_demand_count_unique(self):
-        field = "count_unique(user)"
-        query = "transaction.duration:>0"
-        params = {"field": [field], "query": query}
-        # We do not really have to create the metrics for both specs since
-        # the first API call will not query any on-demand metric
-        for spec_version in OnDemandMetricSpecVersioning.get_spec_versions():
-            spec = OnDemandMetricSpec(
-                field=field,
-                query=query,
-                spec_type=MetricSpecType.DYNAMIC_QUERY,
-                spec_version=spec_version,
-            )
-            self.store_on_demand_metric(1, spec=spec, timestamp=self.min_ago)
-            self.store_on_demand_metric(2, spec=spec, timestamp=self.min_ago)
-
-        # The first call will not be on-demand
-        response = self._make_on_demand_request(params)
-        self._assert_on_demand_response(response, expected_on_demand_query=False)
-
-        # This second call will be on-demand
-        response = self._make_on_demand_request(
-            params, extra_features={SPEC_VERSION_TWO_FLAG: True}
-        )
-        self._assert_on_demand_response(response, expected_on_demand_query=True)
-        assert response.data["data"] == [{"count_unique(user)": 2}]
-
-    def test_split_decision_for_errors_widget(self):
+    def test_split_decision_for_errors_widget(self) -> None:
         error_data = load_data("python", timestamp=before_now(minutes=1))
         self.store_event(
             data={
@@ -3901,7 +3769,7 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
         assert widget.discover_widget_split == DashboardWidgetTypes.ERROR_EVENTS
         assert widget.dataset_source == DatasetSourcesTypes.INFERRED.value
 
-    def test_split_decision_for_transactions_widget(self):
+    def test_split_decision_for_transactions_widget(self) -> None:
         transaction_data = load_data("transaction", timestamp=before_now(minutes=1))
         self.store_event(
             data={
@@ -3930,11 +3798,11 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
             "discoverSplitDecision"
         ) is DashboardWidgetTypes.get_type_name(DashboardWidgetTypes.TRANSACTION_LIKE)
 
-        widget.refresh_from_db()
+        widget = DashboardWidget.objects.get(id=widget.id)
         assert widget.discover_widget_split == DashboardWidgetTypes.TRANSACTION_LIKE
         assert widget.dataset_source == DatasetSourcesTypes.INFERRED.value
 
-    def test_split_decision_for_ambiguous_widget_without_data(self):
+    def test_split_decision_for_ambiguous_widget_without_data(self) -> None:
         _, widget, __ = create_widget(
             ["count()", "transaction.name", "error.type"],
             "",
@@ -3958,11 +3826,11 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
             "discoverSplitDecision"
         ) == DashboardWidgetTypes.get_type_name(DashboardWidgetTypes.ERROR_EVENTS)
 
-        widget.refresh_from_db()
+        widget = DashboardWidget.objects.get(id=widget.id)
         assert widget.discover_widget_split == DashboardWidgetTypes.ERROR_EVENTS
         assert widget.dataset_source == DatasetSourcesTypes.FORCED.value
 
-    def test_split_decision_for_ambiguous_widget_with_data(self):
+    def test_split_decision_for_ambiguous_widget_with_data(self) -> None:
         # Store a transaction
         transaction_data = load_data("transaction", timestamp=before_now(minutes=1))
         self.store_event(
@@ -4005,12 +3873,14 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
             "discoverSplitDecision"
         ) == DashboardWidgetTypes.get_type_name(DashboardWidgetTypes.ERROR_EVENTS)
 
-        widget.refresh_from_db()
+        widget = DashboardWidget.objects.get(id=widget.id)
         assert widget.discover_widget_split == DashboardWidgetTypes.ERROR_EVENTS
         assert widget.dataset_source == DatasetSourcesTypes.FORCED.value
 
     @mock.patch("sentry.snuba.errors.query")
-    def test_errors_request_made_for_saved_error_dashboard_widget_type(self, mock_errors_query):
+    def test_errors_request_made_for_saved_error_dashboard_widget_type(
+        self, mock_errors_query: mock.MagicMock
+    ) -> None:
         mock_errors_query.return_value = {
             "data": [],
             "meta": {},
@@ -4064,115 +3934,41 @@ class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithOnDemandMetric
         assert response.status_code == 200, response.content
         mock_mep_query.assert_called_once()
 
+    def test_idor_dashboard_widget_from_different_org(self) -> None:
+        """Regression test: Cannot access dashboard widgets from other organizations (IDOR)."""
+        # Create a widget in a DIFFERENT organization with discover_widget_split=None
+        # This means if the widget IS accessed, the split detection would run and UPDATE it
+        other_org = self.create_organization()
+        other_project = self.create_project(organization=other_org)
+        _, other_widget, __ = create_widget(
+            ["count()"],
+            "",
+            other_project,
+            discover_widget_split=None,  # Not yet split - would be updated if accessed
+        )
 
-class OrganizationEventsMetricsEnhancedPerformanceEndpointTestWithMetricLayer(
-    OrganizationEventsMetricsEnhancedPerformanceEndpointTest
-):
-    def setUp(self):
-        super().setUp()
-        self.features["organizations:use-metrics-layer"] = True
+        # Verify initial state
+        assert other_widget.discover_widget_split is None
 
-    @pytest.mark.xfail(reason="Not supported")
-    def test_time_spent(self):
-        super().test_time_spent()
+        # Request with cross-org widget ID should NOT access that widget
+        response = self.do_request(
+            {
+                "field": ["count()"],
+                "query": "",
+                "dataset": "metricsEnhanced",
+                "per_page": 50,
+                "dashboardWidgetId": other_widget.id,
+            }
+        )
 
-    @pytest.mark.xfail(reason="Not supported")
-    def test_http_error_rate(self):
-        super().test_http_error_rate()
+        # Request should succeed (the widget query fails silently and falls back)
+        assert response.status_code == 200, response.content
 
-    @pytest.mark.xfail(reason="Multiple aliases to same column not supported")
-    def test_title_and_transaction_alias(self):
-        super().test_title_and_transaction_alias()
-
-    @pytest.mark.xfail(reason="Sort order is flaking when querying multiple datasets")
-    def test_maintain_sort_order_across_datasets(self):
-        """You may need to run this test a few times to get it to fail"""
-        super().test_maintain_sort_order_across_datasets()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_avg_compare(self):
-        super().test_avg_compare()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_avg_if(self):
-        super().test_avg_if()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_count_if(self):
-        super().test_count_if()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_device_class(self):
-        super().test_device_class()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_device_class_filter(self):
-        super().test_device_class_filter()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_performance_score(self):
-        super().test_performance_score()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_performance_score_boundaries(self):
-        super().test_performance_score_boundaries()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_total_performance_score(self):
-        super().test_total_performance_score()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_total_performance_score_with_missing_vitals(self):
-        super().test_total_performance_score_with_missing_vitals()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_invalid_performance_score_column(self):
-        super().test_invalid_performance_score_column()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_opportunity_score(self):
-        super().test_opportunity_score()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_opportunity_score_with_fixed_weights_and_missing_vitals(self):
-        super().test_opportunity_score_with_fixed_weights_and_missing_vitals()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_count_scores(self):
-        super().test_count_scores()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_count_starts(self):
-        super().test_count_starts()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_count_starts_returns_all_counts_when_no_arg_is_passed(self):
-        super().test_count_starts_returns_all_counts_when_no_arg_is_passed()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_timestamp_groupby(self):
-        super().test_timestamp_groupby()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_on_demand_with_mep(self):
-        super().test_on_demand_with_mep()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_cache_miss_rate(self):
-        super().test_cache_miss_rate()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_http_response_rate(self):
-        super().test_http_response_rate()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_avg_span_self_time(self):
-        super().test_avg_span_self_time()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_avg_message_receive_latency_gauge_functions(self):
-        super().test_avg_message_receive_latency_gauge_functions()
-
-    @pytest.mark.xfail(reason="Not implemented")
-    def test_span_module_filter(self):
-        super().test_span_module_filter()
+        # KEY ASSERTION: The cross-org widget should NOT have been modified
+        # Without IDOR fix: widget is found, split detection runs, discover_widget_split gets set
+        # With IDOR fix: widget not found (wrong org), widget stays unchanged
+        other_widget.refresh_from_db()
+        assert other_widget.discover_widget_split is None, (
+            "Cross-org widget was modified - IDOR vulnerability! "
+            "The widget should not be accessible from a different organization."
+        )

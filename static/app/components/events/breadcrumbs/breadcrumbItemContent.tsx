@@ -5,7 +5,6 @@ import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
 import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
 import {StructuredData} from 'sentry/components/structuredEventData';
 import {Timeline} from 'sentry/components/timeline';
-import {space} from 'sentry/styles/space';
 import {
   BreadcrumbMessageFormat,
   BreadcrumbType,
@@ -14,8 +13,8 @@ import {
   type BreadcrumbTypeNavigation,
   type RawCrumb,
 } from 'sentry/types/breadcrumbs';
-import {defined} from 'sentry/utils';
-import {isUrl} from 'sentry/utils/string/isUrl';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 import {usePrismTokens} from 'sentry/utils/usePrismTokens';
 
 const DEFAULT_STRUCTURED_DATA_PROPS = {
@@ -24,15 +23,13 @@ const DEFAULT_STRUCTURED_DATA_PROPS = {
   withOnlyFormattedText: true,
 };
 
-const MESSAGE_PREVIEW_CHAR_LIMIT = 200;
-
 interface BreadcrumbItemContentProps {
   breadcrumb: RawCrumb;
   fullyExpanded?: boolean;
   meta?: Record<string, any>;
 }
 
-export default function BreadcrumbItemContent({
+export function BreadcrumbItemContent({
   breadcrumb: bc,
   meta,
   fullyExpanded = true,
@@ -47,24 +44,7 @@ export default function BreadcrumbItemContent({
 
   const defaultMessage = defined(bc.message) ? (
     <BreadcrumbText>
-      {fullyExpanded ? (
-        <StructuredData
-          value={bc.message}
-          meta={meta?.message}
-          {...structuredDataProps}
-        />
-      ) : (
-        <StructuredData
-          value={
-            bc.message.length > MESSAGE_PREVIEW_CHAR_LIMIT
-              ? bc.message.substring(0, MESSAGE_PREVIEW_CHAR_LIMIT) + '\u2026'
-              : bc.message
-          }
-          // Note: Annotations applying to trimmed content will not be applied.
-          meta={meta?.message}
-          {...structuredDataProps}
-        />
-      )}
+      <StructuredData value={bc.message} meta={meta?.message} {...structuredDataProps} />
     </BreadcrumbText>
   ) : null;
 
@@ -137,13 +117,13 @@ function HTTPCrumbContent({
     status_code: statusCode,
     ...otherData
   } = cleanBreadcrumbData(breadcrumb?.data) ?? {};
-  const isValidUrl = !meta && defined(url) && isUrl(url);
+  const showUrlAsLink = !meta && defined(url) && isValidUrl(url);
   return (
     <Fragment>
       {children}
       <BreadcrumbText>
         {defined(method) && `${method}: `}
-        {isValidUrl ? (
+        {showUrlAsLink ? (
           <Link
             role="link"
             onClick={() => openNavigateToExternalLinkModal({linkText: url})}
@@ -259,7 +239,7 @@ function cleanBreadcrumbData<B extends Record<string, any> | undefined | null>(
 }
 
 const Link = styled('a')`
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   text-decoration: underline;
   text-decoration-style: dotted;
   word-break: break-all;
@@ -268,15 +248,16 @@ const Link = styled('a')`
 const SQLText = styled('pre')`
   &.language-sql {
     margin: 0;
-    padding: ${space(0.25)} 0;
-    font-size: ${p => p.theme.fontSize.sm};
+    padding: ${p => p.theme.space['2xs']} 0;
+    font-size: ${p => p.theme.font.size.sm};
     white-space: pre-wrap;
   }
 `;
 
 const BreadcrumbText = styled(Timeline.Text)`
   white-space: pre-wrap;
-  font-family: ${p => p.theme.text.familyMono};
-  font-size: ${p => p.theme.codeFontSize};
-  color: ${p => p.theme.textColor};
+  word-break: break-all;
+  font-family: ${p => p.theme.font.family.mono};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.primary};
 `;

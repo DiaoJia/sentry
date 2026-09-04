@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from django.db import models
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, Model, region_silo_model, sane_repr
-from sentry.db.models.fields.picklefield import PickledObjectField
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
 from sentry.db.models.manager.option import OptionManager
 from sentry.utils.cache import cache
 
@@ -37,7 +36,7 @@ class OrganizationOptionManager(OptionManager["OrganizationOption"]):
 
     def get_value(
         self,
-        organization: Organization,
+        organization: Organization | int,
         key: str,
         default: Any | None = None,
         validate: Callable[[object], bool] | None = None,
@@ -54,11 +53,9 @@ class OrganizationOptionManager(OptionManager["OrganizationOption"]):
         self.reload_cache(organization.id, "organizationoption.unset_value")
 
     def set_value(self, organization: Organization, key: str, value: Any) -> bool:
-        inst, created = self.create_or_update(
-            organization=organization, key=key, values={"value": value}
-        )
+        self.update_or_create(organization=organization, key=key, defaults={"value": value})
         self.reload_cache(organization.id, "organizationoption.set_value")
-        return bool(created) or inst > 0
+        return True
 
     def get_all_values(self, organization: Organization | int) -> Mapping[str, Any]:
         if isinstance(organization, models.Model):
@@ -75,6 +72,16 @@ class OrganizationOptionManager(OptionManager["OrganizationOption"]):
                 self._option_cache[cache_key] = result
 
         return self._option_cache.get(cache_key, {})
+
+    def reload_task_local_cache(self, organization_id: int) -> None:
+        cache_key = self._make_key(organization_id)
+
+        # Reload the local cache with what's in the shared cache.  If the shared cache is
+        # not populated, then subsequent accesses (via get_all_values) will re-generate the
+        # value with an actual query.
+        result = cache.get(cache_key)
+        if result is None and cache_key in self._option_cache:
+            del self._option_cache[cache_key]
 
     def reload_cache(self, organization_id: int, update_reason: str) -> Mapping[str, Any]:
         from sentry.tasks.relay import schedule_invalidate_project_config
@@ -97,7 +104,7 @@ class OrganizationOptionManager(OptionManager["OrganizationOption"]):
         self.reload_cache(instance.organization_id, "organizationoption.post_delete")
 
 
-@region_silo_model
+@cell_silo_model
 class OrganizationOption(Model):
     """
     Organization options apply only to an instance of a organization.
@@ -113,7 +120,7 @@ class OrganizationOption(Model):
 
     organization = FlexibleForeignKey("sentry.Organization")
     key = models.CharField(max_length=64)
-    value = PickledObjectField(null=True)
+    value = models.JSONField(null=True)
 
     objects: ClassVar[OrganizationOptionManager] = OrganizationOptionManager()
 
@@ -123,3 +130,12 @@ class OrganizationOption(Model):
         unique_together = (("organization", "key"),)
 
     __repr__ = sane_repr("organization_id", "key", "value")
+
+
+def get_option(
+    organization: int | Organization,
+    key: str,
+    default: Any | None = None,
+    validate: Callable[[object], bool] | None = None,
+) -> Any:
+    return OrganizationOption.objects.get_value(organization, key, default, validate)

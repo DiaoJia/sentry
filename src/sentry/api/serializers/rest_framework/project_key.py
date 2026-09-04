@@ -1,7 +1,7 @@
-from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
 from sentry.api.fields.empty_integer import EmptyIntegerField
+from sentry.apidocs.omissions import sentry_schema_serializer
 from sentry.loader.browsersdkversion import get_all_browser_sdk_version_choices
 from sentry.loader.dynamic_sdk_options import DynamicSdkLoaderOption
 from sentry.models.projectkey import UseCase
@@ -31,12 +31,16 @@ class DynamicSdkLoaderOptionSerializer(serializers.Serializer):
     - `Performance Monitoring`
     - `Debug Bundles & Logging`
     - `Session Replay` - Note that the loader will load the ES6 bundle instead of the ES5 bundle.
+    - `User Feedback` - Note that the loader will load the ES6 bundle instead of the ES5 bundle.
+    - `Logs and Metrics` - Note that the loader will load the ES6 bundle instead of the ES5 bundle. Requires SDK >= 10.0.0.
     ```json
     {
         "dynamicSdkLoaderOptions": {
             "hasReplay": true,
             "hasPerformance": true,
-            "hasDebug": true
+            "hasDebug": true,
+            "hasFeedback": true,
+            "hasLogsAndMetrics": true
         }
     }
     ```
@@ -45,6 +49,8 @@ class DynamicSdkLoaderOptionSerializer(serializers.Serializer):
     hasReplay = serializers.BooleanField(required=False)
     hasPerformance = serializers.BooleanField(required=False)
     hasDebug = serializers.BooleanField(required=False)
+    hasFeedback = serializers.BooleanField(required=False)
+    hasLogsAndMetrics = serializers.BooleanField(required=False)
 
     def to_internal_value(self, data):
         # Drop any fields that are not specified as a `DynamicSdkLoaderOption`.
@@ -58,11 +64,11 @@ class DynamicSdkLoaderOptionSerializer(serializers.Serializer):
         return super().to_internal_value(new_data)
 
 
-@extend_schema_serializer(
-    exclude_fields=[
-        "public",
-        "secret",
-    ],
+@sentry_schema_serializer(
+    omit_from_public_schema={
+        "public": "Lets a caller supply existing DSN key material; used by relocation and import, not by general clients.",
+        "secret": "Lets a caller supply existing DSN key material; used by relocation and import, not by general clients.",
+    }
 )
 class ProjectKeyPostSerializer(serializers.Serializer):
     name = serializers.CharField(

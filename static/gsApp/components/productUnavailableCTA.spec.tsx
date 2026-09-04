@@ -17,37 +17,35 @@ import {PlanFixture} from 'getsentry/__fixtures__/plan';
 import {PreviewDataFixture} from 'getsentry/__fixtures__/previewData';
 import {ProductUnavailableCTA} from 'getsentry/components/productUnavailableCTA';
 import type {Reservations} from 'getsentry/components/upgradeNowModal/types';
-import usePreviewData from 'getsentry/components/upgradeNowModal/usePreviewData';
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
-import {PlanTier} from 'getsentry/types';
+import {usePreviewData} from 'getsentry/components/upgradeNowModal/usePreviewData';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 
 jest.mock('getsentry/components/upgradeNowModal/usePreviewData');
 
 function renderMockRequests({
-  planTier,
+  isAncientPlan,
   organization,
   canSelfServe,
 }: {
   organization: Organization;
-  planTier: PlanTier;
+  // Legacy plans without performance/tracing take the "request an update" path;
+  // modern plans take the replay-onboarding path.
   canSelfServe?: boolean;
+  isAncientPlan?: boolean;
 }) {
   const subscription = SubscriptionFixture({
     organization,
-    planTier,
+    // m1 is a legacy plan with no performance/tracing categories; am1_f has them.
+    plan: isAncientPlan ? 'm1' : 'am1_f',
     canSelfServe,
   });
 
   act(() => SubscriptionStore.set(organization.slug, subscription));
 
   MockApiClient.addMockResponse({
-    url: `/subscriptions/${organization.slug}/`,
-    body: {
-      planTier,
-    },
+    url: `/customers/${organization.slug}/`,
+    body: {},
   });
-
-  const isAncientPlan = [PlanTier.MM1, PlanTier.MM2].includes(planTier);
 
   if (isAncientPlan) {
     const requestUpdatePlan = MockApiClient.addMockResponse({
@@ -66,15 +64,14 @@ function renderMockRequests({
   return {requestUpdatePlanDueToReplay};
 }
 
-describe('ProductUnavailableCTA', function () {
-  describe('with no billing access', function () {
-    it('renders no alert', function () {
+describe('ProductUnavailableCTA', () => {
+  describe('with no billing access', () => {
+    it('renders no alert', () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'session-replay'],
       });
 
       renderMockRequests({
-        planTier: PlanTier.AM2,
         organization,
       });
 
@@ -83,11 +80,11 @@ describe('ProductUnavailableCTA', function () {
       expect(container).toBeEmptyDOMElement();
     });
 
-    it('without performance and session replay', async function () {
+    it('without performance and session replay', async () => {
       const {organization} = initializeOrg();
 
       const mockRequests = renderMockRequests({
-        planTier: PlanTier.MM1,
+        isAncientPlan: true,
         organization,
       });
 
@@ -103,7 +100,7 @@ describe('ProductUnavailableCTA', function () {
 
       await waitFor(() => {
         expect(mockRequests?.requestUpdatePlan).toHaveBeenCalledWith(
-          `/organizations/org-slug/plan-upgrade-request/`,
+          '/organizations/org-slug/plan-upgrade-request/',
           expect.objectContaining({
             method: 'POST',
           })
@@ -111,7 +108,7 @@ describe('ProductUnavailableCTA', function () {
       });
     });
 
-    it('without session replay', async function () {
+    it('without session replay', async () => {
       const {organization} = initializeOrg({
         organization: {
           features: ['performance-view'],
@@ -119,7 +116,6 @@ describe('ProductUnavailableCTA', function () {
       });
 
       const mockRequests = renderMockRequests({
-        planTier: PlanTier.AM1,
         organization,
       });
 
@@ -146,15 +142,14 @@ describe('ProductUnavailableCTA', function () {
     });
   });
 
-  describe('with billing access', function () {
-    it('renders no alert', function () {
+  describe('with billing access', () => {
+    it('renders no alert', () => {
       const organization = OrganizationFixture({
         access: ['org:billing'],
         features: ['performance-view', 'session-replay'],
       });
 
       renderMockRequests({
-        planTier: PlanTier.AM2,
         organization,
       });
 
@@ -163,7 +158,7 @@ describe('ProductUnavailableCTA', function () {
       expect(container).toBeEmptyDOMElement();
     });
 
-    it('without performance and session replay', async function () {
+    it('without performance and session replay', async () => {
       const {organization} = initializeOrg({
         organization: {
           access: ['org:billing'] as any, // TODO(ts): Fix this type for organizations on a plan
@@ -171,7 +166,7 @@ describe('ProductUnavailableCTA', function () {
       });
 
       renderMockRequests({
-        planTier: PlanTier.MM1,
+        isAncientPlan: true,
         organization,
       });
 
@@ -186,7 +181,7 @@ describe('ProductUnavailableCTA', function () {
       );
     });
 
-    it('without session replay', async function () {
+    it('without session replay', async () => {
       const {organization} = initializeOrg({
         organization: {
           access: ['org:billing'] as any, // TODO(ts): Fix this type for organizations on a plan
@@ -196,14 +191,11 @@ describe('ProductUnavailableCTA', function () {
 
       // can self-serve
       renderMockRequests({
-        planTier: PlanTier.AM1,
         organization,
         canSelfServe: true,
       });
 
-      const MockUsePreviewData = usePreviewData as jest.MockedFunction<
-        typeof usePreviewData
-      >;
+      const MockUsePreviewData = jest.mocked(usePreviewData);
       const mockReservations: Reservations = {
         reservedErrors: 50000,
         reservedTransactions: 0,
@@ -213,6 +205,13 @@ describe('ProductUnavailableCTA', function () {
         reservedUptime: 0,
         reservedProfileDuration: 0,
         reservedProfileDurationUI: 0,
+        reservedLogBytes: 0,
+        reservedSpans: undefined,
+        reservedSeerAutofix: undefined,
+        reservedSeerScanner: undefined,
+        reservedSeerUsers: undefined,
+        reservedSizeAnalyses: undefined,
+        reservedTraceMetricBytes: undefined,
       };
       const mockPlan = PlanFixture({});
       const mockPreview = PreviewDataFixture({});
@@ -240,7 +239,6 @@ describe('ProductUnavailableCTA', function () {
 
       // can not self-serve
       renderMockRequests({
-        planTier: PlanTier.AM1,
         organization,
         canSelfServe: false,
       });

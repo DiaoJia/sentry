@@ -1,17 +1,24 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sentry.issues.ownership.grammar import Matcher, Owner, Rule, dump_schema, resolve_actors
 from sentry.models.groupassignee import GroupAssignee
-from sentry.models.groupowner import GroupOwner, GroupOwnerType, OwnerRuleType
+from sentry.models.groupowner import (
+    PROJECT_OWNERSHIP_VERSION_KEY,
+    GroupOwner,
+    GroupOwnerType,
+    OwnerRuleType,
+)
 from sentry.models.projectownership import ProjectOwnership
 from sentry.models.repository import Repository
+from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.datetime import before_now
-from sentry.testutils.silo import assume_test_silo_mode_of
+from sentry.testutils.silo import assume_test_silo_mode, assume_test_silo_mode_of
 from sentry.testutils.skips import requires_snuba
 from sentry.types.actor import Actor, ActorType
 from sentry.users.models.user_avatar import UserAvatar
 from sentry.users.services.user.service import user_service
+from sentry.utils.cache import cache
 
 pytestmark = requires_snuba
 
@@ -21,7 +28,7 @@ def actor_key(actor):
 
 
 class ProjectOwnershipTestCase(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.rpc_user = user_service.get_user(user_id=self.user.id)
         self.user2 = self.create_user("bar@localhost", username="bar")
         self.organization.member_set.create(user_id=self.user2.id)
@@ -73,16 +80,16 @@ class ProjectOwnershipTestCase(TestCase):
         # Ensure rules match
         assert sorted(o1[1]) == sorted(o2[1])
 
-    def test_get_owners_default(self):
+    def test_get_owners_default(self) -> None:
         ProjectOwnership.objects.create(project_id=self.project.id, fallthrough=True)
         assert ProjectOwnership.get_owners(self.project.id, {}) == ([], None)
 
-    def test_get_owners_no_record(self):
+    def test_get_owners_no_record(self) -> None:
         assert ProjectOwnership.get_owners(self.project.id, {}) == ([], None)
         ProjectOwnership.objects.create(project_id=self.project.id, fallthrough=True)
         assert ProjectOwnership.get_owners(self.project.id, {}) == ([], None)
 
-    def test_get_owners_basic(self):
+    def test_get_owners_basic(self) -> None:
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
         rule_b = Rule(Matcher("path", "src/*"), [Owner("user", self.user.email)])
 
@@ -145,7 +152,7 @@ class ProjectOwnershipTestCase(TestCase):
             ),
         )
 
-    def test_get_owners_when_codeowners_exists_and_no_issueowners(self):
+    def test_get_owners_when_codeowners_exists_and_no_issueowners(self) -> None:
         # This case will never exist bc we create a ProjectOwnership record if none exists when creating a ProjectCodeOwner record.
         # We have this testcase for potential corrupt data.
         self.code_mapping = self.create_code_mapping(project=self.project)
@@ -168,7 +175,7 @@ class ProjectOwnershipTestCase(TestCase):
             ),
         )
 
-    def test_get_owners_when_codeowners_and_issueowners_exists(self):
+    def test_get_owners_when_codeowners_and_issueowners_exists(self) -> None:
         self.code_mapping = self.create_code_mapping(project=self.project2)
 
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
@@ -196,10 +203,154 @@ class ProjectOwnershipTestCase(TestCase):
             ),
         )
 
-    def test_get_issue_owners_no_codeowners_or_issueowners(self):
+    def test_get_owners_codeowners_exclusion_rule(self) -> None:
+        self.code_mapping = self.create_code_mapping(project=self.project)
+
+        rule_a = Rule(Matcher("codeowners", "/apps/"), [Owner("team", self.team.slug)])
+        rule_exclusion = Rule(Matcher("codeowners", "/apps/github"), [])
+
+        self.create_codeowners(
+            self.project,
+            self.code_mapping,
+            raw="/apps/ @tiger-team\n/apps/github\n",
+            schema=dump_schema([rule_a, rule_exclusion]),
+        )
+
+        # File in /apps/github — last matching codeowners rule is exclusion → no owners
+        assert ProjectOwnership.get_owners(
+            self.project.id,
+            {"stacktrace": {"frames": [{"filename": "apps/github/foo.py"}]}},
+        ) == ([], None)
+
+        # File in /apps/bar — only matches rule_a → owned
+        self.assert_ownership_equals(
+            ProjectOwnership.get_owners(
+                self.project.id,
+                {"stacktrace": {"frames": [{"filename": "apps/bar/foo.py"}]}},
+            ),
+            ([Actor(id=self.team.id, actor_type=ActorType.TEAM)], [rule_a]),
+        )
+
+    def test_get_owners_codeowners_exclusion_overridden_by_later_rule(self) -> None:
+        code_mapping = self.create_code_mapping(project=self.project2)
+
+        rule_a = Rule(Matcher("codeowners", "/apps/"), [Owner("team", self.team.slug)])
+        rule_exclusion = Rule(Matcher("codeowners", "/apps/github"), [])
+        rule_c = Rule(
+            Matcher("codeowners", "/apps/github/special"), [Owner("team", self.team2.slug)]
+        )
+
+        self.create_codeowners(
+            self.project2,
+            code_mapping,
+            raw="/apps/ @tiger-team\n/apps/github\n/apps/github/special @dolphin-team\n",
+            schema=dump_schema([rule_a, rule_exclusion, rule_c]),
+        )
+
+        # File in /apps/github/special — last matching codeowners rule has owners,
+        # so exclusion logic doesn't activate. All matching rules are returned.
+        self.assert_ownership_equals(
+            ProjectOwnership.get_owners(
+                self.project2.id,
+                {"stacktrace": {"frames": [{"filename": "apps/github/special/foo.py"}]}},
+            ),
+            (
+                [
+                    Actor(id=self.team.id, actor_type=ActorType.TEAM),
+                    Actor(id=self.team2.id, actor_type=ActorType.TEAM),
+                ],
+                [rule_a, rule_exclusion, rule_c],
+            ),
+        )
+
+    def test_get_owners_codeowners_exclusion_issueowners_still_apply(self) -> None:
+        self.code_mapping = self.create_code_mapping(project=self.project)
+
+        codeowner_rule = Rule(Matcher("codeowners", "/apps/"), [Owner("team", self.team.slug)])
+        codeowner_exclusion = Rule(Matcher("codeowners", "/apps/github"), [])
+
+        self.create_codeowners(
+            self.project,
+            self.code_mapping,
+            raw="/apps/ @tiger-team\n/apps/github\n",
+            schema=dump_schema([codeowner_rule, codeowner_exclusion]),
+        )
+
+        issueowner_rule = Rule(Matcher("path", "*.py"), [Owner("user", self.user.email)])
+        ProjectOwnership.objects.create(
+            project_id=self.project.id,
+            schema=dump_schema([issueowner_rule]),
+        )
+
+        # File in /apps/github — codeowners excluded, but issueowner rule still matches
+        self.assert_ownership_equals(
+            ProjectOwnership.get_owners(
+                self.project.id,
+                {"stacktrace": {"frames": [{"filename": "apps/github/foo.py"}]}},
+            ),
+            ([Actor(id=self.user.id, actor_type=ActorType.USER)], [issueowner_rule]),
+        )
+
+    def test_get_issue_owners_codeowners_exclusion_rule(self) -> None:
+        self.code_mapping = self.create_code_mapping(project=self.project)
+
+        rule_a = Rule(Matcher("codeowners", "/apps/"), [Owner("team", self.team.slug)])
+        rule_exclusion = Rule(Matcher("codeowners", "/apps/github"), [])
+
+        ProjectOwnership.objects.create(project_id=self.project.id)
+
+        self.create_codeowners(
+            self.project,
+            self.code_mapping,
+            raw="/apps/ @tiger-team\n/apps/github\n",
+            schema=dump_schema([rule_a, rule_exclusion]),
+        )
+
+        # File in /apps/github — exclusion prevents codeowners ownership
+        assert (
+            ProjectOwnership.get_issue_owners(
+                self.project.id,
+                {"stacktrace": {"frames": [{"filename": "apps/github/foo.py"}]}},
+            )
+            == []
+        )
+
+        # File in /apps/bar — only matches rule_a → owned
+        assert ProjectOwnership.get_issue_owners(
+            self.project.id,
+            {"stacktrace": {"frames": [{"filename": "apps/bar/foo.py"}]}},
+        ) == [(rule_a, [self.team], OwnerRuleType.CODEOWNERS.value)]
+
+    def test_get_issue_owners_codeowners_exclusion_issueowners_still_apply(self) -> None:
+        self.code_mapping = self.create_code_mapping(project=self.project)
+
+        codeowner_rule = Rule(Matcher("codeowners", "/apps/"), [Owner("team", self.team.slug)])
+        codeowner_exclusion = Rule(Matcher("codeowners", "/apps/github"), [])
+
+        issueowner_rule = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
+
+        ProjectOwnership.objects.create(
+            project_id=self.project.id,
+            schema=dump_schema([issueowner_rule]),
+        )
+
+        self.create_codeowners(
+            self.project,
+            self.code_mapping,
+            raw="/apps/ @tiger-team\n/apps/github\n",
+            schema=dump_schema([codeowner_rule, codeowner_exclusion]),
+        )
+
+        # File in /apps/github — codeowners excluded, but issueowner rule matches
+        assert ProjectOwnership.get_issue_owners(
+            self.project.id,
+            {"stacktrace": {"frames": [{"filename": "apps/github/foo.py"}]}},
+        ) == [(issueowner_rule, [self.team], OwnerRuleType.OWNERSHIP_RULE.value)]
+
+    def test_get_issue_owners_no_codeowners_or_issueowners(self) -> None:
         assert ProjectOwnership.get_issue_owners(self.project.id, {}) == []
 
-    def test_get_issue_owners_only_issueowners_exists(self):
+    def test_get_issue_owners_only_issueowners_exists(self) -> None:
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
         rule_b = Rule(Matcher("path", "src/*"), [Owner("user", self.user.email)])
 
@@ -217,7 +368,7 @@ class ProjectOwnershipTestCase(TestCase):
             {"stacktrace": {"frames": [{"filename": "foo.py"}]}},
         ) == [(rule_a, [self.team], OwnerRuleType.OWNERSHIP_RULE.value)]
 
-    def test_get_issue_owners_where_owner_is_not_in_project(self):
+    def test_get_issue_owners_where_owner_is_not_in_project(self) -> None:
         self.project_2 = self.create_project(organization=self.organization, teams=[self.team3])
 
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
@@ -237,7 +388,7 @@ class ProjectOwnershipTestCase(TestCase):
             == []
         )
 
-    def test_get_issue_owners_only_codeowners_exists_with_default_assignment_settings(self):
+    def test_get_issue_owners_only_codeowners_exists_with_default_assignment_settings(self) -> None:
         # This case will never exist bc we create a ProjectOwnership record if none exists when creating a ProjectCodeOwner record.
         # We have this testcase for potential corrupt data.
         self.code_mapping = self.create_code_mapping(project=self.project)
@@ -258,7 +409,7 @@ class ProjectOwnershipTestCase(TestCase):
             self.project.id, {"stacktrace": {"frames": [{"filename": "foo.js"}]}}
         ) == [(rule_a, [self.team], OwnerRuleType.CODEOWNERS.value)]
 
-    def test_get_issue_owners_when_codeowners_and_issueowners_exists(self):
+    def test_get_issue_owners_when_codeowners_and_issueowners_exists(self) -> None:
         self.code_mapping = self.create_code_mapping(project=self.project2)
 
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
@@ -290,7 +441,7 @@ class ProjectOwnershipTestCase(TestCase):
             (rule_a, [self.team], OwnerRuleType.OWNERSHIP_RULE.value),
         ]
 
-    def test_handle_auto_assignment_when_only_codeowners_exists(self):
+    def test_handle_auto_assignment_when_only_codeowners_exists(self) -> None:
         self.code_mapping = self.create_code_mapping(project=self.project)
 
         rule_c = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
@@ -320,7 +471,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.team_id == self.team.id
 
-    def test_handle_auto_assignment_when_only_suspect_commit_exists_multiple_emails(self):
+    def test_handle_auto_assignment_when_only_suspect_commit_exists_multiple_emails(self) -> None:
         """Test that if a user has 2 verified email addresses, the non-primary one is the commit author, and the project
         is using the suspect committer auto assignment we correctly assign the issue to the user.
         """
@@ -370,7 +521,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.user_id == self.user2.id
 
-    def test_handle_skip_auto_assignment(self):
+    def test_handle_skip_auto_assignment(self) -> None:
         """Test that if an issue has already been manually assigned, we skip overriding the assignment
         on a future event with auto-assignment.
         """
@@ -414,7 +565,7 @@ class ProjectOwnershipTestCase(TestCase):
         assert assignee.user_id == self.user.id
 
     @patch("sentry.models.GroupAssignee.objects.assign")
-    def test_handle_skip_auto_assignment_same_assignee(self, mock_assign):
+    def test_handle_skip_auto_assignment_same_assignee(self, mock_assign: MagicMock) -> None:
         """Test that if an issue has already been assigned, we skip the assignment
         on a future event with auto-assignment if the assignee won't change.
         """
@@ -447,7 +598,7 @@ class ProjectOwnershipTestCase(TestCase):
         ProjectOwnership.handle_auto_assignment(self.project.id, self.event)
         mock_assign.assert_not_called()
 
-    def test_handle_auto_assignment_when_codeowners_and_issueowners_exists(self):
+    def test_handle_auto_assignment_when_codeowners_and_issueowners_exists(self) -> None:
         self.code_mapping = self.create_code_mapping(project=self.project2)
 
         rule_a = Rule(Matcher("path", "*.py"), [Owner("team", self.team.slug)])
@@ -504,7 +655,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.team_id == self.team.id
 
-    def test_no_group_owner(self):
+    def test_no_group_owner(self) -> None:
         self.event = self.store_event(
             data=self.python_event_data(),
             project_id=self.project2.id,
@@ -598,7 +749,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.user_id == self.user2.id
 
-    def test_abs_path_when_filename_present(self):
+    def test_abs_path_when_filename_present(self) -> None:
         frame = {
             "filename": "computer.cpp",
             "abs_path": "C:\\My\\Path\\computer.cpp",
@@ -611,7 +762,7 @@ class ProjectOwnershipTestCase(TestCase):
             self.project.id, {"stacktrace": {"frames": [frame]}}
         ) == ([Actor(id=self.team.id, actor_type=ActorType.TEAM)], [rule])
 
-    def test_saves_without_either_auto_assignment_option(self):
+    def test_saves_without_either_auto_assignment_option(self) -> None:
         self.group = self.create_group(project=self.project)
         # Turn off all autoassignment
         ProjectOwnership.objects.create(
@@ -621,7 +772,7 @@ class ProjectOwnershipTestCase(TestCase):
         )
         assert ProjectOwnership.get_owners(self.project.id, {}) == ([], None)
 
-    def test_force_handle_auto_assignment(self):
+    def test_force_handle_auto_assignment(self) -> None:
         # Run auto-assignment first
         self.code_mapping = self.create_code_mapping(project=self.project)
 
@@ -672,7 +823,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.team_id == self.team.id
 
-    def test_force_handle_auto_assignment_cache_check(self):
+    def test_force_handle_auto_assignment_cache_check(self) -> None:
         # Run auto-assignment first
         self.code_mapping = self.create_code_mapping(project=self.project)
 
@@ -703,7 +854,7 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=self.event.group)
         assert assignee.team_id == self.team.id
 
-    def test_autoassignment_with_multiple_codeowners(self):
+    def test_autoassignment_with_multiple_codeowners(self) -> None:
         processing_team = self.create_team(
             organization=self.organization, slug="processing-team", members=[self.user]
         )
@@ -772,19 +923,71 @@ class ProjectOwnershipTestCase(TestCase):
         assignee = GroupAssignee.objects.get(group=event.group)
         assert assignee.team_id == processing_team.id
 
+    def test_post_save_sets_ownership_version(self) -> None:
+        cache.delete(PROJECT_OWNERSHIP_VERSION_KEY(self.project.id))
+        assert GroupOwner.get_project_ownership_version(self.project.id) is None
+
+        ProjectOwnership.objects.create(
+            project_id=self.project.id,
+            schema=dump_schema([Rule(Matcher("path", "*.py"), [Owner("user", self.user.email)])]),
+        )
+
+        version = GroupOwner.get_project_ownership_version(self.project.id)
+        assert version is not None
+        assert isinstance(version, float)
+
+    def test_post_delete_sets_ownership_version(self) -> None:
+        ownership = ProjectOwnership.objects.create(
+            project_id=self.project.id,
+            schema=dump_schema([Rule(Matcher("path", "*.py"), [Owner("user", self.user.email)])]),
+        )
+
+        cache.delete(PROJECT_OWNERSHIP_VERSION_KEY(self.project.id))
+        assert GroupOwner.get_project_ownership_version(self.project.id) is None
+
+        ownership.delete()
+
+        version = GroupOwner.get_project_ownership_version(self.project.id)
+        assert version is not None
+        assert isinstance(version, float)
+
+    def test_handle_auto_assignment_skips_deactivated_user(self) -> None:
+        event = self.store_event(
+            data=self.python_event_data(),
+            project_id=self.project.id,
+        )
+        assert event.group is not None
+
+        GroupOwner.objects.create(
+            group=event.group,
+            type=GroupOwnerType.SUSPECT_COMMIT.value,
+            user_id=self.user.id,
+            team_id=None,
+            project=self.project,
+            organization=self.project.organization,
+            context={"commitId": 1},
+        )
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.user.is_active = False
+            self.user.save()
+
+        ProjectOwnership.handle_auto_assignment(self.project.id, event)
+        assert not GroupAssignee.objects.filter(group=event.group).exists()
+
 
 class ResolveActorsTestCase(TestCase):
-    def test_no_actors(self):
+    def test_no_actors(self) -> None:
         assert resolve_actors([], self.project.id) == {}
 
-    def test_basic(self):
+    def test_basic(self) -> None:
         owners = [Owner("user", self.user.email), Owner("team", self.team.slug)]
         assert resolve_actors(owners, self.project.id) == {
             owners[0]: Actor(id=self.user.id, actor_type=ActorType.USER),
             owners[1]: Actor(id=self.team.id, actor_type=ActorType.TEAM),
         }
 
-    def test_teams(self):
+    def test_teams(self) -> None:
         # Normal team
         owner1 = Owner("team", self.team.slug)
         actor1 = Actor(id=self.team.id, actor_type=ActorType.TEAM)
@@ -805,7 +1008,7 @@ class ResolveActorsTestCase(TestCase):
             owner3: actor3,
         }
 
-    def test_users(self):
+    def test_users(self) -> None:
         # Normal user
         owner1 = Owner("user", self.user.email)
         actor1 = Actor(id=self.user.id, actor_type=ActorType.USER)
@@ -846,7 +1049,7 @@ class ResolveActorsTestCase(TestCase):
             owner6: actor6,
         }
 
-    def test_with_user_avatar(self):
+    def test_with_user_avatar(self) -> None:
         # Check for regressions associated with serializing to RpcUser with a
         # non-null UserAvatar
 

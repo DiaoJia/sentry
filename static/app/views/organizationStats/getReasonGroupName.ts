@@ -24,6 +24,8 @@ enum DiscardReason {
   INVALID_REPLAY_VIDEO = 'invalid_replay_video',
   PAYLOAD = 'payload',
   INVALID_COMPRESSION = 'invalid_compression',
+  INVALID_SIGNATURE = 'invalid_signature',
+  MISSING_SIGNATURE = 'missing_signature',
   TOO_LARGE = 'too_large', // Left for backwards compatibility
   // All the too_large we want to communicate to the end-user
   TOO_LARGE_EVENT = 'too_large:event',
@@ -81,6 +83,9 @@ export enum ClientDiscardReason {
   INTERNAL_SDK_ERROR = 'internal_sdk_error',
   INSUFFICIENT_DATA = 'insufficient_data',
   BACKPRESSURE = 'backpressure',
+  IGNORED = 'ignored',
+  NO_PARENT_SPAN = 'no_parent_span',
+  CALLBACK_ERROR = 'callback_error',
 }
 
 enum RateLimitedReason {
@@ -89,6 +94,9 @@ enum RateLimitedReason {
   KEY_QUOTA = 'key_quota',
   SPIKE_PROTECTION = 'spike_protection',
   SMART_RATE_LIMIT = 'smart_rate_limit',
+  PROJECT_ABUSE_LIMIT = 'project_abuse_limit',
+  ORG_ABUSE_LIMIT = 'org_abuse_limit',
+  GLOBAL_ABUSE_LIMIT = 'global_abuse_limit',
 }
 
 // Invalid reasons should not be exposed directly, but instead in the following groups:
@@ -115,6 +123,7 @@ const invalidReasonsGroup: Record<string, DiscardReason[]> = {
     DiscardReason.INVALID_REPLAY_RECORDING,
     DiscardReason.INVALID_REPLAY_VIDEO,
   ],
+  invalid_signature: [DiscardReason.INVALID_SIGNATURE, DiscardReason.MISSING_SIGNATURE],
   payload: [DiscardReason.PAYLOAD, DiscardReason.INVALID_COMPRESSION],
   too_large_other: [DiscardReason.TOO_LARGE],
   too_large_event: [DiscardReason.TOO_LARGE_EVENT],
@@ -161,7 +170,9 @@ function getFilteredReasonGroupName(reason: string): string {
     return 'dynamic sampling';
   }
 
-  return startCase(reason);
+  // A filter that exists once per configured instance, such as a custom inbound
+  // filter, appends its id after a colon. Every instance belongs to one group.
+  return startCase(reason.split(':')[0]);
 }
 
 function getInvalidReasonGroupName(reason: string): string {
@@ -206,6 +217,12 @@ function getRateLimitedReasonGroupName(reason: RateLimitedReason | string): stri
     case RateLimitedReason.SPIKE_PROTECTION:
     case RateLimitedReason.SMART_RATE_LIMIT:
       return 'spike protection';
+    case RateLimitedReason.PROJECT_ABUSE_LIMIT:
+      return 'project abuse limit';
+    case RateLimitedReason.ORG_ABUSE_LIMIT:
+      return 'org abuse limit';
+    case RateLimitedReason.GLOBAL_ABUSE_LIMIT:
+      return 'global abuse limit';
     default:
       return 'internal';
   }
@@ -224,6 +241,9 @@ function getClientDiscardReasonGroupName(reason: ClientDiscardReason): string {
     case ClientDiscardReason.INTERNAL_SDK_ERROR:
     case ClientDiscardReason.INSUFFICIENT_DATA:
     case ClientDiscardReason.BACKPRESSURE:
+    case ClientDiscardReason.IGNORED:
+    case ClientDiscardReason.NO_PARENT_SPAN:
+    case ClientDiscardReason.CALLBACK_ERROR:
       return reason;
     default:
       return 'other';
@@ -237,7 +257,7 @@ export function getReasonGroupName(outcome: string | number, reason: string): st
     case Outcome.CARDINALITY_LIMITED:
     case Outcome.RATE_LIMITED:
     case Outcome.ABUSE:
-      return getRateLimitedReasonGroupName(reason as RateLimitedReason);
+      return getRateLimitedReasonGroupName(reason);
     case Outcome.FILTERED:
       return getFilteredReasonGroupName(reason);
     case Outcome.CLIENT_DISCARD:

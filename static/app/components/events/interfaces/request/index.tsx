@@ -1,35 +1,35 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import ClippedBox from 'sentry/components/clippedBox';
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import {EventDataSection} from 'sentry/components/events/eventDataSection';
+import {CodeBlock} from '@sentry/scraps/code';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+import {Text} from '@sentry/scraps/text';
+
+import {CopyAsDropdown} from 'sentry/components/copyAsDropdown';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
 import {GraphQlRequestBody} from 'sentry/components/events/interfaces/request/graphQlRequestBody';
 import {getCurlCommand, getFullUrl} from 'sentry/components/events/interfaces/utils';
 import {
   KeyValueData,
   type KeyValueDataContentProps,
 } from 'sentry/components/keyValueData';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Truncate from 'sentry/components/truncate';
+import {StructuredEventData} from 'sentry/components/structuredEventData';
+import {JsonEventData} from 'sentry/components/structuredEventData/jsonEventData';
+import {Truncate} from 'sentry/components/truncate';
 import {IconOpen} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {EntryRequest, Event} from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
-import {isUrl} from 'sentry/utils/string/isUrl';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {FoldSection} from 'sentry/views/issueDetails/streamline/foldSection';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
+import {copyToClipboard} from 'sentry/utils/useCopyToClipboard';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
-import {
-  getBodyContent,
-  RichHttpContentClippedBoxBodySection,
-} from './richHttpContentClippedBoxBodySection';
-import {RichHttpContentClippedBoxKeyValueList} from './richHttpContentClippedBoxKeyValueList';
+import {getTransformedData} from './getTransformedData';
 
 interface RequestProps {
   data: EntryRequest['data'];
@@ -42,49 +42,86 @@ interface RequestBodyProps extends RequestProps {
 
 type View = 'formatted' | 'curl';
 
-function RequestBodySection({data, event, meta}: RequestBodyProps) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
+function getBodyContent({
+  data,
+  meta,
+  inferredContentType,
+}: {
+  data: EntryRequest['data']['data'];
+  inferredContentType: EntryRequest['data']['inferredContentType'];
+  meta: Record<any, any> | undefined;
+}) {
+  switch (inferredContentType) {
+    case 'application/json':
+      return (
+        <JsonEventData
+          data-test-id="rich-http-content-body-context-data"
+          data={data}
+          showCopyButton
+        />
+      );
+    case 'application/x-www-form-urlencoded':
+    case 'multipart/form-data': {
+      const transformedData = getTransformedData(data, meta).map(d => {
+        const [key, value] = d.data;
+        return {
+          key,
+          subject: key,
+          value,
+          meta: d.meta,
+        };
+      });
 
+      if (!transformedData.length) {
+        return null;
+      }
+
+      return (
+        <KeyValueList
+          data-test-id="rich-http-content-body-key-value-list"
+          data={transformedData}
+          isContextData
+        />
+      );
+    }
+
+    default:
+      return (
+        <pre data-test-id="rich-http-content-body-section-pre">
+          <StructuredEventData data={data} meta={meta} withAnnotatedText showCopyButton />
+        </pre>
+      );
+  }
+}
+
+function RequestBodySection({data, event, meta}: RequestBodyProps) {
   if (!defined(data.data)) {
     return null;
   }
 
   if (data.apiTarget === 'graphql' && typeof data.data.query === 'string') {
-    return hasStreamlinedUI ? (
+    return (
       <RequestCardPanel>
         <KeyValueData.Title>{t('Body')}</KeyValueData.Title>
         <GraphQlRequestBody data={data.data} {...{event, meta}} />
       </RequestCardPanel>
-    ) : (
-      <GraphQlRequestBody data={data.data} {...{event, meta}} />
     );
   }
 
-  if (hasStreamlinedUI) {
-    const contentBody = getBodyContent({
-      data: data.data,
-      meta: meta?.data,
-      inferredContentType: data.inferredContentType,
-    });
-    return (
-      <RequestCardPanel>
-        <KeyValueData.Title>{t('Body')}</KeyValueData.Title>
-        {contentBody}
-      </RequestCardPanel>
-    );
-  }
-
+  const contentBody = getBodyContent({
+    data: data.data,
+    meta: meta?.data,
+    inferredContentType: data.inferredContentType,
+  });
   return (
-    <RichHttpContentClippedBoxBodySection
-      data={data.data}
-      inferredContentType={data.inferredContentType}
-      meta={meta?.data}
-    />
+    <RequestCardPanel>
+      <KeyValueData.Title>{t('Body')}</KeyValueData.Title>
+      {contentBody}
+    </RequestCardPanel>
   );
 }
 
 export function Request({data, event}: RequestProps) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
   const entryIndex = event.entries.findIndex(entry => entry.type === EntryType.REQUEST);
   const meta = event._meta?.entries?.[entryIndex]?.data;
 
@@ -98,7 +135,7 @@ export function Request({data, event}: RequestProps) {
 
   let fullUrl = getFullUrl(data);
 
-  if (!isUrl(fullUrl)) {
+  if (!isValidUrl(fullUrl)) {
     // Check if the url passed in is a safe url to avoid XSS
     fullUrl = undefined;
   }
@@ -113,126 +150,91 @@ export function Request({data, event}: RequestProps) {
 
   let actions: React.ReactNode = null;
 
-  if (!isPartial && fullUrl) {
+  const canGenerateCurlCommand = !isPartial && fullUrl;
+
+  const shouldRenderCopyAsDropdown = fullUrl || parsedUrl?.pathname;
+
+  const shouldRenderActions = canGenerateCurlCommand || shouldRenderCopyAsDropdown;
+
+  if (shouldRenderActions) {
     actions = (
-      <SegmentedControl aria-label={t('View')} size="xs" value={view} onChange={setView}>
-        <SegmentedControl.Item key="formatted">
-          {/* Translators: this means "formatted" rendering (fancy tables) */}
-          {t('Formatted')}
-        </SegmentedControl.Item>
-        <SegmentedControl.Item key="curl" textValue="curl">
-          <Monospace>curl</Monospace>
-        </SegmentedControl.Item>
-      </SegmentedControl>
+      <Flex gap="sm" align="center">
+        {canGenerateCurlCommand && (
+          <SegmentedControl
+            aria-label={t('View')}
+            size="xs"
+            value={view}
+            onChange={setView}
+          >
+            <SegmentedControl.Item key="formatted">
+              {/* Translators: this means "formatted" rendering (fancy tables) */}
+              {t('Formatted')}
+            </SegmentedControl.Item>
+            <SegmentedControl.Item key="curl" textValue="curl">
+              <Text monospace>curl</Text>
+            </SegmentedControl.Item>
+          </SegmentedControl>
+        )}
+
+        {shouldRenderCopyAsDropdown && (
+          <CopyAsDropdown
+            size="xs"
+            items={[
+              {
+                key: 'fullUrl',
+                label: t('Full URL'),
+                onAction: () => copyToClipboard(fullUrl ?? ''),
+                disabled: !fullUrl,
+              },
+              {
+                key: 'path',
+                label: t('Path'),
+                onAction: () => copyToClipboard(parsedUrl?.pathname ?? ''),
+                disabled: !parsedUrl?.pathname,
+              },
+            ]}
+          />
+        )}
+      </Flex>
     );
   }
 
   const title = (
-    <Fragment>
-      <ExternalLink href={fullUrl} title={fullUrl}>
-        <Path>
-          <strong>{data.method || 'GET'}</strong>
-          <Truncate value={parsedUrl ? parsedUrl.pathname : ''} maxLength={36} leftTrim />
-        </Path>
-        {fullUrl && <StyledIconOpen size="xs" />}
-      </ExternalLink>
-      <small>{parsedUrl ? parsedUrl.hostname : ''}</small>
-    </Fragment>
+    <TruncatedPathLink method={data.method} url={parsedUrl} fullUrl={fullUrl} />
   );
 
-  if (hasStreamlinedUI) {
-    return (
-      <FoldSection
-        sectionKey={SectionKey.REQUEST}
-        title={t('HTTP Request')}
-        actions={actions}
-      >
-        <SummaryLine>{title}</SummaryLine>
-        {view === 'curl' ? (
-          <CodeSnippet language="bash">{getCurlCommand(data)}</CodeSnippet>
-        ) : (
-          <Fragment>
-            <RequestBodySection data={data} event={event} meta={meta} />
-            <RequestDataCard
-              title={t('Query String')}
-              data={data.query}
-              meta={meta?.query}
-            />
-            <RequestDataCard
-              title={t('Fragment')}
-              data={data.fragment}
-              meta={undefined}
-            />
-            <RequestDataCard
-              title={t('Cookies')}
-              data={data.cookies}
-              meta={meta?.cookies}
-            />
-            <RequestDataCard
-              title={t('Headers')}
-              data={data.headers}
-              meta={meta?.headers}
-            />
-            <RequestDataCard title={t('Environment')} data={data.env} meta={meta?.env} />
-          </Fragment>
-        )}
-      </FoldSection>
-    );
-  }
-
   return (
-    <EventDataSection
-      type={SectionKey.REQUEST}
-      title={title}
+    <FoldSection
+      sectionKey={SectionKey.REQUEST}
+      title={t('HTTP Request')}
       actions={actions}
-      className="request"
     >
+      {title}
       {view === 'curl' ? (
-        <CodeSnippet language="bash">{getCurlCommand(data)}</CodeSnippet>
+        <CodeBlock language="bash">{getCurlCommand(data)}</CodeBlock>
       ) : (
         <Fragment>
-          {defined(data.query) && (
-            <RichHttpContentClippedBoxKeyValueList
-              title={t('Query String')}
-              data={data.query}
-              meta={meta?.query}
-              isContextData
-            />
-          )}
-          {defined(data.fragment) && (
-            <ClippedBox title={t('Fragment')}>
-              <ErrorBoundary mini>
-                <pre>{data.fragment}</pre>
-              </ErrorBoundary>
-            </ClippedBox>
-          )}
-          <RequestBodySection {...{data, event, meta}} />
-          {defined(data.cookies) && Object.keys(data.cookies).length > 0 && (
-            <RichHttpContentClippedBoxKeyValueList
-              defaultCollapsed
-              title={t('Cookies')}
-              data={data.cookies}
-              meta={meta?.cookies}
-            />
-          )}
-          {defined(data.headers) && (
-            <RichHttpContentClippedBoxKeyValueList
-              title={t('Headers')}
-              data={data.headers}
-              meta={meta?.headers}
-            />
-          )}
-          {defined(data.env) && (
-            <RichHttpContentClippedBoxKeyValueList
-              defaultCollapsed
-              title={t('Environment')}
-              data={data.env}
-              meta={meta?.env}
-            />
-          )}
+          <RequestBodySection data={data} event={event} meta={meta} />
+          <RequestDataCard
+            title={t('Query String')}
+            data={data.query}
+            meta={meta?.query}
+          />
+          <RequestDataCard title={t('Fragment')} data={data.fragment} meta={undefined} />
+          <RequestDataCard
+            title={t('Cookies')}
+            data={data.cookies}
+            meta={meta?.cookies}
+          />
+          <RequestDataCard
+            title={t('Headers')}
+            data={data.headers}
+            meta={meta?.headers}
+          />
+          <RequestDataCard title={t('Environment')} data={data.env} meta={meta?.env} />
         </Fragment>
       )}
-    </EventDataSection>
+    </FoldSection>
   );
 }
 
@@ -279,37 +281,31 @@ function RequestDataCard({
   );
 }
 
-const Monospace = styled('span')`
-  font-family: ${p => p.theme.text.familyMono};
-`;
-
-const Path = styled('span')`
-  color: ${p => p.theme.textColor};
-  text-transform: none;
-  font-weight: ${p => p.theme.fontWeightNormal};
-
-  & strong {
-    margin-right: ${space(0.5)};
-  }
-`;
-
-// Nudge the icon down so it is centered. the `external-icon` class
-// doesn't quite get it in place.
-const StyledIconOpen = styled(IconOpen)`
-  transition: 0.1s linear color;
-  margin: 0 ${space(0.5)};
-  color: ${p => p.theme.subText};
-  position: relative;
-  top: 1px;
-
-  &:hover {
-    color: ${p => p.theme.textColor};
-  }
-`;
-
-const SummaryLine = styled('div')`
-  margin-bottom: ${space(1)};
-`;
+interface TruncatedPathLinkProps {
+  fullUrl?: string;
+  method?: string | null;
+  url?: HTMLAnchorElement | null;
+}
+function TruncatedPathLink(props: TruncatedPathLinkProps) {
+  return (
+    <Flex as="span" gap="sm" align="baseline" padding="0 0 md 0">
+      <Text bold>{props.method || 'GET'}</Text>
+      <ExternalLink href={props.fullUrl} title={props.fullUrl}>
+        <Flex gap="xs" align="baseline">
+          {flexProps => (
+            <Text {...flexProps} variant="primary">
+              <Truncate value={props.url?.pathname ?? ''} maxLength={36} leftTrim />
+              {props.fullUrl && (
+                <IconOpen style={{transform: 'translateY(1px)'}} size="xs" />
+              )}
+            </Text>
+          )}
+        </Flex>
+      </ExternalLink>
+      <Text variant="muted">{props.url?.hostname ?? ''}</Text>
+    </Flex>
+  );
+}
 
 const RequestCardPanel = styled(KeyValueData.CardPanel)`
   display: block;

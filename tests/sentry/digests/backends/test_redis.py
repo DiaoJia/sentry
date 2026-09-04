@@ -7,16 +7,21 @@ import pytest
 from sentry.digests.backends.base import InvalidState
 from sentry.digests.backends.redis import RedisBackend
 from sentry.digests.types import Notification, Record
+from sentry.models.project import Project
 from sentry.testutils.cases import TestCase
 
 
 class RedisBackendTestCase(TestCase):
     @cached_property
+    def project(self) -> Project:
+        return self.create_project(fire_project_created=True)
+
+    @cached_property
     def notification(self) -> Notification:
-        rule = self.event.project.rule_set.all()[0]
+        rule = self.create_project_rule(project=self.project)
         return Notification(self.event, (rule.id,), str(uuid.uuid4()))
 
-    def test_basic(self):
+    def test_basic(self) -> None:
         backend = RedisBackend()
 
         # The first item should return "true", indicating that this timeline
@@ -46,7 +51,7 @@ class RedisBackendTestCase(TestCase):
         # longer exist at this point.
         assert set(backend.schedule(time.time())) == set()
 
-    def test_truncation(self):
+    def test_truncation(self) -> None:
         backend = RedisBackend(capacity=2, truncation_chance=1.0)
 
         records = [Record(f"record:{i}", self.notification, time.time()) for i in range(4)]
@@ -56,7 +61,7 @@ class RedisBackendTestCase(TestCase):
         with backend.digest("timeline", 0) as records:
             assert {record.key for record in records} == {"record:2", "record:3"}
 
-    def test_maintenance_failure_recovery(self):
+    def test_maintenance_failure_recovery(self) -> None:
         backend = RedisBackend()
 
         record_1 = Record("record:1", self.notification, time.time())
@@ -87,7 +92,7 @@ class RedisBackendTestCase(TestCase):
         with backend.digest("timeline", 0) as records:
             assert {record.key for record in records} == {"record:1", "record:2"}
 
-    def test_maintenance_failure_recovery_with_capacity(self):
+    def test_maintenance_failure_recovery_with_capacity(self) -> None:
         backend = RedisBackend(capacity=10, truncation_chance=0.0)
 
         t = time.time()
@@ -121,7 +126,7 @@ class RedisBackendTestCase(TestCase):
             expected_keys = {f"record:{i}" for i in range(10, 20)}
             assert {record.key for record in records} == expected_keys
 
-    def test_delete(self):
+    def test_delete(self) -> None:
         backend = RedisBackend()
         backend.add("timeline", Record("record:1", self.notification, time.time()))
         backend.delete("timeline")
@@ -133,7 +138,7 @@ class RedisBackendTestCase(TestCase):
         assert set(backend.schedule(time.time())) == set()
         assert len(backend._get_connection("timeline").keys("d:*")) == 0
 
-    def test_missing_record_contents(self):
+    def test_missing_record_contents(self) -> None:
         backend = RedisBackend()
 
         record_1 = Record("record:1", self.notification, time.time())
@@ -148,7 +153,7 @@ class RedisBackendTestCase(TestCase):
         with backend.digest("timeline", 0) as records:
             assert {record.key for record in records} == {"record:2"}
 
-    def test_large_digest(self):
+    def test_large_digest(self) -> None:
         backend = RedisBackend()
 
         n = 8192
@@ -158,3 +163,62 @@ class RedisBackendTestCase(TestCase):
 
         with backend.digest("timeline", 0) as records:
             assert len(records) == n
+
+    def test_schedule_sets_have_an_expiry(self) -> None:
+        backend = RedisBackend()
+        connection = backend._get_connection("timeline")
+
+        # The first record puts the timeline in the "ready" set.
+        backend.add("timeline", Record("record:1", self.notification, time.time()))
+
+        ready_ttl = connection.ttl("d:s:r")
+        assert ready_ttl > 0
+        assert ready_ttl >= backend.ttl
+
+        connection.expire("d:s:r", 60)
+        assert set(backend.schedule(time.time() - 3600)) == set()
+        assert connection.ttl("d:s:r") > 60
+
+        connection.expire("d:s:r", 60)
+        backend.maintenance(time.time() - 3600)
+        assert connection.ttl("d:s:r") > 60
+
+        # Closing a digest puts the timeline back in the "waiting" set, which
+        # also has to carry an expiry.
+        with backend.digest("timeline", 0):
+            pass
+
+        waiting_ttl = connection.ttl("d:s:w")
+        assert waiting_ttl > 0
+        assert waiting_ttl >= backend.ttl
+
+        # The ready set is gone now that the timeline went back to the waiting
+        # set. A scheduler pass creates it again, so the expiry has to be set
+        # after the move. A TTL of -2 means the key is not there.
+        assert connection.ttl("d:s:r") == -2
+        assert {entry.key for entry in backend.schedule(time.time() + 3600)} == {"timeline"}
+        assert connection.ttl("d:s:r") >= backend.ttl
+
+    def test_pending_digest_is_not_dropped_by_the_schedule_expiry(self) -> None:
+        """
+        The schedule expiry slides forward on every write to a timeline, so it
+        is never shorter than the expiry of the keys the schedule points to.
+
+        This asserts that ordering rather than waiting out a wall clock,
+        because Redis counts time to live on the server.
+        """
+        backend = RedisBackend()
+        connection = backend._get_connection("timeline")
+
+        records = [Record(f"record:{i}", self.notification, time.time()) for i in range(5)]
+        for record in records:
+            backend.add("timeline", record)
+
+        schedule_ttl = connection.ttl("d:s:r")
+        assert schedule_ttl >= connection.ttl("d:t:timeline")
+        for record in records:
+            assert schedule_ttl >= connection.ttl(f"d:t:timeline:r:{record.key}")
+
+        # Nothing pending was dropped.
+        with backend.digest("timeline", 0) as digested:
+            assert {record.key for record in digested} == {record.key for record in records}

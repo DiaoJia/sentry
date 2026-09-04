@@ -6,7 +6,7 @@ import {DynamicSamplingPanel} from 'admin/views/dynamicSamplingPanel';
 const devEnvRule = {
   samplingValue: {
     type: 'sampleRate',
-    value: 1.0,
+    value: 1,
   },
   type: 'trace',
   condition: {
@@ -31,8 +31,8 @@ function mockProjectConfigResponse(projectId: string, configs: Record<string, un
   });
 }
 
-describe('Dynamic Sampling Panel', function () {
-  it('renders dynamic sampling rules', async function () {
+describe('Dynamic Sampling Panel', () => {
+  it('renders dynamic sampling rules', async () => {
     const {project} = initializeOrg();
 
     mockProjectConfigResponse(project.id, {
@@ -57,7 +57,7 @@ describe('Dynamic Sampling Panel', function () {
     expect(screen.getByText('100%')).toBeInTheDocument();
   });
 
-  it('loads data from the region API', async function () {
+  it('loads data from the region API', async () => {
     const {project, organization} = initializeOrg();
 
     const mockGet = mockProjectConfigResponse(project.id, {
@@ -90,7 +90,7 @@ describe('Dynamic Sampling Panel', function () {
     );
   });
 
-  it('renders empty table if there is no valid config', async function () {
+  it('renders empty table if there is no valid config', async () => {
     const {project} = initializeOrg();
 
     mockProjectConfigResponse(project.id, {
@@ -105,7 +105,7 @@ describe('Dynamic Sampling Panel', function () {
     expect(emptyTableMsg).toBeInTheDocument();
   });
 
-  it('renders empty table if config does not contain dynamic sampling', async function () {
+  it('renders empty table if config does not contain dynamic sampling', async () => {
     const {project} = initializeOrg();
 
     mockProjectConfigResponse(project.id, {
@@ -120,7 +120,7 @@ describe('Dynamic Sampling Panel', function () {
     expect(emptyTableMsg).toBeInTheDocument();
   });
 
-  it('renders empty table if dynamic sampling config is empty', async function () {
+  it('renders empty table if dynamic sampling config is empty', async () => {
     const {project} = initializeOrg();
 
     mockProjectConfigResponse(project.id, {
@@ -141,13 +141,13 @@ describe('Dynamic Sampling Panel', function () {
     expect(emptyTableMsg).toBeInTheDocument();
   });
 
-  it('renders conditions like in the discover search bar', async function () {
+  it('renders conditions like in the discover search bar', async () => {
     const {project} = initializeOrg();
 
     const rule1 = {
       samplingValue: {
-        type: 'reservoir',
-        limit: 100,
+        type: 'minimumSampleRate',
+        value: 1,
       },
       type: 'transaction',
       id: 3005,
@@ -163,8 +163,8 @@ describe('Dynamic Sampling Panel', function () {
 
     const rule2 = {
       samplingValue: {
-        type: 'reservoir',
-        limit: 300,
+        type: 'minimumSampleRate',
+        value: 0.5,
       },
       type: 'transaction',
       id: 3001,
@@ -290,8 +290,9 @@ describe('Dynamic Sampling Panel', function () {
     expect(timeRanges[0]).toHaveTextContent('Start:Jun 19, 2024 9:03 AM');
     expect(timeRanges[0]).toHaveTextContent('End:Jun 21, 2024 9:03 AM');
 
-    // Check that the limit is displayed if available
-    const limits = screen.queryAllByTestId('limit');
-    expect(limits[0]).toHaveTextContent('Limit:100');
+    // Check that minimum sample rate values are displayed.
+    expect(screen.getAllByText('Minimum Sample Rate')).toHaveLength(2);
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(screen.getAllByText('100%')).toHaveLength(3);
   });
 });

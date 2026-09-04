@@ -1,20 +1,23 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.urls import reverse
 
+from sentry.models.organization import Organization
 from sentry.sentry_apps.models.platformexternalissue import PlatformExternalIssue
 from sentry.testutils.cases import APITestCase
+from sentry.testutils.silo import assume_test_silo_mode_of, control_silo_test
 
 
+@control_silo_test
 class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.superuser = self.create_user(email="a@example.com", is_superuser=True)
         self.user = self.create_user(email="boop@example.com")
         self.org = self.create_organization(owner=self.user)
         self.project = self.create_project(organization=self.org)
         self.group = self.create_group(project=self.project)
 
-    def _set_up_sentry_app(self, name, scopes):
+    def _set_up_sentry_app(self, name: str, scopes: list[str]) -> None:
         self.sentry_app = self.create_sentry_app(
             name=name,
             organization=self.org,
@@ -33,7 +36,7 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
             "sentry-api-0-sentry-app-installation-external-issues", args=[self.install.uuid]
         )
 
-    def _post_data(self):
+    def _post_data(self) -> dict[str, str | int]:
         return {
             "issueId": self.group.id,
             "webUrl": "https://somerandom.io/project/issue-id",
@@ -41,7 +44,7 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
             "identifier": "issue-1",
         }
 
-    def test_creates_external_issue(self):
+    def test_creates_external_issue(self) -> None:
         self._set_up_sentry_app("Testin", ["event:write"])
         data = self._post_data()
 
@@ -49,7 +52,8 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
             self.url, data=data, HTTP_AUTHORIZATION=f"Bearer {self.api_token.token}"
         )
 
-        external_issue = PlatformExternalIssue.objects.get()
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            external_issue = PlatformExternalIssue.objects.get()
 
         assert response.status_code == 200
         assert response.data == {
@@ -60,10 +64,12 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
             "webUrl": "https://somerandom.io/project/issue-id",
         }
 
-    def test_invalid_group_id(self):
+    def test_invalid_group_id(self) -> None:
         self._set_up_sentry_app("Testin", ["event:write"])
         data = self._post_data()
-        data["issueId"] = self.create_group(project=self.create_project()).id
+        other_org = self.create_organization()
+        other_project = self.create_project(organization=other_org)
+        data["issueId"] = self.create_group(project=other_project).id
 
         response = self.client.post(
             self.url, data=data, HTTP_AUTHORIZATION=f"Bearer {self.api_token.token}"
@@ -71,7 +77,27 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
 
         assert response.status_code == 404
 
-    def test_invalid_scopes(self):
+    def test_member_without_project_access(self) -> None:
+        self._set_up_sentry_app("Testin", ["event:write"])
+        with assume_test_silo_mode_of(Organization):
+            self.org.flags.allow_joinleave = False
+            self.org.save()
+
+        member_team = self.create_team(organization=self.org)
+        self.create_project(organization=self.org, teams=[member_team])
+        restricted_member = self.create_user(email="restricted@example.com")
+        self.create_member(
+            organization=self.org, user=restricted_member, role="member", teams=[member_team]
+        )
+        self.login_as(restricted_member)
+
+        response = self.client.post(self.url, data=self._post_data())
+
+        assert response.status_code == 403
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert not PlatformExternalIssue.objects.exists()
+
+    def test_invalid_scopes(self) -> None:
         self._set_up_sentry_app("Testin", ["project:read"])
         data = self._post_data()
 
@@ -80,7 +106,7 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
         )
         assert response.status_code == 403
 
-    def test_invalid_token(self):
+    def test_invalid_token(self) -> None:
         """
         You can only create external issues for the integration
         whose token you are using to hit this endpoint.
@@ -107,7 +133,9 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
     @patch(
         "sentry.sentry_apps.external_issues.external_issue_creator.PlatformExternalIssue.objects.update_or_create"
     )
-    def test_external_issue_creation_fails_with_db_error(self, mock_update_or_create):
+    def test_external_issue_creation_fails_with_db_error(
+        self, mock_update_or_create: MagicMock
+    ) -> None:
         self._set_up_sentry_app("Testin", ["event:write"])
         mock_update_or_create.side_effect = Exception("bruh")
         data = self._post_data()
@@ -118,6 +146,6 @@ class SentryAppInstallationExternalIssuesEndpointTest(APITestCase):
 
         assert response.status_code == 500
         assert response.data == {
-            "detail": f"An issue occured during the integration platform process. Sentry error ID: {None}"
+            "detail": f"An issue occurred during the integration platform process. Sentry error ID: {None}"
         }
         mock_update_or_create.assert_called_once()

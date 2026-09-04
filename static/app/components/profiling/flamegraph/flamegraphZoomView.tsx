@@ -1,11 +1,18 @@
-import type {CSSProperties} from 'react';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import {vec2} from 'gl-matrix';
 
+import type {CSS} from '@sentry/scraps/cssTypes';
+import {Stack} from '@sentry/scraps/layout';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import {FlamegraphTooltip} from 'sentry/components/profiling/flamegraph/flamegraphTooltip';
 import {t} from 'sentry/locale';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import type {
+  AggregateProfileSource,
+  ProfileSource,
+} from 'sentry/utils/analytics/profilingAnalyticsEvents';
 import type {
   CanvasPoolManager,
   CanvasScheduler,
@@ -36,6 +43,7 @@ import {GridRenderer} from 'sentry/utils/profiling/renderers/gridRenderer';
 import {SampleTickRenderer} from 'sentry/utils/profiling/renderers/sampleTickRenderer';
 import {SelectedFrameRenderer} from 'sentry/utils/profiling/renderers/selectedFrameRenderer';
 import {Rect} from 'sentry/utils/profiling/speedscope';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 import {useCanvasScroll} from './interactions/useCanvasScroll';
 import {useCanvasZoomOrScroll} from './interactions/useCanvasZoomOrScroll';
@@ -83,6 +91,7 @@ interface FlamegraphZoomViewProps {
   flamegraphRenderer: FlamegraphRenderer | null;
   flamegraphView: CanvasView<Flamegraph> | null;
   profileGroup: ProfileGroup;
+  profileType: ProfileSource | AggregateProfileSource;
   scheduler: CanvasScheduler;
   setFlamegraphCanvasRef: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setFlamegraphOverlayCanvasRef: React.Dispatch<
@@ -91,8 +100,6 @@ interface FlamegraphZoomViewProps {
   disableCallOrderSort?: boolean;
   disableColorCoding?: boolean;
   disableGrid?: boolean;
-  disablePanX?: boolean;
-  disableZoom?: boolean;
 }
 
 function FlamegraphZoomView({
@@ -104,16 +111,16 @@ function FlamegraphZoomView({
   flamegraphOverlayCanvasRef,
   flamegraphView,
   profileGroup,
+  profileType,
   setFlamegraphCanvasRef,
   setFlamegraphOverlayCanvasRef,
   contextMenu,
   scheduler,
-  disablePanX = false,
-  disableZoom = false,
   disableGrid = false,
   disableCallOrderSort = false,
   disableColorCoding = false,
 }: FlamegraphZoomViewProps): React.ReactElement {
+  const organization = useOrganization();
   const flamegraphTheme = useFlamegraphTheme();
   const flamegraphSearch = useFlamegraphSearch();
   const isInternalFlamegraphDebugModeEnabled = useInternalFlamegraphDebugMode();
@@ -131,7 +138,7 @@ function FlamegraphZoomView({
 
   const selectedFramesRef = useRef<FlamegraphFrame[] | null>(null);
 
-  const textRenderer: FlamegraphTextRenderer | null = useMemo(() => {
+  const textRenderer = useMemo(() => {
     if (!flamegraphOverlayCanvasRef) {
       return null;
     }
@@ -142,7 +149,7 @@ function FlamegraphZoomView({
     );
   }, [flamegraph, flamegraphOverlayCanvasRef, flamegraphTheme]);
 
-  const gridRenderer: GridRenderer | null = useMemo(() => {
+  const gridRenderer = useMemo(() => {
     if (!flamegraphOverlayCanvasRef || disableGrid) {
       return null;
     }
@@ -153,7 +160,7 @@ function FlamegraphZoomView({
     );
   }, [flamegraphOverlayCanvasRef, flamegraph, flamegraphTheme, disableGrid]);
 
-  const sampleTickRenderer: SampleTickRenderer | null = useMemo(() => {
+  const sampleTickRenderer = useMemo(() => {
     if (!isInternalFlamegraphDebugModeEnabled) {
       return null;
     }
@@ -191,7 +198,7 @@ function FlamegraphZoomView({
 
   useEffect(() => {
     if (!flamegraphCanvas || !flamegraphView || !textRenderer || !flamegraphRenderer) {
-      return undefined;
+      return;
     }
 
     const clearOverlayCanvas = () => {
@@ -353,7 +360,7 @@ function FlamegraphZoomView({
 
   useEffect(() => {
     if (!flamegraphCanvas || !flamegraphView) {
-      return undefined;
+      return;
     }
 
     const onResetZoom = () => {
@@ -601,9 +608,16 @@ function FlamegraphZoomView({
       'selected',
     ]);
 
+    if (hoveredNode) {
+      trackAnalytics('profiling_views.flamegraph.click.highlight_frame', {
+        organization,
+        profile_type: profileType,
+      });
+    }
+
     setLastInteraction(null);
     setStartInteractionVector(null);
-  }, [hoveredNode, canvasPoolManager]);
+  }, [hoveredNode, canvasPoolManager, organization, profileType]);
 
   const onCanvasMouseLeave = useCallback(() => {
     setConfigSpaceCursor(null);
@@ -615,14 +629,12 @@ function FlamegraphZoomView({
   const onWheelCenterZoom = useWheelCenterZoom(
     flamegraphCanvas,
     flamegraphView,
-    canvasPoolManager,
-    disableZoom
+    canvasPoolManager
   );
   const onCanvasScroll = useCanvasScroll(
     flamegraphCanvas,
     flamegraphView,
-    canvasPoolManager,
-    disablePanX
+    canvasPoolManager
   );
 
   useCanvasZoomOrScroll({
@@ -773,7 +785,7 @@ function FlamegraphZoomView({
   }, []);
 
   return (
-    <CanvasContainer ref={canvasContainerRef}>
+    <Stack width="100%" height="100%" position="relative" ref={canvasContainerRef}>
       <Canvas
         ref={setFlamegraphCanvasRef}
         onMouseDown={onCanvasMouseDown}
@@ -789,6 +801,7 @@ function FlamegraphZoomView({
       {contextMenu({
         contextMenu: contextMenuState,
         profileGroup,
+        profileType,
         hoveredNode: hoveredNodeOnContextMenuOpen.current,
         isHighlightingAllOccurrences: highlightingAllOccurrences,
         onCopyFunctionNameClick: handleCopyFunctionName,
@@ -812,21 +825,13 @@ function FlamegraphZoomView({
           platform={profileGroup.metadata.platform}
         />
       ) : null}
-    </CanvasContainer>
+    </Stack>
   );
 }
 
-const CanvasContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  width: 100%;
-  position: relative;
-`;
-
 const Canvas = styled('canvas')<{
-  cursor?: CSSProperties['cursor'];
-  pointerEvents?: CSSProperties['pointerEvents'];
+  cursor?: CSS['cursor'];
+  pointerEvents?: CSS['pointerEvents'];
 }>`
   left: 0;
   top: 0;

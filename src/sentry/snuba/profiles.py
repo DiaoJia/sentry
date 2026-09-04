@@ -30,12 +30,10 @@ def query(
     transform_alias_to_input_format: bool = False,
     has_metrics: bool = False,
     functions_acl: list[str] | None = None,
-    use_metrics_layer: bool = False,
     on_demand_metrics_enabled: bool = False,
     on_demand_metrics_type: MetricSpecType | None = None,
-    fallback_to_transactions=False,
+    fallback_to_transactions: bool = False,
     query_source: QuerySource | None = None,
-    debug: bool = False,
 ) -> Any:
     if not selected_columns:
         raise InvalidSearchQuery("No columns selected")
@@ -58,8 +56,8 @@ def query(
         ),
     )
     result = builder.process_results(builder.run_query(referrer, query_source=query_source))
-    if debug:
-        result["meta"]["query"] = str(builder.get_snql_query().query)
+    if snuba_params.debug:
+        result["meta"]["debug_info"] = {"query": str(builder.get_snql_query().query)}
     result["meta"]["tips"] = transform_tips(builder.tips)
     return result
 
@@ -75,7 +73,6 @@ def timeseries_query(
     functions_acl: list[str] | None = None,
     allow_metric_aggregates: bool = False,
     has_metrics: bool = False,
-    use_metrics_layer: bool = False,
     on_demand_metrics_enabled: bool = False,
     on_demand_metrics_type: MetricSpecType | None = None,
     query_source: QuerySource | None = None,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from django.http import HttpRequest
 
@@ -9,6 +10,7 @@ from sentry.auth.provider import MigratingIdentityId
 from sentry.auth.providers.oauth2 import OAuth2Callback, OAuth2Login, OAuth2Provider
 from sentry.auth.services.auth.model import RpcAuthProvider
 from sentry.auth.view import AuthView
+from sentry.identity.google.provider import normalize_email_verified
 from sentry.organizations.services.organization.model import RpcOrganization
 from sentry.plugins.base.response import DeferredResponse
 
@@ -20,7 +22,7 @@ class GoogleOAuth2Login(OAuth2Login):
     authorize_url = AUTHORIZE_URL
     scope = SCOPE
 
-    def __init__(self, client_id: str, domains=None) -> None:
+    def __init__(self, client_id: str, domains: list[str] | None = None) -> None:
         self.domains = domains
         super().__init__(client_id=client_id)
 
@@ -38,7 +40,13 @@ class GoogleOAuth2Provider(OAuth2Provider):
     name = "Google"
     key = "google"
 
-    def __init__(self, domain=None, domains=None, version=None, **config) -> None:
+    def __init__(
+        self,
+        domain: str | None = None,
+        domains: list[str] | None = None,
+        version: str | None = None,
+        **config: Any,
+    ) -> None:
         if domain:
             if domains:
                 domains.append(domain)
@@ -81,10 +89,10 @@ class GoogleOAuth2Provider(OAuth2Provider):
     def get_refresh_token_url(self) -> str:
         return ACCESS_TOKEN_URL
 
-    def build_config(self, state):
+    def build_config(self, state: Mapping[str, Any]) -> dict[str, Any]:
         return {"domains": [state["domain"]], "version": DATA_VERSION}
 
-    def build_identity(self, state):
+    def build_identity(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
         # https://developers.google.com/identity/protocols/OpenIDConnect#server-flow
         # data.user => {
         #      "iss":"accounts.google.com",
@@ -111,5 +119,5 @@ class GoogleOAuth2Provider(OAuth2Provider):
             "email": user_data["email"],
             "name": user_data["email"],
             "data": self.get_oauth_data(data),
-            "email_verified": user_data["email_verified"],
+            "email_verified": normalize_email_verified(user_data["email_verified"]),
         }

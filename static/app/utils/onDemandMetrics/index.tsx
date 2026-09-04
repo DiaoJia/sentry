@@ -5,16 +5,16 @@ import {parseSearch, Token} from 'sentry/components/searchSyntax/parser';
 import type {Organization} from 'sentry/types/organization';
 import {
   AggregationKey,
-  type ErrorTags,
   FieldKey,
   getFieldDefinition,
+  type ErrorTags,
 } from 'sentry/utils/fields';
 import {
   ERROR_ONLY_TAGS,
   ON_DEMAND_METRICS_UNSUPPORTED_TAGS,
   STANDARD_SEARCH_FIELD_KEYS,
 } from 'sentry/utils/onDemandMetrics/constants';
-import {type WidgetQuery, WidgetType} from 'sentry/views/dashboards/types';
+import {WidgetType, type WidgetQuery} from 'sentry/views/dashboards/types';
 
 import {hasOnDemandMetricWidgetFeature} from './features';
 
@@ -35,6 +35,7 @@ function isCustomTag(key: string): boolean {
 }
 
 export function createOnDemandFilterWarning(warning: React.ReactNode) {
+  // oxlint-disable-next-line react/function-component-definition -- This callback is not a React component.
   return (key: string) => {
     const fieldKey = key as FieldKey;
     if (isCustomTag(fieldKey)) {
@@ -101,13 +102,6 @@ export function isOnDemandQueryString(query: string): boolean {
   );
 }
 
-export function isOnDemandSearchKey(searchKey: string): boolean {
-  return (
-    !isStandardSearchFilterKey(searchKey) &&
-    (isOnDemandSupportedFilterKey(searchKey) || isCustomTag(searchKey))
-  );
-}
-
 type SearchFilter = {key: string; operator: string; value: string};
 
 function getSearchFilterKeys(query: string): string[] {
@@ -118,7 +112,7 @@ function getSearchFilterKeys(query: string): string[] {
   }
 }
 
-export function getSearchFilters(query: string): SearchFilter[] {
+function getSearchFilters(query: string): SearchFilter[] {
   try {
     const tokens = parseSearch(query);
     if (!tokens) {
@@ -146,9 +140,4 @@ function getTokenKeyValuePair(
   }
 
   return null;
-}
-
-export function getOnDemandKeys(query: string): string[] {
-  const searchFilterKeys = getSearchFilterKeys(query);
-  return searchFilterKeys.filter(isOnDemandSearchKey);
 }

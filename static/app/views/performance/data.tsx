@@ -1,24 +1,16 @@
 import type {Location} from 'history';
 
-import {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
-import ExternalLink from 'sentry/components/links/externalLink';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {ALL_ACCESS_PROJECTS} from 'sentry/components/pageFilters/constants';
 import {wrapQueryInWildcards} from 'sentry/components/performance/searchBar';
-import {ALL_ACCESS_PROJECTS} from 'sentry/constants/pageFilters';
+import {COL_WIDTH_UNDEFINED} from 'sentry/components/tables/gridEditable';
 import {t, tct} from 'sentry/locale';
 import type {NewQuery, Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import EventView from 'sentry/utils/discover/eventView';
-import {WEB_VITAL_DETAILS} from 'sentry/utils/performance/vitals/constants';
+import {EventView} from 'sentry/utils/discover/eventView';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import {getCurrentTrendParameter} from 'sentry/views/performance/trends/utils';
-
-import {getCurrentLandingDisplay, LandingDisplayField} from './landing/utils';
-import {
-  getVitalDetailTableMehStatusFunction,
-  getVitalDetailTablePoorStatusFunction,
-  vitalNameFromLocation,
-} from './vitalDetail/utils';
 
 export const DEFAULT_STATS_PERIOD = '14d';
 export const DEFAULT_PROJECT_THRESHOLD = 300;
@@ -80,7 +72,7 @@ export enum PerformanceTerm {
 
 type TermFormatter = (organization: Organization) => string;
 
-export const PERFORMANCE_TERMS: Record<PerformanceTerm, TermFormatter> = {
+const PERFORMANCE_TERMS: Record<PerformanceTerm, TermFormatter> = {
   tpm: () => t('TPM is the number of recorded transaction events per minute.'),
   throughput: () =>
     t('Throughput is the number of recorded transaction events per minute.'),
@@ -153,13 +145,13 @@ export function getTermHelp(
   organization: Organization,
   term: keyof typeof PERFORMANCE_TERMS
 ): string {
-  if (!PERFORMANCE_TERMS.hasOwnProperty(term)) {
+  if (!Object.hasOwn(PERFORMANCE_TERMS, term)) {
     return '';
   }
   return PERFORMANCE_TERMS[term](organization);
 }
 
-export function prepareQueryForLandingPage(searchQuery: any, withStaticFilters: any) {
+function prepareQueryForLandingPage(searchQuery: any, withStaticFilters: any) {
   const conditions = new MutableSearch(searchQuery);
 
   // If there is a bare text search, we want to treat it as a search
@@ -185,8 +177,7 @@ export function prepareQueryForLandingPage(searchQuery: any, withStaticFilters: 
 
 export function generateGenericPerformanceEventView(
   location: Location,
-  withStaticFilters: boolean,
-  organization: Organization
+  withStaticFilters: boolean
 ): EventView {
   const {query} = location;
 
@@ -214,8 +205,11 @@ export function generateGenericPerformanceEventView(
     version: 2,
   };
 
-  const widths = new Array(savedQuery.fields.length).fill(COL_WIDTH_UNDEFINED);
+  const widths = Array.from<number | string>({length: savedQuery.fields.length}).fill(
+    COL_WIDTH_UNDEFINED
+  );
   widths[savedQuery.fields.length - 1] = '110';
+  // @ts-expect-error -- TODO: resolve this types mismatch
   savedQuery.widths = widths;
 
   if (!query.statsPeriod && !hasStartAndEnd) {
@@ -228,19 +222,6 @@ export function generateGenericPerformanceEventView(
 
   const eventView = EventView.fromNewQueryWithLocation(savedQuery, location);
   eventView.additionalConditions.addFilterValues('event.type', ['transaction']);
-
-  if (query.trendParameter) {
-    // projects and projectIds are not necessary here since trendParameter will always
-    // be present in location and will not be determined based on the project type
-    const trendParameter = getCurrentTrendParameter(location, [], []);
-    if (
-      // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
-      WEB_VITAL_DETAILS[trendParameter.column] &&
-      !organization.features.includes('performance-new-trends')
-    ) {
-      eventView.additionalConditions.addFilterValues('has', [trendParameter.column]);
-    }
-  }
 
   return eventView;
 }
@@ -278,8 +259,12 @@ export function generateBackendPerformanceEventView(
     version: 2,
   };
 
-  const widths = new Array(savedQuery.fields.length).fill(COL_WIDTH_UNDEFINED);
+  const widths = Array.from<number | string>({length: savedQuery.fields.length}).fill(
+    COL_WIDTH_UNDEFINED
+  );
   widths[savedQuery.fields.length - 1] = '110';
+
+  // @ts-expect-error -- TODO: resolve this types mismatch
   savedQuery.widths = widths;
 
   if (!query.statsPeriod && !hasStartAndEnd) {
@@ -306,7 +291,6 @@ export function generateMobilePerformanceEventView(
   projects: Project[],
   genericEventView: EventView,
   withStaticFilters: boolean,
-  organization: Organization,
   useEap = false
 ): EventView {
   const {query} = location;
@@ -320,9 +304,6 @@ export function generateMobilePerformanceEventView(
     'p75(measurements.frames_slow_rate)',
     'p75(measurements.frames_frozen_rate)',
   ];
-  if (organization.features.includes('mobile-vitals')) {
-    fields.push('p75(measurements.time_to_initial_display)');
-  }
 
   // At this point, all projects are mobile projects.
   // If in addition to that, all projects are react-native projects,
@@ -350,8 +331,11 @@ export function generateMobilePerformanceEventView(
     version: 2,
   };
 
-  const widths = new Array(savedQuery.fields.length).fill(COL_WIDTH_UNDEFINED);
+  const widths = Array.from<number | string>({length: savedQuery.fields.length}).fill(
+    COL_WIDTH_UNDEFINED
+  );
   widths[savedQuery.fields.length - 1] = '110';
+  // @ts-expect-error -- TODO: resolve this types mismatch
   savedQuery.widths = widths;
 
   if (!query.statsPeriod && !hasStartAndEnd) {
@@ -369,56 +353,6 @@ export function generateMobilePerformanceEventView(
   } else {
     eventView.additionalConditions.addFilterValues('event.type', ['transaction']);
   }
-
-  return eventView;
-}
-
-function generateFrontendPageloadPerformanceEventView(
-  location: Location,
-  withStaticFilters: boolean
-): EventView {
-  const {query} = location;
-
-  const fields = [
-    'team_key_transaction',
-    'transaction',
-    'project',
-    'tpm()',
-    'p75(measurements.fcp)',
-    'p75(measurements.lcp)',
-    'p75(measurements.fid)',
-    'p75(measurements.cls)',
-    'count_unique(user)',
-    'count_miserable(user)',
-    'user_misery()',
-  ];
-
-  const hasStartAndEnd = query.start && query.end;
-  const savedQuery: NewQuery = {
-    id: undefined,
-    name: t('Performance'),
-    query: 'event.type:transaction',
-    projects: [],
-    fields,
-    version: 2,
-  };
-
-  const widths = new Array(savedQuery.fields.length).fill(COL_WIDTH_UNDEFINED);
-  widths[savedQuery.fields.length - 1] = '110';
-  savedQuery.widths = widths;
-
-  if (!query.statsPeriod && !hasStartAndEnd) {
-    savedQuery.range = DEFAULT_STATS_PERIOD;
-  }
-  savedQuery.orderby = decodeScalar(query.sort, '-tpm');
-
-  const searchQuery = decodeScalar(query.query, '');
-  savedQuery.query = prepareQueryForLandingPage(searchQuery, withStaticFilters);
-
-  const eventView = EventView.fromNewQueryWithLocation(savedQuery, location);
-
-  eventView.additionalConditions.addFilterValues('event.type', ['transaction']);
-  eventView.additionalConditions.addFilterValues('transaction.op', ['pageload']);
 
   return eventView;
 }
@@ -454,8 +388,11 @@ export function generateFrontendOtherPerformanceEventView(
     version: 2,
   };
 
-  const widths = new Array(savedQuery.fields.length).fill(COL_WIDTH_UNDEFINED);
+  const widths = Array.from<number | string>({length: savedQuery.fields.length}).fill(
+    COL_WIDTH_UNDEFINED
+  );
   widths[savedQuery.fields.length - 1] = '110';
+  // @ts-expect-error -- TODO: resolve this types mismatch
   savedQuery.widths = widths;
 
   if (!query.statsPeriod && !hasStartAndEnd) {
@@ -473,85 +410,6 @@ export function generateFrontendOtherPerformanceEventView(
   } else {
     eventView.additionalConditions.addFilterValues('event.type', ['transaction']);
   }
-
-  return eventView;
-}
-
-export function generatePerformanceEventView(
-  location: Location,
-  projects: Project[],
-  {isTrends = false, withStaticFilters = false} = {},
-  organization: Organization
-) {
-  const eventView = generateGenericPerformanceEventView(
-    location,
-    withStaticFilters,
-    organization
-  );
-  if (isTrends) {
-    return eventView;
-  }
-
-  const display = getCurrentLandingDisplay(location, projects, eventView);
-  switch (display?.field) {
-    case LandingDisplayField.FRONTEND_PAGELOAD:
-      return generateFrontendPageloadPerformanceEventView(location, withStaticFilters);
-    case LandingDisplayField.FRONTEND_OTHER:
-      return generateFrontendOtherPerformanceEventView(location, withStaticFilters);
-    case LandingDisplayField.BACKEND:
-      return generateBackendPerformanceEventView(location, withStaticFilters);
-    case LandingDisplayField.MOBILE:
-      return generateMobilePerformanceEventView(
-        location,
-        projects,
-        eventView,
-        withStaticFilters,
-        organization
-      );
-    default:
-      return eventView;
-  }
-}
-
-export function generatePerformanceVitalDetailView(location: Location): EventView {
-  const {query} = location;
-
-  const vitalName = vitalNameFromLocation(location);
-
-  const hasStartAndEnd = query.start && query.end;
-  const savedQuery: NewQuery = {
-    id: undefined,
-    name: t('Vitals Performance Details'),
-    query: 'event.type:transaction',
-    projects: [],
-    fields: [
-      'team_key_transaction',
-      'transaction',
-      'project',
-      'count_unique(user)',
-      'count()',
-      `p50(${vitalName})`,
-      `p75(${vitalName})`,
-      `p95(${vitalName})`,
-      getVitalDetailTablePoorStatusFunction(vitalName),
-      getVitalDetailTableMehStatusFunction(vitalName),
-    ],
-    version: 2,
-    yAxis: [`p75(${vitalName})`],
-  };
-
-  if (!query.statsPeriod && !hasStartAndEnd) {
-    savedQuery.range = DEFAULT_STATS_PERIOD;
-  }
-  savedQuery.orderby = decodeScalar(query.sort, '-count');
-
-  const searchQuery = decodeScalar(query.query, '');
-  savedQuery.query = prepareQueryForLandingPage(searchQuery, false);
-
-  const eventView = EventView.fromNewQueryWithLocation(savedQuery, location);
-
-  eventView.additionalConditions.addFilterValues('event.type', ['transaction']);
-  eventView.additionalConditions.addFilterValues('has', [vitalName]);
 
   return eventView;
 }

@@ -1,30 +1,29 @@
-import {Fragment} from 'react';
+import {Fragment, useMemo} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location, LocationDescriptor} from 'history';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import SortLink from 'sentry/components/gridEditable/sortLink';
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {LinkButton} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconProfiling} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {TableData, TableDataRow} from 'sentry/utils/discover/discoverQuery';
-import type {MetaType} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView, MetaType} from 'sentry/utils/discover/eventView';
 import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
-import type {Alignments} from 'sentry/utils/discover/fields';
 import {fieldAlignment, getAggregateAlias} from 'sentry/utils/discover/fields';
-import ViewReplayLink from 'sentry/utils/discover/viewReplayLink';
+import {ViewReplayLink} from 'sentry/utils/discover/viewReplayLink';
 import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
 import {VisuallyCompleteWithData} from 'sentry/utils/performanceForSentry';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import type {Actions} from 'sentry/views/discover/table/cellAction';
-import CellAction from 'sentry/views/discover/table/cellAction';
+import {CellAction} from 'sentry/views/discover/table/cellAction';
 import type {TableColumn} from 'sentry/views/discover/table/types';
 import {GridCell, GridCellNumber} from 'sentry/views/performance/styles';
 import type {TrendsDataEvents} from 'sentry/views/performance/trends/types';
@@ -52,7 +51,7 @@ type Props = {
   titles?: string[];
 };
 
-function TransactionsTable(props: Props) {
+export function TransactionsTable(props: Props) {
   const {
     eventView,
     titles,
@@ -66,60 +65,56 @@ function TransactionsTable(props: Props) {
     isLoading,
     referrer,
   } = props;
+  const navigate = useNavigate();
   const theme = useTheme();
 
   const getTitles = () => {
     return titles ?? eventView.getFields();
   };
 
+  const columnCount = (titles ?? eventView.getFields()).length;
+  const columns = useMemo<TableColumnConfig[]>(
+    () =>
+      Array.from({length: columnCount}, (_, index) => ({
+        key: String(index),
+        width: 'auto',
+      })),
+    [columnCount]
+  );
+
   const renderHeader = () => {
     const tableMeta = tableData?.meta;
-    const generateSortLink = () => undefined;
     const tableTitles = getTitles();
 
     const headers = tableTitles.map((title, index) => {
       const column = columnOrder[index]!;
-      const align: Alignments = fieldAlignment(column.name, column.type, tableMeta);
+      const align = fieldAlignment(column.name, column.type, tableMeta);
 
       if (column.key === 'span_ops_breakdown.relative') {
         return (
-          <HeadCellContainer key={index}>
-            <SortLink
-              align={align}
-              title={
-                title === t('operation duration') ? (
-                  <Fragment>
-                    {title}
-                    <StyledIconQuestion
-                      size="xs"
-                      position="top"
-                      title={t(
-                        `Span durations are summed over the course of an entire transaction. Any overlapping spans are only counted once.`
-                      )}
-                    />
-                  </Fragment>
-                ) : (
-                  title
-                )
-              }
-              direction={undefined}
-              canSort={false}
-              generateSortLink={generateSortLink}
-            />
-          </HeadCellContainer>
+          <SimpleTable.HeaderCell align={align} key={index}>
+            {title === t('operation duration') ? (
+              <Fragment>
+                {title}
+                <StyledIconQuestion
+                  size="xs"
+                  position="top"
+                  title={t(
+                    'Span durations are summed over the course of an entire transaction. Any overlapping spans are only counted once.'
+                  )}
+                />
+              </Fragment>
+            ) : (
+              title
+            )}
+          </SimpleTable.HeaderCell>
         );
       }
 
       return (
-        <HeadCellContainer key={index}>
-          <SortLink
-            align={align}
-            title={title}
-            direction={undefined}
-            canSort={false}
-            generateSortLink={generateSortLink}
-          />
-        </HeadCellContainer>
+        <SimpleTable.HeaderCell align={align} key={index}>
+          {title}
+        </SimpleTable.HeaderCell>
       );
     });
 
@@ -131,7 +126,7 @@ function TransactionsTable(props: Props) {
     rowIndex: number,
     colOrder: Array<TableColumn<string | number>>,
     tableMeta: MetaType
-  ): React.ReactNode[] => {
+  ): React.ReactNode => {
     const fields = eventView.getFields();
 
     if (titles?.length) {
@@ -146,15 +141,17 @@ function TransactionsTable(props: Props) {
       const fieldType = tableMeta[fieldName];
 
       const fieldRenderer = getFieldRenderer(field, tableMeta, useAggregateAlias);
-      let rendered = fieldRenderer(row, {organization, location, theme});
+      let rendered = fieldRenderer(row, {navigate, organization, location, theme});
 
       const target = generateLink?.[field]?.(organization, row, location);
+      const isEmptyTarget =
+        typeof target === 'object' && target !== null && isEmptyObject(target);
 
       if (fields[index] === 'profile.id') {
         rendered = (
           <LinkButton
             data-test-id={`view-${fields[index]}`}
-            disabled={!target || isEmptyObject(target)}
+            disabled={!target || isEmptyTarget}
             to={target || {}}
             onClick={getProfileAnalyticsHandler(organization, referrer)}
             size="xs"
@@ -162,7 +159,7 @@ function TransactionsTable(props: Props) {
             <IconProfiling size="xs" />
           </LinkButton>
         );
-      } else if (target && !isEmptyObject(target)) {
+      } else if (target && !isEmptyTarget) {
         if (fields[index] === 'replayId') {
           rendered = (
             <ViewReplayLink replayId={row.replayId!} to={target}>
@@ -201,17 +198,17 @@ function TransactionsTable(props: Props) {
       return <BodyCellContainer key={key}>{rendered}</BodyCellContainer>;
     });
 
-    return resultsRow;
+    return <SimpleTable.Row key={rowIndex}>{resultsRow}</SimpleTable.Row>;
   };
 
   const renderResults = () => {
-    let cells: React.ReactNode[] = [];
+    const rows: React.ReactNode[] = [];
 
     if (isLoading) {
-      return cells;
+      return rows;
     }
     if (!tableData?.meta || !tableData.data) {
-      return cells;
+      return rows;
     }
 
     tableData.data.forEach((row, i: number) => {
@@ -220,9 +217,9 @@ function TransactionsTable(props: Props) {
         return;
       }
       // @ts-expect-error TS(2345): Argument of type 'TableDataRow | TrendsTransaction... Remove this comment to see the full error message
-      cells = cells.concat(renderRow(row, i, columnOrder, tableData.meta, theme));
+      rows.push(renderRow(row, i, columnOrder, tableData.meta, theme));
     });
-    return cells;
+    return rows;
   };
 
   const hasResults = tableData?.meta && tableData.data?.length > 0;
@@ -236,21 +233,21 @@ function TransactionsTable(props: Props) {
       hasData={hasResults}
       isLoading={isLoading}
     >
-      <PanelTable
+      <SimpleTable
         data-test-id="transactions-table"
-        isEmpty={!hasResults}
-        emptyMessage={
-          eventView.query
-            ? t('No transactions found for this filter.')
-            : t('No transactions found.')
-        }
-        headers={renderHeader()}
-        isLoading={isLoading}
-        disablePadding
-        loader={loader}
+        columns={columns}
+        header={<SimpleTable.HeaderRow>{renderHeader()}</SimpleTable.HeaderRow>}
       >
+        {isLoading && <SimpleTable.Empty>{loader}</SimpleTable.Empty>}
+        {!isLoading && !hasResults && (
+          <SimpleTable.Empty>
+            {eventView.query
+              ? t('No transactions found for this filter.')
+              : t('No transactions found.')}
+          </SimpleTable.Empty>
+        )}
         {renderResults()}
-      </PanelTable>
+      </SimpleTable>
     </VisuallyCompleteWithData>
   );
 }
@@ -268,13 +265,13 @@ function getProfileAnalyticsHandler(organization: Organization, referrer?: strin
   };
 }
 
-const HeadCellContainer = styled('div')`
-  padding: ${space(2)};
-`;
-
-const BodyCellContainer = styled('div')`
-  padding: ${space(1)} ${space(2)};
-  ${p => p.theme.overflowEllipsis};
+const BodyCellContainer = styled(SimpleTable.RowCell)`
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const StyledIconQuestion = styled(QuestionTooltip)`
@@ -282,5 +279,3 @@ const StyledIconQuestion = styled(QuestionTooltip)`
   top: 1px;
   left: 4px;
 `;
-
-export default TransactionsTable;

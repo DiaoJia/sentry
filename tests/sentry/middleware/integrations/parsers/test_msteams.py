@@ -1,4 +1,6 @@
 from copy import deepcopy
+from typing import Any
+from unittest.mock import patch
 
 import responses
 from django.http import HttpRequest, HttpResponse
@@ -11,7 +13,7 @@ from sentry.middleware.integrations.classifications import IntegrationClassifica
 from sentry.middleware.integrations.parsers.msteams import MsTeamsRequestParser
 from sentry.testutils.cases import TestCase
 from sentry.testutils.outbox import assert_no_webhook_payloads, assert_webhook_payloads_for_mailbox
-from sentry.testutils.silo import control_silo_test, create_test_regions
+from sentry.testutils.silo import control_silo_test, create_test_cells
 from tests.sentry.integrations.msteams.test_helpers import (
     EXAMPLE_MENTIONED,
     EXAMPLE_PERSONAL_MEMBER_ADDED,
@@ -23,12 +25,12 @@ from tests.sentry.integrations.msteams.test_helpers import (
 )
 
 
-@control_silo_test(regions=create_test_regions("us"))
+@control_silo_test(cells=create_test_cells("us"))
 class MsTeamsRequestParserTest(TestCase):
     factory = RequestFactory()
     path = f"{IntegrationClassification.integration_prefix}msteams/webhook/"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         team_id = "19:8d46058cda57449380517cc374727f2a@thread.tacv2"
         self.user = self.create_user()
@@ -40,7 +42,7 @@ class MsTeamsRequestParserTest(TestCase):
     def get_response(self, request: HttpRequest) -> HttpResponse:
         return HttpResponse(status=200, content="passthrough")
 
-    def generate_card_response(self, integration_id: int):
+    def generate_card_response(self, integration_id: int) -> dict[str, Any]:
         return {
             "type": "message",
             "from": {"id": "user_id"},
@@ -62,8 +64,8 @@ class MsTeamsRequestParserTest(TestCase):
         }
 
     @responses.activate
-    def test_routing_events(self):
-        # No regions identified
+    def test_routing_events(self) -> None:
+        # No cells identified
         request = self.factory.post(
             self.path,
             data=GENERIC_EVENT,
@@ -94,10 +96,10 @@ class MsTeamsRequestParserTest(TestCase):
         assert_webhook_payloads_for_mailbox(
             request=request,
             mailbox_name=f"msteams:{self.integration.id}",
-            region_names=["us"],
+            cell_names=["us"],
         )
 
-    def test_routing_events_no_org_integration(self):
+    def test_routing_events_no_org_integration(self) -> None:
         integration = self.create_provider_integration(
             provider="msteams",
             external_id="blah",
@@ -116,7 +118,7 @@ class MsTeamsRequestParserTest(TestCase):
         assert_no_webhook_payloads()
 
     @responses.activate
-    def test_routing_control_paths(self):
+    def test_routing_control_paths(self) -> None:
         requests = [
             self.factory.get(
                 reverse("sentry-integration-msteams-configure"),
@@ -143,10 +145,10 @@ class MsTeamsRequestParserTest(TestCase):
             assert len(responses.calls) == 0
             assert_no_webhook_payloads()
 
-    def test_get_integration_from_request(self):
+    def test_get_integration_from_request(self) -> None:
         CARD_ACTION_RESPONSE = self.generate_card_response(self.integration.id)
 
-        region_silo_payloads = [
+        cell_silo_payloads = [
             # Integration inferred from channelData.team.id
             EXAMPLE_TEAM_MEMBER_REMOVED,
             EXAMPLE_TEAM_MEMBER_ADDED,
@@ -155,7 +157,7 @@ class MsTeamsRequestParserTest(TestCase):
             CARD_ACTION_RESPONSE,
         ]
 
-        for payload in region_silo_payloads:
+        for payload in cell_silo_payloads:
             request = self.factory.post(
                 self.path,
                 data=payload,
@@ -180,7 +182,34 @@ class MsTeamsRequestParserTest(TestCase):
             integration = parser.get_integration_from_request()
             assert integration is None
 
-    def test_handle_control_silo_payloads(self):
+    @responses.activate
+    def test_synchronous_event_skips_the_routing_lookups(self) -> None:
+        """An installationUpdate is decided from the payload, so the integration and
+        cells are never resolved. "remove" because an "add" is caught further up."""
+        request = self.factory.post(
+            self.path,
+            data={
+                "type": "installationUpdate",
+                "action": "remove",
+                "channelData": {"team": {"id": self.integration.external_id}},
+            },
+            HTTP_AUTHORIZATION=f"Bearer {TOKEN}",
+            content_type="application/json",
+        )
+        parser = MsTeamsRequestParser(request=request, response_handler=self.get_response)
+
+        with patch.object(
+            MsTeamsRequestParser, "get_integration_from_request"
+        ) as mock_get_integration:
+            response = parser.get_response()
+
+        assert isinstance(response, HttpResponse)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.content == b"passthrough"
+        assert mock_get_integration.call_count == 0
+        assert_no_webhook_payloads()
+
+    def test_handle_control_silo_payloads(self) -> None:
         help_command = deepcopy(EXAMPLE_UNLINK_COMMAND)
         help_command["text"] = "Help"
         control_silo_payloads = [GENERIC_EVENT, help_command, EXAMPLE_PERSONAL_MEMBER_ADDED]

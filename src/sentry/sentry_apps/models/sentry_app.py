@@ -10,6 +10,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 from rest_framework.request import Request
 
+from sentry import options
 from sentry.backup.dependencies import NormalizedModelName, get_model_name
 from sentry.backup.sanitize import SanitizableField, Sanitizer
 from sentry.backup.scopes import RelocationScope
@@ -24,50 +25,40 @@ from sentry.db.models import (
     Model,
     control_silo_model,
 )
+from sentry.db.models.fields.encryption import EncryptedTextField
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
-from sentry.db.models.fields.jsonfield import JSONField
 from sentry.db.models.fields.slug import SentrySlugField
 from sentry.db.models.paranoia import ParanoidManager, ParanoidModel
 from sentry.hybridcloud.models.outbox import ControlOutbox, outbox_context
 from sentry.hybridcloud.outbox.category import OutboxCategory, OutboxScope
 from sentry.models.apiscopes import HasApiScopes
-from sentry.types.region import find_all_region_names, find_regions_for_sentry_app
+from sentry.sentry_apps.utils.webhooks import EVENT_EXPANSION, resource_of
+from sentry.types.cell import find_all_cell_names, find_cells_for_sentry_app
 from sentry.utils import metrics
-
-# When a developer selects to receive "<Resource> Webhooks" it really means
-# listening to a list of specific events. This is a mapping of what those
-# specific events are for each resource.
-EVENT_EXPANSION = {
-    "issue": [
-        "issue.assigned",
-        "issue.created",
-        "issue.ignored",
-        "issue.resolved",
-        "issue.unresolved",
-    ],
-    "error": ["error.created"],
-    "comment": ["comment.created", "comment.deleted", "comment.updated"],
-}
-
-# We present Webhook Subscriptions per-resource (Issue, Project, etc.), not
-# per-event-type (issue.created, project.deleted, etc.). These are valid
-# resources a Sentry App may subscribe to.
-VALID_EVENT_RESOURCES = ("issue", "error", "comment")
 
 REQUIRED_EVENT_PERMISSIONS = {
     "issue": "event:read",
     "error": "event:read",
+    "seer": "event:read",
     "project": "project:read",
     "member": "member:read",
     "organization": "org:read",
     "team": "team:read",
     "comment": "event:read",
+    "preprod_artifact": "project:read",
 }
 
 # The only events valid for Sentry Apps are the ones listed in the values of
 # EVENT_EXPANSION above. This list is likely a subset of all valid ServiceHook
 # events.
 VALID_EVENTS = tuple(itertools.chain(*EVENT_EXPANSION.values()))
+
+
+def required_scope_for_subscription(subscription: str) -> str:
+    """The API scope a subscription (a resource or one of its events) requires."""
+    resource = resource_of(subscription) or subscription
+    return REQUIRED_EVENT_PERMISSIONS[resource]
+
 
 MASKED_VALUE = "*" * 64
 
@@ -87,7 +78,7 @@ def track_response_code(status, integration_slug, webhook_event):
 
 
 class SentryAppManager(ParanoidManager["SentryApp"]):
-    def get_alertable_sentry_apps(self, organization_id: int) -> QuerySet:
+    def get_alertable_sentry_apps(self, organization_id: int) -> QuerySet["SentryApp"]:
         return self.filter(
             installations__organization_id=organization_id,
             is_alertable=True,
@@ -135,6 +126,7 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
     # does the application subscribe to `event.alert`,
     # meaning can it be used in alert rules as a {service} ?
     is_alertable = models.BooleanField(default=False)
+    is_disabled = models.BooleanField(default=False, db_default=False)
 
     # does the application need to wait for verification
     # on behalf of the external service to know if its installations
@@ -143,8 +135,13 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
 
     events = ArrayField(models.TextField(), default=list)
 
+    # Custom headers (each entry is a "Header-Name: value" string) sent alongside
+    # every outgoing webhook request. Values may contain secrets (e.g. bearer
+    # tokens), so they are masked on read and scrubbed from logs/audit/relocation.
+    webhook_headers = ArrayField(EncryptedTextField(), default=list, db_default=[])
+
     overview = models.TextField(null=True)
-    schema = JSONField(default=dict)
+    schema = models.JSONField(default=dict)
 
     date_added = models.DateTimeField(default=timezone.now)
     date_updated = models.DateTimeField(default=timezone.now)
@@ -156,7 +153,7 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
     creator_label = models.TextField(null=True)
 
     popularity = models.PositiveSmallIntegerField(null=True, default=1)
-    metadata = JSONField(default=dict)
+    metadata = models.JSONField(default=dict)
 
     objects: ClassVar[SentryAppManager] = SentryAppManager()
 
@@ -165,23 +162,23 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
         db_table = "sentry_sentryapp"
 
     @property
-    def is_published(self):
+    def is_published(self) -> bool:
         return self.status == SentryAppStatus.PUBLISHED
 
     @property
-    def is_unpublished(self):
+    def is_unpublished(self) -> bool:
         return self.status == SentryAppStatus.UNPUBLISHED
 
     @property
-    def is_internal(self):
+    def is_internal(self) -> bool:
         return self.status == SentryAppStatus.INTERNAL
 
     @property
-    def is_publish_request_inprogress(self):
+    def is_publish_request_inprogress(self) -> bool:
         return self.status == SentryAppStatus.PUBLISH_REQUEST_INPROGRESS
 
     @property
-    def slug_for_metrics(self):
+    def slug_for_metrics(self) -> str:
         if self.is_internal:
             return "internal"
         if self.is_unpublished:
@@ -203,7 +200,7 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
                 outbox.save()
             return result
 
-    def is_installed_on(self, organization):
+    def is_installed_on(self, organization) -> bool:
         from sentry.sentry_apps.models.sentry_app_installation import SentryAppInstallation
 
         return SentryAppInstallation.objects.filter(
@@ -211,16 +208,22 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
             sentry_app=self,
         ).exists()
 
-    def build_signature(self, body):
+    def build_signature(self, body) -> str:
         assert self.application is not None
         secret = self.application.client_secret
+        # SentryApps always have a client_secret (they are confidential clients)
+        assert secret is not None
         return hmac.new(
             key=secret.encode("utf-8"), msg=body.encode("utf-8"), digestmod=sha256
         ).hexdigest()
 
-    def show_auth_info(self, access):
+    def show_auth_info(self, access) -> bool:
+        from sentry.conf.server import SENTRY_TOKEN_ONLY_SCOPES
+
         encoded_scopes = set({"%s" % scope for scope in list(access.scopes)})
-        return set(self.scope_list).issubset(encoded_scopes)
+        # Exclude token-only scopes from the check since users don't have them in their roles
+        integration_scopes = set(self.scope_list) - SENTRY_TOKEN_ONLY_SCOPES
+        return integration_scopes.issubset(encoded_scopes)
 
     def outboxes_for_update(self) -> list[ControlOutbox]:
         return [
@@ -229,13 +232,26 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
                 shard_identifier=self.id,
                 object_identifier=self.id,
                 category=OutboxCategory.SENTRY_APP_UPDATE,
-                region_name=region_name,
+                cell_name=cell_name,
             )
-            for region_name in find_all_region_names()
+            for cell_name in find_all_cell_names()
         ]
 
-    def regions_with_installations(self) -> set[str]:
-        return find_regions_for_sentry_app(self)
+    def outboxes_for_delete(self) -> list[ControlOutbox]:
+        return [
+            ControlOutbox(
+                shard_scope=OutboxScope.APP_SCOPE,
+                shard_identifier=self.id,
+                object_identifier=self.id,
+                category=OutboxCategory.SENTRY_APP_DELETE,
+                cell_name=cell_name,
+                payload={"slug": self.slug},
+            )
+            for cell_name in find_all_cell_names()
+        ]
+
+    def cells_with_installations(self) -> set[str]:
+        return find_cells_for_sentry_app(self)
 
     def delete(self, *args, **kwargs):
         from sentry.sentry_apps.models.sentry_app_avatar import SentryAppAvatar
@@ -244,12 +260,16 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
             for outbox in self.outboxes_for_update():
                 outbox.save()
 
-        SentryAppAvatar.objects.filter(sentry_app=self).delete()
-        return super().delete(*args, **kwargs)
+            for outbox in self.outboxes_for_delete():
+                outbox.save()
 
-    def _disable(self):
-        self.events = []
-        self.save(update_fields=["events"])
+            SentryAppAvatar.objects.filter(sentry_app=self).delete()
+
+            if options.get("sentry-apps.hard-delete"):
+                # actually delete the object. we need to delete all soft-deleted objects before removing ParanoidModel
+                return super(Model, self).delete(*args, **kwargs)
+
+            return super().delete(*args, **kwargs)
 
     @classmethod
     def sanitize_relocation_json(
@@ -264,3 +284,5 @@ class SentryApp(ParanoidModel, HasApiScopes, Model):
         sanitizer.set_string(json, SanitizableField(model_name, "overview"))
         sanitizer.set_json(json, SanitizableField(model_name, "schema"), {})
         json["fields"]["events"] = "[]"
+        # webhook_headers may contain secrets (auth tokens); never export them.
+        json["fields"]["webhook_headers"] = "[]"

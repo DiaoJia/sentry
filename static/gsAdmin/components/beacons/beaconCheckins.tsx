@@ -1,9 +1,9 @@
 import moment from 'moment-timezone';
 
-import Truncate from 'sentry/components/truncate';
+import {Truncate} from 'sentry/components/truncate';
 
 import type {BeaconData} from 'admin/components/beacons/beaconOverview';
-import ResultGrid from 'admin/components/resultGrid';
+import {ResultGrid} from 'admin/components/resultGrid';
 
 type Props = {
   data: BeaconData;
@@ -25,7 +25,7 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function BeaconCheckins({data}: Props) {
+export function BeaconCheckins({data}: Props) {
   return (
     <ResultGrid
       inPanel
@@ -54,5 +54,3 @@ function BeaconCheckins({data}: Props) {
     />
   );
 }
-
-export default BeaconCheckins;

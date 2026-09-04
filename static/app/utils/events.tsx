@@ -1,7 +1,7 @@
 import * as Sentry from '@sentry/react';
 
 import {SymbolicatorStatus} from 'sentry/components/events/interfaces/types';
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {
   EntryException,
   EntryRequest,
@@ -12,26 +12,28 @@ import type {
   Thread,
 } from 'sentry/types/event';
 import {EntryType, EventOrGroupType} from 'sentry/types/event';
-import type {BaseGroup, Group, GroupTombstoneHelper} from 'sentry/types/group';
+import type {
+  BaseGroup,
+  Group,
+  GroupTombstoneHelper,
+  SimpleGroup,
+} from 'sentry/types/group';
 import {GroupActivityType, IssueCategory, IssueType} from 'sentry/types/group';
-import {defined} from 'sentry/utils';
 import type {BaseEventAnalyticsParams} from 'sentry/utils/analytics/workflowAnalyticsEvents';
 import {uniq} from 'sentry/utils/array/uniq';
+import {defined} from 'sentry/utils/defined';
 import {
   getExceptionGroupHeight,
   getExceptionGroupWidth,
 } from 'sentry/utils/eventExceptionGroup';
-import getDaysSinceDate, {getDaysSinceDatePrecise} from 'sentry/utils/getDaysSinceDate';
-import {isMobilePlatform, isNativePlatform} from 'sentry/utils/platform';
+import {getDaysSinceDate, getDaysSinceDatePrecise} from 'sentry/utils/getDaysSinceDate';
+import {isMobilePlatform} from 'sentry/utils/platform';
 import {getReplayIdFromEvent} from 'sentry/utils/replays/getReplayIdFromEvent';
 
 const EVENT_TYPES_WITH_LOG_LEVEL = new Set([
   EventOrGroupType.ERROR,
   EventOrGroupType.CSP,
-  EventOrGroupType.EXPECTCT,
   EventOrGroupType.DEFAULT,
-  EventOrGroupType.EXPECTSTAPLE,
-  EventOrGroupType.HPKP,
   EventOrGroupType.NEL,
 ]);
 
@@ -39,8 +41,8 @@ export function eventTypeHasLogLevel(type: EventOrGroupType) {
   return EVENT_TYPES_WITH_LOG_LEVEL.has(type);
 }
 
-export function isTombstone(
-  maybe: BaseGroup | Event | GroupTombstoneHelper
+function isTombstone(
+  maybe: BaseGroup | Event | GroupTombstoneHelper | SimpleGroup
 ): maybe is GroupTombstoneHelper {
   return 'isTombstone' in maybe && maybe.isTombstone;
 }
@@ -49,7 +51,7 @@ export function isTombstone(
  * Extract the display message from an event.
  */
 export function getMessage(
-  event: Event | BaseGroup | GroupTombstoneHelper
+  event: Event | BaseGroup | GroupTombstoneHelper | SimpleGroup
 ): string | undefined {
   if (isTombstone(event)) {
     return event.culprit || '';
@@ -63,10 +65,6 @@ export function getMessage(
       return metadata.value;
     case EventOrGroupType.CSP:
       return metadata.message;
-    case EventOrGroupType.EXPECTCT:
-    case EventOrGroupType.EXPECTSTAPLE:
-    case EventOrGroupType.HPKP:
-      return '';
     case EventOrGroupType.GENERIC:
       return metadata.value;
     default:
@@ -74,22 +72,7 @@ export function getMessage(
   }
 }
 
-/**
- * Get the location from an event.
- */
-export function getLocation(event: Event | BaseGroup | GroupTombstoneHelper) {
-  if (isTombstone(event)) {
-    return undefined;
-  }
-
-  if (event.type === EventOrGroupType.ERROR && isNativePlatform(event.platform)) {
-    return event.metadata.filename || undefined;
-  }
-
-  return undefined;
-}
-
-export function getTitle(event: Event | BaseGroup | GroupTombstoneHelper) {
+export function getTitle(event: Event | BaseGroup | GroupTombstoneHelper | SimpleGroup) {
   const {metadata, type, culprit, title} = event;
   const customTitle = metadata?.title;
 
@@ -104,7 +87,11 @@ export function getTitle(event: Event | BaseGroup | GroupTombstoneHelper) {
 
       return {
         subtitle: culprit,
-        title: metadata.type || metadata.function || '<unknown>',
+        // A synthetic exception's type is a platform label, so the crash location identifies
+        // the issue better. Mirrors `ErrorEvent.compute_title` on the server.
+        title: metadata.synthetic
+          ? metadata.function || metadata.type || '<unknown>'
+          : metadata.type || metadata.function || '<unknown>',
       };
     }
     case EventOrGroupType.CSP:
@@ -112,16 +99,6 @@ export function getTitle(event: Event | BaseGroup | GroupTombstoneHelper) {
       return {
         title: customTitle ?? metadata.directive ?? '',
         subtitle: metadata.uri ?? '',
-      };
-    case EventOrGroupType.EXPECTCT:
-    case EventOrGroupType.EXPECTSTAPLE:
-    case EventOrGroupType.HPKP:
-      // Due to a regression some reports did not have message persisted
-      // (https://github.com/getsentry/sentry/pull/19794) so we need to fall
-      // back to the computed title for these.
-      return {
-        title: customTitle ?? (metadata.message || title),
-        subtitle: metadata.origin ?? '',
       };
     case EventOrGroupType.DEFAULT:
       return {
@@ -280,8 +257,8 @@ function getExceptionEntries(event: Event) {
  * Returns all stack frames of type 'exception' or 'threads' of this event
  */
 function getAllFrames(event: Event, inAppOnly: boolean): Frame[] {
-  const exceptions: EntryException[] | EntryThreads[] = getEntriesWithFrames(event);
-  const frames: Frame[] = exceptions
+  const exceptions = getEntriesWithFrames(event);
+  const frames = exceptions
     // @ts-expect-error TS(2322): Type 'Thread[] | ExceptionValue[]' is not assignab... Remove this comment to see the full error message
     .flatMap(withStacktrace => withStacktrace.data.values ?? [])
     .flatMap(
@@ -512,6 +489,6 @@ export function eventIsProfilingIssue(event: BaseGroup | Event | GroupTombstoneH
   return evidenceData.templateName === 'profile';
 }
 
-export function isGroup(event: BaseGroup | Event): event is BaseGroup {
+function isGroup(event: BaseGroup | Event): event is BaseGroup {
   return (event as BaseGroup).status !== undefined;
 }

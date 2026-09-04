@@ -1,7 +1,7 @@
 import {MutableSearch, TokenType} from 'sentry/utils/tokenizeSearch';
 
-describe('utils/tokenizeSearch', function () {
-  describe('MutableSearch.fromQueryObject', function () {
+describe('utils/tokenizeSearch', () => {
+  describe('MutableSearch.fromQueryObject', () => {
     it.each([
       [{transaction: '/index'}, 'transaction:/index'],
       [{transaction: '/index', has: 'span.domain'}, 'transaction:/index has:span.domain'],
@@ -15,7 +15,7 @@ describe('utils/tokenizeSearch', function () {
     });
   });
 
-  describe('new MutableSearch()', function () {
+  describe('new MutableSearch()', () => {
     const cases = [
       {
         name: 'should convert a basic query string to a query object',
@@ -203,15 +203,104 @@ describe('utils/tokenizeSearch', function () {
           ],
         },
       },
+      {
+        name: 'should handle explicit typed tag keys containing colons',
+        string: 'tags[foo:bar,string]:asdf',
+        object: {
+          tokens: [{type: TokenType.FILTER, key: 'tags[foo:bar,string]', value: 'asdf'}],
+        },
+      },
+      {
+        name: 'should handle quoted filter keys containing colons',
+        string: '"imaginary.attribute:made_up_key":asdf',
+        object: {
+          tokens: [
+            {
+              type: TokenType.FILTER,
+              key: 'imaginary.attribute:made_up_key',
+              value: 'asdf',
+            },
+          ],
+        },
+      },
+      {
+        name: 'should handle negated quoted filter keys containing colons',
+        string: '!"imaginary.attribute:made_up_key":asdf',
+        object: {
+          tokens: [
+            {
+              type: TokenType.FILTER,
+              key: '!imaginary.attribute:made_up_key',
+              value: 'asdf',
+            },
+          ],
+        },
+      },
+      {
+        name: 'should handle contains filter',
+        string: 'message:\uF00DContains\uF00D"test value"',
+        object: {
+          tokens: [
+            {type: TokenType.CONTAINS_FILTER, key: 'message', value: 'test value'},
+          ],
+        },
+      },
+      {
+        name: 'should handle starts with filter',
+        string: 'message:\uF00DStartsWith\uF00D"test value"',
+        object: {
+          tokens: [
+            {type: TokenType.STARTS_WITH_FILTER, key: 'message', value: 'test value'},
+          ],
+        },
+      },
+      {
+        name: 'should handle ends with filter',
+        string: 'message:\uF00DEndsWith\uF00D"test value"',
+        object: {
+          tokens: [
+            {type: TokenType.ENDS_WITH_FILTER, key: 'message', value: 'test value'},
+          ],
+        },
+      },
+      {
+        name: 'should handle trailing paren when quoted value contains parens',
+        string: '(key:"value with (parens)")',
+        object: {
+          tokens: [
+            {type: TokenType.OPERATOR, value: '('},
+            {type: TokenType.FILTER, key: 'key', value: 'value with (parens)'},
+            {type: TokenType.OPERATOR, value: ')'},
+          ],
+        },
+      },
+      {
+        name: 'should handle complex SQL-like query in quoted value with grouping parens',
+        string: '(span.category:db description:"SELECT * FROM users WHERE id = func(1)")',
+        object: {
+          tokens: [
+            {type: TokenType.OPERATOR, value: '('},
+            {type: TokenType.FILTER, key: 'span.category', value: 'db'},
+            {
+              type: TokenType.FILTER,
+              key: 'description',
+              value: 'SELECT * FROM users WHERE id = func(1)',
+            },
+            {type: TokenType.OPERATOR, value: ')'},
+          ],
+        },
+      },
     ];
 
     for (const {name, string, object} of cases) {
-      it(`${name}`, () => expect(new MutableSearch(string)).toEqual(object));
+      // https://github.com/jest-community/eslint-plugin-jest/issues/1940
+      // eslint-disable-next-line jest/valid-title
+      it(name, () => expect(new MutableSearch(string)).toEqual(object));
     }
   });
 
-  describe('QueryResults operations', function () {
-    it('add tokens to query object', function () {
+  describe('QueryResults operations', () => {
+    it('add tokens to query object', () => {
       const results = new MutableSearch([]);
 
       results.addStringFilter('a:a');
@@ -233,14 +322,30 @@ describe('utils/tokenizeSearch', function () {
       expect(results.formatString()).toBe('a:a b:b c:c1 c:c2 d:d e:"e1\\*e2\\e3" d:d2');
     });
 
-    it('adds individual values to query object', function () {
+    it('adds individual values to query object', () => {
       const results = new MutableSearch([]);
 
       results.addFilterValue('e', 'e1*e2\\e3');
       expect(results.formatString()).toBe('e:"e1\\*e2\\e3"');
     });
 
-    it('add text searches to query object', function () {
+    it('quotes filter keys containing colons', () => {
+      const results = new MutableSearch([]);
+
+      results.addFilterValue('imaginary.attribute:made_up_key', 'asdf');
+      results.addFilterValue('!imaginary.attribute:made_up_key', 'fdsa');
+      results.addFilterValue('has', 'imaginary.attribute:made_up_key');
+      results.addFilterValue('!has', 'imaginary.attribute:made_up_key');
+
+      expect(results.formatString()).toBe(
+        '"imaginary.attribute:made_up_key":asdf ' +
+          '!"imaginary.attribute:made_up_key":fdsa ' +
+          'has:"imaginary.attribute:made_up_key" ' +
+          '!has:"imaginary.attribute:made_up_key"'
+      );
+    });
+
+    it('add text searches to query object', () => {
       const results = new MutableSearch(['a:a']);
 
       results.addFreeText('b');
@@ -270,7 +375,7 @@ describe('utils/tokenizeSearch', function () {
       expect(results.freeText).toEqual(['invalid literal for int() with base']);
     });
 
-    it('add ops to query object', function () {
+    it('add ops to query object', () => {
       const results = new MutableSearch(['x', 'a:a', 'y']);
 
       results.addOp('OR');
@@ -288,21 +393,21 @@ describe('utils/tokenizeSearch', function () {
       expect(results.formatString()).toBe('x a:a y OR z ( b:b AND c:c )');
     });
 
-    it('adds tags to query', function () {
+    it('adds tags to query', () => {
       const results = new MutableSearch(['tag:value']);
 
       results.addStringFilter('new:too');
       expect(results.formatString()).toBe('tag:value new:too');
     });
 
-    it('setTag() replaces tags', function () {
+    it('setTag() replaces tags', () => {
       const results = new MutableSearch(['tag:value']);
 
       results.setFilterValues('tag', ['too']);
       expect(results.formatString()).toBe('tag:too');
     });
 
-    it('setTag() replaces tags in OR', function () {
+    it('setTag() replaces tags in OR', () => {
       let results = new MutableSearch([
         '(',
         'transaction:xyz',
@@ -319,7 +424,7 @@ describe('utils/tokenizeSearch', function () {
       expect(results.formatString()).toBe('transaction:def');
     });
 
-    it('does not remove boolean operators after setting tag values', function () {
+    it('does not remove boolean operators after setting tag values', () => {
       const results = new MutableSearch([
         '(',
         'start:xyz',
@@ -340,7 +445,7 @@ describe('utils/tokenizeSearch', function () {
       );
     });
 
-    it('removes tags from query object', function () {
+    it('removes tags from query object', () => {
       let results = new MutableSearch(['x', 'a:a', 'b:b']);
       results.removeFilter('a');
       expect(results.formatString()).toBe('x b:b');
@@ -380,9 +485,21 @@ describe('utils/tokenizeSearch', function () {
       results = new MutableSearch(['a:a', '(b:b1', 'OR', 'b:b2', 'OR', 'b:b3)', 'c:c']);
       results.removeFilter('b');
       expect(results.formatString()).toBe('a:a c:c');
+
+      results = new MutableSearch(['a:a', 'message:\uF00DContains\uF00D"test value"']);
+      results.removeFilter('message');
+      expect(results.formatString()).toBe('a:a');
+
+      results = new MutableSearch(['a:a', 'message:\uF00DStartsWith\uF00D"test value"']);
+      results.removeFilter('message');
+      expect(results.formatString()).toBe('a:a');
+
+      results = new MutableSearch(['a:a', 'message:\uF00DEndsWith\uF00D"test value"']);
+      results.removeFilter('message');
+      expect(results.formatString()).toBe('a:a');
     });
 
-    it('can return the tag keys', function () {
+    it('can return the tag keys', () => {
       const results = new MutableSearch(['tag:value', 'other:value', 'additional text']);
 
       expect(results.getFilterKeys()).toEqual(['tag', 'other']);
@@ -399,9 +516,26 @@ describe('utils/tokenizeSearch', function () {
 
       expect(results.getFilterValues('nonexistent')).toEqual([]);
     });
+
+    it('handles adding wildcard filters', () => {
+      const results = new MutableSearch(['a:a']);
+
+      results.addContainsFilterValue('b', 'b');
+      expect(results.formatString()).toBe('a:a b:\uF00DContains\uF00Db');
+
+      results.addStartsWithFilterValue('c', 'c');
+      expect(results.formatString()).toBe(
+        'a:a b:\uF00DContains\uF00Db c:\uF00DStartsWith\uF00Dc'
+      );
+
+      results.addEndsWithFilterValue('d', 'd');
+      expect(results.formatString()).toBe(
+        'a:a b:\uF00DContains\uF00Db c:\uF00DStartsWith\uF00Dc d:\uF00DEndsWith\uF00Dd'
+      );
+    });
   });
 
-  describe('QueryResults.formatString', function () {
+  describe('QueryResults.formatString', () => {
     const cases = [
       {
         name: 'should convert a basic object to a query string',
@@ -504,6 +638,19 @@ describe('utils/tokenizeSearch', function () {
         string: 'country:>canada OR coronaFree():<newzealand',
       },
       {
+        name: 'preserves grouping parens after aggregate filters',
+        object: new MutableSearch(
+          '(transaction:"Example Transaction" count(span.duration):>100) AND is_transaction:1'
+        ),
+        string:
+          '( transaction:"Example Transaction" count(span.duration):>100 ) AND is_transaction:1',
+      },
+      {
+        name: 'preserves grouping parens when a quoted value ends with a backslash',
+        object: new MutableSearch('(key:"value\\\\")'),
+        string: '( key:"value\\\\" )',
+      },
+      {
         name: 'should quote tags with parens and spaces',
         object: new MutableSearch(['release:4.9.0 build (0.0.01)', 'error.handled:0']),
         string: 'release:"4.9.0 build (0.0.01)" error.handled:0',
@@ -528,10 +675,125 @@ describe('utils/tokenizeSearch', function () {
         object: new MutableSearch(['transaction:["this has a space",thisdoesnot]']),
         string: 'transaction:["this has a space",thisdoesnot]',
       },
+      {
+        name: 'should preserve quotes around bracket expressions when parsing and formatting',
+        object: new MutableSearch(['message:"[filtered]"']),
+        string: 'message:"[filtered]"',
+      },
+      {
+        name: 'should preserve quotes around bracket expressions when parsing and formatting',
+        object: new MutableSearch(['message:"[Filtered]"']),
+        string: 'message:"[Filtered]"',
+      },
+      {
+        name: 'should not add quotes to unquoted bracket expressions',
+        object: new MutableSearch(['message:[Test]']),
+        string: 'message:[Test]',
+      },
+      {
+        name: 'should not add quotes to unquoted bracket expressions',
+        object: new MutableSearch(['message:[test]']),
+        string: 'message:[test]',
+      },
+      {
+        name: 'should not add quotes to unquoted bracket expressions',
+        object: new MutableSearch(['message:[test,[test2]]']),
+        string: 'message:[test,[test2]]',
+      },
+      {
+        name: 'should preserve brackets within quoted strings when flattening',
+        object: new MutableSearch(['message:["[test]",test,[test2]]']),
+        string: 'message:["[test]",test,[test2]]',
+      },
+      {
+        name: 'should correctly handle nested brackets with quoted brackets inside',
+        object: new MutableSearch(['message:[test,"[nested]",other]']),
+        string: 'message:[test,"[nested]",other]',
+      },
+      {
+        name: 'should handle escaped quotes in array syntax correctly',
+        object: new MutableSearch(['message:["value with \\" escaped quote",other]']),
+        string: 'message:["value with \\" escaped quote",other]',
+      },
+      {
+        name: 'should handle complex escape sequences in array syntax correctly',
+        object: new MutableSearch([
+          'message:["value with \\\\\\" complex escape",other]',
+        ]),
+        string: 'message:["value with \\\\\\" complex escape",other]',
+      },
+      {
+        name: 'should leave escaped brackets as is',
+        object: new MutableSearch(['message:"[test, "[Filtered]"]"']),
+        string: 'message:"[test, "[Filtered]"]"',
+      },
+      {
+        name: 'handles contains filter',
+        object: new MutableSearch(['message:\uF00DContains\uF00D"test value"']),
+        string: 'message:\uF00DContains\uF00D"test value"',
+      },
+      {
+        name: 'handles starts with filter',
+        object: new MutableSearch(['message:\uF00DStartsWith\uF00D"test value"']),
+        string: 'message:\uF00DStartsWith\uF00D"test value"',
+      },
+      {
+        name: 'handles ends with filter',
+        object: new MutableSearch(['message:\uF00DEndsWith\uF00D"test value"']),
+        string: 'message:\uF00DEndsWith\uF00D"test value"',
+      },
+      {
+        name: 'should preserve grouping parens when quoted value contains parens',
+        object: new MutableSearch(['(key:"value with (parens)")']),
+        string: '( key:"value with (parens)" )',
+      },
+      {
+        name: 'should preserve complex query with SQL-like quoted value and grouping parens',
+        object: new MutableSearch([
+          '(span.category:db',
+          'description:"SELECT * FROM users WHERE id = func(1)")',
+        ]),
+        string:
+          '( span.category:db description:"SELECT * FROM users WHERE id = func(1)" )',
+      },
     ];
 
     for (const {name, string, object} of cases) {
-      it(`${name}`, () => expect(object.formatString()).toEqual(string));
+      // https://github.com/jest-community/eslint-plugin-jest/issues/1940
+      // eslint-disable-next-line jest/valid-title
+      it(name, () => expect(object.formatString()).toEqual(string));
     }
+  });
+
+  describe('renameFilter', () => {
+    it('renames a simple filter key', () => {
+      const search = new MutableSearch('request.method:GET');
+      search.renameFilter('request.method', 'http.method');
+      expect(search.formatString()).toBe('http.method:GET');
+    });
+
+    it('renames negated filter keys', () => {
+      const search = new MutableSearch('!request.method:GET');
+      search.renameFilter('request.method', 'http.method');
+      expect(search.formatString()).toBe('!http.method:GET');
+    });
+
+    it('preserves OR grouping', () => {
+      const search = new MutableSearch('(request.method:GET OR request.method:POST)');
+      search.renameFilter('request.method', 'http.method');
+      expect(search.formatString()).toBe('( http.method:GET OR http.method:POST )');
+    });
+
+    it('does not rename unrelated keys', () => {
+      const search = new MutableSearch('request.method:GET browser:Chrome');
+      search.renameFilter('request.method', 'http.method');
+      expect(search.formatString()).toBe('http.method:GET browser:Chrome');
+    });
+
+    it('is a no-op when key is not present', () => {
+      const search = new MutableSearch('browser:Chrome');
+      search.renameFilter('request.method', 'http.method');
+      expect(search.formatString()).toBe('browser:Chrome');
+    });
   });
 });

@@ -1,34 +1,36 @@
-import {useMemo} from 'react';
 import styled from '@emotion/styled';
 
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {SectionHeading} from 'sentry/components/charts/styles';
-import TimeSince from 'sentry/components/timeSince';
+import {TimeSince} from 'sentry/components/timeSince';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Organization} from 'sentry/types/organization';
-import getDuration from 'sentry/utils/duration/getDuration';
-import type {OurLogsResponseItem} from 'sentry/views/explore/logs/types';
-import type {TraceMetaQueryResults} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceMeta';
-import type {RepresentativeTraceEvent} from 'sentry/views/performance/newTraceDetails/traceApi/utils';
-import {TraceDrawerComponents} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
+import {getDuration} from 'sentry/utils/duration/getDuration';
+import {OurLogKnownFieldKey} from 'sentry/views/explore/logs/types';
 import {
-  isEAPError,
-  isTraceError,
-} from 'sentry/views/performance/newTraceDetails/traceGuards';
+  getTraceMetaLogsCount,
+  getTraceMetaMetricsCount,
+  getTraceMetaSpanCount,
+  type TraceMetaQueryResults,
+} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceMeta';
+import {TraceDrawerComponents} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
+import {TraceHeaderComponents} from 'sentry/views/performance/newTraceDetails/traceHeader/styles';
 import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
+import type {BaseNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/baseNode';
+import type {TraceOverviewData} from 'sentry/views/performance/newTraceDetails/useTraceOverviewData';
 import {useTraceQueryParams} from 'sentry/views/performance/newTraceDetails/useTraceQueryParams';
 
 type MetaDataProps = {
-  bodyText: React.ReactNode;
+  children: React.ReactNode;
   headingText: string;
   rightAlignBody?: boolean;
 };
 
-function MetaSection({headingText, bodyText, rightAlignBody}: MetaDataProps) {
+function MetaSection({headingText, rightAlignBody, children}: MetaDataProps) {
   return (
     <HeaderInfo>
       <StyledSectionHeading>{headingText}</StyledSectionHeading>
-      <SectionBody rightAlign={rightAlignBody}>{bodyText}</SectionBody>
+      <SectionBody alignment={rightAlignBody}>{children}</SectionBody>
     </HeaderInfo>
   );
 }
@@ -38,140 +40,137 @@ const HeaderInfo = styled('div')`
 `;
 
 const StyledSectionHeading = styled(SectionHeading)`
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   margin: 0;
 `;
 
-const SectionBody = styled('div')<{rightAlign?: boolean}>`
-  font-size: ${p => p.theme.fontSize.xl};
-  text-align: ${p => (p.rightAlign ? 'right' : 'left')};
-  padding: ${space(0.5)} 0;
+const SectionBody = styled('div')<{alignment?: boolean}>`
+  font-size: ${p => p.theme.font.size.xl};
+  text-align: ${p => (p.alignment ? 'right' : 'left')};
+  padding: ${p => p.theme.space.xs} 0;
   max-height: 32px;
 `;
 
 interface MetaProps {
-  logs: OurLogsResponseItem[] | undefined;
+  logsEnabled: boolean;
   meta: TraceMetaQueryResults['data'];
-  organization: Organization;
-  representativeEvent: RepresentativeTraceEvent;
+  metricsEnabled: boolean;
+  overview: TraceOverviewData;
+  representativeEvent: TraceTree.RepresentativeTraceEvent | null;
   tree: TraceTree;
 }
 
-function getRootDuration(event: TraceTree.TraceEvent | null) {
-  if (!event || isEAPError(event) || isTraceError(event)) {
+function getRootDuration(node: BaseNode | null) {
+  if (!node) {
     return '\u2014';
   }
 
-  return getDuration(
-    ('timestamp' in event ? event.timestamp : event.end_timestamp) -
-      event.start_timestamp,
-    2,
-    true
-  );
+  const startTimestamp = node.startTimestamp;
+  const endTimestamp = node.endTimestamp;
+
+  if (!startTimestamp || !endTimestamp) {
+    return '\u2014';
+  }
+
+  return getDuration(endTimestamp - startTimestamp, 2, true);
 }
 
 export function Meta(props: MetaProps) {
-  const traceNode = props.tree.root.children[0]!;
+  const traceNode = props.tree.root.children[0];
   const {timestamp} = useTraceQueryParams();
 
-  const uniqueErrorIssues = useMemo(() => {
-    if (!traceNode) {
-      return [];
-    }
+  let spansCount = 0;
+  let loadedSpansCount = 0;
+  let totalSpansCount = 0;
+  const metaSpansCount = getTraceMetaSpanCount(props.meta);
+  if (traceNode && metaSpansCount && props.tree.eap_spans_count !== metaSpansCount) {
+    loadedSpansCount = props.tree.eap_spans_count;
+    totalSpansCount = metaSpansCount;
+    spansCount = totalSpansCount;
+  } else if (traceNode) {
+    spansCount = props.tree.eap_spans_count;
+  } else if (metaSpansCount) {
+    spansCount = metaSpansCount;
+  }
 
-    const unique: TraceTree.TraceErrorIssue[] = [];
-    const seenIssues: Set<number> = new Set();
-
-    for (const issue of traceNode.errors) {
-      if (seenIssues.has(issue.issue_id)) {
-        continue;
-      }
-      seenIssues.add(issue.issue_id);
-      unique.push(issue);
-    }
-
-    return unique;
-  }, [traceNode]);
-
-  const uniquePerformanceIssues = useMemo(() => {
-    if (!traceNode) {
-      return [];
-    }
-
-    const unique: TraceTree.TraceOccurrence[] = [];
-    const seenIssues: Set<number> = new Set();
-
-    for (const issue of traceNode.occurrences) {
-      if (seenIssues.has(issue.issue_id)) {
-        continue;
-      }
-      seenIssues.add(issue.issue_id);
-      unique.push(issue);
-    }
-
-    return unique;
-  }, [traceNode]);
-
-  const uniqueIssuesCount = uniqueErrorIssues.length + uniquePerformanceIssues.length;
+  const uniqueIssuesCount = traceNode ? traceNode.uniqueIssues.length : 0;
 
   // If there is no trace data, use the timestamp from the query params as an approximation for
   // the age of the trace.
   const ageStartTimestamp =
     traceNode?.space[0] ?? (timestamp ? timestamp * 1000 : undefined);
 
-  const hasSpans = (props.meta?.span_count ?? 0) > 0;
-  const hasLogs = (props.logs?.length ?? 0) > 0;
+  const hasDifferentSpansCount = loadedSpansCount !== 0 && totalSpansCount !== 0;
+  const hasSpans = spansCount > 0 || loadedSpansCount > 0 || totalSpansCount > 0;
+  const logsCount = getTraceMetaLogsCount(props.meta) ?? props.overview.logs.count ?? 0;
+  const hasLogs = props.logsEnabled && logsCount > 0;
+  const logsLoading = props.logsEnabled && props.overview.logs.availability === 'loading';
+  const metricsCount =
+    getTraceMetaMetricsCount(props.meta) ?? props.overview.metrics.count ?? 0;
+  const hasMetrics = props.metricsEnabled && metricsCount > 0;
+  const metricsLoading =
+    props.metricsEnabled && props.overview.metrics.availability === 'loading';
+
+  const repEvent = props.representativeEvent?.event;
 
   return (
     <MetaWrapper>
-      <MetaSection
-        headingText={t('Issues')}
-        bodyText={
-          uniqueIssuesCount > 0 ? (
-            <TraceDrawerComponents.IssuesLink node={traceNode}>
-              {uniqueIssuesCount}
-            </TraceDrawerComponents.IssuesLink>
-          ) : uniqueIssuesCount === 0 ? (
-            0
-          ) : (
-            '\u2014'
-          )
-        }
-      />
+      <MetaSection headingText={t('Issues')}>
+        {uniqueIssuesCount && traceNode ? (
+          <TraceDrawerComponents.IssuesLink node={traceNode}>
+            {uniqueIssuesCount}
+          </TraceDrawerComponents.IssuesLink>
+        ) : (
+          uniqueIssuesCount
+        )}
+      </MetaSection>
       {hasSpans ? (
-        <MetaSection headingText={t('Spans')} bodyText={props.meta?.span_count} />
+        <MetaSection headingText={t('Spans')}>
+          <Tooltip
+            disabled={!hasDifferentSpansCount}
+            showUnderline
+            title={t('Showing %s of %s spans', loadedSpansCount, totalSpansCount)}
+          >
+            {spansCount}
+          </Tooltip>
+        </MetaSection>
       ) : null}
       {ageStartTimestamp ? (
-        <MetaSection
-          headingText={t('Age')}
-          bodyText={
-            <TimeSince
-              unitStyle="extraShort"
-              date={new Date(ageStartTimestamp)}
-              tooltipShowSeconds
-              suffix=""
-            />
-          }
-        />
+        <MetaSection headingText={t('Age')}>
+          <TimeSince
+            unitStyle="extraShort"
+            date={new Date(ageStartTimestamp)}
+            tooltipShowSeconds
+            suffix=""
+          />
+        </MetaSection>
       ) : null}
       {hasSpans ? (
-        <MetaSection
-          headingText={t('Root Duration')}
-          rightAlignBody
-          bodyText={getRootDuration(
-            props.representativeEvent.event as TraceTree.TraceEvent
+        <MetaSection headingText={t('Root Duration')} rightAlignBody>
+          {repEvent
+            ? OurLogKnownFieldKey.PROJECT_ID in repEvent
+              ? '\u2014' // Logs don't have a duration
+              : getRootDuration(repEvent)
+            : '\u2014'}
+        </MetaSection>
+      ) : null}
+      {hasLogs || logsLoading ? (
+        <MetaSection rightAlignBody headingText={t('Logs')}>
+          {hasLogs ? (
+            logsCount
+          ) : (
+            <TraceHeaderComponents.StyledPlaceholder _width={32} _height={20} />
           )}
-        />
-      ) : hasLogs ? (
-        <MetaSection
-          rightAlignBody
-          headingText={t('Logs')}
-          bodyText={
-            props.meta && 'logs' in props.meta
-              ? props.meta.logs
-              : (props.logs?.length ?? 0)
-          }
-        />
+        </MetaSection>
+      ) : null}
+      {hasMetrics || metricsLoading ? (
+        <MetaSection rightAlignBody headingText={t('Metrics')}>
+          {hasMetrics ? (
+            metricsCount
+          ) : (
+            <TraceHeaderComponents.StyledPlaceholder _width={32} _height={20} />
+          )}
+        </MetaSection>
       ) : null}
     </MetaWrapper>
   );
@@ -180,7 +179,8 @@ export function Meta(props: MetaProps) {
 const MetaWrapper = styled('div')`
   display: flex;
   align-items: center;
-  gap: ${space(2)};
+  flex-wrap: wrap;
+  gap: ${p => p.theme.space.xl};
 
   ${HeaderInfo} {
     min-height: 0;

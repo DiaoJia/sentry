@@ -1,4 +1,4 @@
-import type {PageFilters} from 'sentry/types/core';
+import type {PageFilterDatetime} from 'sentry/types/core';
 import type {
   GroupStatusResolution,
   MarkReviewed,
@@ -28,7 +28,7 @@ export enum GroupSearchViewCreatedBy {
 }
 
 export type StarredGroupSearchView = {
-  createdBy: AvatarUser;
+  createdBy: AvatarUser | null;
   dateCreated: string;
   dateUpdated: string;
   environments: string[];
@@ -39,7 +39,7 @@ export type StarredGroupSearchView = {
   query: string;
   querySort: IssueSortOptions;
   stars: number;
-  timeFilters: PageFilters['datetime'];
+  timeFilters: PageFilterDatetime;
 };
 
 export type GroupSearchView = StarredGroupSearchView & {

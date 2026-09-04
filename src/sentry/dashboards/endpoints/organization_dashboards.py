@@ -1,0 +1,781 @@
+from __future__ import annotations
+
+from enum import IntEnum
+from typing import Required, TypedDict
+
+import sentry_sdk
+from django.db import IntegrityError, router, transaction
+from django.db.models import (
+    Case,
+    Exists,
+    F,
+    IntegerField,
+    OrderBy,
+    OuterRef,
+    Subquery,
+    Value,
+    When,
+)
+from drf_spectacular.utils import extend_schema
+from rest_framework import status
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from sentry import audit_log, features, options, quotas, roles
+from sentry.api.api_owners import ApiOwner
+from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
+from sentry.api.paginator import ChainPaginator
+from sentry.api.serializers import serialize
+from sentry.api.serializers.models.dashboard import (
+    DashboardDetailsModelSerializer,
+    DashboardDetailsResponse,
+    DashboardListResponse,
+    DashboardListSerializer,
+)
+from sentry.api.serializers.rest_framework import DashboardSerializer
+from sentry.apidocs.constants import (
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_CONFLICT,
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NOT_FOUND,
+)
+from sentry.apidocs.examples.dashboard_examples import DashboardExamples
+from sentry.apidocs.parameters import (
+    CursorQueryParam,
+    DashboardParams,
+    GlobalParams,
+    VisibilityParams,
+)
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
+from sentry.apidocs.utils import inline_sentry_response_serializer
+from sentry.auth.superuser import is_active_superuser
+from sentry.db.models.fields.text import CharField
+from sentry.locks import locks
+from sentry.models.dashboard import Dashboard, DashboardFavoriteUser, DashboardLastVisited
+from sentry.models.organization import Organization
+from sentry.organizations.services.organization.model import (
+    RpcOrganization,
+    RpcUserOrganizationContext,
+)
+from sentry.users.services.user.service import user_service
+from sentry.utils.locking import UnableToAcquireLock
+
+MAX_RETRIES = 2
+
+
+# Do not delete or modify existing entries. These enums are required to match ids in the frontend.
+class PrebuiltDashboardId(IntEnum):
+    FRONTEND_SESSION_HEALTH = 1
+    BACKEND_QUERIES = 2
+    BACKEND_QUERIES_SUMMARY = 3
+    HTTP = 4
+    HTTP_DOMAIN_SUMMARY = 5
+    WEB_VITALS = 6
+    WEB_VITALS_SUMMARY = 7
+    MOBILE_VITALS = 8
+    MOBILE_VITALS_APP_STARTS = 9
+    MOBILE_VITALS_SCREEN_LOADS = 10
+    MOBILE_VITALS_SCREEN_RENDERING = 11
+    BACKEND_OVERVIEW = 12
+    MOBILE_SESSION_HEALTH = 13
+    FRONTEND_OVERVIEW = 14
+    NEXTJS_FRONTEND_OVERVIEW = 15
+    AI_AGENTS_OVERVIEW = 16
+    AI_AGENTS_MODELS = 17
+    AI_AGENTS_TOOLS = 18
+    MCP_OVERVIEW = 19
+    MCP_TOOLS = 20
+    MCP_RESOURCES = 21
+    MCP_PROMPTS = 22
+    LARAVEL_OVERVIEW = 23
+    FRONTEND_ASSETS = 24
+    FRONTEND_ASSETS_SUMMARY = 25
+    BACKEND_QUEUES = 26
+    BACKEND_QUEUE_SUMMARY = 27
+    BACKEND_CACHES = 28
+    NODE_RUNTIME_METRICS = 29
+
+
+class PrebuiltDashboard(TypedDict, total=False):
+    prebuilt_id: Required[PrebuiltDashboardId]
+    title: Required[str]
+    hidden: bool
+    pre_favorited: bool
+
+
+# Prebuilt dashboards store minimal fields in the database. The actual dashboard and widget settings are
+# coded in the frontend and we rely on matching prebuilt_id to populate the dashboard and widget display.
+# Prebuilt dashboard database records are purely for tracking things like starred status, last viewed, etc.
+#
+# Note A: Consider storing all dashboard and widget data in the database instead of relying on matching
+# prebuilt_id on the frontend, if there are issues.
+# Note B: These titles should match the configs in the `PREBUILT_DASHBOARDS` constant in the frontend so that the results returned by the API match the titles in the frontend.
+PREBUILT_DASHBOARDS: list[PrebuiltDashboard] = [
+    {
+        "prebuilt_id": PrebuiltDashboardId.FRONTEND_SESSION_HEALTH,
+        "title": "Frontend Session Health",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_QUERIES,
+        "title": "Queries",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_QUERIES_SUMMARY,
+        "title": "Query Details",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.HTTP,
+        "title": "Outbound API Requests",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.HTTP_DOMAIN_SUMMARY,
+        "title": "Domain Details",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.WEB_VITALS,
+        "title": "Web Vitals",
+        "pre_favorited": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.WEB_VITALS_SUMMARY,
+        "title": "Web Vitals Page Summary",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MOBILE_VITALS,
+        "title": "Mobile Vitals",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MOBILE_VITALS_APP_STARTS,
+        "title": "Mobile Vitals App Starts",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MOBILE_VITALS_SCREEN_LOADS,
+        "title": "Mobile Vitals Screen Loads",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MOBILE_VITALS_SCREEN_RENDERING,
+        "title": "Mobile Vitals Screen Rendering",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_OVERVIEW,
+        "title": "Backend Overview",
+        "pre_favorited": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MOBILE_SESSION_HEALTH,
+        "title": "Mobile Session Health",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.FRONTEND_OVERVIEW,
+        "title": "Frontend Overview",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.NEXTJS_FRONTEND_OVERVIEW,
+        "title": "Next.js Overview",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.AI_AGENTS_MODELS,
+        "title": "AI Agents Model Details",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.AI_AGENTS_TOOLS,
+        "title": "AI Agents Tool Details",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MCP_TOOLS,
+        "title": "MCP Tool Details",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MCP_RESOURCES,
+        "title": "MCP Resource Details",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MCP_PROMPTS,
+        "title": "MCP Prompt Details",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.AI_AGENTS_OVERVIEW,
+        "title": "AI Agents Overview",
+        "pre_favorited": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.MCP_OVERVIEW,
+        "title": "MCP Overview",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.LARAVEL_OVERVIEW,
+        "title": "Laravel Overview",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.FRONTEND_ASSETS,
+        "title": "Frontend Assets",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.FRONTEND_ASSETS_SUMMARY,
+        "title": "Frontend Assets Summary",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_QUEUES,
+        "title": "Queues",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_QUEUE_SUMMARY,
+        "title": "Queue Summary",
+        "hidden": True,
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.BACKEND_CACHES,
+        "title": "Caches",
+    },
+    {
+        "prebuilt_id": PrebuiltDashboardId.NODE_RUNTIME_METRICS,
+        "title": "Node.js Runtime Metrics",
+    },
+]
+
+
+def get_enabled_prebuilt_dashboards(
+    organization: Organization,
+) -> list[PrebuiltDashboard]:
+    """
+    Returns the list of prebuilt dashboards that are enabled for the given organization,
+    based on the prebuilt-dashboard-ids option and the sync-all feature flag.
+    """
+    enabled_prebuilt_dashboard_ids = options.get("dashboards.prebuilt-dashboard-ids")
+    should_sync_all_registered_prebuilt_dashboards = features.has(
+        "organizations:dashboards-sync-all-registered-prebuilt-dashboards",
+        organization,
+    )
+    all_prebuilt_dashboards = [dashboard for dashboard in PREBUILT_DASHBOARDS]
+    if should_sync_all_registered_prebuilt_dashboards:
+        return all_prebuilt_dashboards
+    return [
+        dashboard
+        for dashboard in all_prebuilt_dashboards
+        if dashboard["prebuilt_id"] in enabled_prebuilt_dashboard_ids
+    ]
+
+
+def sync_prebuilt_dashboards(organization: Organization) -> None:
+    """
+    Queries the database to check if prebuilt dashboards have a Dashboard record and
+    creates them if they don't, updates titles if they've changed, or deletes them
+    if they should no longer exist.
+    """
+
+    with transaction.atomic(router.db_for_write(Dashboard)):
+        enabled_prebuilt_dashboards = get_enabled_prebuilt_dashboards(organization)
+
+        saved_prebuilt_dashboards = Dashboard.objects.filter(
+            organization=organization,
+            prebuilt_id__isnull=False,
+        )
+
+        saved_prebuilt_dashboard_map = {d.prebuilt_id: d for d in saved_prebuilt_dashboards}
+
+        # Create prebuilt dashboards if they don't exist, or update titles if changed
+        dashboards_to_update: list[Dashboard] = []
+        for prebuilt_dashboard in enabled_prebuilt_dashboards:
+            prebuilt_id: PrebuiltDashboardId = prebuilt_dashboard["prebuilt_id"]
+
+            if prebuilt_id not in saved_prebuilt_dashboard_map:
+                # Create new dashboard
+                Dashboard.objects.create(
+                    organization=organization,
+                    title=prebuilt_dashboard["title"],
+                    created_by_id=None,
+                    prebuilt_id=prebuilt_id,
+                )
+            elif saved_prebuilt_dashboard_map[prebuilt_id].title != prebuilt_dashboard["title"]:
+                # Update title if changed
+                saved_prebuilt_dashboard_map[prebuilt_id].title = prebuilt_dashboard["title"]
+                dashboards_to_update.append(saved_prebuilt_dashboard_map[prebuilt_id])
+
+        if dashboards_to_update:
+            Dashboard.objects.bulk_update(dashboards_to_update, ["title"])
+
+        # Delete old prebuilt dashboards if they should no longer exist
+        prebuilt_ids = [d["prebuilt_id"] for d in enabled_prebuilt_dashboards]
+        Dashboard.objects.filter(
+            organization=organization,
+            prebuilt_id__isnull=False,
+        ).exclude(prebuilt_id__in=prebuilt_ids).delete()
+
+
+def sync_prebuilt_dashboards_favorited(organization: Organization, user_id: int) -> None:
+    """
+    Checks if pre-favorited prebuilt dashboards have a DashboardFavoriteUser record for the
+    user, and creates them if they don't. This ensures that certain prebuilt dashboards are
+    favorited by default for all users, preserving any existing starred ones.
+
+    New prebuilts are inserted alphabetically while the user's prebuilt stars are still in
+    their default (alphabetical) order.
+    """
+    enabled_prebuilt_dashboards = get_enabled_prebuilt_dashboards(organization)
+    pre_favorited_ids = [
+        d["prebuilt_id"] for d in enabled_prebuilt_dashboards if d.get("pre_favorited")
+    ]
+    if not pre_favorited_ids:
+        return
+
+    with transaction.atomic(router.db_for_write(DashboardFavoriteUser)):
+        prebuilt_favorited = list(
+            DashboardFavoriteUser.objects.filter(
+                organization=organization,
+                user_id=user_id,
+                favorited=True,
+                dashboard__prebuilt_id__isnull=False,
+            )
+            .order_by("position")
+            .select_related("dashboard")
+        )
+        # We want to know if the dashboards are alphabetically ordered (default) or
+        # have been rearranged, and respect whatever order they're in
+        favorited_titles = [f.dashboard.title for f in prebuilt_favorited]
+        is_default_order = favorited_titles == sorted(favorited_titles)
+
+        # Get any favorited dashboards, custom or prebuilt, belonging to the user.
+        # Don't explicitly exclude those with favorite=False to not show unfavorited dashboards.
+        missing_dashboards = (
+            Dashboard.objects.filter(
+                organization=organization,
+                prebuilt_id__in=pre_favorited_ids,
+            )
+            .exclude(
+                id__in=DashboardFavoriteUser.objects.filter(
+                    organization=organization,
+                    user_id=user_id,
+                ).values_list("dashboard_id", flat=True)
+            )
+            .order_by("title")
+        )
+        for dashboard in missing_dashboards:
+            if is_default_order:
+                DashboardFavoriteUser.objects.insert_favorite_dashboard_alphabetically(
+                    organization, user_id, dashboard
+                )
+            else:
+                DashboardFavoriteUser.objects.insert_favorite_dashboard(
+                    organization=organization,
+                    user_id=user_id,
+                    dashboard=dashboard,
+                )
+
+
+class OrganizationDashboardsPermission(OrganizationPermission):
+    scope_map = {
+        "GET": ["org:read", "org:write", "org:admin"],
+        "POST": ["org:read", "org:write", "org:admin"],
+        "PUT": ["org:read", "org:write", "org:admin"],
+        "DELETE": ["org:read", "org:write", "org:admin"],
+    }
+
+    def has_object_permission(
+        self,
+        request: Request,
+        view: APIView,
+        obj: Organization | RpcOrganization | RpcUserOrganizationContext | Dashboard,
+    ) -> bool:
+        if isinstance(obj, Organization):
+            return super().has_object_permission(request, view, obj)
+
+        if isinstance(obj, Dashboard):
+            is_superuser = is_active_superuser(request)
+            # allow strictly for Owners and superusers, this allows them to delete dashboards
+            # of users that no longer have access to the organization
+            if is_superuser or request.access.has_role_in_organization(
+                role=roles.get_top_dog().id, organization=obj.organization, user_id=request.user.id
+            ):
+                return True
+
+            # check if user is restricted from editing dashboard
+            if hasattr(obj, "permissions"):
+                return obj.permissions.has_edit_permissions(request.user.id)
+
+            # if no permissions are assigned, it is considered accessible to all users
+            return True
+
+        return True
+
+
+@extend_schema(tags=["Dashboards"])
+@cell_silo_endpoint
+class OrganizationDashboardsEndpoint(OrganizationEndpoint):
+    publish_status = {
+        "GET": ApiPublishStatus.PUBLIC,
+        "POST": ApiPublishStatus.PUBLIC,
+    }
+    owner = ApiOwner.DASHBOARDS
+    permission_classes = (OrganizationDashboardsPermission,)
+
+    @extend_schema(
+        operation_id="listOrganizationDashboards",
+        summary="List an Organization's Custom Dashboards",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            DashboardParams.FILTER,
+            DashboardParams.QUERY,
+            DashboardParams.SORT,
+            DashboardParams.PIN,
+            VisibilityParams.PER_PAGE,
+            CursorQueryParam,
+        ],
+        request=None,
+        responses={
+            200: inline_sentry_response_serializer(
+                "DashboardListResponse", list[DashboardListResponse]
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=DashboardExamples.DASHBOARDS_QUERY_RESPONSE,
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[list[DashboardListResponse]]:
+        """
+        Retrieve a list of custom dashboards that are associated with the given organization.
+        """
+        if not request.user.is_authenticated:
+            return Response(status=status.HTTP_401_UNAUTHORIZED)
+
+        if not features.has("organizations:dashboards-basic", organization, actor=request.user):
+            return Response(status=404)
+
+        has_dashboards_starred = features.has(
+            "organizations:dashboards-starred", organization, actor=request.user
+        )
+
+        if features.has(
+            "organizations:dashboards-prebuilt-insights-dashboards",
+            organization,
+            actor=request.user,
+        ):
+            # Sync prebuilt dashboards to the database
+            try:
+                lock = locks.get(
+                    f"dashboards:sync_prebuilt_dashboards:{organization.id}",
+                    duration=10,
+                    name="sync_prebuilt_dashboards",
+                )
+                with lock.acquire():
+                    sync_prebuilt_dashboards(organization)
+            except UnableToAcquireLock:
+                pass
+            except Exception as err:
+                sentry_sdk.capture_exception(err)
+
+            if has_dashboards_starred:
+                try:
+                    favorite_lock = locks.get(
+                        f"dashboards:sync_prebuilt_dashboards_favorited:{organization.id}:{request.user.id}",
+                        duration=10,
+                        name="sync_prebuilt_dashboards_favorited",
+                    )
+                    with favorite_lock.acquire():
+                        sync_prebuilt_dashboards_favorited(organization, request.user.id)
+                except UnableToAcquireLock:
+                    pass
+                except Exception as err:
+                    sentry_sdk.capture_exception(err)
+
+        filters = request.query_params.getlist("filter")
+
+        dashboards = Dashboard.objects.filter(organization_id=organization.id)
+        for f in filters:
+            if f == "onlyFavorites":
+                dashboards = dashboards.filter(
+                    dashboardfavoriteuser__user_id=request.user.id,
+                    dashboardfavoriteuser__favorited=True,
+                )
+            elif f == "excludeFavorites":
+                dashboards = dashboards.exclude(
+                    dashboardfavoriteuser__user_id=request.user.id,
+                    dashboardfavoriteuser__favorited=True,
+                )
+            elif f == "owned":
+                dashboards = dashboards.filter(created_by_id=request.user.id)
+            elif f == "shared":
+                dashboards = dashboards.exclude(created_by_id=request.user.id)
+            elif f == "excludePrebuilt":
+                dashboards = dashboards.exclude(prebuilt_id__isnull=False)
+            elif f == "onlyPrebuilt":
+                dashboards = dashboards.filter(prebuilt_id__isnull=False)
+
+        if "showHidden" not in filters:
+            hidden_prebuilt_ids = [
+                d["prebuilt_id"] for d in PREBUILT_DASHBOARDS if d.get("hidden", False)
+            ]
+            if hidden_prebuilt_ids:
+                dashboards = dashboards.exclude(prebuilt_id__in=hidden_prebuilt_ids)
+
+        query = request.GET.get("query")
+        prebuilt_ids = request.GET.getlist("prebuiltId")
+
+        should_filter_by_prebuilt_ids = (
+            features.has(
+                "organizations:dashboards-prebuilt-insights-dashboards",
+                organization,
+                actor=request.user,
+            )
+            and prebuilt_ids
+            and len(prebuilt_ids) > 0
+        )
+
+        if query:
+            dashboards = dashboards.filter(title__icontains=query)
+        if should_filter_by_prebuilt_ids:
+            dashboards = dashboards.filter(prebuilt_id__in=prebuilt_ids)
+
+        # TODO: Only keep the last_visited per user logic once `dashboards-user-last-visited` is fully rolled out
+        use_user_last_visited = features.has(
+            "organizations:dashboards-user-last-visited", organization, actor=request.user
+        )
+
+        sort_by = request.query_params.get("sort")
+        if sort_by and sort_by.startswith("-"):
+            sort_by, desc = sort_by[1:], True
+        else:
+            desc = False
+
+        if use_user_last_visited and sort_by in (
+            "recentlyViewed",
+            "myDashboardsAndRecentlyViewed",
+        ):
+            dashboards = dashboards.annotate(
+                user_last_visited=Subquery(
+                    DashboardLastVisited.objects.filter(
+                        user_id=request.user.id,
+                        dashboard_id=OuterRef("id"),
+                    ).values("last_visited")[:1]
+                )
+            )
+
+        order_by: list[Case | str | OrderBy]
+        if sort_by == "title":
+            order_by = [
+                "-title" if desc else "title",
+                "-date_added",
+            ]
+
+        elif sort_by == "dateCreated":
+            order_by = ["-date_added" if desc else "date_added"]
+
+        elif sort_by == "mostPopular":
+            order_by = [
+                "visits" if desc else "-visits",
+                "-date_added",
+            ]
+
+        elif sort_by == "recentlyViewed":
+            # TODO: Only keep the last_visited per user logic once `dashboards-user-last-visited` is fully rolled out
+            if use_user_last_visited:
+                order_by = [
+                    F("user_last_visited").asc(nulls_last=True)
+                    if desc
+                    else F("user_last_visited").desc(nulls_last=True)
+                ]
+            else:
+                order_by = ["last_visited" if desc else "-last_visited"]
+
+        elif sort_by == "mydashboards":
+            user_name_dict = {
+                user.id: user.name
+                for user in user_service.get_many_by_id(
+                    ids=list(
+                        id
+                        for id in dashboards.values_list("created_by_id", flat=True).filter(
+                            created_by_id__isnull=False
+                        )
+                        if id is not None
+                    )
+                )
+            }
+            dashboards = dashboards.annotate(
+                user_name=Case(
+                    *[
+                        When(created_by_id=user_id, then=Value(user_name))
+                        for user_id, user_name in user_name_dict.items()
+                    ],
+                    default=Value(""),
+                    output_field=CharField(),
+                )
+            )
+            order_by = [
+                Case(
+                    When(created_by_id=request.user.id, then=-1),
+                    default=1,
+                    output_field=IntegerField(),
+                ),
+                "-user_name" if desc else "user_name",
+                "-date_added",
+            ]
+
+        elif sort_by == "myDashboardsAndRecentlyViewed":
+            # TODO: Only keep the last_visited per user logic once `dashboards-user-last-visited` is fully rolled out
+            order_by = [
+                Case(When(created_by_id=request.user.id, then=-1), default=1),
+                F("user_last_visited").desc(nulls_last=True)
+                if use_user_last_visited
+                else "-last_visited",
+            ]
+        elif "onlyFavorites" in filters and has_dashboards_starred:
+            favorite_dashboards = DashboardFavoriteUser.objects.get_favorite_dashboards(
+                organization, request.user.id
+            ).filter(dashboard_id=OuterRef("id"))
+            dashboards = dashboards.annotate(
+                favorite_position=Subquery(favorite_dashboards.values("position")[:1])
+            )
+            order_by = [F("favorite_position").asc(nulls_last=True), "title"]
+        else:
+            order_by = ["title"]
+
+        # Entries with null last visited need a deterministic tiebreaker,
+        # hence adding id to serve this purpose.
+        if use_user_last_visited:
+            order_by.append("-id")
+
+        pin_by = request.query_params.get("pin")
+        if pin_by == "favorites":
+            favorited_by_subquery = DashboardFavoriteUser.objects.filter(
+                dashboard=OuterRef("pk"), user_id=request.user.id, favorited=True
+            )
+
+            order_by_favorites = [
+                Case(
+                    When(Exists(favorited_by_subquery), then=-1),
+                    default=1,
+                    output_field=IntegerField(),
+                )
+            ]
+            dashboards = dashboards.order_by(*order_by_favorites, *order_by)
+        else:
+            dashboards = dashboards.order_by(*order_by)
+
+        list_serializer = DashboardListSerializer()
+
+        def handle_results(results: list[Dashboard]) -> list[DashboardListResponse]:
+            return serialize(
+                results,
+                request.user,
+                serializer=list_serializer,
+                context={"organization": organization},
+            )
+
+        return self.paginate(
+            request=request,
+            sources=[dashboards],
+            paginator_cls=ChainPaginator,
+            on_results=handle_results,
+        )
+
+    @extend_schema(
+        operation_id="createOrganizationDashboard",
+        summary="Create a New Dashboard for an Organization",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG],
+        request=DashboardSerializer,
+        responses={
+            201: DashboardDetailsModelSerializer,
+            400: RESPONSE_BAD_REQUEST,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+            409: RESPONSE_CONFLICT,
+        },
+        examples=DashboardExamples.DASHBOARD_POST_RESPONSE,
+    )
+    def post(
+        self, request: Request, organization: Organization, retry: int = 0
+    ) -> (
+        Response[DashboardDetailsResponse]
+        | Response[None]
+        | Response[ValidationErrorResponse]
+        | Response[str]
+    ):
+        """
+        Create a new dashboard for the given Organization
+        """
+        if not request.user.is_authenticated:
+            return Response(status=status.HTTP_401_UNAUTHORIZED)
+
+        if not features.has("organizations:dashboards-edit", organization, actor=request.user):
+            return Response(status=404)
+
+        projects = self.get_projects(request, organization)
+        serializer = DashboardSerializer(
+            data=request.data,
+            context={
+                "organization": organization,
+                "request": request,
+                "projects": projects,
+                # allow_joinleave grants project access without team membership.
+                "validation_projects": projects
+                or self.get_projects(request, organization, include_all_accessible=True),
+                "environment": self.request.GET.getlist("environment"),
+            },
+        )
+
+        if not serializer.is_valid():
+            return Response(as_validation_errors(serializer), status=400)
+
+        if request.GET.get("validateOnly"):
+            return Response(status=200)
+
+        # We need to acquire a lock so that a burst of concurrent create requests doesn't read
+        # stale count data and bypass the dashboard limit for an org.
+        dashboard_create_lock = locks.get(
+            f"dashboard:create:{organization.id}",
+            duration=5,
+            name="dashboard_create",
+        )
+
+        try:
+            with (
+                dashboard_create_lock.acquire(),
+                transaction.atomic(router.db_for_write(Dashboard)),
+            ):
+                dashboard_count = Dashboard.objects.filter(
+                    organization=organization, prebuilt_id=None
+                ).count()
+                dashboard_limit = quotas.backend.get_dashboard_limit(organization.id)
+                if dashboard_limit >= 0 and dashboard_count >= dashboard_limit:
+                    return Response(
+                        f"You may not exceed {dashboard_limit} dashboards on your current plan.",
+                        status=400,
+                    )
+
+                dashboard = serializer.save()
+        except IntegrityError:
+            if retry >= MAX_RETRIES:
+                return Response("Dashboard title already taken", status=409)
+
+            request.data["title"] = Dashboard.incremental_title(
+                organization, serializer.validated_data["title"]
+            )
+
+            return self.post(request, organization, retry=retry + 1)
+        except UnableToAcquireLock:
+            return Response("Unable to create dashboard, please try again", status=503)
+
+        # Audit only after a successful create so title-conflict retries cannot
+        # emit multiple create entries.
+        self.create_audit_entry(
+            request=request,
+            organization=organization,
+            target_object=dashboard.id,
+            event=audit_log.get_event_id("DASHBOARD_ADD"),
+            data=dashboard.get_audit_log_data(),
+        )
+
+        body: DashboardDetailsResponse = serialize(dashboard, request.user)
+        return Response(body, status=201)

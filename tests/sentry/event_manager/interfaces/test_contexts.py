@@ -1,16 +1,25 @@
+from typing import Any
+
 import pytest
 
-from sentry import eventstore
 from sentry.event_manager import EventManager
+from sentry.interfaces.contexts import Contexts
+from sentry.services import eventstore
+from sentry.testutils.pytest.fixtures import InstaSnapshotter
+from tests.sentry.event_manager.interfaces import CustomSnapshotter as CustomSnapshotterBase
+
+SnapshotInput = dict[str, Any]
+CustomSnapshotter = CustomSnapshotterBase[SnapshotInput]
 
 
 @pytest.fixture
-def make_ctx_snapshot(insta_snapshot):
-    def inner(data):
-        mgr = EventManager(data={"contexts": data})
+def make_ctx_snapshot(insta_snapshot: InstaSnapshotter) -> CustomSnapshotter:
+    def inner(data: SnapshotInput) -> None:
+        mgr = EventManager(data={"contexts": data, "event_id": "d718bb6c40be4ac9a0c55c4df1640130"})
         mgr.normalize()
         evt = eventstore.backend.create_event(project_id=1, data=mgr.get_data())
         interface = evt.interfaces.get("contexts")
+        assert interface is not None
 
         insta_snapshot(
             {
@@ -23,47 +32,47 @@ def make_ctx_snapshot(insta_snapshot):
     return inner
 
 
-def test_os(make_ctx_snapshot):
+def test_os(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"os": {"os": "Windows 95", "name": "Windows", "version": "95", "rooted": True}}
     )
 
 
-def test_null_values(make_ctx_snapshot):
+def test_null_values(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot({"os": None})
 
 
-def test_null_values2(make_ctx_snapshot):
+def test_null_values2(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot({"os": {}})
 
 
-def test_null_values3(make_ctx_snapshot):
+def test_null_values3(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot({"os": {"name": None}})
 
 
-def test_os_normalization(make_ctx_snapshot):
+def test_os_normalization(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot({"os": {"raw_description": "Microsoft Windows 6.1.7601 S"}})
 
 
-def test_runtime(make_ctx_snapshot):
+def test_runtime(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"runtime": {"runtime": "Java 1.2.3", "name": "Java", "version": "1.2.3", "build": "BLAH"}}
     )
 
 
-def test_runtime_normalization(make_ctx_snapshot):
+def test_runtime_normalization(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"runtime": {"raw_description": ".NET Framework 4.0.30319.42000", "build": "461808"}}
     )
 
 
-def test_browser(make_ctx_snapshot):
+def test_browser(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"browser": {"browser": "Chrome 132.0.6834.0", "name": "Chrome", "version": "132.0.6834.0"}}
     )
 
 
-def test_device(make_ctx_snapshot):
+def test_device(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {
             "device": {
@@ -72,12 +81,13 @@ def test_device(make_ctx_snapshot):
                 "model_id": "1234AB",
                 "version": "1.2.3",
                 "arch": "arm64",
+                "device_type": "Handheld",
             }
         }
     )
 
 
-def test_device_with_alias(make_ctx_snapshot):
+def test_device_with_alias(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {
             "my_device": {
@@ -93,23 +103,23 @@ def test_device_with_alias(make_ctx_snapshot):
     )
 
 
-def test_default(make_ctx_snapshot):
+def test_default(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"whatever": {"foo": "bar", "blub": "blah", "biz": [1, 2, 3], "baz": {"foo": "bar"}}}
     )
 
 
-def test_app(make_ctx_snapshot):
+def test_app(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot({"app": {"app_id": "1234", "device_app_hash": "5678"}})
 
 
-def test_gpu(make_ctx_snapshot):
+def test_gpu(make_ctx_snapshot: CustomSnapshotter) -> None:
     make_ctx_snapshot(
         {"gpu": {"name": "AMD Radeon Pro 560", "vendor_name": "Apple", "version": "Metal"}}
     )
 
 
-def test_large_numbers():
+def test_large_numbers() -> None:
     data = {
         "large_numbers": {
             "decimal_number": 123456.789,
@@ -127,6 +137,7 @@ def test_large_numbers():
     mgr.normalize()
     evt = eventstore.backend.create_event(project_id=1, data=mgr.get_data())
     interface = evt.interfaces.get("contexts")
+    assert interface is not None
     ctx_data = interface.to_json()["large_numbers"]
     for key in numeric_keys:
         assert isinstance(ctx_data[key], (int, float))
@@ -134,7 +145,7 @@ def test_large_numbers():
         assert isinstance(ctx_data[key], str)
 
 
-def test_large_nested_numbers():
+def test_large_nested_numbers() -> None:
     data = {
         "large_numbers": {
             "dictionary": {"key_1": 608548899684111178, "key_2": -123456789123456789},
@@ -159,6 +170,7 @@ def test_large_nested_numbers():
     mgr.normalize()
     evt = eventstore.backend.create_event(project_id=1, data=mgr.get_data())
     interface = evt.interfaces.get("contexts")
+    assert interface is not None
     ctx_data = interface.to_json()["large_numbers"]
 
     expected_data = {
@@ -180,3 +192,48 @@ def test_large_nested_numbers():
         "type": "default",
     }
     assert ctx_data == expected_data
+
+
+def test_unity(make_ctx_snapshot: CustomSnapshotter) -> None:
+    make_ctx_snapshot(
+        {
+            "unity": {
+                "active_scene_name": "MainScene",
+                "editor_version": "2022.3.1f1",
+                "install_mode": "Store",
+                "is_main_thread": True,
+                "rendering_threading_mode": "MultiThreaded",
+                "target_frame_rate": "60",
+            }
+        }
+    )
+
+
+def test_reserved_context_alias_self() -> None:
+    """Test that 'self' can be used as a context alias without causing TypeError."""
+    # Data with 'self' as a context alias (not as a key within context data)
+    data = {
+        "self": {
+            "type": "default",
+            "some_key": "some_value",
+        },
+        "valid_context": {
+            "type": "default",
+            "valid_key": "valid_value",
+        },
+    }
+
+    # Should not raise TypeError: Interface.__init__() got multiple values for argument 'self'
+    result = Contexts.to_python(data)
+
+    # Verify result exists
+    assert result is not None
+
+    # Verify 'self' context is now preserved (was previously filtered out)
+    json_data = result.to_json()
+    assert "self" in json_data
+    assert json_data["self"]["some_key"] == "some_value"
+
+    # Verify valid_context was preserved
+    assert "valid_context" in json_data
+    assert json_data["valid_context"]["valid_key"] == "valid_value"

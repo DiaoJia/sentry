@@ -1,9 +1,9 @@
-import {Tag} from 'sentry/components/core/badge/tag';
-import {DateTime} from 'sentry/components/dateTime';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
+import {Tag} from '@sentry/scraps/badge';
+import {ExternalLink, Link} from '@sentry/scraps/link';
 
-import ResultGrid from 'admin/components/resultGrid';
+import {DateTime} from 'sentry/components/dateTime';
+
+import {ResultGrid} from 'admin/components/resultGrid';
 
 type Props = Partial<React.ComponentProps<typeof ResultGrid>> & {
   orgId: string;
@@ -30,7 +30,7 @@ const getRow = (orgId: string, region: string, row: any) => [
     )}
   </td>,
   <td key="status" style={{textAlign: 'center'}}>
-    <Tag type={row.isPaid ? 'success' : 'warning'}>
+    <Tag variant={row.isPaid ? 'success' : 'warning'}>
       {row.isPaid ? 'paid' : row.failureCode}
     </Tag>
   </td>,
@@ -46,7 +46,7 @@ const getRow = (orgId: string, region: string, row: any) => [
   </td>,
 ];
 
-function CustomerCharges({orgId, region, ...props}: Props) {
+export function CustomerCharges({orgId, region, ...props}: Props) {
   return (
     <ResultGrid
       path={`/_admin/customers/${orgId}/`}
@@ -74,5 +74,3 @@ function CustomerCharges({orgId, region, ...props}: Props) {
     />
   );
 }
-
-export default CustomerCharges;

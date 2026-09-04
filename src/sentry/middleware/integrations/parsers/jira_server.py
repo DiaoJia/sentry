@@ -4,8 +4,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-import orjson
 from django.http import HttpResponse
+from django.http.response import HttpResponseBase
 from rest_framework import status
 
 from sentry.hybridcloud.outbox.category import WebhookProviderIdentifier
@@ -14,15 +14,16 @@ from sentry.integrations.jira_server.webhooks import (
     get_integration_from_token,
 )
 from sentry.integrations.middleware.hybrid_cloud.parser import BaseRequestParser
+from sentry.integrations.types import IntegrationProviderSlug
 
 logger = logging.getLogger(__name__)
 
 
 class JiraServerRequestParser(BaseRequestParser):
-    provider = "jira_server"
+    provider = IntegrationProviderSlug.JIRA_SERVER.value
     webhook_identifier = WebhookProviderIdentifier.JIRA_SERVER
 
-    def get_response_from_issue_update_webhook(self):
+    def get_response_from_issue_update_webhook(self) -> HttpResponseBase:
         token = self.match.kwargs.get("token")
         try:
             integration = get_integration_from_token(token)
@@ -30,32 +31,34 @@ class JiraServerRequestParser(BaseRequestParser):
             logger.info("%s.no_integration", self.provider, extra={"error": str(e)})
             return HttpResponse(status=status.HTTP_200_OK)
 
+        data = self.get_request_body()
+
+        # We only process webhooks with changelogs. Above the org and cell lookups a
+        # dropped payload never needs; below the token lookup so the log can name it.
+        if not data.get("changelog"):
+            logger.info("missing-changelog", extra={"integration_id": integration.id})
+            return HttpResponse(status=status.HTTP_200_OK)
+
+        shed_response = self.get_shed_response(integration_id=integration.id)
+        if shed_response is not None:
+            return shed_response
+
         organizations = self.get_organizations_from_integration(integration=integration)
 
         if len(organizations) == 0:
             return HttpResponse(status=status.HTTP_400_BAD_REQUEST)
 
-        regions = self.get_regions_from_organizations(organizations=organizations)
-
-        try:
-            data = orjson.loads(self.request.body)
-        except orjson.JSONDecodeError:
-            data = {}
-
-        # We only process webhooks with changelogs
-        if not data.get("changelog"):
-            logger.info("missing-changelog", extra={"integration_id": integration.id})
-            return HttpResponse(status=status.HTTP_200_OK)
+        cells = self.get_cells_from_organizations(organizations=organizations)
 
         return self.get_response_from_webhookpayload(
-            regions=regions,
-            identifier=self.get_mailbox_identifier(integration, data),
+            cells=cells,
+            mailbox=self.get_mailbox(integration, data),
             integration_id=integration.id,
         )
 
     def mailbox_bucket_id(self, data: Mapping[str, Any]) -> int | None:
         """
-        Used by get_mailbox_identifier to find the issue.id a payload is for.
+        Used by get_mailbox to find the issue.id a payload is for.
         In high volume jira_server instances we shard messages by issue for greater
         delivery throughput.
         """
@@ -67,7 +70,7 @@ class JiraServerRequestParser(BaseRequestParser):
         except ValueError:
             return None
 
-    def get_response(self):
+    def get_response(self) -> HttpResponseBase:
         if self.view_class == JiraServerIssueUpdatedWebhook:
             return self.get_response_from_issue_update_webhook()
 

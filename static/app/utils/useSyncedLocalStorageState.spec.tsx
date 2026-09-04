@@ -1,26 +1,26 @@
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import localStorageWrapper from 'sentry/utils/localStorage';
+import {localStorageWrapper} from 'sentry/utils/localStorage';
 import {useSyncedLocalStorageState} from 'sentry/utils/useSyncedLocalStorageState';
 
-describe('useSyncedLocalStorageState', function () {
+describe('useSyncedLocalStorageState', () => {
   beforeEach(() => {
     localStorageWrapper.clear();
   });
 
   function Toggle() {
-    const [value, setValue] = useSyncedLocalStorageState<boolean>('key', false);
+    const [value, setValue] = useSyncedLocalStorageState('key', false);
 
     return <button onClick={() => setValue(!value)}>{value ? 'On' : 'Off'}</button>;
   }
 
   function Text() {
-    const [value] = useSyncedLocalStorageState<boolean>('key', false);
+    const [value] = useSyncedLocalStorageState('key', false);
 
     return <div>{value ? 'Value is on' : 'Value is off'}</div>;
   }
 
-  it('responds to changes in multiple components', async function () {
+  it('responds to changes in multiple components', async () => {
     localStorageWrapper.setItem('key', 'true');
 
     function TestComponent() {

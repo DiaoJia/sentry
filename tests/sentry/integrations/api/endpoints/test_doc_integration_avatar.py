@@ -3,10 +3,10 @@ from __future__ import annotations
 from base64 import b64encode
 from typing import Any
 
+from django.conf import settings
 from django.test import override_settings
 from rest_framework import status
 
-from sentry import options as options_store
 from sentry.api.serializers.base import serialize
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import APITestCase
@@ -16,7 +16,7 @@ from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 class DocIntegrationAvatarTest(APITestCase):
     endpoint = "sentry-api-0-doc-integration-avatar"
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user(email="peter@marvel.com", is_superuser=True)
         self.superuser = self.create_user(email="gwen@marvel.com", is_superuser=True)
         self.staff_user = self.create_user(is_staff=True)
@@ -36,7 +36,7 @@ class DocIntegrationAvatarTest(APITestCase):
 class GetDocIntegrationAvatarTest(DocIntegrationAvatarTest):
     method = "GET"
 
-    def test_user_view_avatar(self):
+    def test_user_view_avatar(self) -> None:
         """
         Tests that regular users can see only published doc integration avatars
         """
@@ -51,7 +51,7 @@ class GetDocIntegrationAvatarTest(DocIntegrationAvatarTest):
         )
 
     # TODO(schew2381): Change test to check that superusers can only see published doc integration avatars
-    def test_superuser_view_avatar(self):
+    def test_superuser_view_avatar(self) -> None:
         """
         Tests that superusers can see all doc integration avatars
         """
@@ -61,7 +61,7 @@ class GetDocIntegrationAvatarTest(DocIntegrationAvatarTest):
             assert serialize(doc) == response.data
             assert serialize(doc.avatar.get()) == response.data["avatar"]
 
-    def test_staff_view_avatar(self):
+    def test_staff_view_avatar(self) -> None:
         """
         Tests that staff can see all doc integration avatars
         """
@@ -76,7 +76,7 @@ class GetDocIntegrationAvatarTest(DocIntegrationAvatarTest):
 class PutDocIntegrationAvatarTest(DocIntegrationAvatarTest):
     method = "PUT"
 
-    def test_user_upload_avatar(self):
+    def test_user_upload_avatar(self) -> None:
         """
         Tests that regular users cannot upload doc integration avatars
         """
@@ -85,15 +85,13 @@ class PutDocIntegrationAvatarTest(DocIntegrationAvatarTest):
         self.get_error_response(self.draft_doc.slug, status_code=status.HTTP_403_FORBIDDEN)
 
     # TODO(schew2381): Change test to check that superusers cannot upload doc integration avatars
-    def test_superuser_upload_avatar(self):
+    def test_superuser_upload_avatar(self) -> None:
         """
         Tests that superusers can upload avatars
         """
-        with self.options(
-            {
-                "filestore.control.backend": options_store.get("filestore.backend"),
-                "filestore.control.options": options_store.get("filestore.options"),
-            }
+        with override_settings(
+            SENTRY_CONTROL_FILE_STORAGE_BACKEND=settings.SENTRY_FILE_STORAGE_BACKEND,
+            SENTRY_CONTROL_FILE_STORAGE_CONFIG=settings.SENTRY_FILE_STORAGE_CONFIG,
         ):
             self.login_as(user=self.superuser, superuser=True)
 
@@ -111,15 +109,13 @@ class PutDocIntegrationAvatarTest(DocIntegrationAvatarTest):
                     assert serialize(prev_avatar) != response.data["avatar"]
                     assert prev_avatar.control_file_id != doc.avatar.get().control_file_id
 
-    def test_staff_upload_avatar(self):
+    def test_staff_upload_avatar(self) -> None:
         """
         Tests that superusers can upload avatars
         """
-        with self.options(
-            {
-                "filestore.control.backend": options_store.get("filestore.backend"),
-                "filestore.control.options": options_store.get("filestore.options"),
-            }
+        with override_settings(
+            SENTRY_CONTROL_FILE_STORAGE_BACKEND=settings.SENTRY_FILE_STORAGE_BACKEND,
+            SENTRY_CONTROL_FILE_STORAGE_CONFIG=settings.SENTRY_FILE_STORAGE_CONFIG,
         ):
             self.login_as(user=self.staff_user, staff=True)
 
@@ -137,7 +133,7 @@ class PutDocIntegrationAvatarTest(DocIntegrationAvatarTest):
                     assert serialize(prev_avatar) != response.data["avatar"]
                     assert prev_avatar.control_file_id != doc.avatar.get().control_file_id
 
-    def test_upload_avatar_payload_structure(self):
+    def test_upload_avatar_payload_structure(self) -> None:
         """
         Tests that errors are thrown on malformed upload payloads
         """

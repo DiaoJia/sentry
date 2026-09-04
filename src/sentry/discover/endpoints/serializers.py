@@ -2,11 +2,10 @@ from collections.abc import Sequence
 
 import sentry_sdk
 from django.db.models import Count, Max, QuerySet
-from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 from rest_framework.serializers import ListField
 
-from sentry import features
+import sentry
 from sentry.constants import ALL_ACCESS_PROJECTS
 from sentry.discover.arithmetic import ArithmeticError, categorize_columns
 from sentry.discover.models import (
@@ -15,19 +14,14 @@ from sentry.discover.models import (
     TeamKeyTransaction,
 )
 from sentry.exceptions import InvalidSearchQuery
-from sentry.models.organization import Organization
 from sentry.models.team import Team
 from sentry.search.events.builder.discover import DiscoverQueryBuilder
 from sentry.search.events.types import QueryBuilderConfig
 from sentry.snuba.dataset import Dataset
 from sentry.snuba.errors import PARSER_CONFIG_OVERRIDES as ERROR_PARSER_CONFIG_OVERRIDES
-from sentry.users.models import User
 from sentry.utils.dates import parse_stats_period, validate_interval
 
 
-@extend_schema_serializer(
-    exclude_fields=["rollup", "aggregations", "groupby", "conditions", "limit", "version", "widths"]
-)
 class DiscoverSavedQuerySerializer(serializers.Serializer):
     name = serializers.CharField(
         required=True, max_length=255, help_text="The user-defined saved query name."
@@ -35,7 +29,7 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
     projects = ListField(
         child=serializers.IntegerField(),
         required=False,
-        default=[],
+        default=list,
         help_text="The saved projects filter for this query.",
     )
     queryDataset = serializers.ChoiceField(
@@ -78,14 +72,45 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
 
     # This block of fields is only accepted by discover 1 which omits the version
     # attribute or has it set to 1
-    rollup = serializers.IntegerField(required=False, allow_null=True)
-    aggregations = ListField(child=ListField(), required=False, allow_null=True)
-    groupby = ListField(child=serializers.CharField(), required=False, allow_null=True)
-    conditions = ListField(child=ListField(), required=False, allow_null=True)
-    limit = serializers.IntegerField(min_value=0, max_value=1000, required=False, allow_null=True)
+    rollup = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Time-bucket granularity in seconds for the saved query.",
+    )
+    aggregations = ListField(
+        child=ListField(),
+        required=False,
+        allow_null=True,
+        help_text="Aggregate functions to apply, each as a `[function, column, alias]` triple.",
+    )
+    groupby = ListField(
+        child=serializers.CharField(),
+        required=False,
+        allow_null=True,
+        help_text="Columns to group results by.",
+    )
+    conditions = ListField(
+        child=ListField(),
+        required=False,
+        allow_null=True,
+        help_text="Filter conditions, each as a `[column, operator, value]` triple.",
+    )
+    limit = serializers.IntegerField(
+        min_value=0,
+        max_value=1000,
+        required=False,
+        allow_null=True,
+        help_text="Maximum number of rows to return, from `0` to `1000`.",
+    )
 
     # There are multiple versions of saved queries supported.
-    version = serializers.IntegerField(min_value=1, max_value=2, required=False, allow_null=True)
+    version = serializers.IntegerField(
+        min_value=1,
+        max_value=2,
+        required=False,
+        allow_null=True,
+        help_text="Saved query schema version. `1` for the legacy shape, `2` for the current one.",
+    )
 
     # Attributes that are only accepted if version = 2
     environment = ListField(
@@ -99,7 +124,12 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
         allow_null=True,
         help_text="Filters results by using [query syntax](/product/sentry-basics/search/).",
     )
-    widths = ListField(child=serializers.CharField(), required=False, allow_null=True)
+    widths = ListField(
+        child=serializers.CharField(),
+        required=False,
+        allow_null=True,
+        help_text="Rendered column widths, in the same order as the query's fields.",
+    )
     yAxis = ListField(
         child=serializers.CharField(),
         required=False,
@@ -134,33 +164,6 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
         2: {"groupby", "rollup", "aggregations", "conditions", "limit"},
     }
 
-    def get_metrics_features(
-        self, organization: Organization | None, user: User | None
-    ) -> dict[str, bool | None]:
-        if organization is None or user is None:
-            return {}
-
-        feature_names = [
-            "organizations:mep-rollout-flag",
-            "organizations:dynamic-sampling",
-            "organizations:performance-use-metrics",
-            "organizations:dashboards-mep",
-        ]
-        batch_features = features.batch_has(
-            feature_names,
-            organization=organization,
-            actor=user,
-        )
-
-        return (
-            batch_features.get(f"organization:{organization.id}", {})
-            if batch_features is not None
-            else {
-                feature_name: features.has(feature_name, organization=organization, actor=user)
-                for feature_name in feature_names
-            }
-        )
-
     def validate_projects(self, projects):
         from sentry.api.validators import validate_project_ids
 
@@ -175,10 +178,24 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
                     "org_slug": self.context["organization"].slug,
                 },
             )
+            sentry_sdk.set_attribute("discover.org_slug", self.context["organization"].slug)
             sentry_sdk.capture_message("Created or updated saved query with discover dataset.")
             raise serializers.ValidationError(
                 "Attribute value `discover` is deprecated. Please use `error-events` or `transaction-like`"
             )
+
+        if (
+            sentry.features.has(
+                "organizations:discover-saved-queries-deprecation",
+                self.context["organization"],
+                actor=self.context["user"],
+            )
+            and dataset == DiscoverSavedQueryTypes.TRANSACTION_LIKE
+        ):
+            raise serializers.ValidationError(
+                f"The Transactions dataset is being deprecated. Please append the `is_transaction:true` filter in the Trace Explorer product in Sentry or use the `/organizations/{self.context['organization'].slug}/explore/saved/` endpoint with the filter to save new transaction queries."
+            )
+
         return dataset
 
     def validate(self, data):
@@ -190,8 +207,6 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
             "conditions",
             "aggregations",
             "range",
-            "start",
-            "end",
             "orderby",
             "limit",
             "widths",
@@ -204,6 +219,9 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
         for key in query_keys:
             if data.get(key) is not None:
                 query[key] = data[key]
+        for key in ("start", "end"):
+            if data.get(key) is not None:
+                query[key] = data[key].isoformat()
 
         version = data.get("version", 1)
         self.validate_version_fields(version, query)
@@ -228,25 +246,13 @@ class DiscoverSavedQuerySerializer(serializers.Serializer):
                     0,
                 )
             try:
-                batch_features = self.get_metrics_features(
-                    self.context.get("organization"), self.context.get("user")
-                )
-                use_metrics = bool(
-                    (
-                        batch_features.get("organizations:mep-rollout-flag", False)
-                        and batch_features.get("organizations:dynamic-sampling", False)
-                    )
-                    or batch_features.get("organizations:performance-use-metrics", False)
-                    or batch_features.get("organizations:dashboards-mep", False)
-                )
-
                 equations, columns = categorize_columns(query["fields"])
 
                 config = QueryBuilderConfig()
                 if data.get("queryDataset") == DiscoverSavedQueryTypes.ERROR_EVENTS:
                     config.parser_config_overrides = ERROR_PARSER_CONFIG_OVERRIDES
                 elif data.get("queryDataset") == DiscoverSavedQueryTypes.TRANSACTION_LIKE:
-                    config.has_metrics = use_metrics
+                    config.has_metrics = True
 
                 builder = DiscoverQueryBuilder(
                     dataset=Dataset.Discover,

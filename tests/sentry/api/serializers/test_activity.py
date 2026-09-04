@@ -1,4 +1,5 @@
 from sentry.api.serializers import serialize
+from sentry.api.serializers.models.activity import ActivitySerializer
 from sentry.models.activity import Activity
 from sentry.models.commit import Commit
 from sentry.models.group import GroupStatus
@@ -11,7 +12,7 @@ from sentry.users.models.user import User
 
 
 class GroupActivityTestCase(TestCase):
-    def test_pr_activity(self):
+    def test_pr_activity(self) -> None:
         self.org = self.create_organization(name="Rowdy Tiger")
         user = self.create_user()
         group = self.create_group(status=GroupStatus.UNRESOLVED)
@@ -38,7 +39,34 @@ class GroupActivityTestCase(TestCase):
         assert pull_request["repository"]["name"] == "organization-bar"
         assert pull_request["message"] == "kartoffel"
 
-    def test_commit_activity(self):
+    def test_pull_request_closed_activity(self) -> None:
+        self.org = self.create_organization(name="Rowdy Tiger")
+        user = self.create_user()
+        group = self.create_group(status=GroupStatus.UNRESOLVED)
+        repo = self.create_repo(self.project, name="organization-bar")
+        pr = PullRequest.objects.create(
+            organization_id=self.org.id,
+            repository_id=repo.id,
+            key=5,
+            title="aaaa",
+            message="kartoffel",
+        )
+
+        activity = Activity.objects.create(
+            project_id=group.project_id,
+            group=group,
+            type=ActivityType.PULL_REQUEST_CLOSED.value,
+            ident=str(pr.id),
+            data={"pull_request": pr.id},
+        )
+
+        result = serialize([activity], user)[0]
+        assert result["type"] == "pull_request_closed"
+        pull_request = result["data"]["pullRequest"]
+        assert pull_request["repository"]["name"] == "organization-bar"
+        assert pull_request["message"] == "kartoffel"
+
+    def test_commit_activity(self) -> None:
         self.org = self.create_organization(name="Rowdy Tiger")
         user = self.create_user()
         group = self.create_group(status=GroupStatus.UNRESOLVED)
@@ -62,7 +90,32 @@ class GroupActivityTestCase(TestCase):
         assert commit_data["repository"]["name"] == "organization-bar"
         assert commit_data["message"] == "gemuse"
 
-    def test_serialize_set_resolve_in_commit_activity_with_release(self):
+    def test_referenced_in_commit_activity(self) -> None:
+        self.org = self.create_organization(name="Rowdy Tiger")
+        user = self.create_user()
+        group = self.create_group(status=GroupStatus.UNRESOLVED)
+        repo = self.create_repo(self.project, name="organization-bar")
+
+        commit = Commit.objects.create(
+            organization_id=self.org.id, repository_id=repo.id, key="11111111", message="gemuse"
+        )
+
+        activity = Activity.objects.create(
+            project_id=group.project_id,
+            group=group,
+            type=ActivityType.REFERENCED_IN_COMMIT.value,
+            ident=commit.id,
+            user_id=user.id,
+            data={"commit": commit.id},
+        )
+
+        result = serialize([activity], user)[0]
+        assert result["type"] == "referenced_in_commit"
+        commit_data = result["data"]["commit"]
+        assert commit_data["repository"]["name"] == "organization-bar"
+        assert commit_data["message"] == "gemuse"
+
+    def test_serialize_set_resolve_in_commit_activity_with_release(self) -> None:
         project = self.create_project(name="test_throwaway")
         group = self.create_group(project)
         user = self.create_user()
@@ -84,7 +137,7 @@ class GroupActivityTestCase(TestCase):
 
         assert len(serialized["data"]["commit"]["releases"]) == 1
 
-    def test_serialize_set_resolve_in_commit_activity_with_no_releases(self):
+    def test_serialize_set_resolve_in_commit_activity_with_no_releases(self) -> None:
         self.org = self.create_organization(name="komal-test")
         project = self.create_project(name="random-proj")
         user = self.create_user()
@@ -108,7 +161,7 @@ class GroupActivityTestCase(TestCase):
         assert len(serialized["data"]["commit"]["releases"]) == 0
         assert not Commit.objects.filter(releasecommit__id=commit.id).exists()
 
-    def test_serialize_set_resolve_in_commit_activity_with_release_not_deployed(self):
+    def test_serialize_set_resolve_in_commit_activity_with_release_not_deployed(self) -> None:
         project = self.create_project(name="random-test")
         group = self.create_group(project)
         user = self.create_user()
@@ -131,7 +184,7 @@ class GroupActivityTestCase(TestCase):
 
         assert len(serialized["data"]["commit"]["releases"]) == 1
 
-    def test_collapse_group_stats_in_activity_with_option(self):
+    def test_collapse_group_stats_in_activity_with_option(self) -> None:
         project = self.create_project(name="random-test")
         group = self.create_group(project)
         group_2 = self.create_group(project)
@@ -154,7 +207,53 @@ class GroupActivityTestCase(TestCase):
 
         assert "firstSeen" not in serialized["data"]["source"]
 
-    def test_get_activities_for_group_proxy_user(self):
+    def _create_note(self, mentions):
+        group = self.create_group()
+        return Activity.objects.create(
+            project_id=group.project_id,
+            group=group,
+            type=ActivityType.NOTE.value,
+            user_id=self.user.id,
+            data={"text": "hi **@Jane Doe**", "mentions": mentions},
+        )
+
+    def test_note_mentions_dropped_by_default(self) -> None:
+        note = self._create_note([{"id": self.user.id, "actor_type": "User", "slug": None}])
+
+        assert serialize([note], self.user)[0]["data"] == {"text": "hi **@Jane Doe**"}
+
+    def test_note_mentions_resolved_to_users(self) -> None:
+        mentioned = self.create_user(email="jane@example.com", name="Jane Doe")
+        # ``name`` is optional, and falls back to something identifiable.
+        nameless = self.create_user(email="john@example.com", name="")
+        team = self.create_team(organization=self.organization, slug="payments")
+        note = self._create_note(
+            [
+                {"id": mentioned.id, "actor_type": "User", "slug": None},
+                {"id": nameless.id, "actor_type": "User", "slug": None},
+                # A team isn't assignable, and a stale user ref resolves to nobody.
+                {"id": team.id, "actor_type": "Team", "slug": "payments"},
+                {"id": 1234567890, "actor_type": "User", "slug": None},
+            ]
+        )
+
+        data = serialize([note], self.user, serializer=ActivitySerializer(resolve_mentions=True))[
+            0
+        ]["data"]
+
+        assert data["text"] == "hi **@Jane Doe**"
+        assert data["mentions"] == [
+            {"name": "Jane Doe", "email": "jane@example.com"},
+            {"name": "john@example.com", "email": "john@example.com"},
+        ]
+        # The row keeps its actor refs; resolved users must not be written back onto it.
+        assert note.data["mentions"][0] == {
+            "id": mentioned.id,
+            "actor_type": "User",
+            "slug": None,
+        }
+
+    def test_get_activities_for_group_proxy_user(self) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
         user = self.create_user()

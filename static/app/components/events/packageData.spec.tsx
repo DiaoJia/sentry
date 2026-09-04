@@ -7,12 +7,7 @@ import {textWithMarkupMatcher} from 'sentry-test/utils';
 
 import {EventPackageData} from 'sentry/components/events/packageData';
 
-jest.mock('sentry/views/issueDetails/utils', () => ({
-  ...jest.requireActual('sentry/views/issueDetails/utils'),
-  useHasStreamlinedUI: () => true,
-}));
-
-describe('EventPackageData', function () {
+describe('EventPackageData', () => {
   const event = EventFixture({
     packages: {
       certifi: '',
@@ -34,7 +29,7 @@ describe('EventPackageData', function () {
     relayPiiConfig: JSON.stringify(DataScrubbingRelayPiiConfigFixture()),
   });
 
-  it('changes section title depending on the platform', function () {
+  it('changes section title depending on the platform', () => {
     render(<EventPackageData event={event} />, {
       organization,
     });
@@ -49,7 +44,7 @@ describe('EventPackageData', function () {
     expect(screen.getByText('Dependencies')).toBeInTheDocument();
   });
 
-  it('displays all the data in column format', async function () {
+  it('displays all the data in column format', async () => {
     render(<EventPackageData event={event} />, {
       organization,
     });
@@ -58,7 +53,7 @@ describe('EventPackageData', function () {
     // Displays when open
     await userEvent.click(screen.getByText('Packages'));
     expect(screen.getByText(/python/)).toBeInTheDocument();
-    expect(screen.getByText(event?.packages?.python as string)).toBeInTheDocument();
+    expect(screen.getByText(event?.packages?.python!)).toBeInTheDocument();
     // Respects _meta annotations
     expect(screen.getByText(/redacted/)).toBeInTheDocument();
     await userEvent.hover(screen.getByText(/redacted/));
@@ -71,7 +66,7 @@ describe('EventPackageData', function () {
     ).toBeInTheDocument();
   });
 
-  it('display redacted data', async function () {
+  it('display redacted data', async () => {
     render(<EventPackageData event={event} />, {
       organization,
     });

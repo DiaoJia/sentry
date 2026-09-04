@@ -1,9 +1,9 @@
 import {bulkUpdate, mergeGroups, paramsToQueryArgs} from 'sentry/actionCreators/group';
-import GroupStore from 'sentry/stores/groupStore';
+import {GroupStore} from 'sentry/stores/groupStore';
 
 describe('group', () => {
-  describe('paramsToQueryArgs()', function () {
-    it('should convert itemIds properties to id array', function () {
+  describe('paramsToQueryArgs()', () => {
+    it('should convert itemIds properties to id array', () => {
       expect(
         paramsToQueryArgs({
           itemIds: ['1', '2', '3'],
@@ -12,7 +12,7 @@ describe('group', () => {
       ).toEqual({id: ['1', '2', '3']});
     });
 
-    it('should extract query property if no itemIds', function () {
+    it('should extract query property if no itemIds', () => {
       const invalidArgs: any = {
         foo: 'bar',
       };
@@ -22,7 +22,7 @@ describe('group', () => {
       });
     });
 
-    it('should convert params w/o itemIds or query to empty object', function () {
+    it('should convert params w/o itemIds or query to empty object', () => {
       const invalidArgs: any = {
         foo: 'bar',
         bar: 'baz', // paramsToQueryArgs ignores these
@@ -31,7 +31,7 @@ describe('group', () => {
       expect(paramsToQueryArgs(invalidArgs)).toEqual({});
     });
 
-    it('should keep environment when query is provided', function () {
+    it('should keep environment when query is provided', () => {
       expect(
         paramsToQueryArgs({
           query: 'is:unresolved',
@@ -40,7 +40,7 @@ describe('group', () => {
       ).toEqual({query: 'is:unresolved', environment: 'production'});
     });
 
-    it('should exclude environment when it is null/undefined', function () {
+    it('should exclude environment when it is null/undefined', () => {
       expect(
         paramsToQueryArgs({
           query: 'is:unresolved',
@@ -49,7 +49,7 @@ describe('group', () => {
       ).toEqual({query: 'is:unresolved'});
     });
 
-    it('should handle non-empty projects', function () {
+    it('should handle non-empty projects', () => {
       expect(
         paramsToQueryArgs({
           itemIds: ['1', '2', '3'],
@@ -73,12 +73,12 @@ describe('group', () => {
     });
   });
 
-  describe('bulkUpdate()', function () {
-    beforeEach(function () {
+  describe('bulkUpdate()', () => {
+    beforeEach(() => {
       jest.spyOn(GroupStore, 'onUpdate'); // stub GroupStore.onUpdate call from update
     });
 
-    it('should use itemIds as query if provided', function () {
+    it('should use itemIds as query if provided', () => {
       const request = MockApiClient.addMockResponse({
         url: '/projects/1337/1337/issues/',
         method: 'PUT',
@@ -103,7 +103,7 @@ describe('group', () => {
       );
     });
 
-    it('should use query as query if itemIds are absent', function () {
+    it('should use query as query if itemIds are absent', () => {
       const request = MockApiClient.addMockResponse({
         url: '/projects/1337/1337/issues/',
         method: 'PUT',
@@ -128,7 +128,7 @@ describe('group', () => {
       );
     });
 
-    it('should apply project option', function () {
+    it('should apply project option', () => {
       const request = MockApiClient.addMockResponse({
         url: '/organizations/1337/issues/',
         method: 'PUT',
@@ -151,16 +151,105 @@ describe('group', () => {
         expect.objectContaining({query: {id: ['1', '2', '3'], project: [99]}})
       );
     });
+
+    it('should normalize string assignedTo to Actor object for optimistic update', () => {
+      MockApiClient.addMockResponse({
+        url: '/projects/1337/1337/issues/',
+        method: 'PUT',
+      });
+
+      bulkUpdate(
+        new MockApiClient(),
+        {
+          orgId: '1337',
+          projectId: '1337',
+          itemIds: ['1'],
+          data: {assignedTo: 'user:123'},
+        },
+        {}
+      );
+
+      expect(GroupStore.onUpdate).toHaveBeenCalledWith(expect.any(String), ['1'], {
+        assignedTo: {type: 'user', id: '123', name: ''},
+      });
+    });
+
+    it('should normalize empty assignedTo string to null for optimistic update', () => {
+      MockApiClient.addMockResponse({
+        url: '/projects/1337/1337/issues/',
+        method: 'PUT',
+      });
+
+      bulkUpdate(
+        new MockApiClient(),
+        {
+          orgId: '1337',
+          projectId: '1337',
+          itemIds: ['1'],
+          data: {assignedTo: ''},
+        },
+        {}
+      );
+
+      expect(GroupStore.onUpdate).toHaveBeenCalledWith(expect.any(String), ['1'], {
+        assignedTo: null,
+      });
+    });
+
+    it('should normalize team assignedTo string for optimistic update', () => {
+      MockApiClient.addMockResponse({
+        url: '/projects/1337/1337/issues/',
+        method: 'PUT',
+      });
+
+      bulkUpdate(
+        new MockApiClient(),
+        {
+          orgId: '1337',
+          projectId: '1337',
+          itemIds: ['1'],
+          data: {assignedTo: 'team:456'},
+        },
+        {}
+      );
+
+      expect(GroupStore.onUpdate).toHaveBeenCalledWith(expect.any(String), ['1'], {
+        assignedTo: {type: 'team', id: '456', name: ''},
+      });
+    });
+
+    it('should send raw string assignedTo to the API', () => {
+      const request = MockApiClient.addMockResponse({
+        url: '/projects/1337/1337/issues/',
+        method: 'PUT',
+      });
+
+      bulkUpdate(
+        new MockApiClient(),
+        {
+          orgId: '1337',
+          projectId: '1337',
+          itemIds: ['1'],
+          data: {assignedTo: 'user:123'},
+        },
+        {}
+      );
+
+      expect(request).toHaveBeenCalledWith(
+        '/projects/1337/1337/issues/',
+        expect.objectContaining({data: {assignedTo: 'user:123'}})
+      );
+    });
   });
 
-  describe('mergeGroups()', function () {
+  describe('mergeGroups()', () => {
     // TODO: this is totally copypasta from the test above. We need to refactor
     //       these API methods/tests.
-    beforeEach(function () {
+    beforeEach(() => {
       jest.spyOn(GroupStore, 'onMerge'); // stub GroupStore.onMerge call from mergeGroups
     });
 
-    it('should use itemIds as query if provided', function () {
+    it('should use itemIds as query if provided', () => {
       const request = MockApiClient.addMockResponse({
         url: '/projects/1337/1337/issues/',
         method: 'PUT',
@@ -184,7 +273,7 @@ describe('group', () => {
       );
     });
 
-    it('should use query as query if itemIds are absent', function () {
+    it('should use query as query if itemIds are absent', () => {
       const request = MockApiClient.addMockResponse({
         url: '/projects/1337/1337/issues/',
         method: 'PUT',

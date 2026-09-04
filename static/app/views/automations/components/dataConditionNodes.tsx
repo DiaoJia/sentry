@@ -1,65 +1,106 @@
 import type React from 'react';
 import {createContext, useContext} from 'react';
+import styled from '@emotion/styled';
+
+import {Stack} from '@sentry/scraps/layout';
 
 import {t} from 'sentry/locale';
 import {
-  type DataCondition,
   DataConditionType,
+  type DataCondition,
 } from 'sentry/types/workflowEngine/dataConditions';
 import {
   AgeComparisonDetails,
   AgeComparisonNode,
+  validateAgeComparisonCondition,
 } from 'sentry/views/automations/components/actionFilters/ageComparison';
 import {
   AssignedToDetails,
   AssignedToNode,
+  validateAssignedToCondition,
 } from 'sentry/views/automations/components/actionFilters/assignedTo';
+import {
+  AgeComparison,
+  Attribute,
+  Interval,
+  Level,
+  MatchType,
+  ModelAge,
+  Priority,
+  TargetType,
+  TimeUnit,
+} from 'sentry/views/automations/components/actionFilters/constants';
 import {
   EventAttributeDetails,
   EventAttributeNode,
+  validateEventAttributeCondition,
 } from 'sentry/views/automations/components/actionFilters/eventAttribute';
 import {
   EventFrequencyCountDetails,
   EventFrequencyNode,
   EventFrequencyPercentDetails,
+  validateEventFrequencyCondition,
 } from 'sentry/views/automations/components/actionFilters/eventFrequency';
 import {
   EventUniqueUserFrequencyCountDetails,
   EventUniqueUserFrequencyNode,
   EventUniqueUserFrequencyPercentDetails,
+  validateEventUniqueUserFrequencyCondition,
 } from 'sentry/views/automations/components/actionFilters/eventUniqueUserFrequency';
+import {
+  IssueCategoryDetails,
+  IssueCategoryNode,
+  validateIssueCategoryCondition,
+} from 'sentry/views/automations/components/actionFilters/issueCategory';
 import {
   IssueOccurrencesDetails,
   IssueOccurrencesNode,
+  validateIssueOccurrencesCondition,
 } from 'sentry/views/automations/components/actionFilters/issueOccurrences';
 import {
   IssuePriorityDetails,
   IssuePriorityNode,
+  validateIssuePriorityCondition,
 } from 'sentry/views/automations/components/actionFilters/issuePriority';
+import {IssuePriorityDeescalating} from 'sentry/views/automations/components/actionFilters/issuePriorityDeescalating';
+import {
+  IssueTypeDetails,
+  IssueTypeNode,
+  validateIssueTypeCondition,
+} from 'sentry/views/automations/components/actionFilters/issueType';
 import {
   LatestAdoptedReleaseDetails,
   LatestAdoptedReleaseNode,
+  validateLatestAdoptedReleaseCondition,
 } from 'sentry/views/automations/components/actionFilters/latestAdoptedRelease';
 import {LatestReleaseNode} from 'sentry/views/automations/components/actionFilters/latestRelease';
 import {
   LevelDetails,
   LevelNode,
+  validateLevelCondition,
 } from 'sentry/views/automations/components/actionFilters/level';
 import {
   PercentSessionsCountDetails,
   PercentSessionsNode,
   PercentSessionsPercentDetails,
+  validatePercentSessionsCondition,
 } from 'sentry/views/automations/components/actionFilters/percentSessions';
+import {
+  SeerActivityTriggerDetails,
+  SeerActivityTriggerNode,
+  validateSeerActivityTriggerCondition,
+} from 'sentry/views/automations/components/actionFilters/seerActivityTrigger';
 import {
   TaggedEventDetails,
   TaggedEventNode,
+  validateTaggedEventCondition,
 } from 'sentry/views/automations/components/actionFilters/taggedEvent';
+import type {ValidateDataConditionProps} from 'sentry/views/automations/components/automationFormData';
 
 interface DataConditionNodeProps {
   condition: DataCondition;
   condition_id: string;
-  onUpdate: (comparison: Record<string, any>) => void;
-  onUpdateType: (type: DataConditionType) => void;
+  onUpdate: (params: {comparison?: any; type?: DataConditionType}) => void;
 }
 
 export const DataConditionNodeContext = createContext<DataConditionNodeProps | null>(
@@ -78,8 +119,11 @@ export function useDataConditionNodeContext(): DataConditionNodeProps {
 
 type DataConditionNode = {
   label: string;
+  validate: (({condition}: ValidateDataConditionProps) => string | undefined) | undefined;
   dataCondition?: React.ComponentType<any>;
+  defaultComparison?: any;
   details?: React.ComponentType<any>;
+  warningMessage?: React.ComponentType<any>;
 };
 
 export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNode>([
@@ -87,30 +131,59 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
     DataConditionType.FIRST_SEEN_EVENT,
     {
       label: t('A new issue is created'),
+      validate: undefined,
+    },
+  ],
+  [
+    DataConditionType.ISSUE_RESOLVED_TRIGGER,
+    {
+      label: t('An issue is resolved'),
+      validate: undefined,
+    },
+  ],
+  [
+    DataConditionType.EVERY_EVENT,
+    {
+      label: t('An event or issue activity is captured'),
+      validate: undefined,
     },
   ],
   [
     DataConditionType.REGRESSION_EVENT,
     {
-      label: t('A resolved issue becomes unresolved'),
+      label: t('A resolved issue regresses'),
+      validate: undefined,
     },
   ],
   [
     DataConditionType.REAPPEARED_EVENT,
     {
       label: t('An issue escalates'),
+      validate: undefined,
     },
   ],
   [
     DataConditionType.NEW_HIGH_PRIORITY_ISSUE,
     {
       label: t('Sentry marks a new issue as high priority'),
+      validate: undefined,
     },
   ],
   [
     DataConditionType.EXISTING_HIGH_PRIORITY_ISSUE,
     {
       label: t('Sentry marks an existing issue as high priority'),
+      validate: undefined,
+    },
+  ],
+  [
+    DataConditionType.SEER_ACTIVITY_TRIGGER,
+    {
+      label: t('Seer runs on an issue and reaches the stage...'),
+      dataCondition: SeerActivityTriggerNode,
+      details: SeerActivityTriggerDetails,
+      defaultComparison: ['pr_ready_for_review'],
+      validate: validateSeerActivityTriggerCondition,
     },
   ],
   [
@@ -119,6 +192,12 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Issue age'),
       dataCondition: AgeComparisonNode,
       details: AgeComparisonDetails,
+      defaultComparison: {
+        comparisonType: AgeComparison.OLDER,
+        value: 10,
+        time: TimeUnit.MINUTES,
+      },
+      validate: validateAgeComparisonCondition,
     },
   ],
   [
@@ -127,6 +206,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Issue assignment'),
       dataCondition: AssignedToNode,
       details: AssignedToDetails,
+      defaultComparison: {targetType: TargetType.UNASSIGNED},
+      validate: validateAssignedToCondition,
     },
   ],
   [
@@ -135,14 +216,45 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Issue frequency'),
       dataCondition: IssueOccurrencesNode,
       details: IssueOccurrencesDetails,
+      defaultComparison: {value: 10},
+      validate: validateIssueOccurrencesCondition,
     },
   ],
   [
-    DataConditionType.ISSUE_PRIORITY_EQUALS,
+    DataConditionType.ISSUE_CATEGORY,
+    {
+      label: t('Issue category'),
+      dataCondition: IssueCategoryNode,
+      details: IssueCategoryDetails,
+      validate: validateIssueCategoryCondition,
+    },
+  ],
+  [
+    DataConditionType.ISSUE_TYPE,
+    {
+      label: t('Issue type'),
+      dataCondition: IssueTypeNode,
+      details: IssueTypeDetails,
+      validate: validateIssueTypeCondition,
+    },
+  ],
+  [
+    DataConditionType.ISSUE_PRIORITY_GREATER_OR_EQUAL,
     {
       label: t('Issue priority'),
       dataCondition: IssuePriorityNode,
       details: IssuePriorityDetails,
+      defaultComparison: Priority.HIGH,
+      validate: validateIssuePriorityCondition,
+    },
+  ],
+  [
+    DataConditionType.ISSUE_PRIORITY_DEESCALATING,
+    {
+      label: t('De-escalation'),
+      dataCondition: IssuePriorityDeescalating,
+      details: IssuePriorityDeescalating,
+      validate: undefined,
     },
   ],
   [
@@ -151,6 +263,13 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Release age'),
       dataCondition: LatestAdoptedReleaseNode,
       details: LatestAdoptedReleaseDetails,
+      defaultComparison: {
+        releaseAgeType: ModelAge.OLDEST,
+        ageComparison: AgeComparison.OLDER,
+        environment: '',
+      },
+      validate: validateLatestAdoptedReleaseCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -159,6 +278,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Latest release'),
       dataCondition: LatestReleaseNode,
       details: LatestReleaseNode,
+      validate: undefined,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -167,6 +288,12 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Event attribute'),
       dataCondition: EventAttributeNode,
       details: EventAttributeDetails,
+      defaultComparison: {
+        attribute: Attribute.MESSAGE,
+        match: MatchType.CONTAINS,
+      },
+      validate: validateEventAttributeCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -175,6 +302,10 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Tagged event'),
       dataCondition: TaggedEventNode,
       details: TaggedEventDetails,
+      defaultComparison: {
+        match: MatchType.CONTAINS,
+      },
+      validate: validateTaggedEventCondition,
     },
   ],
   [
@@ -183,6 +314,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Event level'),
       dataCondition: LevelNode,
       details: LevelDetails,
+      defaultComparison: {match: MatchType.EQUAL, level: Level.FATAL},
+      validate: validateLevelCondition,
     },
   ],
   [
@@ -190,6 +323,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
     {
       label: t('Number of events'),
       dataCondition: EventFrequencyNode,
+      validate: validateEventFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -198,6 +333,9 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Number of events'),
       dataCondition: EventFrequencyNode,
       details: EventFrequencyCountDetails,
+      defaultComparison: {value: 100, interval: Interval.ONE_HOUR},
+      validate: validateEventFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -206,6 +344,13 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Number of events'),
       dataCondition: EventFrequencyNode,
       details: EventFrequencyPercentDetails,
+      defaultComparison: {
+        value: 100,
+        interval: Interval.ONE_HOUR,
+        comparisonInterval: Interval.ONE_WEEK,
+      },
+      validate: validateEventFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -213,6 +358,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
     {
       label: t('Number of users affected'),
       dataCondition: EventUniqueUserFrequencyNode,
+      validate: validateEventUniqueUserFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -221,6 +368,9 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Number of users affected'),
       dataCondition: EventUniqueUserFrequencyNode,
       details: EventUniqueUserFrequencyCountDetails,
+      defaultComparison: {value: 100, interval: Interval.ONE_HOUR},
+      validate: validateEventUniqueUserFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -229,6 +379,13 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Number of users affected'),
       dataCondition: EventUniqueUserFrequencyNode,
       details: EventUniqueUserFrequencyPercentDetails,
+      defaultComparison: {
+        value: 100,
+        interval: Interval.ONE_HOUR,
+        comparisonInterval: Interval.ONE_WEEK,
+      },
+      validate: validateEventUniqueUserFrequencyCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -236,6 +393,8 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
     {
       label: t('Percentage of sessions affected'),
       dataCondition: PercentSessionsNode,
+      validate: validatePercentSessionsCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -244,6 +403,9 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Percentage of sessions affected'),
       dataCondition: PercentSessionsNode,
       details: PercentSessionsCountDetails,
+      defaultComparison: {value: 100, interval: Interval.ONE_HOUR},
+      validate: validatePercentSessionsCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
   [
@@ -252,18 +414,32 @@ export const dataConditionNodesMap = new Map<DataConditionType, DataConditionNod
       label: t('Percentage of sessions affected'),
       dataCondition: PercentSessionsNode,
       details: PercentSessionsPercentDetails,
+      defaultComparison: {
+        value: 100,
+        interval: Interval.ONE_HOUR,
+        comparisonInterval: Interval.ONE_WEEK,
+      },
+      validate: validatePercentSessionsCondition,
+      warningMessage: OccurenceBasedMonitorsWarning,
     },
   ],
 ]);
 
-export const frequencyTypeMapping: Partial<Record<DataConditionType, DataConditionType>> =
-  {
-    [DataConditionType.PERCENT_SESSIONS_COUNT]: DataConditionType.PERCENT_SESSIONS,
-    [DataConditionType.PERCENT_SESSIONS_PERCENT]: DataConditionType.PERCENT_SESSIONS,
-    [DataConditionType.EVENT_FREQUENCY_COUNT]: DataConditionType.EVENT_FREQUENCY,
-    [DataConditionType.EVENT_FREQUENCY_PERCENT]: DataConditionType.EVENT_FREQUENCY,
-    [DataConditionType.EVENT_UNIQUE_USER_FREQUENCY_COUNT]:
-      DataConditionType.EVENT_UNIQUE_USER_FREQUENCY,
-    [DataConditionType.EVENT_UNIQUE_USER_FREQUENCY_PERCENT]:
-      DataConditionType.EVENT_UNIQUE_USER_FREQUENCY,
-  };
+function OccurenceBasedMonitorsWarning() {
+  return (
+    <Stack gap="md">
+      <WarningLine>
+        {t('These filters will only apply to some of your monitors and triggers.')}
+      </WarningLine>
+      <WarningLine>
+        {t(
+          'They are only available for occurrence-based monitors (errors, N+1, and replay) and only apply to the triggers "A new event is captured for an issue" and "A new issue is created."'
+        )}
+      </WarningLine>
+    </Stack>
+  );
+}
+
+const WarningLine = styled('p')`
+  margin: 0;
+`;

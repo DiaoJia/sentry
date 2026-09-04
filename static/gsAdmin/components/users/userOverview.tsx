@@ -1,20 +1,21 @@
-import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import {PanelTable} from 'sentry/components/panels/panelTable';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconNot} from 'sentry/icons';
 import type {UserIdentityConfig} from 'sentry/types/auth';
 import {UserIdentityCategory, UserIdentityStatus} from 'sentry/types/auth';
 import type {InternalAppApiToken, User} from 'sentry/types/user';
-import ApiTokenRow from 'sentry/views/settings/account/apiTokenRow';
+import {ApiTokenRow} from 'sentry/views/settings/account/apiTokenRow';
 
-import DetailLabel from 'admin/components/detailLabel';
-import DetailList from 'admin/components/detailList';
-import DetailsContainer from 'admin/components/detailsContainer';
+import {DetailLabel} from 'admin/components/detailLabel';
+import {DetailList} from 'admin/components/detailList';
+import {DetailsContainer} from 'admin/components/detailsContainer';
 import {prettyDate} from 'admin/utils';
 
 type Props = {
@@ -25,6 +26,13 @@ type Props = {
   tokens: InternalAppApiToken[];
   user: User;
 };
+
+const USER_TOKEN_COLUMNS: TableColumnConfig[] = [
+  {key: 'token', width: 'auto'},
+  {key: 'created', width: 'auto'},
+  {key: 'scopes', width: 'auto'},
+  {key: 'actions', width: 'auto'},
+];
 
 function identityLabel(identity: UserIdentityConfig) {
   if (identity.category === UserIdentityCategory.ORG_IDENTITY) {
@@ -39,20 +47,23 @@ function identityLabel(identity: UserIdentityConfig) {
   }
 
   let text: string;
-  if (identity.category === UserIdentityCategory.GLOBAL_IDENTITY) {
+  if (
+    identity.category === UserIdentityCategory.GLOBAL_IDENTITY ||
+    identity.category === UserIdentityCategory.GITHUB_COPILOT_IDENTITY
+  ) {
     text = identity.isLogin ? 'Global Login' : 'App Integration';
   } else if (identity.category === UserIdentityCategory.SOCIAL_IDENTITY) {
     text = 'Legacy Integration';
   } else {
-    throw new Error('Invalid category');
+    text = identity.category;
   }
   return <span style={{fontVariant: 'small-caps'}}>{text}</span>;
 }
 
-function UserOverview({
+export function UserOverview({
   user,
   identities,
-  tokens = [],
+  tokens,
   onAuthenticatorRemove,
   onIdentityDisconnect,
   revokeToken,
@@ -67,7 +78,7 @@ function UserOverview({
       <div>
         <DetailList>
           <DetailLabel title="Status">
-            {user.isActive ? 'Active' : 'Disabled'}
+            {user.isSuspended ? 'Suspended' : user.isActive ? 'Active' : 'Disabled'}
           </DetailLabel>
           <DetailLabel title="Email">
             <ExternalLink href={`mailto:${user.email}`}>{user.email}</ExternalLink>
@@ -92,7 +103,9 @@ function UserOverview({
           <DetailLabel title="Staff" yesNo={user.isStaff} />
           <DetailLabel title="Permissions">
             {Array.from(user.permissions).map(p => (
-              <Tag key={p}>{p}</Tag>
+              <Tag key={p} variant="muted">
+                {p}
+              </Tag>
             ))}
           </DetailLabel>
         </DetailList>
@@ -103,21 +116,21 @@ function UserOverview({
           <DetailList>
             {identities.map(identity => (
               <DetailLabel key={identity.id} title={identity.provider.name}>
-                <ButtonWrapper>
+                <Flex justify="between">
                   <div>{identityLabel(identity)}</div>
                   <Button
                     icon={<IconNot />}
-                    priority="danger"
+                    variant="danger"
                     size="xs"
-                    title="Disconnect Identity"
+                    tooltipProps={{title: 'Disconnect Identity'}}
                     onClick={() => onIdentityDisconnect(identity)}
-                    aria-label={'Disconnect Identity'}
+                    aria-label="Disconnect Identity"
                     disabled={
                       identity.status !== UserIdentityStatus.CAN_DISCONNECT &&
                       identity.category !== UserIdentityCategory.ORG_IDENTITY
                     }
                   />
-                </ButtonWrapper>
+                </Flex>
 
                 <small>{identity.name}</small>
                 <br />
@@ -143,17 +156,17 @@ function UserOverview({
           <DetailList>
             {user.authenticators.map(auth => (
               <DetailLabel title={auth.type} key={auth.id}>
-                <ButtonWrapper>
+                <Flex justify="between">
                   <div>{auth.name}</div>
                   <Button
                     icon={<IconNot />}
-                    priority="danger"
+                    variant="danger"
                     size="xs"
-                    title="Remove Authenticator"
+                    tooltipProps={{title: 'Remove Authenticator'}}
                     onClick={() => onAuthenticatorRemove(auth)}
-                    aria-label={'Remove Authenticator'}
+                    aria-label="Remove Authenticator"
                   />
-                </ButtonWrapper>
+                </Flex>
                 <small style={{color: '#999999'}}>
                   Last used {auth.dateUsed ? prettyDate(auth.dateUsed) : 'never'}
                 </small>
@@ -169,18 +182,26 @@ function UserOverview({
         )}
         <h6>Auth Tokens</h6>
         {tokens.length ? (
-          <PanelTable headers={['Token', 'Created On', 'Scopes', '']}>
+          <SimpleTable
+            columns={USER_TOKEN_COLUMNS}
+            header={
+              <SimpleTable.HeaderRow>
+                <SimpleTable.HeaderCell>Token</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell>Created On</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell>Scopes</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell />
+              </SimpleTable.HeaderRow>
+            }
+          >
             {tokens.map(token => (
               <ApiTokenRow
                 key={token.id}
                 token={token}
                 onRemove={revokeToken}
-                onRemoveConfirmMessage={
-                  "Are you sure you want to revoke this user's token? Doing so may break user's applications, and should usually only be done if the token has been leaked."
-                }
+                onRemoveConfirmMessage="Are you sure you want to revoke this user's token? Doing so may break user's applications, and should usually only be done if the token has been leaked."
               />
             ))}
-          </PanelTable>
+          </SimpleTable>
         ) : (
           <p>
             <em>
@@ -192,10 +213,3 @@ function UserOverview({
     </DetailsContainer>
   );
 }
-
-const ButtonWrapper = styled('div')`
-  display: flex;
-  justify-content: space-between;
-`;
-
-export default UserOverview;

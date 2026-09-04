@@ -1,16 +1,16 @@
-import AnalyticsArea from 'sentry/components/analyticsArea';
+import {AnalyticsArea} from 'sentry/components/analyticsArea';
 import {
   EventDrawerContainer,
   EventDrawerHeader,
 } from 'sentry/components/events/eventDrawer';
 import type {Group} from 'sentry/types/group';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import FlagsDistributionDrawer from 'sentry/views/issueDetails/groupDistributions/flagsDistributionDrawer';
-import GroupDistributionCrumbs from 'sentry/views/issueDetails/groupDistributions/groupDistributionCrumbs';
-import TagsDistributionDrawer from 'sentry/views/issueDetails/groupDistributions/tagsDistributionDrawer';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {FlagsDistributionDrawer} from 'sentry/views/issueDetails/groupDistributions/flagsDistributionDrawer';
+import {GroupDistributionCrumbs} from 'sentry/views/issueDetails/groupDistributions/groupDistributionCrumbs';
+import {TagsDistributionDrawer} from 'sentry/views/issueDetails/groupDistributions/tagsDistributionDrawer';
 import {DrawerTab} from 'sentry/views/issueDetails/groupDistributions/types';
-import useDrawerTab from 'sentry/views/issueDetails/groupDistributions/useDrawerTab';
+import {useDrawerTab} from 'sentry/views/issueDetails/groupDistributions/useDrawerTab';
 
 type Props = {
   group: Group;
@@ -18,7 +18,7 @@ type Props = {
 };
 
 /**
- * Shared tags and feature flags distributions drawer, used by streamlined issue details UI.
+ * Shared tags and feature flags distributions drawer used by issue details.
  */
 export function GroupDistributionsDrawer({group, includeFeatureFlagsTab}: Props) {
   const organization = useOrganization();

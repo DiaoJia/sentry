@@ -7,15 +7,13 @@ import {render, screen, userEvent, within} from 'sentry-test/reactTestingLibrary
 import type {MenuItemProps} from 'sentry/components/dropdownMenu';
 import type {RenderFunctionBaggage} from 'sentry/utils/discover/fieldRenderers';
 import {
-  type AttributesFieldRendererProps,
   AttributesTree,
+  type AttributesFieldRendererProps,
 } from 'sentry/views/explore/components/traceItemAttributes/attributesTree';
 import type {TraceItemResponseAttribute} from 'sentry/views/explore/hooks/useTraceItemDetails';
 
 describe('attributesTree', () => {
-  const organization = OrganizationFixture({
-    features: ['trace-view-v1'],
-  });
+  const organization = OrganizationFixture();
 
   const location = LocationFixture();
 
@@ -27,17 +25,17 @@ describe('attributesTree', () => {
         type: 'str',
         value: 'test value 1',
         name: 'test.attribute1',
-      } as TraceItemResponseAttribute,
+      },
       {
         type: 'float',
         value: 42,
         name: 'test.attribute2',
-      } as TraceItemResponseAttribute,
+      },
       {
         type: 'bool',
         value: true,
         name: 'test.attribute3',
-      } as TraceItemResponseAttribute,
+      },
     ];
 
     const renderers = {
@@ -61,6 +59,7 @@ describe('attributesTree', () => {
         rendererExtra={{
           theme,
           location,
+          navigate: jest.fn(),
           organization,
         }}
       />
@@ -92,17 +91,17 @@ describe('attributesTree', () => {
         type: 'str',
         value: 'test value 1',
         name: 'test.attribute1',
-      } as TraceItemResponseAttribute,
+      },
       {
         type: 'str',
         value: 'test value 2',
         name: 'test',
-      } as TraceItemResponseAttribute,
+      },
       {
         type: 'str',
         value: 'test value 3',
         name: 'test.some-inner-thing.value',
-      } as TraceItemResponseAttribute,
+      },
     ];
 
     render(
@@ -111,6 +110,7 @@ describe('attributesTree', () => {
         rendererExtra={{
           theme,
           location,
+          navigate: jest.fn(),
           organization,
         }}
         getCustomActions={content => {
@@ -155,7 +155,8 @@ describe('attributesTree', () => {
         expect(row?.textContent).toBe('some-inner-thing');
         continue;
       }
-      await userEvent.click(actionsButton);
+      // jsdom does not evaluate :hover styles, so bypass the hidden action's pointer-events check.
+      await userEvent.click(actionsButton, {pointerEventsCheck: 0});
       expect(await within(row).findByText('Visible Action')).toBeInTheDocument();
       expect(await within(row).findByText('Disabled Action')).toBeInTheDocument();
       expect(within(row).queryByText('Hidden Action')).not.toBeInTheDocument();

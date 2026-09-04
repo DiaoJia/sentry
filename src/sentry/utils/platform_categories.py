@@ -84,6 +84,7 @@ BACKEND = {
     "node-express",
     "node-fastify",
     "node-hapi",
+    "node-hono",
     "node-koa",
     "node-nestjs",
     "perl",
@@ -102,6 +103,7 @@ BACKEND = {
     "python-falcon",
     "python-fastapi",
     "python-flask",
+    "python-litestar",
     "python-pylons",
     "python-pymongo",
     "python-pyramid",
@@ -158,9 +160,19 @@ DESKTOP = {
     "unreal",
 }
 
-# TODO: @athena Remove this
-# This is only temporary since we decide the right category. Don't add anything here or your frontend experience will be broken
-TEMPORARY = {"nintendo"}
+CONSOLES = {
+    "nintendo-switch",
+    "playstation",
+    "xbox",
+}
+
+GAMING = {
+    "godot",
+    "native",
+    "unity",
+    "unreal",
+    *CONSOLES,
+}
 
 CATEGORY_LIST = [
     {id: "browser", "name": _("Browser"), "platforms": FRONTEND},
@@ -168,7 +180,8 @@ CATEGORY_LIST = [
     {id: "mobile", "name": _("Mobile"), "platforms": MOBILE},
     {id: "desktop", "name": _("Desktop"), "platforms": DESKTOP},
     {id: "serverless", "name": _("Serverless"), "platforms": SERVERLESS},
-    {id: "temporary", "name": _("Temporary"), "platforms": TEMPORARY},
+    {id: "gaming", "name": _("Gaming"), "platforms": GAMING},
+    {id: "other", "name": _("Other"), "platforms": {"other"}},
 ]
 
 # Mirrors `const sourceMaps` in sentry/static/app/data/platformCategories.tsx

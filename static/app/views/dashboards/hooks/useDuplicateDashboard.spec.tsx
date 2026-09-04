@@ -1,0 +1,227 @@
+import {DashboardFixture, DashboardListItemFixture} from 'sentry-fixture/dashboard';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+import {WidgetFixture} from 'sentry-fixture/widget';
+
+import {act, renderHookWithProviders} from 'sentry-test/reactTestingLibrary';
+
+import {useDuplicateDashboard} from 'sentry/views/dashboards/hooks/useDuplicateDashboard';
+import type {DashboardFilters} from 'sentry/views/dashboards/types';
+import {WidgetType} from 'sentry/views/dashboards/types';
+import {PrebuiltDashboardId} from 'sentry/views/dashboards/utils/prebuiltConfigs';
+
+describe('useDuplicateDashboard', () => {
+  const organization = OrganizationFixture();
+
+  beforeEach(() => {
+    MockApiClient.clearMockResponses();
+  });
+
+  it('fetches and duplicates a non-prebuilt dashboard', async () => {
+    const fetchMock = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/42/`,
+      body: DashboardFixture([WidgetFixture()], {id: '42'}),
+    });
+    const createMock = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'POST',
+      body: DashboardFixture([WidgetFixture()], {id: '100'}),
+    });
+
+    const onSuccess = jest.fn();
+    const {result} = renderHookWithProviders(() => useDuplicateDashboard({onSuccess}), {
+      organization,
+    });
+
+    await act(async () => {
+      await result.current(DashboardListItemFixture({id: '42'}), 'table');
+    });
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(createMock).toHaveBeenCalled();
+    expect(onSuccess).toHaveBeenCalledWith(expect.objectContaining({id: '100'}));
+  });
+
+  it('resolves linked dashboard IDs before duplicating a prebuilt dashboard', async () => {
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'GET',
+      body: [
+        DashboardFixture([], {
+          id: '55',
+          prebuiltId: PrebuiltDashboardId.WEB_VITALS_SUMMARY,
+        }),
+      ],
+    });
+    const createMock = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'POST',
+      body: DashboardFixture([], {id: '200'}),
+    });
+
+    const onSuccess = jest.fn();
+    const {result} = renderHookWithProviders(() => useDuplicateDashboard({onSuccess}), {
+      organization,
+    });
+
+    await act(async () => {
+      await result.current(
+        DashboardListItemFixture({
+          id: '-1',
+          prebuiltId: PrebuiltDashboardId.WEB_VITALS,
+        }),
+        'table'
+      );
+    });
+
+    expect(createMock).toHaveBeenCalled();
+    expect(onSuccess).toHaveBeenCalled();
+  });
+
+  it('copies saved filters and page filters when duplicating a prebuilt dashboard', async () => {
+    const savedFilters: DashboardFilters = {
+      globalFilter: [
+        {
+          dataset: WidgetType.SPANS,
+          tag: {key: 'span.system', name: 'span.system'},
+          value: 'postgresql',
+        },
+      ],
+    };
+    // Mock for fetchDashboard (saved instance with user's filters)
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/55/`,
+      body: DashboardFixture([], {
+        id: '55',
+        prebuiltId: PrebuiltDashboardId.BACKEND_QUERIES,
+        filters: savedFilters,
+        projects: [1, 2],
+        environment: ['production'],
+        period: '7d',
+      }),
+    });
+    // Mock for resolveLinkedDashboardIds (resolves linked summary dashboard)
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'GET',
+      body: [
+        DashboardFixture([], {
+          id: '56',
+          prebuiltId: PrebuiltDashboardId.BACKEND_QUERIES_SUMMARY,
+        }),
+      ],
+    });
+    const createMock = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'POST',
+      body: DashboardFixture([], {id: '200'}),
+    });
+
+    const onSuccess = jest.fn();
+    const {result} = renderHookWithProviders(() => useDuplicateDashboard({onSuccess}), {
+      organization,
+    });
+
+    await act(async () => {
+      await result.current(
+        DashboardListItemFixture({
+          id: '55',
+          prebuiltId: PrebuiltDashboardId.BACKEND_QUERIES,
+        }),
+        'table'
+      );
+    });
+
+    // The saved span.system override is preserved alongside the prebuilt
+    // span.action / span.domain chips that the user never modified.
+    expect(createMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          filters: {
+            globalFilter: expect.arrayContaining([
+              expect.objectContaining({
+                tag: expect.objectContaining({key: 'span.system'}),
+                value: 'postgresql',
+              }),
+              expect.objectContaining({
+                tag: expect.objectContaining({key: 'span.action'}),
+                value: '',
+              }),
+              expect.objectContaining({
+                tag: expect.objectContaining({key: 'span.domain'}),
+                value: '',
+              }),
+            ]),
+          },
+          projects: [1, 2],
+          environment: ['production'],
+          period: '7d',
+        }),
+      })
+    );
+    expect(onSuccess).toHaveBeenCalled();
+  });
+
+  it('preserves prebuilt-only globalFilter chips when no saved filters exist', async () => {
+    // Web Vitals defines `browser.name` and `user.geo.subregion` chips in its
+    // prebuilt config. They live only in the static config — not the DB
+    // record — so cloning must not drop them.
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/77/`,
+      body: DashboardFixture([], {
+        id: '77',
+        prebuiltId: PrebuiltDashboardId.WEB_VITALS,
+        filters: {},
+      }),
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'GET',
+      body: [
+        DashboardFixture([], {
+          id: '78',
+          prebuiltId: PrebuiltDashboardId.WEB_VITALS_SUMMARY,
+        }),
+      ],
+    });
+    const createMock = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/dashboards/`,
+      method: 'POST',
+      body: DashboardFixture([], {id: '200'}),
+    });
+
+    const onSuccess = jest.fn();
+    const {result} = renderHookWithProviders(() => useDuplicateDashboard({onSuccess}), {
+      organization,
+    });
+
+    await act(async () => {
+      await result.current(
+        DashboardListItemFixture({
+          id: '77',
+          prebuiltId: PrebuiltDashboardId.WEB_VITALS,
+        }),
+        'table'
+      );
+    });
+
+    expect(createMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          filters: {
+            globalFilter: expect.arrayContaining([
+              expect.objectContaining({
+                tag: expect.objectContaining({key: 'browser.name'}),
+              }),
+              expect.objectContaining({
+                tag: expect.objectContaining({key: 'user.geo.subregion'}),
+              }),
+            ]),
+          },
+        }),
+      })
+    );
+    expect(onSuccess).toHaveBeenCalled();
+  });
+});

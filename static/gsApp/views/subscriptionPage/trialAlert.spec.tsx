@@ -4,9 +4,9 @@ import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 import {resetMockDate, setMockDate} from 'sentry-test/utils';
 
-import TrialAlert from 'getsentry/views/subscriptionPage/trialAlert';
+import {TrialAlert} from 'getsentry/views/subscriptionPage/trialAlert';
 
-describe('Subscription > TrialAlert', function () {
+describe('Subscription > TrialAlert', () => {
   const organization = OrganizationFixture();
   const subscription = SubscriptionFixture({organization});
 
@@ -18,10 +18,10 @@ describe('Subscription > TrialAlert', function () {
     resetMockDate();
   });
 
-  it('does not render not on trial', function () {
+  it('does not render not on trial', () => {
     const sub = {
       ...subscription,
-      isTrial: false,
+      trialPlan: null,
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
     };
@@ -29,10 +29,10 @@ describe('Subscription > TrialAlert', function () {
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
-  it('renders 1 day left', function () {
+  it('renders 1 day left', () => {
     const sub = {
       ...subscription,
-      isTrial: true,
+      trialPlan: 'am1_business',
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
       trialEnd: '2021-01-02',
@@ -42,10 +42,10 @@ describe('Subscription > TrialAlert', function () {
     expect(screen.getByRole('button')).toBeInTheDocument();
   });
 
-  it('renders 14 days left', function () {
+  it('renders 14 days left', () => {
     const sub = {
       ...subscription,
-      isTrial: true,
+      trialPlan: 'am1_business',
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
       trialEnd: '2021-01-15',
@@ -55,10 +55,10 @@ describe('Subscription > TrialAlert', function () {
     expect(screen.getByRole('button')).toBeInTheDocument();
   });
 
-  it('does not render negative days left', function () {
+  it('does not render negative days left', () => {
     const sub = {
       ...subscription,
-      isTrial: true,
+      trialPlan: 'am1_business',
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
       trialEnd: '2020-12-01',
@@ -67,10 +67,10 @@ describe('Subscription > TrialAlert', function () {
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
-  it('renders enterprise trial', function () {
+  it('renders enterprise trial', () => {
     const sub = {
       ...subscription,
-      isTrial: true,
+      trialPlan: 'am1_business',
       isEnterpriseTrial: true,
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
@@ -84,11 +84,11 @@ describe('Subscription > TrialAlert', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders am3 enterprise trial', function () {
+  it('renders am3 enterprise trial', () => {
     const am3_sub = SubscriptionFixture({organization, plan: 'am3_f'});
     const sub = {
       ...am3_sub,
-      isTrial: true,
+      trialPlan: 'am1_business',
       isEnterpriseTrial: true,
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
@@ -102,12 +102,11 @@ describe('Subscription > TrialAlert', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders plan trial', function () {
+  it('renders plan trial', () => {
     const sub = {
       ...subscription,
-      isTrial: true,
+      trialPlan: 'am1_business',
       isEnterpriseTrial: false,
-      isPerformancePlanTrial: false,
       onDemandMaxSpend: 1000,
       onDemandSpendUsed: 0,
     };
@@ -119,23 +118,5 @@ describe('Subscription > TrialAlert', function () {
       )
     ).toBeInTheDocument();
     expect(screen.queryByText(/unlimited errors/)).not.toBeInTheDocument();
-  });
-
-  it('renders performance trial', function () {
-    const sub = {
-      ...subscription,
-      isTrial: true,
-      isEnterpriseTrial: false,
-      isPerformancePlanTrial: true,
-      onDemandMaxSpend: 1000,
-      onDemandSpendUsed: 0,
-    };
-    render(<TrialAlert subscription={sub} organization={organization} />);
-    expect(screen.getByText('Performance Trial')).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        `With your trial you have access to Sentry's performance features.`
-      )
-    ).toBeInTheDocument();
   });
 });

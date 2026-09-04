@@ -1,6 +1,6 @@
 from time import time
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import orjson
 import responses
@@ -14,15 +14,26 @@ from sentry.testutils.asserts import assert_failure_metric, assert_success_metri
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.silo import assume_test_silo_mode
 from sentry.users.models.identity import Identity
-from sentry_plugins.bitbucket.testutils import REFS_CHANGED_EXAMPLE
 
 PROVIDER = "bitbucket_server"
+
+REFS_CHANGED_EXAMPLE = b"""{
+    "changes": [],
+    "repository": {
+        "id": "{b128e0f6-196a-4dde-b72d-f42abc6dc239}",
+        "project": {
+            "key": "my-project"
+        },
+        "slug": "marcos"
+    }
+}
+"""
 
 
 class WebhookTestBase(APITestCase):
     endpoint = "sentry-extensions-bitbucketserver-webhook"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.base_url = "https://api.bitbucket.org"
@@ -80,23 +91,23 @@ class WebhookTestBase(APITestCase):
 
 
 class WebhookGetTest(WebhookTestBase):
-    def test_get_request_fails(self):
+    def test_get_request_fails(self) -> None:
         self.get_error_response(self.organization.id, self.integration.id, status_code=405)
 
 
 class WebhookPostTest(WebhookTestBase):
     method = "post"
 
-    def test_invalid_organization(self):
+    def test_invalid_organization(self) -> None:
         self.get_error_response(0, self.integration.id, status_code=400)
 
-    def test_invalid_integration(self):
+    def test_invalid_integration(self) -> None:
         self.get_error_response(self.organization.id, 0, status_code=400)
 
-    def test_missing_event(self):
+    def test_missing_event(self) -> None:
         self.get_error_response(self.organization.id, self.integration.id, status_code=400)
 
-    def test_unregistered_event(self):
+    def test_unregistered_event(self) -> None:
         self.get_success_response(
             self.organization.id,
             self.integration.id,
@@ -109,7 +120,7 @@ class WebhookPostTest(WebhookTestBase):
 class RefsChangedWebhookTest(WebhookTestBase):
     method = "post"
 
-    def test_missing_integration(self):
+    def test_missing_integration(self) -> None:
         self.create_repository()
         self.get_error_response(
             self.organization.id,
@@ -120,7 +131,7 @@ class RefsChangedWebhookTest(WebhookTestBase):
         )
 
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_simple(self, mock_record):
+    def test_simple(self, mock_record: MagicMock) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             self.integration.add_organization(self.organization, default_auth_id=self.identity.id)
 
@@ -129,21 +140,53 @@ class RefsChangedWebhookTest(WebhookTestBase):
 
         assert_success_metric(mock_record)
 
-    @patch("sentry.integrations.bitbucket_server.webhook.PushEventWebhook.__call__")
+    @patch("sentry.integrations.bitbucket_server.client.BitbucketServerClient.get_commits")
+    def test_deleted_ref_skips_commit_lookup(self, mock_get_commits: MagicMock) -> None:
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.integration.add_organization(self.organization, default_auth_id=self.identity.id)
+
+        self.create_repository()
+        self.get_success_response(
+            self.organization.id,
+            self.integration.id,
+            raw_data={
+                "changes": [{"fromHash": "1" * 40, "toHash": "0" * 40}],
+                "repository": {
+                    "id": self.external_id,
+                    "project": {"key": "my-project"},
+                    "slug": "marcos",
+                },
+            },
+            extra_headers=dict(HTTP_X_EVENT_KEY="repo:refs_changed"),
+            status_code=204,
+        )
+
+        mock_get_commits.assert_not_called()
+
+    @patch("sentry.integrations.bitbucket_server.client.BitbucketServerClient.get_commits")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_webhook_error_metric(self, mock_record, mock_event):
+    def test_webhook_error_metric(
+        self, mock_record: MagicMock, mock_get_commits: MagicMock
+    ) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             self.integration.add_organization(self.organization, default_auth_id=self.identity.id)
 
         self.create_repository()
 
         error = Exception("error")
-        mock_event.side_effect = error
+        mock_get_commits.side_effect = error
 
         self.get_error_response(
             self.organization.id,
             self.integration.id,
-            raw_data=REFS_CHANGED_EXAMPLE,
+            raw_data={
+                "changes": [{"fromHash": "hash1", "toHash": "hash2"}],
+                "repository": {
+                    "id": "{b128e0f6-196a-4dde-b72d-f42abc6dc239}",
+                    "project": {"key": "my-project"},
+                    "slug": "breaking-changes",
+                },
+            },
             extra_headers=dict(HTTP_X_EVENT_KEY="repo:refs_changed"),
             status_code=500,
         )
@@ -151,7 +194,7 @@ class RefsChangedWebhookTest(WebhookTestBase):
         assert_failure_metric(mock_record, error)
 
     @responses.activate
-    def test_get_commits_error(self):
+    def test_get_commits_error(self) -> None:
         responses.add(
             responses.GET,
             "https://api.bitbucket.org/rest/api/1.0/projects/my-project/repos/marcos/commits",
@@ -194,7 +237,7 @@ class RefsChangedWebhookTest(WebhookTestBase):
         )
 
     @responses.activate
-    def test_handle_unreachable_host(self):
+    def test_handle_unreachable_host(self) -> None:
         responses.add(
             responses.GET,
             "https://api.bitbucket.org/rest/api/1.0/projects/my-project/repos/marcos/commits",

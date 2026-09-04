@@ -3,8 +3,8 @@ import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import {ProfilingBreadcrumbs} from 'sentry/components/profiling/profilingBreadcrumbs';
 
-describe('Breadcrumb', function () {
-  it('renders the profiling link', function () {
+describe('Breadcrumb', () => {
+  it('renders the profiling link', () => {
     const {organization} = initializeOrg();
     render(
       <ProfilingBreadcrumbs
@@ -23,10 +23,10 @@ describe('Breadcrumb', function () {
         ]}
       />
     );
-    expect(screen.getByText('Profiling')).toBeInTheDocument();
-    expect(screen.getByRole('link', {name: 'Profiling'})).toHaveAttribute(
+    expect(screen.getByText('Profiles')).toBeInTheDocument();
+    expect(screen.getByRole('link', {name: 'Profiles'})).toHaveAttribute(
       'href',
-      `/organizations/${organization.slug}/profiling/`
+      `/organizations/${organization.slug}/explore/profiles/`
     );
     expect(screen.getByText('foo')).toBeInTheDocument();
   });

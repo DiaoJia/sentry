@@ -2,12 +2,12 @@ import {Component} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 
-import {Alert} from 'sentry/components/core/alert';
-import DetailedError from 'sentry/components/errors/detailedError';
+import {Alert} from '@sentry/scraps/alert';
+import {Flex} from '@sentry/scraps/layout';
+
+import {DetailedError} from 'sentry/components/errors/detailedError';
 import {IconClose} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import getDynamicText from 'sentry/utils/getDynamicText';
 
 type DefaultProps = {
   mini: boolean;
@@ -31,9 +31,6 @@ type Props = DefaultProps & {
   className?: string;
   customComponent?: ((props: CustomComponentRenderProps) => React.ReactNode) | null;
 
-  // To add context for better error reporting
-  errorTag?: Record<string, string>;
-
   message?: React.ReactNode;
 };
 
@@ -47,7 +44,7 @@ function getExclamation() {
   return exclamation[Math.floor(Math.random() * exclamation.length)];
 }
 
-class ErrorBoundary extends Component<Props, State> {
+export class ErrorBoundary extends Component<Props, State> {
   static defaultProps: DefaultProps = {
     mini: false,
   };
@@ -67,15 +64,11 @@ class ErrorBoundary extends Component<Props, State> {
     }
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    const {errorTag} = this.props;
+  componentDidCatch(_error: Error | string, errorInfo: React.ErrorInfo) {
+    const error = typeof _error === 'string' ? new Error(_error) : _error;
 
     this.setState({error});
     Sentry.withScope(scope => {
-      if (errorTag) {
-        Object.keys(errorTag).forEach(tag => scope.setTag(tag, errorTag[tag]));
-      }
-
       try {
         // Based on https://github.com/getsentry/sentry-javascript/blob/6f4ad562c469f546f1098136b65583309d03487b/packages/react/src/errorboundary.tsx#L75-L85
         const errorBoundaryError = new Error(error.message);
@@ -126,11 +119,11 @@ class ErrorBoundary extends Component<Props, State> {
     if (mini) {
       return (
         <Alert.Container>
-          <Alert type="error" showIcon className={className}>
-            <AlertContent>
+          <Alert variant="danger" className={className}>
+            <Flex align="center" justify="between">
               {message || t('There was a problem rendering this component')}
               {this.props.allowDismiss && <IconClose onClick={this.handleClose} />}
-            </AlertContent>
+            </Flex>
           </Alert>
         </Alert.Container>
       );
@@ -139,10 +132,7 @@ class ErrorBoundary extends Component<Props, State> {
     return (
       <Wrapper data-test-id="error-boundary">
         <DetailedError
-          heading={getDynamicText({
-            value: getExclamation(),
-            fixed: exclamation[0],
-          })}
+          heading={getExclamation()}
           message={t(
             `Something went horribly wrong rendering this page.
 We use a decent error reporting service so this will probably be fixed soon. Unless our error reporting service is also broken. That would be awkward.
@@ -155,15 +145,9 @@ Anyway, we apologize for the inconvenience.`
   }
 }
 
-const AlertContent = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;
-
 const Wrapper = styled('div')`
-  color: ${p => p.theme.textColor};
-  padding: ${space(3)};
+  color: ${p => p.theme.tokens.content.primary};
+  padding: ${p => p.theme.space['2xl']};
   max-width: 1000px;
   margin: auto;
 `;
@@ -174,5 +158,3 @@ const StackTrace = styled('pre')`
   margin-left: 85px;
   margin-right: 18px;
 `;
-
-export default ErrorBoundary;

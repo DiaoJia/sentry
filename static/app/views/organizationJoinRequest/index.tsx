@@ -1,123 +1,124 @@
-import {Component} from 'react';
-import styled from '@emotion/styled';
+import type {MouseEvent} from 'react';
+import {useMutation} from '@tanstack/react-query';
+import {z} from 'zod';
+
+import {Button} from '@sentry/scraps/button';
+import {defaultFormOptions, useScrapsForm} from '@sentry/scraps/form';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {Heading, Text} from '@sentry/scraps/text';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import EmailField from 'sentry/components/forms/fields/emailField';
-import Form from 'sentry/components/forms/form';
-import NarrowLayout from 'sentry/components/narrowLayout';
+import {NarrowLayout} from 'sentry/components/narrowLayout';
 import {IconMegaphone} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useParams} from 'sentry/utils/useParams';
 
-type Props = RouteComponentProps<{orgId: string}>;
+const joinRequestSchema = z.object({
+  email: z.email(t('Please enter a valid email address')),
+});
 
-type State = {
-  submitSuccess: boolean | null;
-};
+export default function OrganizationJoinRequest() {
+  const {orgId} = useParams<{orgId: string}>();
+  const location = useLocation();
 
-class OrganizationJoinRequest extends Component<Props, State> {
-  state: State = {
-    submitSuccess: null,
-  };
+  const mutation = useMutation({
+    mutationFn: (data: {email: string}) =>
+      fetchMutation({
+        url: getApiUrl('/organizations/$organizationIdOrSlug/join-request/', {
+          path: {organizationIdOrSlug: orgId},
+        }),
+        method: 'POST',
+        data,
+      }),
+    onSuccess: () => {
+      trackAnalytics('join_request.created', {
+        organization: orgId,
+        referrer: decodeScalar(location.query.referrer, ''),
+      });
+    },
+    onError: () => {
+      addErrorMessage(t('Request to join failed'));
+    },
+  });
 
-  handleSubmitSuccess = () => {
-    const {params, location} = this.props;
-    this.setState({submitSuccess: true});
-    trackAnalytics('join_request.created', {
-      organization: params.orgId,
-      referrer: location.query.referrer,
-    });
-  };
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {email: ''},
+    validators: {onDynamic: joinRequestSchema},
+    onSubmit: ({value}) => mutation.mutateAsync(value).catch(() => {}),
+  });
 
-  handleSubmitError() {
-    addErrorMessage(t('Request to join failed'));
-  }
-
-  handleCancel = (e: any) => {
+  const handleCancel = (e: MouseEvent) => {
     e.preventDefault();
-    const {params} = this.props;
-
-    window.location.assign(`/auth/login/${params.orgId}/`);
+    testableWindowLocation.assign(`/auth/login/${orgId}/`);
   };
 
-  render() {
-    const {params} = this.props;
-    const {submitSuccess} = this.state;
-
-    if (submitSuccess) {
-      return (
-        <NarrowLayout maxWidth="550px">
-          <SuccessModal>
-            <StyledIconMegaphone size="xxl" />
-            <StyledHeader>{t('Request Sent')}</StyledHeader>
-            <StyledText>{t('Your request to join has been sent.')}</StyledText>
-            <ReceiveEmailMessage>
-              {t('You will receive an email when your request is approved.')}
-            </ReceiveEmailMessage>
-          </SuccessModal>
-        </NarrowLayout>
-      );
-    }
-
+  if (mutation.isSuccess) {
     return (
-      <NarrowLayout maxWidth="650px">
-        <StyledIconMegaphone size="xxl" />
-        <StyledHeader data-test-id="join-request">{t('Request to Join')}</StyledHeader>
-        <StyledText>
-          {tct('Ask the admins if you can join the [orgId] organization.', {
-            orgId: params.orgId,
-          })}
-        </StyledText>
-        <Form
-          requireChanges
-          apiEndpoint={`/organizations/${params.orgId}/join-request/`}
-          apiMethod="POST"
-          submitLabel={t('Request to Join')}
-          onSubmitSuccess={this.handleSubmitSuccess}
-          onSubmitError={this.handleSubmitError}
-          onCancel={this.handleCancel}
-        >
-          <StyledEmailField
-            name="email"
-            inline={false}
-            label={t('Email Address')}
-            placeholder="name@example.com"
-          />
-        </Form>
+      <NarrowLayout maxWidth="550px">
+        <Stack align="center" gap="xl" paddingTop="lg" paddingBottom="3xl">
+          <IconMegaphone size="xl" />
+          <Stack align="center" gap="md">
+            <Heading as="h3" size="xl">
+              {t('Request Sent')}
+            </Heading>
+            <Text as="p" align="center">
+              {t('Your request to join has been sent.')}
+            </Text>
+            <Container maxWidth="250px">
+              <Text as="p" align="center">
+                {t('You will receive an email when your request is approved.')}
+              </Text>
+            </Container>
+          </Stack>
+        </Stack>
       </NarrowLayout>
     );
   }
+
+  return (
+    <NarrowLayout maxWidth="650px">
+      <Stack gap="xl">
+        <IconMegaphone size="xl" />
+        <Stack gap="md">
+          <Heading as="h3" size="xl" data-test-id="join-request">
+            {t('Request to Join')}
+          </Heading>
+          <Text as="p">
+            {tct('Ask the admins if you can join the [orgId] organization.', {
+              orgId,
+            })}
+          </Text>
+        </Stack>
+        <form.AppForm form={form}>
+          <Stack gap="xl">
+            <form.AppField name="email">
+              {field => (
+                <field.Layout.Stack label={t('Email Address')} required>
+                  <field.Input
+                    type="email"
+                    value={field.state.value}
+                    onChange={field.handleChange}
+                    placeholder="name@example.com"
+                  />
+                </field.Layout.Stack>
+              )}
+            </form.AppField>
+            <Container borderTop="secondary" paddingTop="xl" paddingBottom="xl">
+              <Flex gap="md" justify="end">
+                <Button onClick={handleCancel}>{t('Cancel')}</Button>
+                <form.SubmitButton>{t('Request to Join')}</form.SubmitButton>
+              </Flex>
+            </Container>
+          </Stack>
+        </form.AppForm>
+      </Stack>
+    </NarrowLayout>
+  );
 }
-
-const SuccessModal = styled('div')`
-  display: grid;
-  justify-items: center;
-  text-align: center;
-  padding-top: 10px;
-  padding-bottom: ${space(4)};
-`;
-
-const StyledIconMegaphone = styled(IconMegaphone)`
-  padding-bottom: ${space(3)};
-`;
-
-const StyledHeader = styled('h3')`
-  margin-bottom: ${space(1)};
-`;
-
-const StyledText = styled('p')`
-  margin-bottom: 0;
-`;
-
-const ReceiveEmailMessage = styled(StyledText)`
-  max-width: 250px;
-`;
-
-const StyledEmailField = styled(EmailField)`
-  padding-top: ${space(2)};
-  padding-left: 0;
-`;
-
-export default OrganizationJoinRequest;

@@ -1,19 +1,20 @@
 import styled from '@emotion/styled';
 
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {IconOpen} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {defined} from 'sentry/utils';
-import {isUrl} from 'sentry/utils/string/isUrl';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 
 interface Props {
   value: string;
   meta?: Record<any, any>;
 }
 
-export default function LinkHint({meta, value}: Props) {
-  if (!isUrl(value) || defined(meta)) {
+export function LinkHint({meta, value}: Props) {
+  if (!isValidUrl(value) || defined(meta)) {
     return null;
   }
 

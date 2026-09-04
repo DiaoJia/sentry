@@ -1,16 +1,19 @@
+from datetime import timedelta
 from unittest.mock import create_autospec
 
 from django.db import models
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import region_silo_model
+from sentry.db.models import cell_silo_model
 from sentry.testutils.cases import TestCase
 from sentry.utils.function_cache import cache_func, cache_func_for_models
 
 cache_func_for_models
 
+_TTL = timedelta(days=7)
 
-@region_silo_model
+
+@cell_silo_model
 class CacheModel(models.Model):
     __relocation_scope__ = RelocationScope.Excluded
     some_field = models.TextField()
@@ -37,10 +40,12 @@ class CacheFuncForModelsTest(TestCase):
             len([ca for ca in mock_test_func.call_args_list if ca.args[0] == text_search]) == count
         )
 
-    def test(self):
+    def test(self) -> None:
         mock_test_func = create_autospec(count_func)
         mock_test_func.side_effect = count_func
-        decorated_test_func = cache_func_for_models([(CacheModel, arg_extractor)])(mock_test_func)
+        decorated_test_func = cache_func_for_models([(CacheModel, arg_extractor)], cache_ttl=_TTL)(
+            mock_test_func
+        )
         self.assert_called_with_count(mock_test_func, "test", 0)
         assert decorated_test_func("test") == 0
         self.assert_called_with_count(mock_test_func, "test", 1)
@@ -60,11 +65,13 @@ class CacheFuncForModelsTest(TestCase):
         self.assert_called_with_count(mock_test_func, "test", 3)
         assert decorated_test_func("test") == 2
 
-    def test_no_recalculate(self):
+    def test_no_recalculate(self) -> None:
         mock_test_func = create_autospec(count_func)
         mock_test_func.side_effect = count_func
         decorated_test_func = cache_func_for_models(
-            [(CacheModel, arg_extractor)], recalculate=False
+            [(CacheModel, arg_extractor)],
+            cache_ttl=_TTL,
+            recalculate=False,
         )(mock_test_func)
         self.assert_called_with_count(mock_test_func, "test", 0)
         assert decorated_test_func("test") == 0
@@ -83,10 +90,12 @@ class CacheFuncForModelsTest(TestCase):
         self.assert_called_with_count(mock_test_func, "test", 3)
         assert decorated_test_func("test") == 2
 
-    def test_batch(self):
+    def test_batch(self) -> None:
         mock_test_func = create_autospec(count_func)
         mock_test_func.side_effect = count_func
-        decorated_test_func = cache_func_for_models([(CacheModel, arg_extractor)])(mock_test_func)
+        decorated_test_func = cache_func_for_models([(CacheModel, arg_extractor)], cache_ttl=_TTL)(
+            mock_test_func
+        )
 
         results = decorated_test_func.batch([("test1",), ("test2",), ("test3",)])
         assert results == [0, 0, 0]
@@ -113,7 +122,7 @@ class CacheFuncTest(TestCase):
             len([ca for ca in mock_test_func.call_args_list if ca.args[0] == text_search]) == count
         )
 
-    def test(self):
+    def test(self) -> None:
         mock_test_func = create_autospec(simple_func)
         mock_test_func.side_effect = simple_func
         decorated_test_func = cache_func()(mock_test_func)
@@ -129,7 +138,7 @@ class CacheFuncTest(TestCase):
         assert decorated_test_func("test_2") == "test_2_yay"
         self.assert_called_with_count(mock_test_func, "test_2", 1)
 
-    def test_batch(self):
+    def test_batch(self) -> None:
         mock_test_func = create_autospec(simple_func)
         mock_test_func.side_effect = simple_func
 

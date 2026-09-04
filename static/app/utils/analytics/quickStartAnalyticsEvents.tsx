@@ -7,8 +7,9 @@ export type QuickStartEventParameters = {
       | 'targeted_onboarding_welcome_skip'
       | 'targeted_onboarding_select_platform_skip'
       | 'targeted_onboarding_first_event_footer_skip'
-      | 'onboarding_sidebar'
-      | 'onboarding_sidebar_user_second_visit';
+      | 'targeted_onboarding_scm_connect_skip'
+      | 'targeted_onboarding_scm_platform_features_skip'
+      | 'onboarding_sidebar';
     user_clicked: boolean;
   };
   'quick_start.task_card_clicked': {

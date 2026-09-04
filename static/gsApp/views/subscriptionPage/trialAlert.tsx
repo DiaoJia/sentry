@@ -1,17 +1,17 @@
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import Panel from 'sentry/components/panels/panel';
+import {Button} from '@sentry/scraps/button';
+import {Container, Flex} from '@sentry/scraps/layout';
+
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
 
 import {openUpsellModal} from 'getsentry/actionCreators/modal';
 import type {Subscription} from 'getsentry/types';
-import {getTrialDaysLeft} from 'getsentry/utils/billing';
+import {getTrialDaysLeft, isTrial} from 'getsentry/utils/billing';
 
-import TrialBadge from './trial/badge';
+import {TrialBadge} from './trial/badge';
 import {ButtonWrapper, SubscriptionBody} from './styles';
 
 type Props = {
@@ -19,8 +19,8 @@ type Props = {
   subscription: Subscription;
 };
 
-function TrialAlert({organization, subscription}: Props) {
-  if (!subscription.isTrial) {
+export function TrialAlert({organization, subscription}: Props) {
+  if (!isTrial(subscription)) {
     return null;
   }
 
@@ -32,22 +32,23 @@ function TrialAlert({organization, subscription}: Props) {
 
   const trialName = subscription.isEnterpriseTrial
     ? t('Enterprise Trial')
-    : subscription.isPerformancePlanTrial
-      ? t('Performance Trial')
-      : t('Business Plan Trial');
+    : t('Business Plan Trial');
 
-  const featuresName = subscription.isPerformancePlanTrial
-    ? 'performance'
-    : 'business plan';
+  const featuresName = 'business plan';
 
   return (
-    <Panel data-test-id="trial-alert">
+    <Container
+      data-test-id="trial-alert"
+      background="primary"
+      border="primary"
+      radius="md"
+    >
       <SubscriptionBody withPadding>
         <TrialInfo>
-          <TrialHeader>
+          <Flex align="center" gap="md">
             <StyledHeading>{trialName}</StyledHeading>
             <TrialBadge subscription={subscription} organization={organization} />
-          </TrialHeader>
+          </Flex>
           <StyledSubText>
             {tct("With your trial you have access to Sentry's [featuresName] features.", {
               featuresName,
@@ -56,7 +57,7 @@ function TrialAlert({organization, subscription}: Props) {
         </TrialInfo>
 
         {subscription.canSelfServe && (
-          <ButtonWrapper>
+          <ButtonWrapper gap="0">
             <Button
               size="sm"
               data-test-id="trial-details-button"
@@ -67,30 +68,22 @@ function TrialAlert({organization, subscription}: Props) {
           </ButtonWrapper>
         )}
       </SubscriptionBody>
-    </Panel>
+    </Container>
   );
 }
 
 const TrialInfo = styled('div')`
   display: grid;
   grid-auto-rows: auto;
-  gap: ${space(1)};
-`;
-
-const TrialHeader = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-  align-items: center;
+  gap: ${p => p.theme.space.md};
 `;
 
 const StyledHeading = styled('span')`
   font-weight: 400;
-  font-size: ${p => p.theme.fontSize.xl};
+  font-size: ${p => p.theme.font.size.xl};
 `;
 
 const StyledSubText = styled(TextBlock)`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   margin: 0;
 `;
-
-export default TrialAlert;

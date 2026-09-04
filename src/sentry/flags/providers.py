@@ -98,7 +98,7 @@ class LaunchDarklyItemSerializer(serializers.Serializer):
     accesses = serializers.ListField(required=True)
     date = serializers.IntegerField(required=True)
     member = serializers.DictField(required=False, allow_null=True)
-    name = serializers.CharField(max_length=100, required=True)
+    name = serializers.CharField(max_length=256, required=True)
     description = serializers.CharField(allow_blank=True, required=True)
 
 
@@ -201,7 +201,7 @@ class GenericItemSerializer(serializers.Serializer):
     change_id = serializers.IntegerField(required=True)
     created_at = serializers.DateTimeField(required=True)
     created_by = GenericItemCreatedBySerializer(required=True)
-    flag = serializers.CharField(required=True, max_length=100)
+    flag = serializers.CharField(required=True, max_length=256)
 
 
 class GenericMetaSerializer(serializers.Serializer):
@@ -277,7 +277,7 @@ SUPPORTED_UNLEASH_ACTIONS = {
 
 class UnleashItemSerializer(serializers.Serializer):
     # Technically featureName is not required by Unleash, but for all the actions we care about, it should exist.
-    featureName = serializers.CharField(max_length=100, required=True)
+    featureName = serializers.CharField(max_length=256, required=True)
     createdAt = serializers.DateTimeField(
         required=True,
         input_formats=["iso-8601"],
@@ -303,8 +303,8 @@ def _get_user(validated_event: dict[str, Any]) -> tuple[str, int]:
     except ValidationError:
         pass
 
-    if "createdByUserId" in validated_event:
-        return validated_event["createdByUserId"], CREATED_BY_TYPE_MAP["id"]
+    if validated_event.get("createdByUserId") is not None:
+        return str(validated_event["createdByUserId"]), CREATED_BY_TYPE_MAP["id"]
     return created_by, CREATED_BY_TYPE_MAP["name"]
 
 
@@ -386,13 +386,8 @@ class StatsigEventSerializer(serializers.Serializer):
     eventName = serializers.CharField(required=True)
     timestamp = serializers.CharField(required=True)
     metadata = serializers.DictField(required=True)
-
-    user = serializers.DictField(required=False, child=serializers.CharField())
-    userID = serializers.CharField(required=False)
-    value = serializers.CharField(required=False)
-    statsigMetadata = serializers.DictField(required=False)
-    timeUUID = serializers.UUIDField(required=False)
-    unitID = serializers.CharField(required=False)
+    user = serializers.DictField(required=False, allow_null=True)
+    userID = serializers.CharField(required=False, allow_blank=True)
 
 
 class StatsigItemSerializer(serializers.Serializer):
@@ -504,7 +499,7 @@ class FlagAuditLogItem(TypedDict):
     flag: str
     created_at: datetime.datetime
     created_by: str
-    tags: dict[str, str]
+    tags: dict[str, Any]
 
 
 def handle_flag_pole_event_internal(items: list[FlagAuditLogItem], organization_id: int) -> None:

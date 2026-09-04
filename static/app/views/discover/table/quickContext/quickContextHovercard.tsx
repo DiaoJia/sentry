@@ -2,26 +2,24 @@ import type {ComponentProps} from 'react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
+import {Flex} from '@sentry/scraps/layout';
+
 import {CopyToClipboardButton} from 'sentry/components/copyToClipboardButton';
 import {Body, Hovercard} from 'sentry/components/hovercard';
-import Version from 'sentry/components/version';
+import {Version} from 'sentry/components/version';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import type {EventData} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventData, EventView} from 'sentry/utils/discover/eventView';
 import {getShortEventId} from 'sentry/utils/events';
 import {useLocation} from 'sentry/utils/useLocation';
 
-import EventContext from './eventContext';
-import IssueContext from './issueContext';
-import ReleaseContext from './releaseContext';
+import {EventContext} from './eventContext';
+import {IssueContext} from './issueContext';
+import {ReleaseContext} from './releaseContext';
 import {NoContextWrapper} from './styles';
 import {ContextType} from './utils';
-
-const HOVER_DELAY = 400;
 
 function getHoverBody(
   dataRow: EventData,
@@ -97,27 +95,20 @@ type HoverHeaderProps = {
   title: string;
   copyContent?: string;
   copyLabel?: React.ReactNode;
-  hideCopy?: boolean;
 };
 
-function HoverHeader({
-  title,
-  hideCopy = false,
-  copyLabel,
-  copyContent,
-  organization,
-}: HoverHeaderProps) {
+function HoverHeader({title, copyLabel, copyContent, organization}: HoverHeaderProps) {
   return (
-    <HoverHeaderWrapper>
+    <Flex align="center" justify="between">
       {title}
-      <HoverHeaderContent>
+      <Flex flex="1" align="center" justify="end" gap="xs">
         {copyLabel}
 
-        {!hideCopy && copyContent && (
+        {copyContent && (
           <CopyToClipboardButton
-            borderless
+            variant="transparent"
+            aria-label={t('Copy to clipboard')}
             data-test-id="quick-context-hover-header-copy-button"
-            iconSize="xs"
             onCopy={() => {
               trackAnalytics('discover_v2.quick_context_header_copy', {
                 organization,
@@ -128,8 +119,8 @@ function HoverHeader({
             text={copyContent}
           />
         )}
-      </HoverHeaderContent>
-    </HoverHeaderWrapper>
+      </Flex>
+    </Flex>
   );
 }
 
@@ -158,7 +149,6 @@ export function QuickContextHovercard(props: ContextProps) {
     <StyledHovercard
       {...hovercardProps}
       showUnderline
-      delay={HOVER_DELAY}
       header={getHoverHeader(dataRow, contextType, organization)}
       body={getHoverBody(
         dataRow,
@@ -180,20 +170,6 @@ const StyledHovercard = styled(Hovercard)`
   }
   overflow: hidden;
   min-width: max-content;
-`;
-
-const HoverHeaderWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;
-
-const HoverHeaderContent = styled('div')`
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: flex-end;
-  gap: ${space(0.5)};
 `;
 
 const StyledVersion = styled(Version)`

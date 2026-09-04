@@ -1,9 +1,10 @@
 import styled from '@emotion/styled';
 
 import {t} from 'sentry/locale';
-import type {DataCategory, DataCategoryInfo} from 'sentry/types/core';
-import {Outcome} from 'sentry/types/core';
+import type {DataCategory} from 'sentry/types/core';
+import {DataCategoryExact, Outcome} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
 
 import type {UsageSeries} from './types';
@@ -11,7 +12,7 @@ import {formatUsageWithUnits, getFormatUsageOptions} from './utils';
 
 type Props = {
   dataCategory: DataCategory;
-  dataCategoryApiName: DataCategoryInfo['apiName'];
+  dataCategoryApiName: DataCategoryExact;
   organization: Organization;
   projectIds: number[];
 };
@@ -26,7 +27,7 @@ type Props = {
  * We're going with this approach for simplicity sake. By keeping the range
  * as small as possible, this call is quite fast.
  */
-function UsageStatsPerMin({
+export function UsageStatsPerMin({
   organization,
   projectIds,
   dataCategory,
@@ -38,7 +39,9 @@ function UsageStatsPerMin({
     isError,
   } = useApiQuery<UsageSeries>(
     [
-      `/organizations/${organization.slug}/stats_v2/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/stats_v2/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           statsPeriod: '5m', // Any value <1h will return current hour's data
@@ -67,13 +70,12 @@ function UsageStatsPerMin({
     const eventsLastMin = groups.reduce((count, group) => {
       const {category, outcome} = group.by;
 
-      if (dataCategoryApiName === 'span_indexed') {
-        if (category !== 'span_indexed' || outcome !== Outcome.ACCEPTED) {
+      if (dataCategoryApiName === DataCategoryExact.SPAN_INDEXED) {
+        if (category !== DataCategoryExact.SPAN_INDEXED || outcome !== Outcome.ACCEPTED) {
           return count;
         }
       } else {
-        // HACK: The backend enum are singular, but the frontend enums are plural
-        if (!dataCategory.includes(`${category}`) || outcome !== Outcome.ACCEPTED) {
+        if (dataCategoryApiName !== category || outcome !== Outcome.ACCEPTED) {
           return count;
         }
       }
@@ -96,10 +98,8 @@ function UsageStatsPerMin({
   );
 }
 
-export default UsageStatsPerMin;
-
 const Wrapper = styled('div')`
   display: inline-block;
-  color: ${p => p.theme.success};
-  font-size: ${p => p.theme.fontSize.md};
+  color: ${p => p.theme.tokens.content.success};
+  font-size: ${p => p.theme.font.size.md};
 `;

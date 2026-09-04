@@ -1,18 +1,20 @@
 import {Fragment, useState} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
+
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import type {LineChartSeries} from 'sentry/components/charts/lineChart';
 import {LineChart} from 'sentry/components/charts/lineChart';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import {Input} from 'sentry/components/core/input';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import {space} from 'sentry/styles/space';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import type {Group} from 'sentry/types/group';
-import useApi from 'sentry/utils/useApi';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApi} from 'sentry/utils/useApi';
 
-import PageHeader from 'admin/components/pageHeader';
+import {PageHeader} from 'admin/components/pageHeader';
 
 const SECOND_TO_MILLISECOND = 1000;
 const MILLISECOND_TO_DAY = SECOND_TO_MILLISECOND * 60 * 60 * 24;
@@ -38,7 +40,9 @@ function IssueOwnerDebbuging() {
     }
 
     const data = await api.requestPromise(
-      `/organizations/${organizationSlug}/debugging/issue-owners/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/debugging/issue-owners/', {
+        path: {organizationIdOrSlug: organizationSlug},
+      }),
       {
         method: 'GET',
         query: {projectSlug, stacktracePath},
@@ -83,22 +87,32 @@ function IssueOwnerDebbuging() {
             minLength={1}
             placeholder="/src/sentry/integrations/github/webhook.py"
           />
-          <Button priority="primary" type="submit">
+          <Button variant="primary" type="submit">
             Submit
           </Button>
         </SearchContainer>
       </form>
-      <PanelTable headers={['Type', 'Rule']} isEmpty={!ruleMatches.length}>
+      <SimpleTable
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>Type</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>Rule</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
+      >
+        {ruleMatches.length === 0 && (
+          <SimpleTable.Empty>There are no items to display</SimpleTable.Empty>
+        )}
         {ruleMatches.map(({source, rule}, index) => (
-          <Fragment key={rule}>
-            <div>{source}</div>
-            <div>
+          <SimpleTable.Row key={rule}>
+            <SimpleTable.RowCell>{source}</SimpleTable.RowCell>
+            <SimpleTable.RowCell gap="md">
               <span>{rule}</span>
-              {!index && <StyledTag type="success">Assigned Rule</StyledTag>}
-            </div>
-          </Fragment>
+              {!index && <StyledTag variant="success">Assigned Rule</StyledTag>}
+            </SimpleTable.RowCell>
+          </SimpleTable.Row>
         ))}
-      </PanelTable>
+      </SimpleTable>
     </Fragment>
   );
 }
@@ -144,6 +158,7 @@ function getHourlyForecasts(
 }
 
 function IssueEscalatingDebugging() {
+  const theme = useTheme();
   const api = useApi();
   const [organizationSlug, setOrganizationSlug] = useState('');
   const [groupId, setGroupId] = useState('');
@@ -158,15 +173,17 @@ function IssueEscalatingDebugging() {
 
     const expand = ['forecast'];
     const data: IssueDetailsResponse = await api.requestPromise(
-      `/organizations/${organizationSlug}/issues/${groupId}/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/issues/$issueId/', {
+        path: {organizationIdOrSlug: organizationSlug, issueId: groupId},
+      }),
       {
         method: 'GET',
         query: {expand},
       }
     );
 
-    const forecast: Forecast = data.forecast;
-    const hourlyCount: Array<[number, number]> = data.stats['24h']!;
+    const forecast = data.forecast;
+    const hourlyCount = data.stats['24h']!;
 
     if (forecast && forecast.data.length > 0) {
       const timestamps = hourlyCount.map(
@@ -218,7 +235,7 @@ function IssueEscalatingDebugging() {
             minLength={1}
             placeholder="1"
           />
-          <Button priority="primary" type="submit">
+          <Button variant="primary" type="submit">
             Submit
           </Button>
         </SearchContainer>
@@ -226,7 +243,7 @@ function IssueEscalatingDebugging() {
       <LineChart
         height={300}
         series={hourlySeries}
-        grid={{left: space(4), right: space(4)}}
+        grid={{left: theme.space['3xl'], right: theme.space['3xl']}}
         showTimeInTooltip
         xAxis={{
           show: hourlySeries.length > 0,
@@ -244,7 +261,7 @@ function IssueEscalatingDebugging() {
   );
 }
 
-function DebuggingTools() {
+export function DebuggingTools() {
   return (
     <div>
       <PageHeader title="Debug Tools" />
@@ -260,12 +277,11 @@ export const SearchContainer = styled('div')`
   display: grid;
   grid-template-rows: 1fr;
   grid-template-columns: repeat(2, 1fr 2fr) 1fr 5fr 1fr;
-  gap: ${space(3)};
-  padding: ${space(1.5)};
+  gap: ${p => p.theme.space['2xl']};
+  padding: ${p => p.theme.space.lg};
   align-items: center;
 `;
 
 const StyledTag = styled(Tag)`
-  padding: 0 ${space(4)};
+  padding: 0 ${p => p.theme.space['3xl']};
 `;
-export default DebuggingTools;

@@ -3,7 +3,6 @@ import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {UserFixture} from 'sentry-fixture/user';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
   render,
   renderGlobalModal,
@@ -14,26 +13,20 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 
 import DashboardTable from 'sentry/views/dashboards/manage/dashboardTable';
-import {type DashboardListItem, DisplayType} from 'sentry/views/dashboards/types';
+import {DisplayType, type DashboardListItem} from 'sentry/views/dashboards/types';
 
-describe('Dashboards - DashboardTable', function () {
+describe('Dashboards - DashboardTable', () => {
   let dashboards: DashboardListItem[];
   let deleteMock: jest.Mock;
   let dashboardUpdateMock: jest.Mock;
   let createMock: jest.Mock;
   const organization = OrganizationFixture({
-    features: [
-      'global-views',
-      'dashboards-basic',
-      'dashboards-edit',
-      'discover-query',
-      'dashboards-table-view',
-    ],
+    features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
   });
 
-  const {router} = initializeOrg();
+  const location = LocationFixture();
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
 
     MockApiClient.addMockResponse({
@@ -111,13 +104,14 @@ describe('Dashboards - DashboardTable', function () {
     dashboardUpdateMock = jest.fn();
   });
 
-  it('renders an empty list', async function () {
+  it('renders an empty list', async () => {
     render(
       <DashboardTable
         onDashboardsChange={jest.fn()}
         organization={organization}
         dashboards={[]}
-        location={router.location}
+        location={location}
+        isOnlyPrebuilt={false}
       />
     );
 
@@ -127,13 +121,14 @@ describe('Dashboards - DashboardTable', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders dashboard list', async function () {
+  it('renders dashboard list', async () => {
     render(
       <DashboardTable
         onDashboardsChange={jest.fn()}
         organization={organization}
         dashboards={dashboards}
-        location={router.location}
+        location={location}
+        isOnlyPrebuilt={false}
       />
     );
 
@@ -141,13 +136,14 @@ describe('Dashboards - DashboardTable', function () {
     expect(await screen.findByText('Dashboard 2')).toBeInTheDocument();
   });
 
-  it('returns landing page url for dashboards', async function () {
+  it('returns landing page url for dashboards', async () => {
     render(
       <DashboardTable
         onDashboardsChange={jest.fn()}
         organization={organization}
         dashboards={dashboards}
-        location={router.location}
+        location={location}
+        isOnlyPrebuilt={false}
       />
     );
 
@@ -161,29 +157,34 @@ describe('Dashboards - DashboardTable', function () {
     );
   });
 
-  it('persists global selection headers', async function () {
+  it('does not forward query params from the list page to dashboard links', async () => {
     render(
       <DashboardTable
         onDashboardsChange={jest.fn()}
         organization={organization}
         dashboards={dashboards}
-        location={{...LocationFixture(), query: {statsPeriod: '7d'}}}
+        location={{
+          ...LocationFixture(),
+          query: {sort: 'title', query: 'agent', statsPeriod: '7d'},
+        }}
+        isOnlyPrebuilt={false}
       />
     );
 
     expect(await screen.findByRole('link', {name: 'Dashboard 1'})).toHaveAttribute(
       'href',
-      '/organizations/org-slug/dashboard/1/?statsPeriod=7d'
+      '/organizations/org-slug/dashboard/1/'
     );
   });
 
-  it('can delete dashboards', async function () {
+  it('can delete dashboards', async () => {
     render(
       <DashboardTable
         organization={organization}
         dashboards={dashboards}
         location={{...LocationFixture(), query: {}}}
         onDashboardsChange={dashboardUpdateMock}
+        isOnlyPrebuilt={false}
       />
     );
     renderGlobalModal();
@@ -202,38 +203,14 @@ describe('Dashboards - DashboardTable', function () {
     expect(dashboardUpdateMock).toHaveBeenCalled();
   });
 
-  it('cannot delete last dashboard', async function () {
-    const singleDashboard = [
-      DashboardListItemFixture({
-        id: '1',
-        title: 'Dashboard 1',
-        dateCreated: '2021-04-19T13:13:23.962105Z',
-        createdBy: UserFixture({id: '1'}),
-        widgetPreview: [],
-      }),
-    ];
-    render(
-      <DashboardTable
-        organization={organization}
-        dashboards={singleDashboard}
-        location={LocationFixture()}
-        onDashboardsChange={dashboardUpdateMock}
-      />
-    );
-
-    expect((await screen.findAllByTestId('dashboard-delete'))[0]).toHaveAttribute(
-      'aria-disabled',
-      'true'
-    );
-  });
-
-  it('can duplicate dashboards', async function () {
+  it('can duplicate dashboards', async () => {
     render(
       <DashboardTable
         organization={organization}
         dashboards={dashboards}
         location={{...LocationFixture(), query: {}}}
         onDashboardsChange={dashboardUpdateMock}
+        isOnlyPrebuilt={false}
       />
     );
     renderGlobalModal();
@@ -252,7 +229,7 @@ describe('Dashboards - DashboardTable', function () {
     expect(dashboardUpdateMock).toHaveBeenCalled();
   });
 
-  it('does not throw an error if the POST fails during duplication', async function () {
+  it('does not throw an error if the POST fails during duplication', async () => {
     const postMock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/',
       method: 'POST',
@@ -265,6 +242,7 @@ describe('Dashboards - DashboardTable', function () {
         dashboards={dashboards}
         location={{...LocationFixture(), query: {}}}
         onDashboardsChange={dashboardUpdateMock}
+        isOnlyPrebuilt={false}
       />
     );
     renderGlobalModal();
@@ -284,15 +262,9 @@ describe('Dashboards - DashboardTable', function () {
     expect(dashboardUpdateMock).not.toHaveBeenCalled();
   });
 
-  it('renders access column', async function () {
+  it('renders access column', async () => {
     const organizationWithEditAccess = OrganizationFixture({
-      features: [
-        'global-views',
-        'dashboards-basic',
-        'dashboards-edit',
-        'discover-query',
-        'dashboards-table-view',
-      ],
+      features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
     });
 
     render(
@@ -300,31 +272,26 @@ describe('Dashboards - DashboardTable', function () {
         onDashboardsChange={jest.fn()}
         organization={organizationWithEditAccess}
         dashboards={dashboards}
-        location={router.location}
+        location={location}
+        isOnlyPrebuilt={false}
       />
     );
 
     expect(await screen.findAllByTestId('grid-head-cell')).toHaveLength(5);
     expect(screen.getByText('Access')).toBeInTheDocument();
-    await userEvent.click((await screen.findAllByTestId('edit-access-dropdown'))[0]!);
+    await userEvent.click(screen.getByText('All'));
     expect(screen.getAllByPlaceholderText('Search Teams')[0]).toBeInTheDocument();
   });
 
-  it('renders favorite column', async function () {
-    MockApiClient.addMockResponse({
+  it('renders favorite column', async () => {
+    const favoriteMock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/2/favorite/',
       method: 'PUT',
-      body: {isFavorited: false},
+      body: {isFavorited: true},
     });
 
     const organizationWithFavorite = OrganizationFixture({
-      features: [
-        'global-views',
-        'dashboards-basic',
-        'dashboards-edit',
-        'discover-query',
-        'dashboards-table-view',
-      ],
+      features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
     });
 
     render(
@@ -332,18 +299,124 @@ describe('Dashboards - DashboardTable', function () {
         onDashboardsChange={jest.fn()}
         organization={organizationWithFavorite}
         dashboards={dashboards}
-        location={router.location}
+        location={location}
+        isOnlyPrebuilt={false}
       />,
       {
         organization: organizationWithFavorite,
       }
     );
 
-    expect(screen.getByLabelText('Favorite Column')).toBeInTheDocument();
-    expect(screen.queryAllByLabelText('Favorite')).toHaveLength(1);
-    expect(screen.queryAllByLabelText('UnFavorite')).toHaveLength(1);
+    expect(screen.getByLabelText('Star Column')).toBeInTheDocument();
+    expect(screen.queryAllByLabelText('Star')).toHaveLength(1);
+    expect(screen.queryAllByLabelText('Unstar')).toHaveLength(1);
 
-    await userEvent.click(screen.queryAllByLabelText('Favorite')[0]!);
-    expect(screen.queryAllByLabelText('UnFavorite')).toHaveLength(2);
+    await userEvent.click(screen.queryAllByLabelText('Star')[0]!);
+    await waitFor(() =>
+      expect(favoriteMock).toHaveBeenCalledWith(
+        '/organizations/org-slug/dashboards/2/favorite/',
+        expect.objectContaining({method: 'PUT', data: {shouldFavorite: true}})
+      )
+    );
+  });
+
+  describe('with dashboards-user-last-visited feature flag', () => {
+    const organizationWithLastVisited = OrganizationFixture({
+      features: [
+        'dashboards-basic',
+        'dashboards-edit',
+        'discover-query',
+        'dashboards-user-last-visited',
+      ],
+    });
+
+    let lastVisitedDashboards: DashboardListItem[];
+
+    beforeEach(() => {
+      lastVisitedDashboards = [
+        DashboardListItemFixture({
+          id: '1',
+          title: 'Dashboard With Description',
+          description: 'Some accurate description about this dashboard.',
+          lastVisited: '2021-04-19T13:13:23.962105Z',
+          createdBy: UserFixture({id: '1'}),
+        }),
+        DashboardListItemFixture({
+          id: '2',
+          title: 'Dashboard Without Description',
+          createdBy: UserFixture({id: '1'}),
+        }),
+      ];
+    });
+
+    it('renders all columns in the default view', async () => {
+      render(
+        <DashboardTable
+          onDashboardsChange={jest.fn()}
+          organization={organizationWithLastVisited}
+          dashboards={lastVisitedDashboards}
+          location={location}
+          isOnlyPrebuilt={false}
+        />,
+        {organization: organizationWithLastVisited}
+      );
+
+      const headers = await screen.findAllByTestId('grid-head-cell');
+      expect(headers).toHaveLength(6);
+      expect(headers[0]).toHaveTextContent('Name');
+      expect(headers[1]).toHaveTextContent('Widgets');
+      expect(headers[2]).toHaveTextContent('Owner');
+      expect(headers[3]).toHaveTextContent('Access');
+      expect(headers[4]).toHaveTextContent('Created');
+      expect(headers[5]).toHaveTextContent('Last Visited');
+      // Description is only shown in the Sentry Built view
+      expect(screen.queryByText('Description')).not.toBeInTheDocument();
+
+      expect(screen.getAllByTestId('dashboard-delete')).toHaveLength(
+        lastVisitedDashboards.length
+      );
+    });
+
+    it('renders Sentry Built columns with Description instead of Owner/Created', async () => {
+      render(
+        <DashboardTable
+          onDashboardsChange={jest.fn()}
+          organization={organizationWithLastVisited}
+          dashboards={lastVisitedDashboards}
+          location={location}
+          isOnlyPrebuilt
+        />,
+        {organization: organizationWithLastVisited}
+      );
+
+      const headers = await screen.findAllByTestId('grid-head-cell');
+      expect(headers).toHaveLength(4);
+      expect(headers[0]).toHaveTextContent('Name');
+      expect(headers[1]).toHaveTextContent('Description');
+      expect(headers[2]).toHaveTextContent('Widgets');
+      expect(headers[3]).toHaveTextContent('Last Visited');
+
+      // Owner, Created, and Access are omitted from the Sentry Built view
+      expect(screen.queryByText('Owner')).not.toBeInTheDocument();
+      expect(screen.queryByText('Created')).not.toBeInTheDocument();
+      expect(screen.queryByText('Access')).not.toBeInTheDocument();
+    });
+
+    it('renders the description column', async () => {
+      render(
+        <DashboardTable
+          onDashboardsChange={jest.fn()}
+          organization={organizationWithLastVisited}
+          dashboards={lastVisitedDashboards}
+          location={location}
+          isOnlyPrebuilt
+        />,
+        {organization: organizationWithLastVisited}
+      );
+
+      expect(
+        await screen.findByText('Some accurate description about this dashboard.')
+      ).toBeInTheDocument();
+    });
   });
 });

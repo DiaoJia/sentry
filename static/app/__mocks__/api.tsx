@@ -1,9 +1,10 @@
 import isEqual from 'lodash/isEqual';
 
 import type * as ApiNamespace from 'sentry/api';
-import RequestError from 'sentry/utils/requestError/requestError';
+import type {ResponseMeta} from 'sentry/types/api';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
-const RealApi: typeof ApiNamespace = jest.requireActual('sentry/api');
+const RealApi = jest.requireActual<typeof ApiNamespace>('sentry/api');
 
 export const initApiClientErrorHandling = RealApi.initApiClientErrorHandling;
 export const hasProjectBeenRenamed = RealApi.hasProjectBeenRenamed;
@@ -14,6 +15,11 @@ const respond = (
   ...args: any[]
 ): void => {
   if (!fn) {
+    return;
+  }
+
+  if (asyncDelay instanceof Promise) {
+    asyncDelay.then(() => fn(...args));
     return;
   }
 
@@ -32,8 +38,8 @@ type FunctionCallback<Args extends any[] = any[]> = (...args: Args) => void;
  */
 type MatchCallable = (url: string, options: ApiNamespace.RequestOptions) => boolean;
 
-type AsyncDelay = undefined | number;
-interface ResponseType extends ApiNamespace.ResponseMeta {
+type AsyncDelay = undefined | number | Promise<unknown>;
+interface ResponseType extends ResponseMeta {
   body: any;
   callCount: 0;
   headers: Record<string, string>;
@@ -43,11 +49,9 @@ interface ResponseType extends ApiNamespace.ResponseMeta {
   statusCode: number;
   url: string;
   /**
-   * Whether to return mocked api responses directly, or with a setTimeout delay.
+   * Whether to return mocked API responses directly or after an asynchronous delay.
    *
-   * Set to `null` to disable the async delay
-   * Set to a `number` which will be the amount of time (ms) for the delay
-   *
+   * Set to a `number` for a millisecond delay, or a `Promise` to delay until it resolves.
    * This will override `MockApiClient.asyncDelay` for this request.
    */
   asyncDelay?: AsyncDelay;
@@ -97,11 +101,9 @@ class Client implements ApiNamespace.Client {
   static mockResponses: MockResponse[] = [];
 
   /**
-   * Whether to return mocked api responses directly, or with a setTimeout delay.
+   * Whether to return mocked API responses directly or after an asynchronous delay.
    *
-   * Set to `null` to disable the async delay
-   * Set to a `number` which will be the amount of time (ms) for the delay
-   *
+   * Set to a `number` for a millisecond delay, or a `Promise` to delay until it resolves.
    * This is the global/default value. `addMockResponse` can override per request.
    */
   static asyncDelay: AsyncDelay = undefined;
@@ -220,6 +222,7 @@ class Client implements ApiNamespace.Client {
           resolve(includeAllArgs ? [data, ...args] : data);
         },
         error: (error, ..._args) => {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
           reject(error);
         },
       });
@@ -275,8 +278,7 @@ class Client implements ApiNamespace.Client {
             abort: () => {},
             then: () => {},
             error: () => {},
-          },
-          new XMLHttpRequest()
+          }
         );
 
         this.handleRequestError(

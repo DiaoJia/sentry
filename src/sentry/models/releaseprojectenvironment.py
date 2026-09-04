@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime
 from enum import Enum
+from typing import TypedDict
 
 from django.db import models
 from django.utils import timezone
@@ -11,11 +12,12 @@ from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.utils import metrics
 from sentry.utils.cache import cache
+from sentry.utils.last_seen import try_bump_last_seen
 
 
 class ReleaseStages(str, Enum):
@@ -24,7 +26,7 @@ class ReleaseStages(str, Enum):
     REPLACED = "replaced"
 
 
-@region_silo_model
+@cell_silo_model
 class ReleaseProjectEnvironment(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -51,7 +53,7 @@ class ReleaseProjectEnvironment(Model):
     __repr__ = sane_repr("project", "release", "environment")
 
     @classmethod
-    def get_cache_key(cls, release_id, project_id, environment_id):
+    def get_cache_key(cls, release_id, project_id, environment_id) -> str:
         return f"releaseprojectenv:{release_id}:{project_id}:{environment_id}"
 
     @classmethod
@@ -81,26 +83,37 @@ class ReleaseProjectEnvironment(Model):
 
         metrics_tags["created"] = "true" if created else "false"
 
-        # Same as releaseenvironment model. Minimizes last_seen updates to once a minute
-        if not created and instance.last_seen < datetime - timedelta(seconds=60):
-            cls.objects.filter(
-                id=instance.id, last_seen__lt=datetime - timedelta(seconds=60)
-            ).update(last_seen=datetime)
-            instance.last_seen = datetime
-            cache.set(cache_key, instance, 3600)
-            metrics_tags["bumped"] = "true"
+        if not created:
+            try_bump_last_seen(
+                model_class=cls,
+                instance=instance,
+                datetime=datetime,
+                bump_key=f"releaseprojectenv_bump:{instance.id}",
+                cache_key=cache_key,
+                metrics_tags=metrics_tags,
+            )
         else:
             metrics_tags["bumped"] = "false"
 
         return instance
 
     @property
-    def adoption_stages(self):
-        if self.adopted is not None and self.unadopted is None:
-            stage = ReleaseStages.ADOPTED
-        elif self.adopted is not None and self.unadopted is not None:
-            stage = ReleaseStages.REPLACED
-        else:
-            stage = ReleaseStages.LOW_ADOPTION
+    def adoption_stages(self) -> AdoptionStage:
+        return adoption_stage(self.adopted, self.unadopted)
 
-        return {"stage": stage, "adopted": self.adopted, "unadopted": self.unadopted}
+
+class AdoptionStage(TypedDict):
+    stage: ReleaseStages
+    adopted: datetime | None
+    unadopted: datetime | None
+
+
+def adoption_stage(adopted: datetime | None, unadopted: datetime | None) -> AdoptionStage:
+    if adopted is not None and unadopted is None:
+        stage = ReleaseStages.ADOPTED
+    elif adopted is not None and unadopted is not None:
+        stage = ReleaseStages.REPLACED
+    else:
+        stage = ReleaseStages.LOW_ADOPTION
+
+    return {"stage": stage, "adopted": adopted, "unadopted": unadopted}

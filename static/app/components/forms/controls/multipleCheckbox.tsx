@@ -3,15 +3,14 @@ import {createContext, useCallback, useContext, useMemo} from 'react';
 import styled from '@emotion/styled';
 import noop from 'lodash/noop';
 
-import {Checkbox} from 'sentry/components/core/checkbox';
-import {space} from 'sentry/styles/space';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {Container, Flex} from '@sentry/scraps/layout';
 
 type Props<T> = {
   children: ReactNode;
   name: string;
   value: T[];
   className?: string;
-  disabled?: boolean;
   onChange?: (value: T[], event: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
@@ -20,11 +19,9 @@ type CheckboxItemProps<T> = {
   value: T;
   className?: string;
   disabled?: boolean;
-  onChange?: (event: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
 type MultipleCheckboxContextValue<T> = {
-  disabled: Props<T>['disabled'];
   handleChange: (itemValue: T, event: React.ChangeEvent<HTMLInputElement>) => void;
   name: string;
   value: Props<T>['value'];
@@ -34,13 +31,11 @@ const MultipleCheckboxContext = createContext<MultipleCheckboxContextValue<any>>
   handleChange: noop,
   value: [],
   name: '',
-  disabled: false,
 });
 
-function MultipleCheckbox<T extends string | number>({
+export function MultipleCheckbox<T extends string | number>({
   children,
   value,
-  disabled,
   onChange,
   name,
   className,
@@ -65,14 +60,15 @@ function MultipleCheckbox<T extends string | number>({
       value,
       handleChange,
       name,
-      disabled,
     }),
-    [disabled, handleChange, name, value]
+    [handleChange, name, value]
   );
 
   return (
     <MultipleCheckboxContext value={contextValue}>
-      <MultipleCheckboxWrapper className={className}>{children}</MultipleCheckboxWrapper>
+      <Flex wrap="wrap" className={className}>
+        {children}
+      </Flex>
     </MultipleCheckboxContext>
   );
 }
@@ -81,45 +77,39 @@ function Item<T extends string | number>({
   value: itemValue,
   children,
   disabled: itemDisabled,
-  onChange,
   className,
 }: CheckboxItemProps<T>) {
-  const {disabled, value, handleChange, name} = useContext<
-    MultipleCheckboxContextValue<T>
-  >(MultipleCheckboxContext);
+  const {value, handleChange, name} = useContext<MultipleCheckboxContextValue<T>>(
+    MultipleCheckboxContext
+  );
 
   return (
-    <LabelContainer className={className}>
+    <Container
+      className={className}
+      width={{zero: '100%', xl: '50%', '3xl': '33.333%', '4xl': '25%'}}
+    >
       <Label>
         <Checkbox
           name={name}
           checked={value.includes(itemValue)}
-          disabled={disabled || itemDisabled}
+          disabled={itemDisabled}
           onChange={e => {
             handleChange(itemValue, e);
-            onChange?.(e);
           }}
           value={value.toString()}
         />
         <CheckboxLabel>{children}</CheckboxLabel>
       </Label>
-    </LabelContainer>
+    </Container>
   );
 }
 
 MultipleCheckbox.Item = Item;
 
-export default MultipleCheckbox;
-
-const MultipleCheckboxWrapper = styled('div')`
-  display: flex;
-  flex-wrap: wrap;
-`;
-
 const Label = styled('label')`
   display: inline-flex;
   align-items: center;
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   white-space: nowrap;
   margin-right: 10px;
   margin-bottom: 10px;
@@ -127,19 +117,5 @@ const Label = styled('label')`
 `;
 
 const CheckboxLabel = styled('span')`
-  margin-left: ${space(1)};
-`;
-
-const LabelContainer = styled('div')`
-  width: 100%;
-
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    width: 50%;
-  }
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    width: 33.333%;
-  }
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    width: 25%;
-  }
+  margin-left: ${p => p.theme.space.md};
 `;

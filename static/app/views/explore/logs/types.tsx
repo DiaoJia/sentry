@@ -1,6 +1,5 @@
 import type {EventsMetaType} from 'sentry/utils/discover/eventView';
 import type {
-  ColumnValueType,
   CountUnit,
   CurrencyUnit,
   DurationUnit,
@@ -25,23 +24,48 @@ export enum OurLogKnownFieldKey {
   PROJECT = 'project',
   SPAN_ID = 'span_id',
   TIMESTAMP = 'timestamp',
-  TIMESTAMP_PRECISE = 'tags[sentry.timestamp_precise,number]',
-  OBSERVED_TIMESTAMP_PRECISE = 'sentry.observed_timestamp_nanos',
+  TIMESTAMP_PRECISE = 'timestamp_precise',
+  TIMESTAMP_SEQUENCE = 'timestamp.sequence',
+  OBSERVED_TIMESTAMP_PRECISE = 'observed_timestamp',
+  LOGGER = 'logger.name',
+
+  PAYLOAD_SIZE = 'payload_size',
+
+  TEMPLATE = 'message.template',
+  PARENT_SPAN_ID = 'trace.parent_span_id',
+
+  // Field renderer aliases
   CODE_FILE_PATH = 'code.file.path',
   CODE_LINE_NUMBER = 'tags[code.line.number,number]',
   CODE_FUNCTION_NAME = 'code.function.name',
 
+  // SDK attributes https://develop.sentry.dev/sdk/telemetry/logs/#default-attributes
   RELEASE = 'release',
-  TEMPLATE = 'message.template',
-  PARENT_SPAN_ID = 'trace.parent_span_id',
   SDK_NAME = 'sdk.name',
   SDK_VERSION = 'sdk.version',
+  BROWSER_NAME = 'browser.name',
+  USER_ID = 'user.id',
+  USER_EMAIL = 'user.email',
+  USER_NAME = 'user.name',
+  SERVER_ADDRESS = 'server.address',
 
   // From the EAP dataset directly not using a column alias.
-  ID = 'sentry.item_id',
+  ID = 'id',
 
   // From the EAP dataset directly not using a column alias, should be hidden.
   ITEM_TYPE = 'sentry.item_type',
+
+  // Trace item details fall back to this when OBSERVED_TIMESTAMP_PRECISE can't be aliased.
+  OBSERVED_TIMESTAMP_NANOS = 'sentry.observed_timestamp_nanos',
+
+  // Deprecated fields
+  TIMESTAMP_NANOS = 'sentry.timestamp_nanos',
+
+  // Replay integration
+  REPLAY_ID = 'replay_id',
+
+  // INTERNAL only (these only appear for staff)
+  INTERNAL_ONLY_INGESTED_AT = 'tags[sentry._internal.ingested_at,number]',
 }
 
 export type OurLogFieldKey = OurLogCustomFieldKey | OurLogKnownFieldKey;
@@ -58,6 +82,7 @@ type OurLogsKnownFieldResponseMap = Record<
   [OurLogKnownFieldKey.PROJECT_ID]: string;
   [OurLogKnownFieldKey.TIMESTAMP]: string;
   [OurLogKnownFieldKey.TIMESTAMP_PRECISE]: string | number;
+  [OurLogKnownFieldKey.OBSERVED_TIMESTAMP_PRECISE]?: string | number;
 };
 
 type OurLogsCustomFieldResponseMap = Record<OurLogCustomFieldKey, string | number>;
@@ -75,14 +100,8 @@ export type LogAttributeUnits =
 
 export interface LogRowItem {
   fieldKey: OurLogFieldKey;
-  metaFieldType: ColumnValueType;
   unit: LogAttributeUnits;
   value: OurLogsResponseItem[OurLogFieldKey];
-}
-
-export interface LogAttributeItem {
-  fieldKey: OurLogFieldKey;
-  value: OurLogsResponseItem[OurLogFieldKey] | null;
 }
 
 export interface EventsLogsResult {
@@ -104,7 +123,7 @@ export type OurLogsAggregate =
   | AggregationKey.MAX;
 
 type OurLogsAggregateKeys = `${OurLogsAggregate}(${OurLogFieldKey})`;
-type OurLogsAggregateResponseItem = Record<
+export type OurLogsAggregateResponseItem = Record<
   keyof OurLogsResponseItem | OurLogsAggregateKeys,
   string | number
 >;

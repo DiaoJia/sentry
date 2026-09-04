@@ -14,9 +14,10 @@ from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
+from sentry.db.models.base import DefaultFieldsModel
 from sentry.db.models.fields import JSONField
 
 ON_DEMAND_ENABLED_KEY = "enabled"
@@ -67,6 +68,14 @@ class DashboardWidgetTypes(TypesClass):
     These represent the logs trace item type on the EAP dataset.
     """
     LOGS = 103
+    """
+    These represent the tracemetrics item type on the EAP dataset.
+    """
+    TRACEMETRICS = 104
+    """
+    Mobile app size metrics from preprod item type on the EAP dataset.
+    """
+    PREPROD_APP_SIZE = 105
 
     TYPES = [
         (DISCOVER, "discover"),
@@ -79,8 +88,19 @@ class DashboardWidgetTypes(TypesClass):
         (TRANSACTION_LIKE, "transaction-like"),
         (SPANS, "spans"),
         (LOGS, "logs"),
+        (TRACEMETRICS, "tracemetrics"),
+        (PREPROD_APP_SIZE, "preprod-app-size"),
     ]
     TYPE_NAMES = [t[1] for t in TYPES]
+
+
+class DashboardWidgetLegendType(str, Enum):
+    DEFAULT = "default"
+    BREAKDOWN = "breakdown"
+
+    @classmethod
+    def as_text_choices(cls):
+        return [(member.value, member.value) for member in cls]
 
 
 class DatasetSourcesTypes(Enum):
@@ -110,6 +130,30 @@ class DatasetSourcesTypes(Enum):
      Dataset inferred by split script, version 2
     """
     SPLIT_VERSION_2 = 5
+    """
+     Dataset modified by transaction -> span migration
+    """
+    SPAN_MIGRATION_VERSION_1 = 6
+    """
+     Dataset modified by using the widget snapshot to restore the original transaction query
+    """
+    RESTORED_SPAN_MIGRATION_VERSION_1 = 7
+    """
+     Dataset modified by the transaction -> span migration version 2
+    """
+    SPAN_MIGRATION_VERSION_2 = 8
+    """
+    Dataset modified by the transaction -> span migration version 3
+    """
+    SPAN_MIGRATION_VERSION_3 = 9
+    """
+    Dataset modified by the transaction -> span migration version 4 (fixing boolean bug)
+    """
+    SPAN_MIGRATION_VERSION_4 = 10
+    """
+    Dataset modified by the transaction -> span migration version 5 (fixing boolean bug again)
+    """
+    SPAN_MIGRATION_VERSION_5 = 11
 
     @classmethod
     def as_choices(cls):
@@ -133,24 +177,61 @@ DiscoverFullFallbackWidgetType = [
 class DashboardWidgetDisplayTypes(TypesClass):
     LINE_CHART = 0
     AREA_CHART = 1
-    STACKED_AREA_CHART = 2
     BAR_CHART = 3
     TABLE = 4
     BIG_NUMBER = 6
-    TOP_N = 7
+    DETAILS = 8
+    CATEGORICAL_BAR_CHART = 9
+    WHEEL = 10
+    RAGE_AND_DEAD_CLICKS = 11
+    SERVER_TREE = 12
+    TEXT = 13
+    AGENTS_TRACES_TABLE = 14
+    HEATMAP = 15
     TYPES = [
         (LINE_CHART, "line"),
         (AREA_CHART, "area"),
-        (STACKED_AREA_CHART, "stacked_area"),
         (BAR_CHART, "bar"),
         (TABLE, "table"),
         (BIG_NUMBER, "big_number"),
-        (TOP_N, "top_n"),
+        (DETAILS, "details"),
+        (CATEGORICAL_BAR_CHART, "categorical_bar"),
+        (WHEEL, "wheel"),
+        (RAGE_AND_DEAD_CLICKS, "rage_and_dead_clicks"),
+        (SERVER_TREE, "server_tree"),
+        (TEXT, "text"),
+        (AGENTS_TRACES_TABLE, "agents_traces_table"),
+        (HEATMAP, "heatmap"),
     ]
     TYPE_NAMES = [t[1] for t in TYPES]
 
 
-@region_silo_model
+SHORT_WIDGET_DISPLAY_TYPES = frozenset(
+    {
+        DashboardWidgetDisplayTypes.BIG_NUMBER,
+        DashboardWidgetDisplayTypes.DETAILS,
+        DashboardWidgetDisplayTypes.TEXT,
+    }
+)
+DEFAULT_WIDGET_MIN_HEIGHT = 2
+
+
+def get_min_widget_height(display_type_id: int) -> int:
+    return 1 if display_type_id in SHORT_WIDGET_DISPLAY_TYPES else DEFAULT_WIDGET_MIN_HEIGHT
+
+
+DEFAULT_MAX_WIDGET_LIMIT = 10
+MAX_WIDGET_LIMIT_BY_DISPLAY_TYPE: dict[int, int] = {
+    DashboardWidgetDisplayTypes.CATEGORICAL_BAR_CHART: 25,
+    DashboardWidgetDisplayTypes.TABLE: 20,
+}
+
+
+def get_max_widget_limit(display_type_id: int) -> int:
+    return MAX_WIDGET_LIMIT_BY_DISPLAY_TYPE.get(display_type_id, DEFAULT_MAX_WIDGET_LIMIT)
+
+
+@cell_silo_model
 class DashboardWidgetQuery(Model):
     """
     A query in a dashboard widget.
@@ -190,7 +271,24 @@ class DashboardWidgetQuery(Model):
     __repr__ = sane_repr("widget", "type", "name")
 
 
-@region_silo_model
+@cell_silo_model
+class DashboardFieldLink(DefaultFieldsModel):
+    __relocation_scope__ = RelocationScope.Organization
+
+    dashboard_widget_query = FlexibleForeignKey(
+        "sentry.DashboardWidgetQuery", on_delete=models.CASCADE
+    )
+    field = models.TextField()
+    # The dashboard that the field is linked to
+    dashboard = FlexibleForeignKey("sentry.Dashboard", on_delete=models.CASCADE)
+
+    class Meta:
+        app_label = "sentry"
+        db_table = "sentry_dashboardfieldlink"
+        unique_together = (("dashboard_widget_query", "field"),)
+
+
+@cell_silo_model
 class DashboardWidgetQueryOnDemand(Model):
     """
     Tracks on_demand state and values for dashboard widget queries.
@@ -213,8 +311,9 @@ class DashboardWidgetQueryOnDemand(Model):
         """ The widget was manually disabled by a user """
         DISABLED_SPEC_LIMIT = "disabled:spec-limit", gettext_lazy("disabled:spec-limit")
         """ This widget query was disabled during rollout due to the organization reaching it's spec limit. """
-        DISABLED_HIGH_CARDINALITY = "disabled:high-cardinality", gettext_lazy(
-            "disabled:high-cardinality"
+        DISABLED_HIGH_CARDINALITY = (
+            "disabled:high-cardinality",
+            gettext_lazy("disabled:high-cardinality"),
         )
         """ This widget query was disabled by the cardinality cron due to one of the columns having high cardinality """
         ENABLED_ENROLLED = "enabled:enrolled", gettext_lazy("enabled:enrolled")
@@ -258,7 +357,7 @@ class DashboardWidgetQueryOnDemand(Model):
     __repr__ = sane_repr("extraction_state", "spec_hashes")
 
 
-@region_silo_model
+@cell_silo_model
 class DashboardWidget(Model):
     """
     A dashboard widget.
@@ -267,9 +366,9 @@ class DashboardWidget(Model):
     __relocation_scope__ = RelocationScope.Organization
 
     dashboard = FlexibleForeignKey("sentry.Dashboard")
-    order = BoundedPositiveIntegerField()
+    order = BoundedPositiveIntegerField(null=True)
     title = models.CharField(max_length=255)
-    description = models.CharField(max_length=255, null=True)
+    description = models.TextField(null=True, blank=True)
     thresholds = JSONField(null=True)
     interval = models.CharField(max_length=10, null=True)
     display_type = BoundedPositiveIntegerField(choices=DashboardWidgetDisplayTypes.as_choices())
@@ -288,9 +387,14 @@ class DashboardWidget(Model):
         db_default=DatasetSourcesTypes.UNKNOWN.value,
     )
 
+    # These fields are used for the dashboards transactions -> spans widget migration.
+    # This field is used to store a snapshot of the widget before the migration.
+    widget_snapshot = models.JSONField(null=True)
+    # This field is used to store the reason for dropping fields or substantial changes to the widget query.
+    changed_reason = models.JSONField(null=True)
+
     class Meta:
         app_label = "sentry"
         db_table = "sentry_dashboardwidget"
-        unique_together = (("dashboard", "order"),)
 
     __repr__ = sane_repr("dashboard", "title")

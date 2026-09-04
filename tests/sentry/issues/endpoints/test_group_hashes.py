@@ -37,7 +37,7 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         assert new_event.group_id == old_event.group_id
 
-        url = f"/api/0/issues/{new_event.group_id}/hashes/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{new_event.group_id}/hashes/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200, response.content
@@ -77,7 +77,7 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         eventstream.end_merge(state)
 
-        url = f"/api/0/issues/{event1.group_id}/hashes/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event1.group_id}/hashes/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200, response.content
@@ -85,6 +85,95 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         primary_hashes = [hash["id"] for hash in response.data]
         assert primary_hashes == [event2.get_primary_hash(), event1.get_primary_hash()]
+
+    def test_return_multiple_hashes_with_seer_match(self) -> None:
+        self.login_as(user=self.user)
+
+        min_ago = before_now(minutes=1).isoformat()
+        two_min_ago = before_now(minutes=2).isoformat()
+
+        event1 = self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "message": "message",
+                "timestamp": two_min_ago,
+                "fingerprint": ["group-1"],
+            },
+            project_id=self.project.id,
+        )
+
+        event2 = self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "message": "message2",
+                "timestamp": min_ago,
+                "fingerprint": ["group-2"],
+            },
+            project_id=self.project.id,
+        )
+
+        # Merge the events
+        eventstream = SnubaEventStream()
+        state = eventstream.start_merge(self.project.id, [event2.group_id], event1.group_id)
+        assert state is not None
+
+        eventstream.end_merge(state)
+
+        # Get the grouphashes for both events
+        hash1 = event1.get_primary_hash()
+        hash2 = event2.get_primary_hash()
+        grouphash1 = GroupHash.objects.get(project=self.project, hash=hash1)
+        grouphash2 = GroupHash.objects.get(project=self.project, hash=hash2)
+        assert grouphash2.metadata
+
+        # Manually update grouphash2 to point to the merged group (event1.group_id) and its metadata
+        # to reflect the Seer match
+        grouphash2.group = event1.group
+        grouphash2.metadata.seer_matched_grouphash = grouphash1
+        grouphash2.metadata.seer_match_distance = 0.01
+        grouphash2.save()
+        grouphash2.metadata.save()
+
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event1.group_id}/hashes/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200, response.content
+        assert len(response.data) == 2
+
+        # Find the hash data for each hash
+        hash1_data = next(h for h in response.data if h["id"] == hash1)
+        hash2_data = next(h for h in response.data if h["id"] == hash2)
+
+        # hash1 should not be matched by seer (it's the parent)
+        assert hash1_data["mergedBySeer"] is False
+        assert hash1_data["seerMatchDistance"] is None
+
+        # hash2 should be matched by seer (it points to hash1)
+        assert hash2_data["mergedBySeer"] is True
+        assert hash2_data["seerMatchDistance"] == 0.01
+
+    def test_full_param(self) -> None:
+        self.login_as(user=self.user)
+
+        event = self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "message": "message",
+                "timestamp": before_now(minutes=1).isoformat(),
+                "fingerprint": ["group-1"],
+            },
+            project_id=self.project.id,
+        )
+
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group_id}/hashes/"
+
+        response = self.client.get(f"{url}?full=true", format="json")
+        assert response.status_code == 200, response.content
+        assert "entries" in response.data[0]["latestEvent"]
+
+        response = self.client.get(f"{url}?full=false", format="json")
+        assert response.status_code == 200, response.content
+        assert "entries" not in response.data[0]["latestEvent"]
 
     def test_unmerge(self) -> None:
         self.login_as(user=self.user)
@@ -101,7 +190,7 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         url = "?".join(
             [
-                f"/api/0/issues/{group.id}/hashes/",
+                f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/hashes/",
                 urlencode({"id": [h.hash for h in hashes]}, True),
             ]
         )
@@ -133,7 +222,7 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         url = "?".join(
             [
-                f"/api/0/issues/{group.id}/hashes/",
+                f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/hashes/",
                 urlencode({"id": [h.hash for h in hashes]}, True),
             ]
         )
@@ -160,7 +249,7 @@ class GroupHashesTest(APITestCase, SnubaTestCase):
 
         url = "?".join(
             [
-                f"/api/0/issues/{group.id}/hashes/",
+                f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/hashes/",
                 urlencode({"id": [h.hash for h in hashes]}, True),
             ]
         )

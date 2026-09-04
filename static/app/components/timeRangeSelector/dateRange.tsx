@@ -5,12 +5,12 @@ import {withTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
+import {Checkbox} from '@sentry/scraps/checkbox';
+
 import {DateRangePicker} from 'sentry/components/calendar';
-import {Checkbox} from 'sentry/components/core/checkbox';
 import {MAX_PICKABLE_DAYS} from 'sentry/constants';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {WithRouterProps} from 'sentry/types/legacyReactRouter';
+import type {PlainRoute} from 'sentry/types/legacyReactRouter';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {
@@ -19,12 +19,10 @@ import {
   isValidTime,
   setDateToTime,
 } from 'sentry/utils/dates';
-import {domId} from 'sentry/utils/domId';
-import getRouteStringFromRoutes from 'sentry/utils/getRouteStringFromRoutes';
-// eslint-disable-next-line no-restricted-imports
-import withSentryRouter from 'sentry/utils/withSentryRouter';
+import {getRouteStringFromRoutes} from 'sentry/utils/getRouteStringFromRoutes';
+import {useRoutes} from 'sentry/utils/useRoutes';
 
-import TimePicker from './timePicker';
+import {TimePicker} from './timePicker';
 
 const getTimeStringFromDate = (date: Date) => moment(date).local().format('HH:mm');
 
@@ -39,7 +37,7 @@ const defaultProps = {
   maxPickableDays: MAX_PICKABLE_DAYS,
 };
 
-type Props = WithRouterProps & {
+type Props = {
   /**
    * End date value for absolute date selector
    */
@@ -53,6 +51,11 @@ type Props = WithRouterProps & {
    * handle UTC checkbox change
    */
   onChangeUtc: () => void;
+
+  /**
+   * The matched routes, used to derive a parameterized path for analytics.
+   */
+  routes: PlainRoute[];
 
   /**
    * Start date value for absolute date selector
@@ -97,7 +100,8 @@ class BaseDateRange extends Component<Props, State> {
     hasEndErrors: false,
   };
 
-  private readonly utcInputId = domId('utc-picker-');
+  private readonly utcInputId =
+    'utc-picker-' + Math.random().toString(36).substring(2, 12);
 
   handleSelectDateRange = (range: Range) => {
     const {onChange} = this.props;
@@ -117,7 +121,7 @@ class BaseDateRange extends Component<Props, State> {
     // Time will be in 24hr e.g. "21:00"
     const start = this.props.start ?? '';
     const end = this.props.end ?? undefined;
-    const {onChange, organization, router} = this.props;
+    const {onChange, organization, routes} = this.props;
     const startTime = e.target.value;
     const newStartTime = setDateToTime(start, startTime, {local: true});
 
@@ -131,7 +135,7 @@ class BaseDateRange extends Component<Props, State> {
       organization: organization ?? null,
       field_changed: 'start',
       time: startTime,
-      path: getRouteStringFromRoutes(router.routes),
+      path: getRouteStringFromRoutes({routes}),
     });
 
     onChange({
@@ -146,7 +150,7 @@ class BaseDateRange extends Component<Props, State> {
   handleChangeEnd = (e: React.ChangeEvent<HTMLInputElement>) => {
     const start = this.props.start ?? undefined;
     const end = this.props.end ?? '';
-    const {organization, onChange, router} = this.props;
+    const {organization, onChange, routes} = this.props;
     const endTime = e.target.value;
     const newEndTime = setDateToTime(end, endTime, {local: true});
 
@@ -160,7 +164,7 @@ class BaseDateRange extends Component<Props, State> {
       organization: organization ?? null,
       field_changed: 'end',
       time: endTime,
-      path: getRouteStringFromRoutes(router.routes),
+      path: getRouteStringFromRoutes({routes}),
     });
 
     onChange({
@@ -238,18 +242,23 @@ class BaseDateRange extends Component<Props, State> {
   }
 }
 
-const DateRange = styled(withTheme(withSentryRouter(BaseDateRange)))`
+function WithRoutes(props: Omit<Props, 'routes'>) {
+  const routes = useRoutes();
+  return <BaseDateRange {...props} routes={routes} />;
+}
+
+export const DateRange = styled(withTheme(WithRoutes))`
   display: flex;
   flex-direction: column;
-  border-left: 1px solid ${p => p.theme.border};
+  border-left: 1px solid ${p => p.theme.tokens.border.primary};
 `;
 
 const TimeAndUtcPicker = styled('div')`
   display: flex;
   align-items: center;
-  margin: 0 ${space(2)};
-  padding: ${space(0.5)} 0;
-  border-top: 1px solid ${p => p.theme.innerBorder};
+  margin: 0 ${p => p.theme.space.xl};
+  padding: ${p => p.theme.space.xs} 0;
+  border-top: 1px solid ${p => p.theme.tokens.border.secondary};
 `;
 
 const StyledTimePicker = styled(TimePicker)`
@@ -259,19 +268,17 @@ const StyledTimePicker = styled(TimePicker)`
 `;
 
 const UtcPicker = styled('div')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   white-space: nowrap;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex: 1;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
 `;
 
 const UtcPickerLabel = styled('label')`
   margin: 0;
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   color: inherit;
 `;
-
-export default DateRange;

@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 
 import pytest
+from sentry_conventions.attributes import ATTRIBUTE_NAMES
 
 from sentry.spans.grouping.strategy.base import (
     Span,
@@ -19,7 +20,7 @@ from sentry.spans.grouping.strategy.config import (
     register_configuration,
 )
 from sentry.spans.grouping.utils import hash_values
-from sentry.testutils.performance_issues.span_builder import SpanBuilder
+from sentry.testutils.issue_detection.span_builder import SpanBuilder
 
 
 def test_register_duplicate_confiig() -> None:
@@ -414,8 +415,9 @@ def test_basic_span_grouping_strategy(spans: list[Span], expected: Mapping[str, 
                 "b" * 16: ["GET", "https", "sentry.io", "/api/0/organization/sentry/projects/"],
                 "c" * 16: ["GET", "https", "sentry.io", "/api/0/organization/sentry/projects/"],
                 "d" * 16: ["POST", "https", "sentry.io", "/api/0/organization/sentry/projects/"],
-                "e"
-                * 16: ["GET https://sentry.io/api/0/organization/sentry/projects/?all_projects=0"],
+                "e" * 16: [
+                    "GET https://sentry.io/api/0/organization/sentry/projects/?all_projects=0"
+                ],
                 "f" * 16: [""],
             },
         ),
@@ -588,10 +590,15 @@ def test_default_2022_10_27_strategy(spans: list[Span], expected: Mapping[str, l
 
 
 def test_standalone_spans_compat() -> None:
-    spans = [
+    spans_v1 = [
         SpanBuilder().with_span_id("b" * 16).with_description("b" * 16).build(),
         SpanBuilder().with_span_id("c" * 16).with_description("c" * 16).build(),
         SpanBuilder().with_span_id("d" * 16).with_description("d" * 16).build(),
+    ]
+    spans_v2 = [
+        SpanBuilder().with_span_id("b" * 16).with_description("b" * 16).build_v2(),
+        SpanBuilder().with_span_id("c" * 16).with_description("c" * 16).build_v2(),
+        SpanBuilder().with_span_id("d" * 16).with_description("d" * 16).build_v2(),
     ]
 
     event = {
@@ -601,15 +608,15 @@ def test_standalone_spans_compat() -> None:
                 "span_id": "a" * 16,
             },
         },
-        "spans": spans,
+        "spans": spans_v1,
     }
 
-    standalone_spans = spans + [
+    standalone_spans = spans_v2 + [
         SpanBuilder()
         .with_span_id("a" * 16)
         .segment()
-        .with_sentry_tag("transaction", "transaction name")
-        .build()
+        .with_data({ATTRIBUTE_NAMES.SENTRY_SEGMENT_NAME: "transaction name"})
+        .build_v2()
     ]
 
     cfg = CONFIGURATIONS[DEFAULT_CONFIG_ID]

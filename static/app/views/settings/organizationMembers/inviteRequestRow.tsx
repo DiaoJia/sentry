@@ -1,18 +1,19 @@
 import {Fragment} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import Confirm from 'sentry/components/confirm';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {InfoText} from '@sentry/scraps/info';
+
+import {Confirm} from 'sentry/components/confirm';
 import type {InviteModalRenderFunc} from 'sentry/components/modals/memberInviteModalCustomization';
 import {InviteModalHook} from 'sentry/components/modals/memberInviteModalCustomization';
-import PanelItem from 'sentry/components/panels/panelItem';
-import RoleSelectControl from 'sentry/components/roleSelectControl';
-import TeamSelector from 'sentry/components/teamSelector';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {RoleSelectControl} from 'sentry/components/roleSelectControl';
+import {TeamSelector} from 'sentry/components/teamSelector';
 import {IconCheckmark, IconClose} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Member, Organization, OrgRole} from 'sentry/types/organization';
 
 type Props = {
@@ -25,7 +26,7 @@ type Props = {
   organization: Organization;
 };
 
-function InviteRequestRow({
+export function InviteRequestRow({
   inviteRequest,
   inviteRequestBusy,
   organization,
@@ -34,21 +35,27 @@ function InviteRequestRow({
   onUpdate,
   allRoles,
 }: Props) {
+  const theme = useTheme();
   const role = allRoles.find(r => r.id === inviteRequest.role);
   const roleDisallowed = !role?.isAllowed;
   const {access} = organization;
   const canApprove = access.includes('member:admin');
 
-  const hookRenderer: InviteModalRenderFunc = ({sendInvites, canSend, headerInfo}) => (
+  const overrideRenderer: InviteModalRenderFunc = ({
+    sendInvites,
+    canSend,
+    headerInfo,
+  }) => (
     <StyledPanelItem>
       <div>
-        <h5 style={{marginBottom: space(0.5)}}>
+        <h5 style={{marginBottom: theme.space.xs}}>
           <UserName>{inviteRequest.email}</UserName>
         </h5>
         {inviteRequest.inviteStatus === 'requested_to_be_invited' ? (
           inviteRequest.inviterName && (
             <Description>
-              <Tooltip
+              <InfoText
+                variant="inherit"
                 title={t(
                   'An existing member has asked to invite this user to your organization'
                 )}
@@ -56,11 +63,14 @@ function InviteRequestRow({
                 {tct('Requested by [inviterName]', {
                   inviterName: inviteRequest.inviterName,
                 })}
-              </Tooltip>
+              </InfoText>
             </Description>
           )
         ) : (
-          <Tag title={t('This user has asked to join your organization.')}>
+          <Tag
+            variant="muted"
+            title={t('This user has asked to join your organization.')}
+          >
             {t('Join request')}
           </Tag>
         )}
@@ -100,11 +110,11 @@ function InviteRequestRow({
           onClick={() => onDeny(inviteRequest)}
           icon={<IconClose />}
           disabled={!canApprove}
-          title={
-            canApprove
+          tooltipProps={{
+            title: canApprove
               ? undefined
-              : t('This request needs to be reviewed by a privileged user')
-          }
+              : t('This request needs to be reviewed by a privileged user'),
+          }}
         >
           {t('Deny')}
         </Button>
@@ -122,19 +132,19 @@ function InviteRequestRow({
           }
         >
           <Button
-            priority="primary"
+            variant="primary"
             size="sm"
             busy={inviteRequestBusy[inviteRequest.id]}
-            title={
-              canApprove
+            tooltipProps={{
+              title: canApprove
                 ? roleDisallowed
                   ? t(
                       `You do not have permission to approve a user of this role.
                       Select a different role to approve this user.`
                     )
                   : undefined
-                : t('This request needs to be reviewed by a privileged user')
-            }
+                : t('This request needs to be reviewed by a privileged user'),
+            }}
             icon={<IconCheckmark />}
           >
             {t('Approve')}
@@ -150,7 +160,7 @@ function InviteRequestRow({
       organization={organization}
       onSendInvites={() => onApprove(inviteRequest)}
     >
-      {hookRenderer}
+      {overrideRenderer}
     </InviteModalHook>
   );
 }
@@ -158,19 +168,19 @@ function InviteRequestRow({
 const StyledPanelItem = styled(PanelItem)`
   display: grid;
   grid-template-columns: minmax(150px, auto) minmax(100px, 140px) 220px max-content;
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
   align-items: center;
 `;
 
 const UserName = styled('div')`
-  font-size: ${p => p.theme.fontSize.lg};
+  font-size: ${p => p.theme.font.size.lg};
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
 const Description = styled('div')`
   display: block;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -191,7 +201,5 @@ const TeamSelectControl = styled(TeamSelector)`
 const ButtonGroup = styled('div')`
   display: inline-grid;
   grid-template-columns: repeat(2, max-content);
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
-
-export default InviteRequestRow;

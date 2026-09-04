@@ -1,0 +1,365 @@
+from unittest.mock import MagicMock, patch
+
+import pytest
+from django.core import mail
+
+from sentry.constants import DEFAULT_CODE_REVIEW_TRIGGERS, ObjectStatus
+from sentry.models.options.organization_option import OrganizationOption
+from sentry.models.repository import Repository
+from sentry.models.repositorysettings import RepositorySettings
+from sentry.testutils.cases import TestCase
+from sentry.testutils.helpers.features import with_feature
+from sentry.testutils.helpers.options import override_options
+
+
+class RepositoryDeleteEmailTest(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user = self.create_user()
+        self.organization = self.create_organization()
+        self.repo = Repository.objects.create(
+            organization_id=self.organization.id,
+            name="getsentry/sentry",
+            provider="dummy",
+        )
+        self.provider = MagicMock()
+        self.provider.name = "Example"
+        self.repo.get_provider = lambda: self.provider
+
+    @with_feature("organizations:notification-platform.internal-testing")
+    @override_options(
+        {"notifications.platform-rollout.internal-testing": {"unable-to-delete-repository": 1.0}}
+    )
+    def test_send_delete_fail_email_with_notification_platform(self) -> None:
+        with self.tasks():
+            self.repo.send_delete_fail_email("Failed to connect to GitHub API", self.user.email)
+
+        assert len(mail.outbox) == 1
+        email = mail.outbox[0]
+        assert isinstance(email, mail.EmailMultiAlternatives)
+
+        assert email.subject == "Unable to Delete Repository Webhooks"
+
+        text_content = email.body
+        assert "We were unable to delete webhooks in Example" in text_content
+        assert "getsentry/sentry" in text_content
+        assert "Failed to connect to GitHub API" in text_content
+        assert "You will need to remove these webhooks manually" in text_content
+
+        [html_alternative] = email.alternatives
+        [html_content, content_type] = html_alternative
+        html_content = str(html_content)
+        assert content_type == "text/html"
+        assert "We were unable to delete webhooks in Example" in html_content
+        assert "getsentry/sentry" in html_content
+        assert "Failed to connect to GitHub API" in html_content
+
+    def test_send_delete_fail_email_without_notification_platform(self) -> None:
+        with self.tasks():
+            self.repo.send_delete_fail_email("Failed to connect to GitHub API", self.user.email)
+
+        assert len(mail.outbox) == 1
+        email = mail.outbox[0]
+        assert email.subject == "Unable to Delete Repository Webhooks"
+        assert "Failed to connect to GitHub API" in email.body
+
+    def test_generate_delete_fail_email(self) -> None:
+        msg = self.repo.generate_delete_fail_email("Test error message")
+
+        assert msg.subject == "Unable to Delete Repository Webhooks"
+        assert msg.template == "sentry/emails/unable-to-delete-repo.txt"
+        assert msg.html_template == "sentry/emails/unable-to-delete-repo.html"
+        assert msg.context["repo"] == self.repo
+        assert msg.context["error_message"] == "Test error message"
+        assert msg.context["provider_name"] == "Example"
+
+
+class RepositoryCodeReviewSettingsTest(TestCase):
+    """Tests for auto-enabling code review settings on repository creation."""
+
+    def test_settings_created_when_no_auto_enable(self) -> None:
+        org = self.create_organization()
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.enabled_code_review is False
+        assert settings.code_review_triggers == DEFAULT_CODE_REVIEW_TRIGGERS
+
+    def test_settings_created_when_auto_enable_disabled(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=False,
+        )
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:default_code_review_triggers",
+            value=["on_new_commit"],
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.enabled_code_review is False
+        assert settings.code_review_triggers == ["on_new_commit"]
+
+    def test_settings_created_when_auto_enable_enabled(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.enabled_code_review is True
+        assert settings.code_review_triggers == DEFAULT_CODE_REVIEW_TRIGGERS
+
+    def test_settings_created_with_triggers(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:default_code_review_triggers",
+            value=["on_new_commit", "on_ready_for_review"],
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.enabled_code_review is True
+        assert settings.code_review_triggers == ["on_new_commit", "on_ready_for_review"]
+
+    def test_no_settings_for_unsupported_provider(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="unsupported_provider",
+        )
+
+        assert not RepositorySettings.objects.filter(repository=repo).exists()
+
+    def test_invalid_triggers_type_defaults_to_empty_list(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+        # Set invalid triggers type (string instead of list)
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:default_code_review_triggers",
+            value="invalid_string",
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.code_review_triggers == DEFAULT_CODE_REVIEW_TRIGGERS
+
+    def test_settings_not_duplicated_on_update(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        repo.name = "updated-repo"
+        repo.save()
+
+        assert RepositorySettings.objects.filter(repository=repo).count() == 1
+
+    def test_transaction_rollback_on_auto_enable_failure(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+
+        initial_repo_count = Repository.objects.filter(organization_id=org.id).count()
+
+        with patch.object(
+            Repository,
+            "_handle_auto_enable_code_review",
+            side_effect=Exception("Test exception"),
+        ):
+            with pytest.raises(Exception, match="Test exception"):
+                Repository.objects.create(
+                    organization_id=org.id,
+                    name="test-repo",
+                    provider="integrations:github",
+                )
+
+        # Neither Repository nor RepositorySettings should be saved due to transaction rollback
+        assert Repository.objects.filter(organization_id=org.id).count() == initial_repo_count
+        assert not RepositorySettings.objects.filter(repository__organization_id=org.id).exists()
+
+    def test_both_repository_and_settings_saved_atomically(self) -> None:
+        org = self.create_organization()
+
+        OrganizationOption.objects.set_value(
+            organization=org,
+            key="sentry:auto_enable_code_review",
+            value=True,
+        )
+
+        repo = Repository.objects.create(
+            organization_id=org.id,
+            name="test-repo",
+            provider="integrations:github",
+        )
+
+        # Both should exist
+        assert Repository.objects.filter(id=repo.id).exists()
+        assert RepositorySettings.objects.filter(repository=repo).exists()
+
+        # Verify the settings are correct
+        settings = RepositorySettings.objects.get(repository=repo)
+        assert settings.enabled_code_review is True
+
+
+class RepositoryManagerResolveActiveTest(TestCase):
+    def setUp(self) -> None:
+        self.repo = self.create_repo(
+            self.project, name="getsentry/sentry", provider="integrations:github"
+        )
+
+    def _resolve(
+        self, *, name: str = "getsentry/sentry", normalized_provider: str | None = "github"
+    ):
+        return Repository.objects.resolve_active(
+            organization_id=self.organization.id,
+            name=name,
+            normalized_provider=normalized_provider,
+        )
+
+    def test_resolves_single_active_match(self) -> None:
+        repo, reason = self._resolve()
+
+        assert reason == "resolved"
+        assert repo == self.repo
+
+    def test_matches_both_provider_shapes(self) -> None:
+        # Stored as ``integrations:github``; the bare ``github`` form must still match it.
+        repo, reason = self._resolve(normalized_provider="github")
+
+        assert reason == "resolved"
+        assert repo == self.repo
+
+    def test_resolves_without_provider_when_unambiguous(self) -> None:
+        repo, reason = self._resolve(normalized_provider=None)
+
+        assert reason == "resolved"
+        assert repo == self.repo
+
+    def test_not_found(self) -> None:
+        repo, reason = self._resolve(name="getsentry/missing")
+
+        assert repo is None
+        assert reason == "not_found"
+
+    def test_ambiguous_without_provider(self) -> None:
+        self.create_repo(self.project, name="getsentry/sentry", provider="integrations:gitlab")
+
+        repo, reason = self._resolve(normalized_provider=None)
+
+        assert repo is None
+        assert reason == "ambiguous"
+
+    def test_provider_disambiguates_same_name(self) -> None:
+        gitlab_repo = self.create_repo(
+            self.project, name="getsentry/sentry", provider="integrations:gitlab"
+        )
+
+        repo, reason = self._resolve(normalized_provider="gitlab")
+
+        assert reason == "resolved"
+        assert repo == gitlab_repo
+
+    def test_ignores_inactive_repositories(self) -> None:
+        self.repo.update(status=ObjectStatus.PENDING_DELETION)
+
+        repo, reason = self._resolve()
+
+        assert repo is None
+        assert reason == "not_found"
+
+    def test_scoped_to_organization(self) -> None:
+        other_org = self.create_organization()
+        other_project = self.create_project(organization=other_org)
+        self.create_repo(other_project, name="getsentry/sentry", provider="integrations:github")
+
+        repo, reason = Repository.objects.resolve_active(
+            organization_id=other_org.id, name="getsentry/sentry", normalized_provider="github"
+        )
+
+        assert reason == "resolved"
+        assert repo is not None
+        assert repo.organization_id == other_org.id
+
+
+class RepositoryManagerProviderMatchTest(TestCase):
+    def test_matches_bare_and_prefixed_only(self) -> None:
+        bare = self.create_repo(self.project, name="a/bare", provider="github")
+        prefixed = self.create_repo(self.project, name="a/prefixed", provider="integrations:github")
+        other = self.create_repo(self.project, name="a/other", provider="integrations:gitlab")
+
+        matched = set(
+            Repository.objects.filter(organization_id=self.organization.id).filter(
+                Repository.objects.provider_match("github")
+            )
+        )
+
+        assert matched == {bare, prefixed}
+        assert other not in matched

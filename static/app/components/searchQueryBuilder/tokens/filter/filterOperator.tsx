@@ -1,14 +1,20 @@
-import {type ReactNode, useMemo} from 'react';
+import {useLayoutEffect, useMemo, useRef, useState, type ReactNode} from 'react';
 import isPropValid from '@emotion/is-prop-valid';
 import styled from '@emotion/styled';
+import {useFocusWithin} from '@react-aria/interactions';
 import {mergeProps} from '@react-aria/utils';
 import type {ListState} from '@react-stately/list';
 import type {Node} from '@react-types/shared';
 
-import {CompactSelect, type SelectOption} from 'sentry/components/core/compactSelect';
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {useSearchQueryBuilder} from 'sentry/components/searchQueryBuilder/context';
+import {CompactSelect, type SelectOption} from '@sentry/scraps/compactSelect';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Flex} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {
+  useSearchQueryBuilderConfig,
+  useSearchQueryBuilderState,
+} from 'sentry/components/searchQueryBuilder/context';
 import {UnstyledButton} from 'sentry/components/searchQueryBuilder/tokens/filter/unstyledButton';
 import {useFilterButtonProps} from 'sentry/components/searchQueryBuilder/tokens/filter/useFilterButtonProps';
 import {
@@ -18,23 +24,23 @@ import {
   getValidOpsForFilter,
   OP_LABELS,
 } from 'sentry/components/searchQueryBuilder/tokens/filter/utils';
-import {type SearchQueryBuilderOperators} from 'sentry/components/searchQueryBuilder/types';
 import {
   isDateToken,
   recentSearchTypeToLabel,
 } from 'sentry/components/searchQueryBuilder/utils';
 import {
   FilterType,
-  type ParseResultToken,
+  negationOperators,
   TermOperator,
+  type ParseResultToken,
   type Token,
   type TokenResult,
 } from 'sentry/components/searchSyntax/parser';
 import {getKeyName} from 'sentry/components/searchSyntax/utils';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
+import {type FieldDefinition} from 'sentry/utils/fields';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 interface FilterOperatorProps {
   item: Node<ParseResultToken>;
@@ -70,7 +76,7 @@ function FilterKeyOperatorLabel({
   includeKeyLabel?: boolean;
   opLabel?: string;
 }) {
-  const {getFieldDefinition} = useSearchQueryBuilder();
+  const {getFieldDefinition} = useSearchQueryBuilderConfig();
   const fieldDefinition = getFieldDefinition(keyValue);
 
   if (!includeKeyLabel) {
@@ -78,32 +84,41 @@ function FilterKeyOperatorLabel({
   }
 
   return (
-    <KeyOpLabelWrapper>
+    <Flex align="center" gap="sm">
       <Tooltip title={fieldDefinition?.desc}>
         <span>{keyLabel}</span>
         {opLabel ? <OpLabel> {opLabel}</OpLabel> : null}
       </Tooltip>
-    </KeyOpLabelWrapper>
+    </Flex>
   );
 }
 
-export function getOperatorInfo(
-  token: TokenResult<Token.FILTER>,
-  hasWildcardOperators: boolean
-): {
+function isNegationOperator(op: TermOperator) {
+  return negationOperators.includes(op);
+}
+
+export function getOperatorInfo({
+  filterToken,
+  fieldDefinition,
+  disallowNegation,
+}: {
+  fieldDefinition: FieldDefinition | null;
+  filterToken: TokenResult<Token.FILTER>;
+  disallowNegation?: boolean;
+}): {
   label: ReactNode;
-  operator: SearchQueryBuilderOperators;
-  options: Array<SelectOption<SearchQueryBuilderOperators>>;
+  operator: TermOperator;
+  options: Array<SelectOption<TermOperator>>;
 } {
-  if (isDateToken(token)) {
-    const operator = getOperatorFromDateToken(token);
+  if (isDateToken(filterToken)) {
+    const operator = getOperatorFromDateToken(filterToken);
     // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
     const opLabel = DATE_OP_LABELS[operator] ?? operator;
 
     return {
       operator,
       label: <OpLabel>{opLabel}</OpLabel>,
-      options: DATE_OPTIONS.map((op): SelectOption<SearchQueryBuilderOperators> => {
+      options: DATE_OPTIONS.map((op): SelectOption<TermOperator> => {
         const optionOpLabel = DATE_OP_LABELS[op] ?? op;
 
         return {
@@ -115,15 +130,15 @@ export function getOperatorInfo(
     };
   }
 
-  const {operator, label} = getLabelAndOperatorFromToken(token, hasWildcardOperators);
+  const {operator} = getLabelAndOperatorFromToken(filterToken);
 
-  if (token.filter === FilterType.IS) {
+  if (filterToken.filter === FilterType.IS) {
     return {
       operator,
       label: (
         <FilterKeyOperatorLabel
-          keyValue={token.key.value}
-          keyLabel={token.key.text}
+          keyValue={filterToken.key.value}
+          keyLabel={filterToken.key.text}
           opLabel={operator === TermOperator.NOT_EQUAL ? 'not' : undefined}
           includeKeyLabel
         />
@@ -133,35 +148,39 @@ export function getOperatorInfo(
           value: TermOperator.DEFAULT,
           label: (
             <FilterKeyOperatorLabel
-              keyLabel={token.key.text}
-              keyValue={token.key.value}
+              keyLabel={filterToken.key.text}
+              keyValue={filterToken.key.value}
               includeKeyLabel
             />
           ),
           textValue: 'is',
         },
-        {
-          value: TermOperator.NOT_EQUAL,
-          label: (
-            <FilterKeyOperatorLabel
-              keyLabel={token.key.text}
-              keyValue={token.key.value}
-              opLabel="not"
-              includeKeyLabel
-            />
-          ),
-          textValue: 'is not',
-        },
+        ...(disallowNegation
+          ? []
+          : [
+              {
+                value: TermOperator.NOT_EQUAL,
+                label: (
+                  <FilterKeyOperatorLabel
+                    keyLabel={filterToken.key.text}
+                    keyValue={filterToken.key.value}
+                    opLabel="not"
+                    includeKeyLabel
+                  />
+                ),
+                textValue: 'is not',
+              },
+            ]),
       ],
     };
   }
 
-  if (token.filter === FilterType.HAS) {
+  if (filterToken.filter === FilterType.HAS) {
     return {
       operator,
       label: (
         <FilterKeyOperatorLabel
-          keyValue={token.key.value}
+          keyValue={filterToken.key.value}
           keyLabel={operator === TermOperator.NOT_EQUAL ? 'does not have' : 'has'}
           includeKeyLabel
         />
@@ -172,35 +191,71 @@ export function getOperatorInfo(
           label: (
             <FilterKeyOperatorLabel
               keyLabel="has"
-              keyValue={token.key.value}
+              keyValue={filterToken.key.value}
               includeKeyLabel
             />
           ),
           textValue: 'has',
         },
-        {
-          value: TermOperator.NOT_EQUAL,
-          label: (
-            <FilterKeyOperatorLabel
-              keyLabel="does not have"
-              keyValue={token.key.value}
-              includeKeyLabel
-            />
-          ),
-          textValue: 'does not have',
-        },
+        ...(disallowNegation
+          ? []
+          : [
+              {
+                value: TermOperator.NOT_EQUAL,
+                label: (
+                  <FilterKeyOperatorLabel
+                    keyLabel="does not have"
+                    keyValue={filterToken.key.value}
+                    includeKeyLabel
+                  />
+                ),
+                textValue: 'does not have',
+              },
+            ]),
       ],
     };
   }
 
-  const keyLabel = token.key.text;
+  if (filterToken.filter === FilterType.ARRAY_INCLUDES) {
+    // Array membership uses the default operator; `[*]` on the key conveys
+    // membership and `!` negation reads as "does not include".
+    const includesLabel = 'includes';
+    const doesNotIncludeLabel = 'does not include';
+    const isNegated = operator === TermOperator.NOT_EQUAL;
+
+    return {
+      operator,
+      label: <OpLabel>{isNegated ? doesNotIncludeLabel : includesLabel}</OpLabel>,
+      options: [
+        {
+          value: TermOperator.DEFAULT,
+          label: <OpLabel>{includesLabel}</OpLabel>,
+          textValue: includesLabel,
+        },
+        ...(disallowNegation
+          ? []
+          : [
+              {
+                value: TermOperator.NOT_EQUAL,
+                label: <OpLabel>{doesNotIncludeLabel}</OpLabel>,
+                textValue: doesNotIncludeLabel,
+              },
+            ]),
+      ],
+    };
+  }
+
+  const keyLabel = filterToken.key.text;
+
+  const validOps = getValidOpsForFilter({filterToken, fieldDefinition});
 
   return {
     operator,
-    label: <OpLabel>{label}</OpLabel>,
-    options: getValidOpsForFilter(token, hasWildcardOperators)
+    label: <OpLabel>{OP_LABELS[operator] ?? operator}</OpLabel>,
+    options: validOps
       .filter(op => op !== TermOperator.EQUAL)
-      .map((op): SelectOption<SearchQueryBuilderOperators> => {
+      .filter(op => !disallowNegation || !isNegationOperator(op))
+      .map((op): SelectOption<TermOperator> => {
         const optionOpLabel = OP_LABELS[op] ?? op;
 
         return {
@@ -214,36 +269,76 @@ export function getOperatorInfo(
 
 export function FilterOperator({state, item, token, onOpenChange}: FilterOperatorProps) {
   const organization = useOrganization();
-  const {dispatch, searchSource, query, recentSearches, disabled} =
-    useSearchQueryBuilder();
+  const {dispatch, query, focusOverride} = useSearchQueryBuilderState();
+  const {searchSource, recentSearches, disabled, disallowNegation, getFieldDefinition} =
+    useSearchQueryBuilderConfig();
   const filterButtonProps = useFilterButtonProps({state, item});
-
-  const hasWildcardOperators = organization.features.includes(
-    'search-query-builder-wildcard-operators'
-  );
+  const {focusWithinProps} = useFocusWithin({});
 
   const {operator, label, options} = useMemo(
-    () => getOperatorInfo(token, hasWildcardOperators),
-    [token, hasWildcardOperators]
+    () =>
+      getOperatorInfo({
+        filterToken: token,
+        fieldDefinition: getFieldDefinition(token.key.text),
+        disallowNegation,
+      }),
+    [token, getFieldDefinition, disallowNegation]
   );
 
   const onlyOperator = token.filter === FilterType.IS || token.filter === FilterType.HAS;
 
+  const [autoFocus, setAutoFocus] = useState(false);
+  // track to see if we have already clicked the button
+  const initialOpClickedRef = useRef(false);
+  // track to see if we have already set the initial operator
+  const initialOpSettingRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (focusOverride?.itemKey === item.key && focusOverride.part === 'op') {
+      setAutoFocus(true);
+      initialOpSettingRef.current = true;
+      dispatch({type: 'RESET_FOCUS_OVERRIDE'});
+    }
+  }, [dispatch, focusOverride, item.key, onOpenChange]);
+
   return (
     <CompactSelect
       disabled={disabled}
-      trigger={triggerProps => (
-        <OpButton
-          disabled={disabled}
-          aria-label={t('Edit operator for filter: %s', token.key.text)}
-          onlyOperator={onlyOperator}
-          {...mergeProps(triggerProps, filterButtonProps)}
-        >
-          <InteractionStateLayer />
-          {label}
-        </OpButton>
-      )}
+      trigger={triggerProps => {
+        return (
+          <OpButton
+            disabled={disabled}
+            aria-label={t('Edit operator for filter: %s', token.key.text)}
+            onlyOperator={onlyOperator}
+            {...mergeProps(triggerProps, filterButtonProps, focusWithinProps)}
+            ref={r => {
+              if (!r || !triggerProps.ref) {
+                return;
+              }
+
+              if (typeof triggerProps.ref === 'function') {
+                triggerProps.ref(r);
+              } else {
+                triggerProps.ref.current = r;
+              }
+
+              if (
+                autoFocus &&
+                !initialOpClickedRef.current &&
+                initialOpSettingRef.current
+              ) {
+                r.click();
+                initialOpClickedRef.current = true;
+              }
+            }}
+          >
+            <InteractionStateLayer />
+            {label}
+          </OpButton>
+        );
+      }}
       size="sm"
+      autoFocus={autoFocus}
       options={options}
       value={operator}
       onOpenChange={onOpenChange}
@@ -257,13 +352,26 @@ export function FilterOperator({state, item, token, onOpenChange}: FilterOperato
           search_operator: option.value,
           filter_key: getKeyName(token.key),
         });
+
         dispatch({
           type: 'UPDATE_FILTER_OP',
           token,
           op: option.value,
+          focusOverride: initialOpSettingRef.current
+            ? {
+                itemKey: `${item.key}`,
+                part: 'value',
+              }
+            : undefined,
+          shouldCommitQuery: !initialOpSettingRef.current,
         });
+        initialOpSettingRef.current = false;
+        setAutoFocus(false);
       }}
       offset={MENU_OFFSET}
+      onInteractOutside={() => {
+        setAutoFocus(false);
+      }}
     />
   );
 }
@@ -271,7 +379,7 @@ export function FilterOperator({state, item, token, onOpenChange}: FilterOperato
 const OpButton = styled(UnstyledButton, {
   shouldForwardProp: isPropValid,
 })<{onlyOperator?: boolean}>`
-  padding: 0 ${space(0.25)} 0 ${space(0.5)};
+  padding: 0 ${p => p.theme.space['2xs']} 0 ${p => p.theme.space.xs};
   height: 100%;
   border-left: 1px solid transparent;
   border-right: 1px solid transparent;
@@ -279,18 +387,12 @@ const OpButton = styled(UnstyledButton, {
   border-radius: ${p => (p.onlyOperator ? '3px 0 0 3px' : 0)};
 
   :focus {
-    background-color: ${p => p.theme.translucentGray100};
-    border-right: 1px solid ${p => p.theme.innerBorder};
-    border-left: 1px solid ${p => p.theme.innerBorder};
+    background-color: ${p => p.theme.colors.gray100};
+    border-right: 1px solid ${p => p.theme.tokens.border.secondary};
+    border-left: 1px solid ${p => p.theme.tokens.border.secondary};
   }
 `;
 
-const KeyOpLabelWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.75)};
-`;
-
 const OpLabel = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

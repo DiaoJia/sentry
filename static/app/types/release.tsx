@@ -1,6 +1,6 @@
 import type {TimeseriesValue} from './core';
 import type {Commit} from './integrations';
-import type {PlatformKey} from './project';
+import type {PlatformKey} from './platform';
 import type {User} from './user';
 
 export enum ReleaseStatus {
@@ -93,7 +93,7 @@ interface ReleaseData {
   lastEvent: string;
   // TODO(ts)
   newGroups: number;
-  versionInfo: VersionInfo;
+  versionInfo: VersionInfo | null;
   adoptionStages?: Record<
     string,
     {
@@ -107,18 +107,6 @@ interface ReleaseData {
   owner?: any;
   userAgent?: string;
 }
-
-export type CurrentRelease = {
-  environment: string;
-  firstSeen: string;
-  lastSeen: string;
-  release: Release;
-  stats: {
-    // 24h/30d is hardcoded in GroupReleaseWithStatsSerializer
-    '24h': TimeseriesValue[];
-    '30d': TimeseriesValue[];
-  };
-};
 
 export type ReleaseProject = {
   id: number;
@@ -145,11 +133,12 @@ export type ReleaseMeta = {
   deployCount: number;
   isArtifactBundle: boolean;
   newGroups: number;
+  preprodBuildCount: number;
   projects: ReleaseProject[];
   releaseFileCount: number;
   released: string;
   version: string;
-  versionInfo: VersionInfo;
+  versionInfo: VersionInfo | null;
 };
 
 /**
@@ -181,11 +170,13 @@ export enum ReleaseComparisonChartType {
   HEALTHY_USERS = 'healthyUsers',
   ABNORMAL_USERS = 'abnormalUsers',
   ERRORED_USERS = 'erroredUsers',
+  UNHANDLED_USERS = 'unhandledUsers',
   CRASHED_USERS = 'crashedUsers',
   CRASH_FREE_SESSIONS = 'crashFreeSessions',
   HEALTHY_SESSIONS = 'healthySessions',
   ABNORMAL_SESSIONS = 'abnormalSessions',
   ERRORED_SESSIONS = 'erroredSessions',
+  UNHANDLED_SESSIONS = 'unhandledSessions',
   CRASHED_SESSIONS = 'crashedSessions',
   SESSION_COUNT = 'sessionCount',
   USER_COUNT = 'userCount',

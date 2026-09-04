@@ -24,14 +24,14 @@ from sentry.organizations.services.organization import RpcOrganization
 T = TypeVar("T", bound=SourceCodeIssueIntegration)
 
 
-class SourceCodeSearchSerializer(serializers.Serializer):
+class SourceCodeSearchSerializer(serializers.Serializer[dict[str, str]]):
     field = serializers.CharField(required=True)
-    query = serializers.CharField(required=True)
+    query = serializers.CharField(required=True, allow_blank=True)
 
 
 @control_silo_endpoint
 class SourceCodeSearchEndpoint(IntegrationEndpoint, Generic[T], ABC):
-    owner = ApiOwner.ECOSYSTEM
+    owner = ApiOwner.CODING_WORKFLOWS
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
@@ -61,7 +61,12 @@ class SourceCodeSearchEndpoint(IntegrationEndpoint, Generic[T], ABC):
     def handle_search_issues(self, installation: T, query: str, repo: str | None) -> Response:
         raise NotImplementedError
 
-    def record_event(self, event: SCMIntegrationInteractionType):
+    def record_event(
+        self,
+        event: SCMIntegrationInteractionType,
+        organization_id: int,
+        integration_id: int,
+    ) -> SCMIntegrationInteractionEvent:
         # XXX (mifu67): self.integration_provider is None for the GithubSharedSearchEndpoint,
         # which is used by both GitHub and GitHub Enterprise.
         provider_name = (
@@ -72,6 +77,8 @@ class SourceCodeSearchEndpoint(IntegrationEndpoint, Generic[T], ABC):
         return SCMIntegrationInteractionEvent(
             interaction_type=event,
             provider_key=provider_name,
+            organization_id=organization_id,
+            integration_id=integration_id,
         )
 
     # not used in VSTS
@@ -80,10 +87,19 @@ class SourceCodeSearchEndpoint(IntegrationEndpoint, Generic[T], ABC):
     ) -> Response:
         raise NotImplementedError
 
+    def handle_search_field(
+        self, installation: T, field: str, query: str, repo: str | None
+    ) -> Response | None:
+        return None
+
     def get(
         self, request: Request, organization: RpcOrganization, integration_id: int, **kwds: Any
     ) -> Response:
-        with self.record_event(SCMIntegrationInteractionType.GET).capture() as lifecycle:
+        with self.record_event(
+            SCMIntegrationInteractionType.GET,
+            organization_id=organization.id,
+            integration_id=integration_id,
+        ).capture() as lifecycle:
             integration_query = Q(
                 organizationintegration__organization_id=organization.id, id=integration_id
             )
@@ -128,5 +144,10 @@ class SourceCodeSearchEndpoint(IntegrationEndpoint, Generic[T], ABC):
 
             if self.repository_field and field == self.repository_field:
                 return self.handle_search_repositories(integration, installation, query)
+
+            repo = request.GET.get(self.repository_field) if self.repository_field else None
+            response = self.handle_search_field(installation, field, query, repo)
+            if response is not None:
+                return response
 
             return Response({"detail": "Invalid field"}, status=400)

@@ -1,21 +1,26 @@
 import {useCallback, useMemo} from 'react';
 import type {Location, LocationDescriptorObject} from 'history';
 
-import {URL_PARAM} from 'sentry/constants/pageFilters';
+import {URL_PARAM} from 'sentry/components/pageFilters/constants';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {encodeSort} from 'sentry/utils/discover/eventView';
 import {parseFunction, type Sort} from 'sentry/utils/discover/fields';
 import {decodeList, decodeSorts} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
+import {defaultAggregateSortBys} from 'sentry/views/explore/contexts/pageParamsContext/aggregateSortBys';
 import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
 import {defaultSortBys} from 'sentry/views/explore/contexts/pageParamsContext/sortBys';
 import {
   DEFAULT_VISUALIZATION,
   DEFAULT_VISUALIZATION_FIELD,
 } from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import {
+  buildConditionalAggregate,
+  parseConditionalAggregate,
+} from 'sentry/views/explore/utils/conditionalAggregate';
 import {ChartType} from 'sentry/views/insights/common/components/chart';
 import {makeTracesPathname} from 'sentry/views/traces/pathnames';
 
@@ -27,6 +32,7 @@ export type ReadableExploreQueryParts = {
   query: string;
   sortBys: Sort[];
   yAxes: string[];
+  caseInsensitive?: '1' | null;
   chartType?: ChartType;
 };
 
@@ -46,8 +52,8 @@ function validateSortBys(
 ): Sort[] {
   const mode = getQueryMode(groupBys);
 
-  if (parsedSortBys.length > 0) {
-    if (mode === Mode.SAMPLES) {
+  if (mode === Mode.SAMPLES) {
+    if (parsedSortBys.length > 0) {
       if (parsedSortBys.every(sort => fields?.includes(sort.field))) {
         return parsedSortBys;
       }
@@ -59,16 +65,86 @@ function validateSortBys(
       ];
     }
 
-    if (
-      mode === Mode.AGGREGATE &&
-      parsedSortBys.every(
-        sort => groupBys?.includes(sort.field) || yAxes?.includes(sort.field)
-      )
-    ) {
-      return parsedSortBys;
-    }
+    return defaultSortBys(fields ?? []);
   }
-  return defaultSortBys(mode, fields ?? [], yAxes ?? []);
+
+  if (mode === Mode.AGGREGATE) {
+    if (parsedSortBys.length > 0) {
+      if (
+        parsedSortBys.every(
+          sort => groupBys?.includes(sort.field) || yAxes?.includes(sort.field)
+        )
+      ) {
+        return parsedSortBys;
+      }
+    }
+
+    return defaultAggregateSortBys(yAxes ?? []);
+  }
+
+  return [];
+}
+
+/**
+ * AND binds tighter than OR in search syntax, so concatenating
+ * `base left OR right` is `(base AND left) OR right`. Wrap sides that
+ * contain OR so Compare keeps `base AND (left OR right)`.
+ */
+function wrapQueryForMerge(query: string): string {
+  return /\bOR\b/.test(query) ? `(${query})` : query;
+}
+
+function mergeCompareQueryFilters(baseQuery: string, seriesFilter: string): string {
+  const base = baseQuery.trim();
+  const filter = seriesFilter.trim();
+  if (!filter) {
+    return base;
+  }
+  if (!base) {
+    return filter;
+  }
+  return `${wrapQueryForMerge(base)} ${wrapQueryForMerge(filter)}`;
+}
+
+/**
+ * Compare queries use the top-level filter bar instead of per-series `_if` filters.
+ * Move any EAP conditional aggregate into `{query, yAxes}` form the compare UI can edit.
+ */
+export function normalizeCompareQueryParts(
+  query: WritableExploreQueryParts
+): WritableExploreQueryParts {
+  let mergedQuery = query.query ?? '';
+  const normalizedYAxes: string[] = [];
+  const yAxisReplacements = new Map<string, string>();
+
+  for (const yAxis of query.yAxes ?? []) {
+    const conditional = parseConditionalAggregate(yAxis);
+    if (!conditional?.filter) {
+      normalizedYAxes.push(yAxis);
+      continue;
+    }
+
+    mergedQuery = mergeCompareQueryFilters(mergedQuery, conditional.filter);
+    const plainYAxis = buildConditionalAggregate({
+      name: conditional.name,
+      arguments: conditional.arguments,
+      filter: '',
+    });
+    yAxisReplacements.set(yAxis, plainYAxis);
+    normalizedYAxes.push(plainYAxis);
+  }
+
+  const normalizedSortBys = query.sortBys?.map(sort => {
+    const replacement = yAxisReplacements.get(sort.field);
+    return replacement ? {...sort, field: replacement} : sort;
+  });
+
+  return {
+    ...query,
+    query: mergedQuery,
+    yAxes: normalizedYAxes,
+    sortBys: normalizedSortBys,
+  };
 }
 
 function parseQuery(raw: string): ReadableExploreQueryParts {
@@ -90,18 +166,38 @@ function parseQuery(raw: string): ReadableExploreQueryParts {
     }
 
     const groupBys: string[] = parsed.groupBys ?? [];
-    const fields: string[] = getFieldsForConstructedQuery(yAxes);
+    const fields = getFieldsForConstructedQuery(yAxes);
 
     const parsedSortBys = decodeSorts(parsed.sortBys);
     const sortBys = validateSortBys(parsedSortBys, groupBys, fields, yAxes);
 
-    return {
+    const caseInsensitive = parsed.caseInsensitive ?? undefined;
+
+    const normalized = normalizeCompareQueryParts({
       yAxes,
       chartType,
       sortBys,
       query: parsed.query ?? '',
       groupBys,
-      fields,
+      caseInsensitive,
+    });
+
+    const normalizedFields = getFieldsForConstructedQuery(normalized.yAxes ?? yAxes);
+    const normalizedSortBys = validateSortBys(
+      [...(normalized.sortBys ?? sortBys)],
+      groupBys,
+      normalizedFields,
+      normalized.yAxes ?? yAxes
+    );
+
+    return {
+      yAxes: normalized.yAxes ?? yAxes,
+      chartType: normalized.chartType ?? chartType,
+      sortBys: normalizedSortBys,
+      query: normalized.query ?? '',
+      groupBys,
+      fields: normalizedFields,
+      caseInsensitive: normalized.caseInsensitive ?? caseInsensitive,
     };
   } catch (error) {
     return DEFAULT_QUERY;
@@ -127,11 +223,12 @@ export function useReadQueriesFromLocation(): ReadableExploreQueryParts[] {
 // Write utils begin
 
 type WritableExploreQueryParts = {
+  caseInsensitive?: '1' | null;
   chartType?: ChartType;
   fields?: string[];
-  groupBys?: string[];
+  groupBys?: readonly string[];
   query?: string;
-  sortBys?: Sort[];
+  sortBys?: readonly Sort[];
   yAxes?: string[];
 };
 
@@ -139,6 +236,7 @@ function getQueriesAsUrlParam(queries: WritableExploreQueryParts[]): string[] {
   return queries.map(query =>
     JSON.stringify({
       chartType: query.chartType,
+      caseInsensitive: query.caseInsensitive,
       fields: query.fields,
       groupBys: query.groupBys,
       query: query.query,
@@ -176,8 +274,7 @@ export function useUpdateQueryAtIndex(index: number) {
 
       const newQuery = {...queryToUpdate, ...updates};
       newQuery.fields = getFieldsForConstructedQuery(newQuery.yAxes);
-      const newQueries = [...queries];
-      newQueries[index] = newQuery;
+      const newQueries = queries.map((query, i) => (i === index ? newQuery : query));
 
       const target = getUpdatedLocationWithQueries(location, newQueries);
       navigate(target);
@@ -245,6 +342,9 @@ export function getSamplesTargetAtIndex(
   const queryString = queryToUpdate.query ?? '';
   const search = new MutableSearch(queryString);
   for (const groupBy of queryToUpdate.groupBys) {
+    if (!groupBy) {
+      continue;
+    }
     const value = row[groupBy];
     search.setFilterValues(groupBy, [value]);
   }
@@ -267,7 +367,8 @@ export function getFieldsForConstructedQuery(yAxes: string[]): string[] {
   const fields: string[] = ['id'];
 
   for (const yAxis of yAxes) {
-    const arg = parseFunction(yAxis)?.arguments[0];
+    // Prefer parseConditionalAggregate so EAP `_if` filters are not treated as columns.
+    const arg = parseConditionalAggregate(yAxis)?.arguments[0];
     if (!arg) {
       continue;
     }
@@ -298,7 +399,6 @@ type CompareRouteProps = {
   mode: Mode;
   organization: Organization;
   queries: WritableExploreQueryParts[];
-  referrer?: string;
 };
 
 export function generateExploreCompareRoute({
@@ -306,16 +406,19 @@ export function generateExploreCompareRoute({
   location,
   mode,
   queries,
-  referrer,
 }: CompareRouteProps): LocationDescriptorObject {
   const url = getCompareBaseUrl(organization);
-  const compareQueries = queries.map(query => ({
-    ...query,
-    // Filter out empty strings which are used to indicate no grouping
-    // in Trace Explorer. The same assumption does not exist for the
-    // comparison view.
-    groupBys: mode === Mode.AGGREGATE ? query.groupBys?.filter(Boolean) : [],
-  }));
+  const compareQueries = queries.map(query => {
+    const normalized = normalizeCompareQueryParts({
+      ...query,
+      yAxes: query.yAxes ?? [],
+    });
+    return {
+      ...normalized,
+      fields: getFieldsForConstructedQuery(normalized.yAxes ?? []),
+      groupBys: mode === Mode.AGGREGATE ? normalized.groupBys?.filter(Boolean) : [],
+    };
+  });
 
   if (compareQueries.length < 2) {
     compareQueries.push(DEFAULT_QUERY);
@@ -329,10 +432,6 @@ export function generateExploreCompareRoute({
     [URL_PARAM.ENVIRONMENT]: location.query.environment,
     queries: getQueriesAsUrlParam(compareQueries),
   };
-
-  if (referrer) {
-    query.referrer = referrer;
-  }
 
   return {
     pathname: url,

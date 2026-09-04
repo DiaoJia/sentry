@@ -1,63 +1,89 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Organization} from 'sentry/types/organization';
-import type {Project} from 'sentry/types/project';
-import recreateRoute from 'sentry/utils/recreateRoute';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
-import GroupTombstones from 'sentry/views/settings/project/projectFilters/groupTombstones';
+import {recreateRoute} from 'sentry/utils/recreateRoute';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {useRoutes} from 'sentry/utils/useRoutes';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {GroupTombstones} from 'sentry/views/settings/project/projectFilters/groupTombstones';
 import {ProjectFiltersChart} from 'sentry/views/settings/project/projectFilters/projectFiltersChart';
 import {ProjectFiltersSettings} from 'sentry/views/settings/project/projectFilters/projectFiltersSettings';
 import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
+import {useProjectSettingsOutlet} from 'sentry/views/settings/project/projectSettingsLayout';
 
-type Props = {
-  organization: Organization;
-  project: Project;
-} & RouteComponentProps<{filterType: string; projectId: string}>;
+import {CustomFilters} from './customFilters';
 
-function ProjectFilters(props: Props) {
-  const {project, params} = props;
+export default function ProjectFilters() {
+  const routes = useRoutes();
+  const params = useParams<{filterType: string; projectId: string}>();
   const {projectId, filterType} = params;
+  const {project} = useProjectSettingsOutlet();
+  const organization = useOrganization();
+
   if (!project) {
     return null;
   }
 
   const features = new Set(project.features);
+  const hasInboundFiltersV2 = organization.features.includes('inbound-filters-v2');
+  const hasDiscardGroups = features.has('discard-groups');
+  const showTabs = hasDiscardGroups || hasInboundFiltersV2;
+
+  // Unknown or gated :filterType segments (stale links, old URLs from before a
+  // rename) fall back to data filters, so the highlighted tab always matches
+  // the content actually rendered below.
+  const activeTab =
+    filterType === 'discarded-groups' && hasDiscardGroups
+      ? 'discarded-groups'
+      : filterType === 'custom-filters' && hasInboundFiltersV2
+        ? 'custom-filters'
+        : 'data-filters';
 
   return (
     <Fragment>
       <SentryDocumentTitle title={t('Inbound Filters')} projectSlug={projectId} />
-      <SettingsPageHeader title={t('Inbound Data Filters')} />
-      <TextBlock>
-        {t(
+      <SettingsPageHeader
+        title={t('Inbound Data Filters')}
+        subtitle={t(
           'Filters allow you to prevent Sentry from storing events in certain situations. Filtered events are tracked separately from rate limits, and do not apply to any project quotas.'
         )}
-      </TextBlock>
+      />
 
       <ProjectPermissionAlert project={project} />
 
       <div>
         <ProjectFiltersChart project={project} />
 
-        {features.has('discard-groups') && (
+        {showTabs && (
           <TabsContainer>
-            <Tabs value={filterType}>
+            <Tabs value={activeTab}>
               <TabList>
                 <TabList.Item
                   key="data-filters"
-                  to={recreateRoute('data-filters/', {...props, stepBack: -1})}
+                  to={recreateRoute('data-filters/', {routes, params, stepBack: -1})}
                 >
                   {t('Data Filters')}
                 </TabList.Item>
                 <TabList.Item
+                  key="custom-filters"
+                  hidden={!hasInboundFiltersV2}
+                  to={recreateRoute('custom-filters/', {
+                    routes,
+                    params,
+                    stepBack: -1,
+                  })}
+                >
+                  {t('Custom Filters')}
+                </TabList.Item>
+                <TabList.Item
                   key="discarded-groups"
-                  to={recreateRoute('discarded-groups/', {...props, stepBack: -1})}
+                  hidden={!hasDiscardGroups}
+                  to={recreateRoute('discarded-groups/', {routes, params, stepBack: -1})}
                 >
                   {t('Discarded Issues')}
                 </TabList.Item>
@@ -66,10 +92,12 @@ function ProjectFilters(props: Props) {
           </TabsContainer>
         )}
 
-        {filterType === 'discarded-groups' ? (
+        {activeTab === 'discarded-groups' ? (
           <GroupTombstones project={project} />
+        ) : activeTab === 'custom-filters' ? (
+          <CustomFilters project={project} />
         ) : (
-          <ProjectFiltersSettings project={project} params={params} features={features} />
+          <ProjectFiltersSettings project={project} params={params} />
         )}
       </div>
     </Fragment>
@@ -77,7 +105,5 @@ function ProjectFilters(props: Props) {
 }
 
 const TabsContainer = styled('div')`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
-
-export default ProjectFilters;

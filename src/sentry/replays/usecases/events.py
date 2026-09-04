@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
-from sentry.replays.lib.kafka import initialize_replays_publisher
 from sentry.utils import json
 
 
-def archive_event(project_id: int, replay_id: str) -> str:
-    """Create an archive "replay_event" message."""
+def archive_event(project_id: int, replay_id: str, timestamp: datetime) -> str:
+    """Create an archive "replay_event" message.
+
+    `timestamp` decides which day the archive row lands in. Replay queries always carry a timestamp
+    window and aggregate `is_archived` per replay within it, so an archive row stamped "now" is
+    invisible to anyone looking at the deleted replay's own date range. Pass the replay's own
+    timestamp whenever the caller knows it.
+    """
     return _replay_event(
         project_id=project_id,
         replay_id=replay_id,
@@ -21,7 +27,7 @@ def archive_event(project_id: int, replay_id: str) -> str:
             "trace_ids": [],
             "error_ids": [],
             "urls": [],
-            "timestamp": time.time(),
+            "timestamp": timestamp.timestamp(),
             "is_archived": True,
             "platform": "",
         },
@@ -50,12 +56,6 @@ def _replay_event(project_id: int, replay_id: str, event: dict[str, Any]) -> str
             "project_id": project_id,
             "segment_id": None,
             "retention_days": 90,
-            "payload": list(json.dumps(event).encode()),
+            "payload": event,
         }
     )
-
-
-def publish_replay_event(message: str, is_async: bool):
-    """Publish a replay-event to the replay snuba consumer topic."""
-    publisher = initialize_replays_publisher(is_async=is_async)
-    publisher.publish("ingest-replay-events", message)

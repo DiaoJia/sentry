@@ -2,36 +2,55 @@ from __future__ import annotations
 
 import io
 import logging
-import zlib
-from base64 import b64decode, b64encode
+from base64 import b64decode
+from collections.abc import Generator, Mapping, Sequence
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from operator import itemgetter
 from time import time
-from typing import Any, TypedDict
+from typing import Any
 from uuid import UUID
 
 import msgpack
 import sentry_sdk
 import vroomrs
 from arroyo import Topic as ArroyoTopic
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer, build_kafka_configuration
+from arroyo.backends.kafka import KafkaPayload, KafkaProducer
 from django.conf import settings
+from google.protobuf.timestamp_pb2 import Timestamp
 from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
+from sentry_protos.snuba.v1.request_common_pb2 import TraceItemType
+from sentry_protos.snuba.v1.trace_item_pb2 import AnyValue, TraceItem
+from taskbroker_client.constants import CompressionType
+from taskbroker_client.retry import Retry
 
 from sentry import features, options, quotas
 from sentry.conf.types.kafka_definition import Topic
 from sentry.constants import DataCategory
+from sentry.killswitches import killswitch_matches_context
 from sentry.lang.javascript.processing import _handles_frame as is_valid_javascript_frame
 from sentry.lang.native.processing import _merge_image
-from sentry.lang.native.symbolicator import Symbolicator, SymbolicatorPlatform, SymbolicatorTaskKind
+from sentry.lang.native.symbolicator import (
+    FrameOrder,
+    Symbolicator,
+    SymbolicatorFunction,
+    SymbolicatorTaskKind,
+)
 from sentry.lang.native.utils import native_images_from_data
-from sentry.models.eventerror import EventError
+from sentry.models.eventerror import EventErrorType
 from sentry.models.files.utils import get_profiles_storage
 from sentry.models.organization import Organization
+from sentry.models.profilechunkattachment import ProfileChunkAttachment
 from sentry.models.project import Project
-from sentry.models.projectsdk import EventType, ProjectSDK, get_minimum_sdk_version
+from sentry.models.projectsdk import (
+    EventType,
+    ProjectSDK,
+    get_minimum_sdk_version,
+    get_rejected_sdk_version,
+)
+from sentry.objectstore import default_attachment_retention
+from sentry.objectstore.metrics import measure_storage_operation
 from sentry.profiles.java import (
     convert_android_methods_to_jvm_frames,
     deobfuscate_signature,
@@ -39,24 +58,31 @@ from sentry.profiles.java import (
     merge_jvm_frames_with_android_methods,
 )
 from sentry.profiles.utils import (
+    PROFILE_FORMAT_V2_ANDROID_TRACE,
     Profile,
     apply_stack_trace_rules_to_profile,
-    get_from_profiling_service,
+    is_android_trace_format,
 )
 from sentry.search.utils import DEVICE_CLASS
 from sentry.signals import first_profile_received
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
-from sentry.taskworker.namespaces import ingest_profiling_tasks
-from sentry.taskworker.retry import Retry
+from sentry.taskworker.namespaces import (
+    ingest_profiling_passthrough_tasks,
+    ingest_profiling_raw_tasks,
+)
 from sentry.utils import json, metrics
-from sentry.utils.arroyo_producer import SingletonProducer
-from sentry.utils.kafka_config import get_kafka_producer_cluster_options, get_topic_definition
+from sentry.utils.arroyo_producer import (
+    get_arroyo_producer,
+    get_future_tracking_producer,
+)
+from sentry.utils.eap import hex_to_item_id
+from sentry.utils.kafka_config import get_topic_definition
 from sentry.utils.locking import UnableToAcquireLock
 from sentry.utils.outcomes import Outcome, track_outcome
 from sentry.utils.projectflags import set_project_flag_and_signal
 from sentry.utils.sdk import set_span_attribute
+from sentry.utils.tracing import start_span
 
 REVERSE_DEVICE_CLASS = {next(iter(tags)): label for label, tags in DEVICE_CLASS.items()}
 
@@ -65,84 +91,160 @@ MAX_DURATION_SAMPLE_V2 = 66000
 
 UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
 
+UNSAMPLED_PROFILE_ID = "00000000000000000000000000000000"
 
-def _get_profiles_producer_from_topic(topic: Topic) -> KafkaProducer:
-    cluster_name = get_topic_definition(topic)["cluster"]
-    producer_config = get_kafka_producer_cluster_options(cluster_name)
-    producer_config.pop("compression.type", None)
-    producer_config.pop("message.max.bytes", None)
-    return KafkaProducer(build_kafka_configuration(default_config=producer_config))
+CLIENT_SAMPLE_RATE = 1.0
+SERVER_SAMPLE_RATE = 1.0
 
 
-processed_profiles_producer = SingletonProducer(
-    lambda: _get_profiles_producer_from_topic(Topic.PROCESSED_PROFILES),
-    max_futures=settings.SENTRY_PROCESSED_PROFILES_FUTURES_MAX_LIMIT,
+def _get_profiles_producer_from_topic(
+    topic: Topic, name: str = "sentry.profiles.task"
+) -> KafkaProducer:
+    return get_arroyo_producer(
+        name=name,
+        topic=topic,
+        exclude_config_keys=["compression.type", "message.max.bytes"],
+    )
+
+
+def _get_producer_name(name: str) -> str:
+    return f"sentry.profiles.{name}.producer"
+
+
+processed_profiles_name = _get_producer_name("processed")
+processed_profiles_producer = get_future_tracking_producer(
+    processed_profiles_name,
+    lambda: _get_profiles_producer_from_topic(Topic.PROCESSED_PROFILES, processed_profiles_name),
 )
 
-profile_functions_producer = SingletonProducer(
-    lambda: _get_profiles_producer_from_topic(Topic.PROFILES_CALL_TREE),
-    max_futures=settings.SENTRY_PROFILE_FUNCTIONS_FUTURES_MAX_LIMIT,
+profile_functions_name = _get_producer_name("functions")
+profile_functions_producer = get_future_tracking_producer(
+    profile_functions_name,
+    lambda: _get_profiles_producer_from_topic(Topic.PROFILES_CALL_TREE, profile_functions_name),
 )
 
-profile_chunks_producer = SingletonProducer(
-    lambda: _get_profiles_producer_from_topic(Topic.PROFILE_CHUNKS),
-    max_futures=settings.SENTRY_PROFILE_CHUNKS_FUTURES_MAX_LIMIT,
+profile_chunks_name = _get_producer_name("chunks")
+profile_chunks_producer = get_future_tracking_producer(
+    profile_chunks_name,
+    lambda: _get_profiles_producer_from_topic(Topic.PROFILE_CHUNKS, profile_chunks_name),
+)
+
+profile_occurrences_name = _get_producer_name("occurrences")
+profile_occurrences_producer = get_future_tracking_producer(
+    profile_occurrences_name,
+    lambda: _get_profiles_producer_from_topic(Topic.INGEST_OCCURRENCES, profile_occurrences_name),
+)
+
+profile_eap_name = _get_producer_name("eap")
+eap_producer = get_future_tracking_producer(
+    profile_eap_name,
+    lambda: _get_profiles_producer_from_topic(Topic.SNUBA_ITEMS, profile_eap_name),
 )
 
 logger = logging.getLogger(__name__)
 
 
-def decode_payload(encoded: str) -> dict[str, Any]:
-    try:
-        res = msgpack.unpackb(zlib.decompress(b64decode(encoded.encode("utf-8"))), use_list=False)
-        metrics.incr("profiling.profile_metrics.decompress", tags={"status": "ok"})
-        return res
-    except Exception as e:
-        logger.exception("Failed to decompress compressed profile", extra={"error": e})
-        metrics.incr("profiling.profile_metrics.decompress", tags={"status": "err"})
-        raise
+def _process_profile_from_kafka(message_bytes: bytes, headers: dict[str, str]) -> None:
+    if _should_drop(headers):
+        return
 
+    sampled = _is_sampled(headers)
 
-def encode_payload(message: dict[str, Any]) -> str:
-    return b64encode(
-        zlib.compress(
-            msgpack.packb(message),
-            level=1,
-        )
-    ).decode("utf-8")
+    if not sampled and not options.get("profiling.profile_metrics.unsampled_profiles.enabled"):
+        return
+
+    process_profile_task(payload=message_bytes, sampled=sampled)
 
 
 @instrumented_task(
-    name="sentry.profiles.task.process_profile",
-    retry_backoff=True,
-    retry_backoff_max=20,
-    retry_jitter=True,
-    default_retry_delay=5,  # retries after 5s
-    max_retries=2,
-    acks_late=True,
-    task_time_limit=60,
-    task_acks_on_failure_or_timeout=False,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=ingest_profiling_tasks,
-        processing_deadline_duration=60,
-        retry=Retry(
-            times=2,
-            delay=5,
-        ),
-    ),
+    name="sentry.profiles.task.process_profile_from_kafka",
+    namespace=ingest_profiling_passthrough_tasks,
+    processing_deadline_duration=80,
+    retry=Retry(times=2, delay=5),
+    compression_type=CompressionType.ZSTD,
+    silo_mode=SiloMode.CELL,
+    pass_headers=True,
 )
+def process_profile_from_kafka(
+    message_bytes: bytes,
+    headers: dict[str, str],
+) -> None:
+    """Process a profile from raw Kafka message bytes.
+
+    This task is directly spawned from taskbroker in "raw mode". You won't find
+    any application code that calls apply_async or delay directly on it,
+    instead taskbroker itself is configured to consume a topic (in infra
+    templates) and spawns tasks for each message.
+
+    As such, the task signature, name and namespace cannot be changed without
+    coordination.
+
+    This is a duplicate of `process_profile_from_kafka_raw`, registered under
+    the `ingest.profiling.passthrough` namespace instead of
+    `ingest.profiling.raw` (STREAM-1191). Delete this task once infra no
+    longer routes anything to `ingest.profiling.passthrough`.
+    """
+    _process_profile_from_kafka(message_bytes, headers)
+
+
+@instrumented_task(
+    name="sentry.profiles.task.process_profile_from_kafka_raw",
+    namespace=ingest_profiling_raw_tasks,
+    retry=Retry(times=2, delay=5),
+    silo_mode=SiloMode.CELL,
+    pass_headers=True,
+)
+def process_profile_from_kafka_raw(
+    message_bytes: bytes,
+    headers: dict[str, str],
+) -> None:
+    """Process a profile from raw Kafka message bytes.
+
+    This task is directly spawned from taskbroker in "raw mode". You won't find
+    any application code that calls apply_async or delay directly on it,
+    instead taskbroker itself is configured to consume a topic (in infra
+    templates) and spawns tasks for each message.
+
+    As such, the task signature, name and namespace cannot be changed without
+    coordination.
+
+    This is a duplicate of `process_profile_from_kafka`, registered under the
+    `ingest.profiling.raw` namespace instead of `ingest.profiling.passthrough`
+    (STREAM-1191).
+    """
+    _process_profile_from_kafka(message_bytes, headers)
+
+
+def _is_sampled(headers: dict[str, str]) -> bool:
+    return headers.get("sampled", "true") == "true"
+
+
+def _should_drop(headers: dict[str, str]) -> bool:
+    context = {"project_id": headers["project_id"]} if "project_id" in headers else {}
+
+    return bool(context) and killswitch_matches_context(
+        "profiling.killswitch.ingest-profiles", context
+    )
+
+
 def process_profile_task(
     profile: Profile | None = None,
-    payload: str | None = None,
+    payload: bytes | str | None = None,
     sampled: bool = True,
     **kwargs: Any,
 ) -> None:
     if not sampled and not options.get("profiling.profile_metrics.unsampled_profiles.enabled"):
         return
 
+    # Attachments (e.g. Perfetto traces) are only present on profile-chunk
+    # messages produced by Relay, alongside the profile payload.
+    attachments: Sequence[Mapping[str, Any]] = ()
+
     if payload:
-        message_dict = decode_payload(payload)
+        # Handle both bytes (new) and base64 string (legacy) payloads
+        if isinstance(payload, str):
+            payload = b64decode(payload.encode("utf-8"))
+        message_dict = msgpack.unpackb(payload, use_list=False)
 
         profile = json.loads(message_dict["payload"], use_rapid_json=True)
 
@@ -157,6 +259,8 @@ def process_profile_task(
             }
         )
 
+        attachments = message_dict.get("attachments") or ()
+
     assert profile is not None
 
     if not sampled:
@@ -168,12 +272,16 @@ def process_profile_task(
     organization = Organization.objects.get_from_cache(id=profile["organization_id"])
 
     sentry_sdk.set_tag("organization", organization.id)
+    sentry_sdk.set_attribute("organization", organization.id)
     sentry_sdk.set_tag("organization.slug", organization.slug)
+    sentry_sdk.set_attribute("organization.slug", organization.slug)
 
     project = Project.objects.get_from_cache(id=profile["project_id"])
 
     sentry_sdk.set_tag("project", project.id)
+    sentry_sdk.set_attribute("project", project.id)
     sentry_sdk.set_tag("project.slug", project.slug)
+    sentry_sdk.set_attribute("project.slug", project.slug)
 
     if sampled and _is_deprecated(profile, project, organization):
         return
@@ -195,19 +303,29 @@ def process_profile_task(
         "profile",
         profile_context,
     )
+    sentry_sdk.set_attribute("profile.organization_id", profile_context["organization_id"])
+    sentry_sdk.set_attribute("profile.project_id", profile_context["project_id"])
 
     sentry_sdk.set_tag("platform", profile["platform"])
+    sentry_sdk.set_attribute("platform", profile["platform"])
 
-    if "version" in profile:
-        version = profile["version"]
+    version = profile.get("version")
+
+    if is_android_trace_format(profile):
+        # Android trace format is sent both as legacy transaction profiles and as
+        # continuous-profiling chunks, the latter identified by a profiler_id.
+        fmt = "android_chunk" if "profiler_id" in profile else "legacy"
+        sentry_sdk.set_tag("format", fmt)
+        sentry_sdk.set_attribute("format", fmt)
+    elif version is not None:
         sentry_sdk.set_tag("format", f"sample_v{version}")
+        sentry_sdk.set_attribute("format", f"sample_v{version}")
         set_span_attribute("profile.samples", len(profile["profile"]["samples"]))
         set_span_attribute("profile.stacks", len(profile["profile"]["stacks"]))
         set_span_attribute("profile.frames", len(profile["profile"]["frames"]))
-    elif "profiler_id" in profile and profile["platform"] == "android":
-        sentry_sdk.set_tag("format", "android_chunk")
     else:
         sentry_sdk.set_tag("format", "legacy")
+        sentry_sdk.set_attribute("format", "legacy")
 
     if not _symbolicate_profile(profile, project):
         return
@@ -228,29 +346,25 @@ def process_profile_task(
     # only for those platforms that didn't go through symbolication
     _set_frames_platform(profile)
 
-    if "version" in profile:
+    if version is not None and not is_android_trace_format(profile):
         set_span_attribute("profile.samples.processed", len(profile["profile"]["samples"]))
         set_span_attribute("profile.stacks.processed", len(profile["profile"]["stacks"]))
         set_span_attribute("profile.frames.processed", len(profile["profile"]["frames"]))
 
-    if options.get("profiling.stack_trace_rules.enabled"):
-        try:
-            with metrics.timer("process_profile.apply_stack_trace_rules"):
-                rules_config = project.get_option("sentry:grouping_enhancements")
-                if rules_config is not None and rules_config != "":
-                    apply_stack_trace_rules_to_profile(profile, rules_config)
-        except Exception as e:
-            sentry_sdk.capture_exception(e)
+    try:
+        with metrics.timer("process_profile.apply_stack_trace_rules"):
+            rules_config = project.get_option("sentry:grouping_enhancements")
+            if rules_config is not None and rules_config != "":
+                apply_stack_trace_rules_to_profile(profile, rules_config)
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
 
-    if (
-        features.has("projects:continuous-profiling-vroomrs-processing", project)
-        and "profiler_id" in profile
-    ):
-        if not _process_vroomrs_profile(profile, project):
-            return
-    else:
-        if not _push_profile_to_vroom(profile, project):
-            return
+    if not _process_vroomrs_profile(profile, project):
+        return
+
+    if attachments and "profiler_id" in profile and "chunk_id" in profile:
+        if features.has("organizations:continuous-profiling-perfetto", organization):
+            _save_chunk_attachments(profile, project, attachments)
 
     if sampled:
         with metrics.timer("process_profile.track_outcome.accepted"):
@@ -287,10 +401,45 @@ def process_profile_task(
             )
 
 
-def _is_deprecated(profile: Profile, project: Project, organization: Organization) -> bool:
-    if not features.has("organizations:profiling-sdks", organization):
-        return False
+def _save_chunk_attachments(
+    profile: Profile, project: Project, attachments: Sequence[Mapping[str, Any]]
+) -> None:
+    """
+    Persist references to profile-chunk attachments that Relay stored in
+    Objectstore. The blob itself lives in Objectstore (keyed by ``stored_id``)
+    and expires via its TTL; we only record the metadata so it can be listed
+    and downloaded. ``date_expires`` mirrors the chunk's retention so the row is
+    pruned on the same schedule.
+    """
+    try:
+        retention_days = profile.get("retention_days") or default_attachment_retention()
+        date_expires = datetime.now(timezone.utc) + timedelta(days=retention_days)
+        ProfileChunkAttachment.objects.bulk_create(
+            [
+                ProfileChunkAttachment(
+                    project_id=project.id,
+                    profiler_id=profile["profiler_id"],
+                    chunk_id=profile["chunk_id"],
+                    name=attachment["name"],
+                    content_type=attachment.get("content_type"),
+                    stored_id=attachment["stored_id"],
+                    date_expires=date_expires,
+                )
+                for attachment in attachments
+            ],
+            ignore_conflicts=True,
+        )
+        metrics.incr(
+            "process_profile.chunk_attachments.tracked",
+            len(attachments),
+            tags={"platform": profile["platform"]},
+            sample_rate=1.0,
+        )
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
 
+
+def _is_deprecated(profile: Profile, project: Project, organization: Organization) -> bool:
     try:
         event_type = determine_profile_type(profile)
     except UnknownProfileTypeException:
@@ -308,6 +457,9 @@ def _is_deprecated(profile: Profile, project: Project, organization: Organizatio
     try:
         sdk_name, sdk_version = determine_client_sdk(profile, event_type)
     except UnknownClientSDKException:
+        # unknown SDKs happen because older sdks didn't send the sdk version
+        # in the payload, so if we cant determine the client sdk, we assume
+        # it's one of the deprecated versions
         _track_outcome(
             profile=profile,
             project=project,
@@ -329,18 +481,29 @@ def _is_deprecated(profile: Profile, project: Project, organization: Organizatio
         # update the version so we can skip the update from this event
         return False
 
-    if not is_sdk_deprecated(event_type, sdk_name, sdk_version):
-        return False
+    if features.has("organizations:profiling-reject-sdks", organization) and is_sdk_rejected(
+        organization, event_type, sdk_name, sdk_version
+    ):
+        _track_outcome(
+            profile=profile,
+            project=project,
+            outcome=Outcome.FILTERED,
+            categories=[category],
+            reason="rejected sdk",
+        )
+        return True
 
-    _track_outcome(
-        profile=profile,
-        project=project,
-        outcome=Outcome.FILTERED,
-        categories=[category],
-        reason="deprecated sdk",
-    )
+    if is_sdk_deprecated(event_type, sdk_name, sdk_version):
+        _track_outcome(
+            profile=profile,
+            project=project,
+            outcome=Outcome.FILTERED,
+            categories=[category],
+            reason="deprecated sdk",
+        )
+        return True
 
-    return features.has("organizations:profiling-deprecate-sdks", organization)
+    return False
 
 
 JS_PLATFORMS = ["javascript", "node"]
@@ -381,7 +544,7 @@ def _symbolicate_profile(profile: Profile, project: Project) -> bool:
     if not _should_symbolicate(profile):
         return True
 
-    with sentry_sdk.start_span(op="task.profiling.symbolicate"):
+    with start_span(op="task.profiling.symbolicate", name="task.profiling.symbolicate"):
         try:
             if "debug_meta" not in profile or not profile["debug_meta"]:
                 metrics.incr(
@@ -414,6 +577,9 @@ def _symbolicate_profile(profile: Profile, project: Project) -> bool:
                     profile=profile,
                     modules=raw_modules,
                     stacktraces=raw_stacktraces,
+                    # Frames in a profile aren't inherently ordered,
+                    # but returned inlinees should be ordered callee first.
+                    frame_order=FrameOrder.callee_first,
                     platform=platform,
                 )
 
@@ -444,7 +610,7 @@ def _deobfuscate_profile(profile: Profile, project: Project) -> bool:
     if not _should_deobfuscate(profile):
         return True
 
-    with sentry_sdk.start_span(op="task.profiling.deobfuscate"):
+    with start_span(op="task.profiling.deobfuscate", name="task.profiling.deobfuscate"):
         try:
             if "profile" not in profile or not profile["profile"]:
                 metrics.incr(
@@ -468,7 +634,7 @@ def _normalize_profile(profile: Profile, organization: Organization, project: Pr
     if profile.get("normalized", False):
         return True
 
-    with sentry_sdk.start_span(op="task.profiling.normalize"):
+    with start_span(op="task.profiling.normalize", name="task.profiling.normalize"):
         try:
             _normalize(profile=profile, organization=organization)
             profile["normalized"] = True
@@ -481,11 +647,19 @@ def _normalize_profile(profile: Profile, organization: Organization, project: Pr
 
 @metrics.wraps("process_profile.normalize")
 def _normalize(profile: Profile, organization: Organization) -> None:
-    profile["retention_days"] = quotas.backend.get_event_retention(organization=organization) or 90
+    profile["retention_days"] = quotas.backend.get_event_retention(
+        organization=organization,
+        category=_get_duration_category(profile),
+    )
     platform = profile["platform"]
     version = profile.get("version")
 
-    if platform not in {"cocoa", "android"} or version == "2":
+    # Skip unsupported platforms and sample v2 profiles, which don't carry device
+    # classification. The version can't be trusted on android though, so only skip
+    # genuine sample v2 profiles there and not the (faulty-version) legacy format.
+    if platform not in {"cocoa", "android"} or (
+        version == "2" and not is_android_trace_format(profile)
+    ):
         return
 
     classification = profile.get("transaction_tags", {}).get("device.class", None)
@@ -504,7 +678,10 @@ def _normalize(profile: Profile, organization: Organization) -> None:
 def _prepare_frames_from_profile(
     profile: Profile, platform: str | None
 ) -> tuple[list[Any], list[Any], set[int]]:
-    with sentry_sdk.start_span(op="task.profiling.symbolicate.prepare_frames"):
+    with start_span(
+        op="task.profiling.symbolicate.prepare_frames",
+        name="task.profiling.symbolicate.prepare_frames",
+    ):
         modules = profile["debug_meta"]["images"]
         frames: list[Any] = []
         frames_sent: set[int] = set()
@@ -586,6 +763,7 @@ def symbolicate(
     profile: Profile,
     modules: list[Any],
     stacktraces: list[Any],
+    frame_order: FrameOrder,
     platform: str,
 ) -> Any:
     if platform in SHOULD_SYMBOLICATE_JS:
@@ -595,6 +773,7 @@ def symbolicate(
             modules=modules,
             release=profile.get("release"),
             dist=profile.get("dist"),
+            frame_order=frame_order,
             apply_source_context=False,
         )
     elif platform == "android":
@@ -604,6 +783,7 @@ def symbolicate(
             stacktraces=stacktraces,
             modules=modules,
             release_package=profile.get("transaction_metadata", {}).get("app.identifier"),
+            frame_order=frame_order,
             apply_source_context=False,
             classes=[],
         )
@@ -611,6 +791,7 @@ def symbolicate(
         platform=platform,
         stacktraces=stacktraces,
         modules=modules,
+        frame_order=frame_order,
         apply_source_context=False,
     )
 
@@ -625,6 +806,7 @@ def run_symbolicate(
     profile: Profile,
     modules: list[Any],
     stacktraces: list[Any],
+    frame_order: FrameOrder,
     platform: str,
 ) -> tuple[list[Any], list[Any], bool]:
     symbolication_start_time = time()
@@ -635,29 +817,33 @@ def run_symbolicate(
             raise SymbolicationTimeout
 
     if platform in SHOULD_SYMBOLICATE_JS:
-        symbolicator_platform = SymbolicatorPlatform.js
+        symbolicator_function = SymbolicatorFunction.js
     else:
-        symbolicator_platform = SymbolicatorPlatform.native
+        symbolicator_function = SymbolicatorFunction.native
     symbolicator = Symbolicator(
-        task_kind=SymbolicatorTaskKind(platform=symbolicator_platform),
+        task_kind=SymbolicatorTaskKind(function=symbolicator_function),
         on_request=on_symbolicator_request,
         project=project,
         event_id=get_event_id(profile),
     )
 
     try:
-        with sentry_sdk.start_span(op="task.profiling.symbolicate.process_payload"):
+        with start_span(
+            op="task.profiling.symbolicate.process_payload",
+            name="task.profiling.symbolicate.process_payload",
+        ):
             response = symbolicate(
                 symbolicator=symbolicator,
                 profile=profile,
                 stacktraces=stacktraces,
                 modules=modules,
+                frame_order=frame_order,
                 platform=platform,
             )
 
             if not response:
                 profile["symbolicator_error"] = {
-                    "type": EventError.NATIVE_INTERNAL_FAILURE,
+                    "type": EventErrorType.NATIVE_INTERNAL_FAILURE,
                 }
                 return modules, stacktraces, False
             elif response["status"] == "completed":
@@ -668,7 +854,7 @@ def run_symbolicate(
                 )
             elif response["status"] == "failed":
                 profile["symbolicator_error"] = {
-                    "type": EventError.NATIVE_SYMBOLICATOR_FAILED,
+                    "type": EventErrorType.NATIVE_SYMBOLICATOR_FAILED,
                     "status": response.get("status"),
                     "message": response.get("message"),
                 }
@@ -676,7 +862,7 @@ def run_symbolicate(
             else:
                 profile["symbolicator_error"] = {
                     "status": response.get("status"),
-                    "type": EventError.NATIVE_INTERNAL_FAILURE,
+                    "type": EventErrorType.NATIVE_INTERNAL_FAILURE,
                 }
                 return modules, stacktraces, False
     except SymbolicationTimeout:
@@ -694,7 +880,10 @@ def _process_symbolicator_results(
     frames_sent: set[int],
     platform: str,
 ) -> None:
-    with sentry_sdk.start_span(op="task.profiling.symbolicate.process_results"):
+    with start_span(
+        op="task.profiling.symbolicate.process_results",
+        name="task.profiling.symbolicate.process_results",
+    ):
         # update images with status after symbolication
         profile["debug_meta"]["images"] = modules
 
@@ -906,14 +1095,17 @@ def _deobfuscate_using_symbolicator(project: Project, profile: Profile, debug_fi
             raise SymbolicationTimeout
 
     symbolicator = Symbolicator(
-        task_kind=SymbolicatorTaskKind(platform=SymbolicatorPlatform.jvm),
+        task_kind=SymbolicatorTaskKind(function=SymbolicatorFunction.jvm),
         on_request=on_symbolicator_request,
         project=project,
         event_id=get_event_id(profile),
     )
 
     try:
-        with sentry_sdk.start_span(op="task.profiling.deobfuscate.process_payload"):
+        with start_span(
+            op="task.profiling.deobfuscate.process_payload",
+            name="task.profiling.deobfuscate.process_payload",
+        ):
             response = symbolicate(
                 symbolicator=symbolicator,
                 profile=profile,
@@ -924,12 +1116,11 @@ def _deobfuscate_using_symbolicator(project: Project, profile: Profile, debug_fi
                     }
                 ],
                 stacktraces=[
-                    {
-                        "frames": convert_android_methods_to_jvm_frames(
-                            profile["profile"]["methods"]
-                        )
-                    },
+                    {"frames": convert_android_methods_to_jvm_frames(profile)},
                 ],
+                # Methods in a profile aren't inherently ordered, but the order of returned
+                # inlinees should be caller first.
+                frame_order=FrameOrder.caller_first,
                 platform=profile["platform"],
             )
             if response:
@@ -937,13 +1128,18 @@ def _deobfuscate_using_symbolicator(project: Project, profile: Profile, debug_fi
                 if response["status"] == "failed":
                     deobfuscation_context["status"] = response["status"]
                     deobfuscation_context["message"] = response["message"]
+                    sentry_sdk.set_attribute("profile_deobfuscation.status", response["status"])
+                    sentry_sdk.set_attribute("profile_deobfuscation.message", response["message"])
                 if "errors" in response:
                     deobfuscation_context["errors"] = response["errors"]
+                    sentry_sdk.set_attribute(
+                        "profile_deobfuscation.errors", json.dumps(response["errors"])
+                    )
                 sentry_sdk.set_context("profile deobfuscation", deobfuscation_context)
                 if "stacktraces" in response:
                     merge_jvm_frames_with_android_methods(
                         frames=response["stacktraces"][0]["frames"],
-                        methods=profile["profile"]["methods"],
+                        profile=profile,
                     )
                     return True
             else:
@@ -955,7 +1151,20 @@ def _deobfuscate_using_symbolicator(project: Project, profile: Profile, debug_fi
 
 
 def get_debug_file_id(profile: Profile) -> str | None:
-    debug_file_id = profile.get("build_id")
+    # Only the android trace formats (legacy transaction profiles and
+    # android-trace chunks) carry a top-level `build_id`. Sample v2 chunks
+    # reference their proguard mapping as a debug_meta image, like events do.
+    if is_android_trace_format(profile):
+        debug_file_id = profile.get("build_id")
+    else:
+        debug_file_id = next(
+            (
+                image.get("uuid")
+                for image in (profile.get("debug_meta") or {}).get("images") or ()
+                if image.get("type") == "proguard"
+            ),
+            None,
+        )
 
     if debug_file_id is None or debug_file_id == "":
         return None
@@ -969,22 +1178,27 @@ def get_debug_file_id(profile: Profile) -> str | None:
 @metrics.wraps("process_profile.deobfuscate")
 def _deobfuscate(profile: Profile, project: Project) -> None:
     debug_file_id = get_debug_file_id(profile)
+
+    # if no proguard mapping was provided, we still need to decode the
+    # signatures on the legacy android trace format; sample v2 frames don't
+    # carry signatures, so there's nothing to do there.
     if debug_file_id is None:
-        # we still need to decode signatures
-        for m in profile["profile"]["methods"]:
-            if m.get("signature"):
-                types = deobfuscate_signature(m["signature"])
-                m["signature"] = format_signature(types)
+        if is_android_trace_format(profile):
+            for m in profile["profile"]["methods"]:
+                if m.get("signature"):
+                    types = deobfuscate_signature(m["signature"])
+                    m["signature"] = format_signature(types)
         return
 
     try:
-        with sentry_sdk.start_span(op="deobfuscate_with_symbolicator"):
+        with start_span(op="deobfuscate_with_symbolicator", name="deobfuscate_with_symbolicator"):
             success = _deobfuscate_using_symbolicator(
                 project=project,
                 profile=profile,
                 debug_file_id=debug_file_id,
             )
             sentry_sdk.set_tag("deobfuscated_with_symbolicator_with_success", success)
+            sentry_sdk.set_attribute("deobfuscated_with_symbolicator_with_success", success)
             if success:
                 return
     except Exception as e:
@@ -997,16 +1211,6 @@ def get_event_id(profile: Profile) -> str:
     elif "profile_id" in profile:
         return profile["profile_id"]
     return profile["event_id"]
-
-
-def get_data_category(profile: Profile) -> DataCategory:
-    if profile.get("version") == "2":
-        return (
-            DataCategory.PROFILE_CHUNK_UI
-            if profile["platform"] in UI_PROFILE_PLATFORMS
-            else DataCategory.PROFILE_CHUNK
-        )
-    return DataCategory.PROFILE_INDEXED
 
 
 @metrics.wraps("process_profile.track_outcome")
@@ -1049,62 +1253,6 @@ def _track_failed_outcome(profile: Profile, project: Project, reason: str) -> No
     )
 
 
-@metrics.wraps("process_profile.insert_vroom_profile")
-def _insert_vroom_profile(profile: Profile) -> bool:
-    with sentry_sdk.start_span(op="task.profiling.insert_vroom"):
-        try:
-            path = "/chunk" if "profiler_id" in profile else "/profile"
-            response = get_from_profiling_service(
-                method="POST",
-                path=path,
-                json_data=profile,
-                metric=(
-                    "profiling.profile.payload.size",
-                    {
-                        "type": "chunk" if "profiler_id" in profile else "profile",
-                        "platform": profile["platform"],
-                    },
-                ),
-            )
-
-            sentry_sdk.set_tag("vroom.response.status_code", str(response.status))
-
-            reason = "bad status"
-
-            if response.status == 204:
-                return True
-            elif response.status == 429:
-                reason = "gcs timeout"
-            elif response.status == 412:
-                reason = "duplicate profile"
-
-            metrics.incr(
-                "process_profile.insert_vroom_profile.error",
-                tags={
-                    "platform": profile["platform"],
-                    "reason": reason,
-                    "status_code": response.status,
-                },
-                sample_rate=1.0,
-            )
-            return False
-        except Exception as e:
-            sentry_sdk.capture_exception(e)
-            metrics.incr(
-                "process_profile.insert_vroom_profile.error",
-                tags={"platform": profile["platform"], "reason": "encountered error"},
-                sample_rate=1.0,
-            )
-            return False
-
-
-def _push_profile_to_vroom(profile: Profile, project: Project) -> bool:
-    if _insert_vroom_profile(profile=profile):
-        return True
-    _track_failed_outcome(profile, project, "profiling_failed_vroom_insertion")
-    return False
-
-
 def prepare_android_js_profile(profile: Profile) -> None:
     profile["js_profile"] = {"profile": profile["js_profile"]}
     p = profile["js_profile"]
@@ -1126,11 +1274,6 @@ def clean_android_js_profile(profile: Profile) -> None:
     del p["dist"]
 
 
-class _ProjectKeyKwargs(TypedDict):
-    project_id: int
-    use_case: str
-
-
 @metrics.wraps("process_profile.track_outcome")
 def _track_duration_outcome(
     profile: Profile,
@@ -1145,26 +1288,25 @@ def _track_duration_outcome(
         key_id=None,
         outcome=Outcome.ACCEPTED,
         timestamp=datetime.now(timezone.utc),
-        category=(
-            DataCategory.PROFILE_DURATION_UI
-            if profile["platform"] in UI_PROFILE_PLATFORMS
-            else DataCategory.PROFILE_DURATION
-        ),
+        category=_get_duration_category(profile),
         quantity=duration_ms,
     )
 
 
+def _get_duration_category(profile: Profile) -> DataCategory:
+    if profile["platform"] in UI_PROFILE_PLATFORMS:
+        return DataCategory.PROFILE_DURATION_UI
+    return DataCategory.PROFILE_DURATION
+
+
 def _calculate_profile_duration_ms(profile: Profile) -> int:
+    if is_android_trace_format(profile):
+        return _calculate_duration_for_android_format(profile)
     version = profile.get("version")
-    if version:
-        if version == "1":
-            return _calculate_duration_for_sample_format_v1(profile)
-        elif version == "2":
-            return _calculate_duration_for_sample_format_v2(profile)
-    else:
-        platform = profile["platform"]
-        if platform == "android":
-            return _calculate_duration_for_android_format(profile)
+    if version == "1":
+        return _calculate_duration_for_sample_format_v1(profile)
+    elif version == "2":
+        return _calculate_duration_for_sample_format_v2(profile)
     return 0
 
 
@@ -1204,6 +1346,9 @@ def _calculate_duration_for_sample_format_v2(profile: Profile) -> int:
                 "duration_ms": duration_ms,
             },
         )
+        sentry_sdk.set_attribute("profile_duration_calculation.min_timestamp", min_timestamp)
+        sentry_sdk.set_attribute("profile_duration_calculation.max_timestamp", max_timestamp)
+        sentry_sdk.set_attribute("profile_duration_calculation.duration_ms", duration_ms)
         sentry_sdk.capture_message("Calculated duration is above the limit")
         return MAX_DURATION_SAMPLE_V2
     return duration_ms
@@ -1216,7 +1361,9 @@ def _calculate_duration_for_android_format(profile: Profile) -> int:
 def _set_frames_platform(profile: Profile) -> None:
     platform = profile["platform"]
     frames = (
-        profile["profile"]["methods"] if platform == "android" else profile["profile"]["frames"]
+        profile["profile"]["methods"]
+        if is_android_trace_format(profile)
+        else profile["profile"]["frames"]
     )
     for f in frames:
         if "platform" not in f:
@@ -1232,18 +1379,18 @@ class UnknownClientSDKException(Exception):
 
 
 def determine_profile_type(profile: Profile) -> EventType:
-    if "version" in profile:
-        version = profile["version"]
-        if version == "1":
-            return EventType.PROFILE
-        elif version == "2":
-            return EventType.PROFILE_CHUNK
-    elif profile["platform"] == "android":
+    if is_android_trace_format(profile):
         if "profiler_id" in profile:
             return EventType.PROFILE_CHUNK
         else:
             # This is the legacy android format
             return EventType.PROFILE
+
+    version = profile.get("version")
+    if version == "1":
+        return EventType.PROFILE
+    elif version == "2":
+        return EventType.PROFILE_CHUNK
     raise UnknownProfileTypeException
 
 
@@ -1304,33 +1451,187 @@ def is_sdk_deprecated(event_type: EventType, sdk_name: str, sdk_version: str) ->
     return True
 
 
+def is_sdk_rejected(
+    organization: Organization, event_type: EventType, sdk_name: str, sdk_version: str
+) -> bool:
+    rejected_version = get_rejected_sdk_version(event_type.value, sdk_name)
+
+    # no rejected sdk version was specified
+    if rejected_version is None:
+        return False
+
+    try:
+        version = parse_version(sdk_version)
+    except InvalidVersion:
+        return False
+
+    # satisfies the rejected sdk version
+    if version >= rejected_version:
+        return False
+
+    parts = sdk_name.split(".", 2)
+    if len(parts) >= 2:
+        normalized_sdk_name = ".".join(parts[:2])
+        metrics.incr(
+            "process_profile.sdk.rejected",
+            tags={"sdk_name": normalized_sdk_name},
+            sample_rate=1.0,
+        )
+
+    return True
+
+
 @metrics.wraps("process_profile.process_vroomrs_profile")
 def _process_vroomrs_profile(profile: Profile, project: Project) -> bool:
-    if "profiler_id" in profile and _process_vroomrs_chunk_profile(profile=profile):
-        return True
+    if "profiler_id" in profile:
+        if _process_vroomrs_chunk_profile(profile, project):
+            return True
+    elif "event_id" in profile or "profile_id" in profile:
+        if _process_vroomrs_transaction_profile(profile, project):
+            return True
     _track_failed_outcome(profile, project, "profiling_failed_vroomrs_processing")
     return False
 
 
-def _process_vroomrs_chunk_profile(profile: Profile) -> bool:
-    with sentry_sdk.start_span(op="task.profiling.process_vroomrs_chunk_profile"):
+def _process_vroomrs_transaction_profile(profile: Profile, project: Project) -> bool:
+    with start_span(
+        op="task.profiling.process_vroomrs_transaction_profile",
+        name="task.profiling.process_vroomrs_transaction_profile",
+    ):
         try:
             # todo (improvement): check the feasibility of passing the profile
             # dict directly to the PyO3 module to avoid json serialization/deserialization
-            with sentry_sdk.start_span(op="json.dumps"):
+            with start_span(op="json.dumps", name="json.dumps"):
                 json_profile = json.dumps(profile)
-            with sentry_sdk.start_span(op="json.unmarshal"):
-                chunk = vroomrs.profile_chunk_from_json_str(json_profile, profile["platform"])
+                metrics.distribution(
+                    "profiling.profile.payload.size",
+                    len(json_profile),
+                    tags={"type": "profile", "platform": profile["platform"]},
+                )
+            with start_span(op="json.unmarshal", name="json.unmarshal"):
+                prof = vroomrs.profile_from_json_str(json_profile, profile["platform"])
+            prof.normalize()
+            if not prof.is_sampled():
+                # if we're dealing with an unsampled profile
+                # we'll assign the special "000....00" profile ID
+                # so that we can handle it accordingly either in
+                # either of snuba/sentry/front-end
+                prof.set_profile_id(UNSAMPLED_PROFILE_ID)
+            if prof.is_sampled():
+                with start_span(op="gcs.write", name="compress and write"):
+                    storage = get_profiles_storage()
+                    with measure_storage_operation(
+                        "put", "profiling", len(json_profile)
+                    ) as metric_emitter:
+                        compressed_profile = prof.compress()
+                        metric_emitter.record_compressed_size(len(compressed_profile), "lz4")
+                        storage.save(prof.storage_path(), io.BytesIO(compressed_profile))
+                # we only run find_occurrences for sampled profiles, unsampled profiles
+                # are skipped
+                with start_span(op="processing", name="find occurrences"):
+                    occurrences = prof.find_occurrences()
+                    occurrences.filter_none_type_issues()
+                    for occurrence in occurrences.occurrences:
+                        payload = KafkaPayload(None, occurrence.to_json_str().encode("utf-8"), [])
+                        topic = ArroyoTopic(
+                            get_topic_definition(Topic.INGEST_OCCURRENCES)["real_topic_name"]
+                        )
+                        profile_occurrences_producer.produce(topic, payload)
+            # function metrics are extracted for both sampled and unsampled profiles
+            with start_span(op="processing", name="extract functions metrics"):
+                functions = prof.extract_functions_metrics(
+                    min_depth=1, filter_system_frames=True, max_unique_functions=100
+                )
+                if functions is not None and len(functions) > 0:
+                    payload = build_profile_functions_kafka_message(prof, functions)
+                    topic = ArroyoTopic(
+                        get_topic_definition(Topic.PROFILES_CALL_TREE)["real_topic_name"]
+                    )
+                    profile_functions_producer.produce(topic, payload)
+            if features.has("projects:profile-functions-metrics-eap-ingestion", project):
+                with start_span(op="processing", name="extract functions metrics (eap)"):
+                    eap_functions = prof.extract_functions_metrics(
+                        min_depth=1,
+                        filter_system_frames=True,
+                        max_unique_functions=100,
+                        generate_stack_fingerprints=True,
+                    )
+                    if eap_functions is not None and len(eap_functions) > 0:
+                        topic = ArroyoTopic(
+                            get_topic_definition(Topic.SNUBA_ITEMS)["real_topic_name"]
+                        )
+                        tot = 0
+                        for payload in build_profile_functions_eap_trace_items(prof, eap_functions):
+                            eap_producer.produce(topic, payload)
+                            tot += 1
+                        metrics.incr(
+                            "process_profile.eap_functions_metrics.ingested.count",
+                            tot,
+                            tags={"type": "profile", "platform": profile["platform"]},
+                            sample_rate=1.0,
+                        )
+            if prof.is_sampled():
+                # Send profile metadata to Kafka
+                with start_span(op="processing", name="send profile kafka message"):
+                    payload = build_profile_kafka_message(prof)
+                    topic = ArroyoTopic(
+                        get_topic_definition(Topic.PROCESSED_PROFILES)["real_topic_name"]
+                    )
+                    processed_profiles_producer.produce(topic, payload)
+            return True
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            metrics.incr(
+                "process_profile.process_vroomrs_profile.error",
+                tags={"platform": profile["platform"], "reason": "encountered error"},
+                sample_rate=1.0,
+            )
+            return False
+
+
+def _process_vroomrs_chunk_profile(profile: Profile, project: Project) -> bool:
+    with start_span(
+        op="task.profiling.process_vroomrs_chunk_profile",
+        name="task.profiling.process_vroomrs_chunk_profile",
+    ):
+        try:
+            # todo (improvement): check the feasibility of passing the profile
+            # dict directly to the PyO3 module to avoid json serialization/deserialization
+            with start_span(op="json.dumps", name="json.dumps"):
+                json_profile = json.dumps(profile)
+                metrics.distribution(
+                    "profiling.profile.payload.size",
+                    len(json_profile),
+                    tags={"type": "chunk", "platform": profile["platform"]},
+                )
+            with start_span(op="json.unmarshal", name="json.unmarshal"):
+                # Detect the android trace format before trusting `version`,
+                # analogous to how `symbolicate()` special-cases android: a
+                # faulty version can't be relied on, so a trace profile is
+                # always deserialized as "2.android-trace".
+                version = profile.get("version")
+                if is_android_trace_format(profile):
+                    chunk = vroomrs.profile_chunk_from_json_str_and_version(
+                        json_profile, PROFILE_FORMAT_V2_ANDROID_TRACE
+                    )
+                elif version is not None:
+                    chunk = vroomrs.profile_chunk_from_json_str_and_version(json_profile, version)
+                else:
+                    chunk = vroomrs.profile_chunk_from_json_str(json_profile, profile["platform"])
             chunk.normalize()
-            with sentry_sdk.start_span(op="gcs.write", name="compress and write"):
+            with start_span(op="gcs.write", name="compress and write"):
                 storage = get_profiles_storage()
-                compressed_chunk = chunk.compress()
-                storage.save(chunk.storage_path(), io.BytesIO(compressed_chunk))
-            with sentry_sdk.start_span(op="processing", name="send chunk to kafka"):
+                with measure_storage_operation(
+                    "put", "profiling", len(json_profile)
+                ) as metric_emitter:
+                    compressed_chunk = chunk.compress()
+                    metric_emitter.record_compressed_size(len(compressed_chunk), "lz4")
+                    storage.save(chunk.storage_path(), io.BytesIO(compressed_chunk))
+            with start_span(op="processing", name="send chunk to kafka"):
                 payload = build_chunk_kafka_message(chunk)
                 topic = ArroyoTopic(get_topic_definition(Topic.PROFILE_CHUNKS)["real_topic_name"])
                 profile_chunks_producer.produce(topic, payload)
-            with sentry_sdk.start_span(op="processing", name="extract functions metrics"):
+            with start_span(op="processing", name="extract functions metrics"):
                 functions = chunk.extract_functions_metrics(
                     min_depth=1, filter_system_frames=True, max_unique_functions=100
                 )
@@ -1340,6 +1641,28 @@ def _process_vroomrs_chunk_profile(profile: Profile) -> bool:
                         get_topic_definition(Topic.PROFILES_CALL_TREE)["real_topic_name"]
                     )
                     profile_functions_producer.produce(topic, payload)
+            if features.has("projects:profile-functions-metrics-eap-ingestion", project):
+                with start_span(op="processing", name="extract functions metrics (eap)"):
+                    eap_functions = chunk.extract_functions_metrics(
+                        min_depth=1,
+                        filter_system_frames=True,
+                        max_unique_functions=100,
+                        generate_stack_fingerprints=True,
+                    )
+                    if eap_functions is not None and len(eap_functions) > 0:
+                        topic = ArroyoTopic(
+                            get_topic_definition(Topic.SNUBA_ITEMS)["real_topic_name"]
+                        )
+                        tot = 0
+                        for payload in build_chunk_functions_eap_trace_items(chunk, eap_functions):
+                            eap_producer.produce(topic, payload)
+                            tot += 1
+                        metrics.incr(
+                            "process_profile.eap_functions_metrics.ingested.count",
+                            tot,
+                            tags={"type": "chunk", "platform": profile["platform"]},
+                            sample_rate=1.0,
+                        )
             return True
         except Exception as e:
             sentry_sdk.capture_exception(e)
@@ -1400,3 +1723,232 @@ def build_chunk_functions_kafka_message(
         "materialization_version": 1,
     }
     return KafkaPayload(None, json.dumps(data).encode("utf-8"), [])
+
+
+def build_profile_functions_kafka_message(
+    profile: vroomrs.Profile, functions: list[vroomrs.CallTreeFunction]
+) -> KafkaPayload:
+    data = {
+        "environment": profile.get_environment() or "",
+        "functions": [
+            {
+                "fingerprint": f.get_fingerprint(),
+                "function": f.get_function(),
+                "package": f.get_package(),
+                "in_app": f.get_in_app(),
+                "self_times_ns": f.get_self_times_ns(),
+                "thread_id": f.get_thread_id(),
+            }
+            for f in functions
+        ],
+        "profile_id": profile.get_profile_id(),
+        "platform": profile.get_platform(),
+        "project_id": profile.get_project_id(),
+        "received": int(profile.get_received()),
+        "release": profile.get_release() or "",
+        "retention_days": profile.get_retention_days(),
+        "timestamp": int(profile.get_timestamp()),
+        "transaction_name": profile.get_transaction().name,
+        "materialization_version": 1,
+    }
+    return KafkaPayload(None, json.dumps(data).encode("utf-8"), [])
+
+
+def build_profile_kafka_message(profile: vroomrs.Profile) -> KafkaPayload:
+    t = profile.get_transaction()
+    m = profile.get_metadata()
+    data = {
+        "device_locale": m.device_locale or "",
+        "device_manufacturer": m.device_manufacturer or "",
+        "device_model": m.device_model,
+        "device_os_name": m.device_os_name,
+        "device_os_version": m.device_os_version,
+        "duration_ns": profile.duration_ns(),
+        "profile_id": profile.get_profile_id(),
+        "organization_id": profile.get_organization_id(),
+        "platform": profile.get_platform(),
+        "project_id": profile.get_project_id(),
+        "received": int(profile.get_received()),
+        "retention_days": profile.get_retention_days(),
+        "trace_id": t.trace_id,
+        "transaction_id": t.id,
+        "transaction_name": t.name,
+        "version_code": m.version_code or "",
+        "version_name": m.version_name or "",
+    }
+    if (android_api_level := m.android_api_level) is not None:
+        data["android_api_level"] = android_api_level
+    if (architecture := m.architecture) is not None:
+        data["architecture"] = architecture
+    if (device_classification := m.device_classification) is not None:
+        data["device_classification"] = device_classification
+    if (environment := profile.get_environment()) is not None:
+        data["environment"] = environment
+    if (device_os_build_number := m.device_os_build_number) is not None:
+        data["device_os_build_number"] = device_os_build_number
+    if (sdk_name := m.sdk_name) is not None:
+        data["sdk_name"] = sdk_name
+    if (sdk_version := m.sdk_version) is not None:
+        data["sdk_version"] = sdk_version
+    return KafkaPayload(None, json.dumps(data).encode("utf-8"), [])
+
+
+def _timestamp(value: float) -> Timestamp:
+    return Timestamp(
+        seconds=int(value),
+        nanos=round((value % 1) * 1_000_000) * 1000,
+    )
+
+
+def build_chunk_functions_eap_trace_items(
+    chunk: vroomrs.ProfileChunk, functions: list[vroomrs.CallTreeFunction]
+) -> Generator[KafkaPayload]:
+    for f in functions:
+        timestamp = AnyValue(int_value=int(chunk.start_timestamp()))
+        fingerprint = AnyValue(int_value=f.get_fingerprint())
+        name = AnyValue(string_value=f.get_function())
+        package = AnyValue(string_value=f.get_package())
+        is_application = AnyValue(bool_value=f.get_in_app())
+        platform = AnyValue(string_value=chunk.get_platform())
+        profile_id = AnyValue(string_value=chunk.get_profiler_id())
+        start_timestamp = AnyValue(double_value=chunk.start_timestamp())
+        end_timestamp = AnyValue(double_value=chunk.end_timestamp())
+        thread_id = AnyValue(string_value=f.get_thread_id())
+        profiling_type = AnyValue(string_value="continuous")
+
+        depth: int | None = f.get_depth()
+        stack_fingerprint: int | None = f.get_stack_fingerprint()
+        parent_fingerprint: int | None = f.get_parent_fingerprint()
+        environment: str | None = chunk.get_environment()
+        release: str | None = chunk.get_release()
+
+        for i in range(len(f.get_total_times_ns())):
+            attributes: dict[str, AnyValue] = {
+                "timestamp": timestamp,
+                "fingerprint": fingerprint,
+                "name": name,
+                "package": package,
+                "is_application": is_application,
+                "platform": platform,
+                "profile_id": profile_id,
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
+                "thread_id": thread_id,
+                "profiling_type": profiling_type,
+            }
+            if depth is not None:
+                attributes["depth"] = AnyValue(int_value=depth)
+
+            if stack_fingerprint is not None:
+                attributes["stack_fingerprint"] = AnyValue(int_value=stack_fingerprint)
+
+            if parent_fingerprint is not None:
+                attributes["parent_fingerprint"] = AnyValue(int_value=parent_fingerprint)
+
+            if environment is not None:
+                attributes["environment"] = AnyValue(string_value=environment)
+
+            if release is not None:
+                attributes["release"] = AnyValue(string_value=release)
+
+            attributes["self_time_ns"] = AnyValue(int_value=f.get_self_times_ns()[i])
+            attributes["total_time_ns"] = AnyValue(int_value=f.get_total_times_ns()[i])
+
+            item = TraceItem(
+                organization_id=chunk.get_organization_id(),
+                project_id=chunk.get_project_id(),
+                trace_id=chunk.get_profiler_id(),  # until we actually get a trace_id from the SDKs
+                item_id=hex_to_item_id(chunk.get_profiler_id()),
+                item_type=TraceItemType.TRACE_ITEM_TYPE_PROFILE_FUNCTION,
+                timestamp=_timestamp(chunk.start_timestamp()),
+                attributes=attributes,
+                client_sample_rate=CLIENT_SAMPLE_RATE,
+                server_sample_rate=SERVER_SAMPLE_RATE,
+                retention_days=chunk.get_retention_days(),
+                downsampled_retention_days=0,
+                received=_timestamp(chunk.get_received()),
+            )
+            yield KafkaPayload(
+                key=None,
+                value=item.SerializeToString(),
+                headers=[
+                    ("item_type", str(item.item_type).encode("ascii")),
+                    ("project_id", str(chunk.get_project_id()).encode("ascii")),
+                ],
+            )
+
+
+def build_profile_functions_eap_trace_items(
+    profile: vroomrs.Profile, functions: list[vroomrs.CallTreeFunction]
+) -> Generator[KafkaPayload]:
+    for f in functions:
+        timestamp = AnyValue(int_value=int(profile.get_timestamp()))
+        fingerprint = AnyValue(int_value=f.get_fingerprint())
+        name = AnyValue(string_value=f.get_function())
+        package = AnyValue(string_value=f.get_package())
+        is_application = AnyValue(bool_value=f.get_in_app())
+        platform = AnyValue(string_value=profile.get_platform())
+        profile_id = AnyValue(string_value=profile.get_profile_id())
+        thread_id = AnyValue(string_value=f.get_thread_id())
+        profiling_type = AnyValue(string_value="transaction")
+        transaction_name = AnyValue(string_value=profile.get_transaction().name)
+
+        depth: int | None = f.get_depth()
+        stack_fingerprint: int | None = f.get_stack_fingerprint()
+        parent_fingerprint: int | None = f.get_parent_fingerprint()
+        environment: str | None = profile.get_environment()
+        release: str | None = profile.get_release()
+
+        for i in range(len(f.get_total_times_ns())):
+            attributes: dict[str, AnyValue] = {
+                "timestamp": timestamp,
+                "fingerprint": fingerprint,
+                "name": name,
+                "package": package,
+                "is_application": is_application,
+                "platform": platform,
+                "profile_id": profile_id,
+                "thread_id": thread_id,
+                "profiling_type": profiling_type,
+                "transaction_name": transaction_name,
+            }
+            if depth is not None:
+                attributes["depth"] = AnyValue(int_value=depth)
+
+            if stack_fingerprint is not None:
+                attributes["stack_fingerprint"] = AnyValue(int_value=stack_fingerprint)
+
+            if parent_fingerprint is not None:
+                attributes["parent_fingerprint"] = AnyValue(int_value=parent_fingerprint)
+
+            if environment is not None:
+                attributes["environment"] = AnyValue(string_value=environment)
+
+            if release is not None:
+                attributes["release"] = AnyValue(string_value=release)
+
+            attributes["self_time_ns"] = AnyValue(int_value=f.get_self_times_ns()[i])
+            attributes["total_time_ns"] = AnyValue(int_value=f.get_total_times_ns()[i])
+
+            item = TraceItem(
+                organization_id=profile.get_organization_id(),
+                project_id=profile.get_project_id(),
+                trace_id=profile.get_profile_id(),  # until we actually get a trace_id from the SDKs
+                item_id=hex_to_item_id(profile.get_profile_id()),
+                item_type=TraceItemType.TRACE_ITEM_TYPE_PROFILE_FUNCTION,
+                timestamp=_timestamp(profile.get_timestamp()),
+                attributes=attributes,
+                client_sample_rate=CLIENT_SAMPLE_RATE,
+                server_sample_rate=SERVER_SAMPLE_RATE,
+                retention_days=profile.get_retention_days(),
+                downsampled_retention_days=0,
+                received=_timestamp(profile.get_received()),
+            )
+            yield KafkaPayload(
+                key=None,
+                value=item.SerializeToString(),
+                headers=[
+                    ("item_type", str(item.item_type).encode("ascii")),
+                    ("project_id", str(profile.get_project_id()).encode("ascii")),
+                ],
+            )

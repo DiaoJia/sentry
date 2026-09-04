@@ -1,32 +1,24 @@
-import {useCallback, useMemo, useState} from 'react';
-import styled from '@emotion/styled';
+import {useMemo, useState} from 'react';
 
-import GuideAnchor from 'sentry/components/assistant/guideAnchor';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
+import {Grid} from '@sentry/scraps/layout';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+
 import {EventTags} from 'sentry/components/events/eventTags';
 import {
   associateTagsWithMeta,
   getSentryDefaultTags,
   TagFilter,
   TagFilterData,
-  TAGS_DOCS_LINK,
 } from 'sentry/components/events/eventTags/util';
-import ExternalLink from 'sentry/components/links/externalLink';
-import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {Project} from 'sentry/types/project';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 type Props = {
   event: Event;
   projectSlug: Project['slug'];
-  /**
-   * Additional buttons to render in the header of the section
-   */
-  additionalActions?: React.ReactNode;
   disableCollapsePersistence?: boolean;
   ref?: React.Ref<HTMLDivElement>;
 };
@@ -35,15 +27,14 @@ export function EventTagsDataSection({
   ref,
   event,
   projectSlug,
-  additionalActions,
   disableCollapsePersistence,
 }: Props) {
   const sentryTags = getSentryDefaultTags();
 
-  const [tagFilter, setTagFilter] = useState<TagFilter>(TagFilter.ALL);
-  const handleTagFilterChange = useCallback((value: TagFilter) => {
+  const [tagFilter, setTagFilter] = useState(TagFilter.ALL);
+  const handleTagFilterChange = (value: TagFilter) => {
     setTagFilter(value);
-  }, []);
+  };
 
   const tagsWithMeta = useMemo(() => {
     return associateTagsWithMeta({tags: event.tags, meta: event._meta?.tags});
@@ -68,8 +59,7 @@ export function EventTagsDataSection({
   }, [event.tags]);
 
   const actions = (
-    <ButtonBar gap={1}>
-      {additionalActions}
+    <Grid flow="column" align="center" gap="md">
       <SegmentedControl
         size="xs"
         aria-label={t('Filter tags')}
@@ -77,27 +67,18 @@ export function EventTagsDataSection({
         onChange={handleTagFilterChange}
       >
         {[TagFilter.ALL, TagFilter.CUSTOM, ...availableFilters].map(v => (
-          <SegmentedControl.Item key={v}>{`${v}`}</SegmentedControl.Item>
+          <SegmentedControl.Item key={v}>{v}</SegmentedControl.Item>
         ))}
       </SegmentedControl>
-    </ButtonBar>
+    </Grid>
   );
 
   return (
-    <StyledEventDataSection
+    <FoldSection
       disableCollapsePersistence={disableCollapsePersistence}
-      title={
-        <GuideAnchor target="tags" position="top">
-          {t('Tags')}
-        </GuideAnchor>
-      }
-      help={tct('The searchable tags associated with this event. [link:Learn more]', {
-        link: <ExternalLink openInNewTab href={TAGS_DOCS_LINK} />,
-      })}
-      isHelpHoverable
+      title={t('Tags')}
       actions={actions}
-      data-test-id="event-tags"
-      type={SectionKey.TAGS}
+      sectionKey={SectionKey.TAGS}
       ref={ref}
     >
       <EventTags
@@ -106,14 +87,6 @@ export function EventTagsDataSection({
         tagFilter={tagFilter}
         filteredTags={filteredTags ?? []}
       />
-    </StyledEventDataSection>
+    </FoldSection>
   );
 }
-
-const StyledEventDataSection = styled(InterimSection)`
-  padding: ${space(0.5)} ${space(2)} ${space(1)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    padding: ${space(1)} ${space(4)} ${space(1.5)};
-  }
-`;

@@ -1,5 +1,5 @@
 import type {IssueType} from 'sentry/types/group';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import type {Tab} from 'sentry/views/issueDetails/types';
 
 export type ResourceLink = {
@@ -30,6 +30,18 @@ export type IssueTypeConfig = {
    * Should show Autofix for this issue type
    */
   autofix: boolean;
+  /**
+   * Shows the Problem section in the configuration issue details
+   */
+  configurationProblem: DisabledWithReasonConfig;
+  /**
+   * Shows the Troubleshooting section in the configuration issue details
+   */
+  configurationTroubleshooting: DisabledWithReasonConfig;
+  /**
+   * Shows the event Contexts section (browser, OS, runtime, etc.)
+   */
+  contexts: DisabledWithReasonConfig;
   /**
    * Custom copy for actions and other UI elements
    */
@@ -65,12 +77,24 @@ export type IssueTypeConfig = {
     helpText?: string;
   } | null;
   /**
+   * Should the grouping information section be shown within the event details?
+   * Some issue types are grouped by some user defined object like a metric or uptime detector,
+   * so in those cases it doesn't make sense to show this.
+   */
+  groupingInfo: DisabledWithReasonConfig;
+  /**
    * Configuration for the issue-level information header
    */
   header: {
+    /**
+     * Controls the "X in this issue" event navigation row
+     */
+    eventNavigation: DisabledWithReasonConfig;
     filterBar: DisabledWithReasonConfig & {
-      // Display the environment filter in an inactive, locked state
+      /** Display the environment filter in an inactive, locked state */
       fixedEnvironment?: boolean;
+      /** The search bar can be hidden if the issue type does not support event filtering */
+      searchBar?: DisabledWithReasonConfig;
     };
     graph: DisabledWithReasonConfig & {
       type?: 'detector-history' | 'discover-events' | 'cron-checks' | 'uptime-checks';
@@ -134,10 +158,6 @@ export type IssueTypeConfig = {
     userFeedback: DisabledWithReasonConfig;
   };
   /**
-   * Shows performance duration regression components
-   */
-  performanceDurationRegression: DisabledWithReasonConfig;
-  /**
    * Shows profiling duration regression components
    */
   profilingDurationRegression: DisabledWithReasonConfig;
@@ -182,6 +202,10 @@ export type IssueTypeConfig = {
    */
   tags: DisabledWithReasonConfig;
   /**
+   * Shows the Trace Preview section
+   */
+  trace: DisabledWithReasonConfig;
+  /**
    * Whether to use open periods for the last checked date
    */
   useOpenPeriodChecks: boolean;
@@ -191,8 +215,9 @@ export type IssueTypeConfig = {
   usesIssuePlatform: boolean;
 };
 
-export interface IssueCategoryConfigMapping
-  extends Partial<Record<IssueType, Partial<IssueTypeConfig>>> {
+export interface IssueCategoryConfigMapping extends Partial<
+  Record<IssueType, Partial<IssueTypeConfig>>
+> {
   /**
    * Config options that apply to the entire issue category.
    * These options can be overridden by specific issue type configs.

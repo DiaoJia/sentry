@@ -9,6 +9,7 @@ from requests import PreparedRequest
 from sentry.integrations.client import ApiClient
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.integration.model import RpcIntegration
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.integrations.utils.atlassian_connect import get_query_hash
 from sentry.shared_integrations.exceptions import ApiError
 from sentry.utils import jwt
@@ -19,6 +20,9 @@ logger = logging.getLogger("sentry.integrations.jira")
 JIRA_KEY = f"{urlparse(absolute_uri()).hostname}.jira"
 ISSUE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
 CUSTOMFIELD_PREFIX = "customfield_"
+
+STATUS_SEARCH_PAGE_SIZE = 200
+STATUS_SEARCH_MAX_PAGES = 20
 
 
 class JiraCloudClient(ApiClient):
@@ -32,7 +36,7 @@ class JiraCloudClient(ApiClient):
     PRIORITIES_URL = "/rest/api/2/priority"
     PROJECTS_PAGINATED_URL = "/rest/api/2/project/search"
     PROJECT_URL = "/rest/api/2/project"
-    SEARCH_URL = "/rest/api/2/search/"
+    SEARCH_URL = "/rest/api/2/search/jql/"
     VERSIONS_URL = "/rest/api/2/project/%s/versions"
     USERS_URL = "/rest/api/2/user/assignable/search"
     USER_URL = "/rest/api/2/user"
@@ -44,7 +48,10 @@ class JiraCloudClient(ApiClient):
     AUTOCOMPLETE_URL = "/rest/api/2/jql/autocompletedata/suggestions"
     PROPERTIES_URL = "/rest/api/3/issue/%s/properties/%s"
 
-    integration_name = "jira"
+    integration_name = IntegrationProviderSlug.JIRA.value
+    # Configures `get_with_pagination`, used by the paginated `get_project_statuses`.
+    page_size = STATUS_SEARCH_PAGE_SIZE
+    page_number_limit = STATUS_SEARCH_MAX_PAGES
 
     # This timeout is completely arbitrary. Jira doesn't give us any
     # caching headers to work with. Ideally we want a duration that
@@ -71,10 +78,11 @@ class JiraCloudClient(ApiClient):
         path = prepared_request.url[len(self.base_url) :]
         url_params = dict(parse_qs(urlsplit(path).query))
         path = path.split("?")[0]
+        now = datetime.datetime.now(datetime.UTC)
         jwt_payload = {
             "iss": JIRA_KEY,
-            "iat": datetime.datetime.utcnow(),
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(seconds=5 * 60),
+            "iat": now,
+            "exp": now + datetime.timedelta(seconds=5 * 60),
             "qsh": get_query_hash(
                 uri=path,
                 method=prepared_request.method.upper(),
@@ -85,7 +93,7 @@ class JiraCloudClient(ApiClient):
         prepared_request.headers["Authorization"] = f"JWT {encoded_jwt}"
         return prepared_request
 
-    def get_cache_prefix(self):
+    def get_cache_prefix(self) -> str:
         return "sentry-jira-2:"
 
     def user_id_get_param(self):
@@ -116,7 +124,7 @@ class JiraCloudClient(ApiClient):
             jql = f'id="{q}"'
         else:
             jql = f'text ~ "{q}"'
-        return self.get(self.SEARCH_URL, params={"jql": jql})
+        return self.get(self.SEARCH_URL, params={"jql": jql, "fields": "*all"})
 
     def create_comment(self, issue_key, comment):
         return self.post(self.COMMENTS_URL % issue_key, data={"body": comment})
@@ -230,5 +238,18 @@ class JiraCloudClient(ApiClient):
             self.AUTOCOMPLETE_URL, params={"fieldName": jql_name, "fieldValue": value}
         )
 
-    def get_project_statuses(self, project_id: str) -> dict[str, Any]:
-        return dict(self.get_cached(self.STATUS_SEARCH_URL, params={"projectId": project_id}))
+    def get_project_statuses(self, project_id: str, paginate: bool = False) -> dict[str, Any]:
+        if not paginate:
+            # TODO: Remove this after rolling out lazy status feature flag fully
+            return dict(self.get_cached(self.STATUS_SEARCH_URL, params={"projectId": project_id}))
+
+        values = self.get_with_pagination(
+            self.STATUS_SEARCH_URL,
+            gen_params=lambda page_num, page_size: {
+                "projectId": project_id,
+                "startAt": page_num * page_size,
+                "maxResults": page_size,
+            },
+            get_results=lambda resp: resp.get("values", []),
+        )
+        return {"values": values}

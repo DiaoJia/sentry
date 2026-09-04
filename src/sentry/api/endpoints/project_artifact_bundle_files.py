@@ -1,12 +1,13 @@
 from datetime import datetime
 
+from django.core.exceptions import ValidationError
 from django.utils.functional import cached_property
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectReleasePermission
 from sentry.api.paginator import ChainPaginator
 from sentry.api.serializers import serialize
@@ -44,14 +45,14 @@ class ArtifactBundleSource:
             ]
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.sorted_and_filtered_files)
 
     def __getitem__(self, range):
         return self.sorted_and_filtered_files[range]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ProjectArtifactBundleFilesEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -83,7 +84,7 @@ class ProjectArtifactBundleFilesEndpoint(ProjectEndpoint):
                 bundle_id=bundle_id,
                 projectartifactbundle__project_id=project.id,
             )[0]
-        except IndexError:
+        except (IndexError, ValidationError):
             return Response(
                 {
                     "error": f"The artifact bundle with {bundle_id} is not bound to this project or doesn't exist"

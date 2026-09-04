@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from sentry import features, tagstore
-from sentry.eventstore.models import GroupEvent
+from sentry import tagstore
 from sentry.integrations.discord.message_builder import LEVEL_TO_COLOR
-from sentry.integrations.discord.message_builder.base.base import DiscordMessageBuilder
+from sentry.integrations.discord.message_builder.base.base import (
+    DiscordMessage,
+    DiscordMessageBuilder,
+)
 from sentry.integrations.discord.message_builder.base.component.action_row import DiscordActionRow
 from sentry.integrations.discord.message_builder.base.component.base import DiscordMessageComponent
 from sentry.integrations.discord.message_builder.base.component.button import DiscordButton
@@ -23,7 +25,8 @@ from sentry.models.group import Group, GroupStatus
 from sentry.models.project import Project
 from sentry.models.rule import Rule
 from sentry.notifications.notifications.base import ProjectNotification
-from sentry.notifications.utils.rules import get_key_from_rule_data
+from sentry.notifications.utils.rules import RuleIdType, get_rule_or_workflow_id
+from sentry.services.eventstore.models import GroupEvent
 
 from ..message_builder.base.component import DiscordComponentCustomIds as CustomIds
 
@@ -47,7 +50,7 @@ class DiscordIssuesMessageBuilder(DiscordMessageBuilder):
         self.issue_details = issue_details
         self.notification = notification
 
-    def build(self, notification_uuid: str | None = None) -> dict[str, object]:
+    def build(self, notification_uuid: str | None = None) -> DiscordMessage:
         project = Project.objects.get_from_cache(id=self.group.project_id)
         event_for_tags = self.event or self.group.get_latest_event()
         timestamp = (
@@ -56,43 +59,37 @@ class DiscordIssuesMessageBuilder(DiscordMessageBuilder):
         obj: Group | GroupEvent = self.event if self.event is not None else self.group
         rule_id = None
         rule_environment_id = None
+        key: RuleIdType = "legacy_rule_id"
         if self.rules:
             rule_environment_id = self.rules[0].environment_id
-            if features.has("organizations:workflow-engine-ui-links", self.group.organization):
-                rule_id = int(get_key_from_rule_data(self.rules[0], "workflow_id"))
-            elif features.has(
-                "organizations:workflow-engine-trigger-actions", self.group.organization
-            ):
-                rule_id = int(get_key_from_rule_data(self.rules[0], "legacy_rule_id"))
-            else:
-                rule_id = self.rules[0].id
+            key, rule_id = get_rule_or_workflow_id(self.rules[0])
 
         url = None
-
-        if features.has("organizations:workflow-engine-ui-links", self.group.organization):
-            url = get_title_link_workflow_engine_ui(
-                self.group,
-                self.event,
-                self.link_to_event,
-                self.issue_details,
-                self.notification,
-                ExternalProviders.DISCORD,
-                rule_id,
-                rule_environment_id,
-                notification_uuid=notification_uuid,
-            )
-        else:
-            url = get_title_link(
-                self.group,
-                self.event,
-                self.link_to_event,
-                self.issue_details,
-                self.notification,
-                ExternalProviders.DISCORD,
-                rule_id,
-                rule_environment_id,
-                notification_uuid=notification_uuid,
-            )
+        match key:
+            case "workflow_id":
+                url = get_title_link_workflow_engine_ui(
+                    self.group,
+                    self.event,
+                    self.link_to_event,
+                    self.issue_details,
+                    self.notification,
+                    ExternalProviders.DISCORD,
+                    int(rule_id) if rule_id else None,
+                    rule_environment_id,
+                    notification_uuid=notification_uuid,
+                )
+            case "legacy_rule_id":
+                url = get_title_link(
+                    self.group,
+                    self.event,
+                    self.link_to_event,
+                    self.issue_details,
+                    self.notification,
+                    ExternalProviders.DISCORD,
+                    int(rule_id) if rule_id else None,
+                    rule_environment_id,
+                    notification_uuid=notification_uuid,
+                )
 
         embeds = [
             DiscordMessageEmbed(
@@ -145,7 +142,6 @@ def build_components(
     group: Group,
     project: Project,
 ) -> list[DiscordMessageComponent]:
-
     archive_button = DiscordButton(
         custom_id=f"{CustomIds.ARCHIVE}:{group.id}",
         label="Archive",

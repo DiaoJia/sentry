@@ -8,11 +8,14 @@ from rest_framework.response import Response
 from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects, OrganizationEndpoint
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.serializers import serialize
-from sentry.api.serializers.models.exploresavedquery import ExploreSavedQueryModelSerializer
+from sentry.api.serializers.models.exploresavedquery import (
+    ExploreSavedQueryModelSerializer,
+    ExploreSavedQueryResponse,
+)
 from sentry.apidocs.constants import (
     RESPONSE_BAD_REQUEST,
     RESPONSE_FORBIDDEN,
@@ -21,13 +24,15 @@ from sentry.apidocs.constants import (
 )
 from sentry.apidocs.examples.explore_saved_query_examples import ExploreExamples
 from sentry.apidocs.parameters import ExploreSavedQueryParams, GlobalParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
 from sentry.explore.endpoints.bases import ExploreSavedQueryPermission
 from sentry.explore.endpoints.serializers import ExploreSavedQuerySerializer
 from sentry.explore.models import ExploreSavedQuery, ExploreSavedQueryLastVisited
+from sentry.models.organization import Organization
 
 
 class ExploreSavedQueryBase(OrganizationEndpoint):
-    owner = ApiOwner.PERFORMANCE
+    owner = ApiOwner.EXPLORE
     permission_classes = (ExploreSavedQueryPermission,)
 
     def convert_args(self, request: Request, organization_id_or_slug, id, *args, **kwargs):
@@ -45,12 +50,12 @@ class ExploreSavedQueryBase(OrganizationEndpoint):
 
 
 @extend_schema(tags=["Discover"])
-@region_silo_endpoint
+@cell_silo_endpoint
 class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
     publish_status = {
-        "DELETE": ApiPublishStatus.PRIVATE,
-        "GET": ApiPublishStatus.PRIVATE,
-        "PUT": ApiPublishStatus.PRIVATE,
+        "DELETE": ApiPublishStatus.EXPERIMENTAL,
+        "GET": ApiPublishStatus.EXPERIMENTAL,
+        "PUT": ApiPublishStatus.EXPERIMENTAL,
     }
 
     def has_feature(self, organization, request):
@@ -72,7 +77,9 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
         },
         examples=ExploreExamples.EXPLORE_SAVED_QUERY_GET_RESPONSE,
     )
-    def get(self, request: Request, organization, query) -> Response:
+    def get(
+        self, request: Request, organization: Organization, query: ExploreSavedQuery
+    ) -> Response[ExploreSavedQueryResponse]:
         """
         Retrieve a saved query.
         """
@@ -81,7 +88,10 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
 
         self.check_object_permissions(request, query)
 
-        return Response(serialize(query, request.user), status=200)
+        return Response(
+            serialize(query, request.user, serializer=ExploreSavedQueryModelSerializer()),
+            status=200,
+        )
 
     @extend_schema(
         operation_id="Edit an Organization's Explore Saved Query",
@@ -95,7 +105,9 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
         },
         examples=ExploreExamples.EXPLORE_SAVED_QUERY_GET_RESPONSE,
     )
-    def put(self, request: Request, organization, query) -> Response:
+    def put(
+        self, request: Request, organization: Organization, query: ExploreSavedQuery
+    ) -> Response[ExploreSavedQueryResponse] | Response[ValidationErrorResponse]:
         """
         Modify a saved query.
         """
@@ -119,7 +131,7 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
             context={"params": params, "organization": organization, "user": request.user},
         )
         if not serializer.is_valid():
-            return Response(serializer.errors, status=400)
+            return Response(as_validation_errors(serializer), status=400)
 
         data = serializer.validated_data
 
@@ -127,11 +139,13 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
             organization=organization,
             name=data["name"],
             query=data["query"],
+            dataset=data["dataset"],
+            changed_reason=None,
         )
 
         query.set_projects(data["project_ids"])
 
-        return Response(serialize(query), status=200)
+        return Response(serialize(query, serializer=ExploreSavedQueryModelSerializer()), status=200)
 
     @extend_schema(
         operation_id="Delete an Organization's Explore Saved Query",
@@ -142,7 +156,9 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def delete(self, request: Request, organization, query) -> Response:
+    def delete(
+        self, request: Request, organization: Organization, query: ExploreSavedQuery
+    ) -> Response[None]:
         """
         Delete a saved query.
         """
@@ -159,7 +175,7 @@ class ExploreSavedQueryDetailEndpoint(ExploreSavedQueryBase):
         return Response(status=204)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ExploreSavedQueryVisitEndpoint(ExploreSavedQueryBase):
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
@@ -177,15 +193,17 @@ class ExploreSavedQueryVisitEndpoint(ExploreSavedQueryBase):
         if not self.has_feature(organization, request):
             return self.respond(status=404)
 
+        self.check_object_permissions(request, query)
+
         query.visits = F("visits") + 1
         query.last_visited = timezone.now()
         query.save(update_fields=["visits", "last_visited"])
 
-        ExploreSavedQueryLastVisited.objects.create_or_update(
+        ExploreSavedQueryLastVisited.objects.update_or_create(
             organization=organization,
             user_id=request.user.id,
             explore_saved_query=query,
-            values={"last_visited": timezone.now()},
+            defaults={"last_visited": timezone.now()},
         )
 
         return Response(status=204)

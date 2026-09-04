@@ -2,7 +2,7 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import {
   getLaravelContextData,
   type LaravelContext,
@@ -24,8 +24,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('LaravelContext', function () {
-  it('returns values and according to the parameters', function () {
+describe('LaravelContext', () => {
+  it('returns values and according to the parameters', () => {
     expect(getLaravelContextData({data: MOCK_LARAVEL_CONTEXT})).toEqual([
       {
         key: 'extra_data',
@@ -42,7 +42,7 @@ describe('LaravelContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {laravel: MOCK_REDACTION}},
     });
@@ -50,8 +50,8 @@ describe('LaravelContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'default'}
-        alias={'laravel'}
+        type="default"
+        alias="laravel"
         value={{...MOCK_LARAVEL_CONTEXT, extra_data: ''}}
       />
     );

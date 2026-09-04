@@ -41,11 +41,11 @@ class UserOrganizationIntegationTest(APITestCase):
     endpoint = "sentry-api-0-user-organization-integrations"
     method = "get"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(self.user)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         integration = self.create_provider_integration(provider="github")
 
         self.create_organization_integration(
@@ -55,7 +55,7 @@ class UserOrganizationIntegationTest(APITestCase):
         response = self.get_success_response(self.user.id)
         assert response.data[0]["organizationId"] == self.organization.id
 
-    def test_billing_users_dont_see_integrations(self):
+    def test_billing_users_dont_see_integrations(self) -> None:
         integration = self.create_provider_integration(provider="github")
 
         self.create_organization_integration(
@@ -72,3 +72,76 @@ class UserOrganizationIntegationTest(APITestCase):
             assert response.status_code == 200
             content = orjson.loads(response.content)
             assert content == []
+
+    def test_serialization_error_filtered_from_response(self) -> None:
+        """An exception during serialization should produce an empty list, not null entries."""
+        integration = self.create_provider_integration(provider="github")
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=integration.id
+        )
+
+        with patch(
+            "sentry.integrations.base.IntegrationInstallation.get_dynamic_display_information",
+            side_effect=RuntimeError("boom"),
+        ):
+            response = self.get_success_response(self.user.id)
+
+        assert response.data == []
+
+    def test_filter_by_single_provider(self) -> None:
+        slack = self.create_provider_integration(provider="slack")
+        github = self.create_provider_integration(provider="github")
+
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=slack.id
+        )
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=github.id
+        )
+
+        response = self.get_success_response(self.user.id, provider="slack")
+        assert len(response.data) == 1
+        assert response.data[0]["provider"]["key"] == "slack"
+
+    def test_filter_by_multiple_providers(self) -> None:
+        slack = self.create_provider_integration(provider="slack")
+        github = self.create_provider_integration(provider="github")
+        jira = self.create_provider_integration(provider="jira")
+
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=slack.id
+        )
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=github.id
+        )
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=jira.id
+        )
+
+        response = self.get_success_response(self.user.id, provider=["slack", "github"])
+        providers = {item["provider"]["key"] for item in response.data}
+        assert providers == {"slack", "github"}
+
+    def test_filter_by_provider_is_case_insensitive(self) -> None:
+        slack = self.create_provider_integration(provider="slack")
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=slack.id
+        )
+
+        response = self.get_success_response(self.user.id, provider="Slack")
+        assert len(response.data) == 1
+        assert response.data[0]["provider"]["key"] == "slack"
+
+    def test_no_provider_filter_returns_all(self) -> None:
+        slack = self.create_provider_integration(provider="slack")
+        github = self.create_provider_integration(provider="github")
+
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=slack.id
+        )
+        self.create_organization_integration(
+            organization_id=self.organization.id, integration_id=github.id
+        )
+
+        response = self.get_success_response(self.user.id)
+        assert len(response.data) == 2

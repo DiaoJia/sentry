@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from sentry_sdk import Scope
 
 from sentry.api.base import Endpoint
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.integrations.utils.atlassian_connect import AtlassianConnectValidationError, get_token
 from sentry.shared_integrations.exceptions import ApiError
 
@@ -33,7 +34,7 @@ class JiraWebhookBase(Endpoint, abc.ABC):
 
     authentication_classes = ()
     permission_classes = ()
-    provider = "jira"
+    provider = IntegrationProviderSlug.JIRA.value
 
     @csrf_exempt
     def dispatch(self, request: HttpRequest, *args, **kwargs) -> HttpResponseBase:
@@ -77,7 +78,10 @@ class JiraWebhookBase(Endpoint, abc.ABC):
             )
 
             scope.set_tag("jira.host", exc.host)
+            if exc.host is not None:
+                scope.set_attribute("jira.host", exc.host)
             scope.set_tag("jira.endpoint", jira_api_endpoint)
+            scope.set_attribute("jira.endpoint", jira_api_endpoint)
 
             # If the error message is a big mess of html or xml, move it to `handler_context_mut`
             # so we can see it if we need it, but also can replace the error message
@@ -100,13 +104,13 @@ class JiraWebhookBase(Endpoint, abc.ABC):
                     exc.text = f"Gateway timeout when connecting to {jira_api_endpoint}"
                 else:  # generic ApiError
                     exc.text = f"Unknown error when requesting {jira_api_endpoint}"
-                    logger.error("Unclear JIRA exception")
+                    logger.warning("Unclear JIRA exception")
 
         # OperationalErrors are errors talking to our postgres DB
         elif isinstance(exc, OperationalError):
             pass  # No processing needed and these are known errors
         else:
-            logger.error("Unclear JIRA exception")
+            logger.warning("Unclear JIRA exception")
 
         # This will log the error locally, capture the exception and send it to Sentry, and create a
         # generic 500/Internal Error response

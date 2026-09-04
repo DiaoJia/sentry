@@ -1,48 +1,44 @@
 import {Fragment, useCallback, useMemo, useState} from 'react';
-import {css} from '@emotion/react';
+import {css, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {keepPreviousData, useQuery} from '@tanstack/react-query';
 
-import Access from 'sentry/components/acl/access';
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import Confirm from 'sentry/components/confirm';
-import {Button, type ButtonProps} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Button} from '@sentry/scraps/button';
+import {CodeBlock} from '@sentry/scraps/code';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {Access} from 'sentry/components/acl/access';
+import {Confirm} from 'sentry/components/confirm';
 import {DateTime} from 'sentry/components/dateTime';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import KeyValueList from 'sentry/components/events/interfaces/keyValueList';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
 import {
   getSourceMapsDocLinks,
   projectPlatformToDocsMap,
 } from 'sentry/components/events/interfaces/sourceMapsDebuggerModal';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import SearchBar from 'sentry/components/searchBar';
-import Version from 'sentry/components/version';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {SearchBar} from 'sentry/components/searchBar';
 import {IconDelete, IconUpload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {KeyValueListData} from 'sentry/types/group';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import type {SourceMapsArchive} from 'sentry/types/release';
+import type {Release, SourceMapsArchive} from 'sentry/types/release';
 import type {DebugIdBundle, DebugIdBundleAssociation} from 'sentry/types/sourceMaps';
-import {defined} from 'sentry/utils';
-import {keepPreviousData, useApiQuery} from 'sentry/utils/queryClient';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {defined} from 'sentry/utils/defined';
 import {decodeScalar} from 'sentry/utils/queryString';
-import useOrganization from 'sentry/utils/useOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {AssociatedReleases} from 'sentry/views/settings/projectSourceMaps/associatedReleases';
 import {useDeleteDebugIdBundle} from 'sentry/views/settings/projectSourceMaps/useDeleteDebugIdBundle';
 
-type Props = RouteComponentProps<{
-  orgId: string;
-  projectId: string;
-  bundleId?: string;
-}> & {
+type Props = {
   project: Project;
 };
 
@@ -75,7 +71,7 @@ function mergeReleaseAndDebugIdBundles(
     id: release.name,
   }));
 
-  return [...debugIdUploads, ...releaseUploads] as SourceMapUpload[];
+  return [...debugIdUploads, ...releaseUploads];
 }
 
 interface UseSourceMapUploadsProps {
@@ -92,46 +88,75 @@ function useSourceMapUploads({
   cursor,
 }: UseSourceMapUploadsProps) {
   const {
-    data: archivesData,
-    getResponseHeader: archivesHeaders,
+    data: archivesResponse,
     isPending: archivesLoading,
     refetch: archivesRefetch,
-  } = useApiQuery<SourceMapsArchive[]>(
-    [
-      `/projects/${organization.slug}/${project.slug}/files/source-maps/`,
+  } = useQuery({
+    ...apiOptions.as<SourceMapsArchive[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/files/source-maps/',
       {
+        path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
         query: {query, cursor, sortBy: '-date_added'},
-      },
-    ],
-    {
-      staleTime: 0,
-      placeholderData: keepPreviousData,
-    }
-  );
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+    placeholderData: keepPreviousData,
+  });
+
+  const archivesData = archivesResponse?.json;
 
   const {
-    data: debugIdBundlesData,
-    getResponseHeader: debugIdBundlesHeaders,
+    data: debugIdBundlesResponse,
     isPending: debugIdBundlesLoading,
     refetch: debugIdBundlesRefetch,
-  } = useApiQuery<DebugIdBundle[]>(
-    [
-      `/projects/${organization.slug}/${project.slug}/files/artifact-bundles/`,
+  } = useQuery({
+    ...apiOptions.as<DebugIdBundle[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/files/artifact-bundles/',
       {
+        path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
         query: {query, cursor, sortBy: '-date_added'},
-      },
-    ],
-    {
-      staleTime: 0,
-      placeholderData: keepPreviousData,
-    }
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+    placeholderData: keepPreviousData,
+  });
+
+  const debugIdBundlesData = debugIdBundlesResponse?.json;
+
+  const mergedData = mergeReleaseAndDebugIdBundles(archivesData, debugIdBundlesData);
+  const releaseVersions = mergedData.flatMap(data =>
+    data.associations.map(association => `"${association.release}"`)
   );
 
+  const {data: releasesData, isPending: releasesLoading} = useQuery({
+    ...apiOptions.as<Release[]>()('/organizations/$organizationIdOrSlug/releases/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        project: [project.id],
+        query: `release:[${releaseVersions.join(',')}]`,
+      },
+      staleTime: Infinity,
+    }),
+    retry: false,
+    enabled: !debugIdBundlesLoading && !archivesLoading,
+  });
+
+  const existingReleaseNames = new Set((releasesData ?? []).map(r => r.version));
+
   return {
-    data: mergeReleaseAndDebugIdBundles(archivesData, debugIdBundlesData),
-    headers: (header: string) => {
-      return debugIdBundlesHeaders?.(header) ?? archivesHeaders?.(header);
-    },
+    data: releasesLoading
+      ? mergedData
+      : mergedData.map(data => ({
+          ...data,
+          associations: data.associations.map(association => ({
+            ...association,
+            exists: existingReleaseNames.has(association.release),
+          })),
+        })),
+    pageLinks:
+      debugIdBundlesResponse?.headers.Link ?? archivesResponse?.headers.Link ?? '',
     isPending: archivesLoading || debugIdBundlesLoading,
     refetch: () => {
       archivesRefetch();
@@ -140,15 +165,17 @@ function useSourceMapUploads({
   };
 }
 
-export function SourceMapsList({location, router, project}: Props) {
+export function SourceMapsList({project}: Props) {
   const organization = useOrganization();
-  const query = decodeScalar(location.query.query) ?? '';
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  const cursor = location.query.cursor ?? '';
+  const query = decodeScalar(location.query.query);
+  const cursor = decodeScalar(location.query.cursor);
 
   const {
     data: sourceMapUploads,
-    headers,
+    pageLinks,
     isPending,
     refetch,
   } = useSourceMapUploads({
@@ -164,31 +191,31 @@ export function SourceMapsList({location, router, project}: Props) {
 
   const handleSearch = useCallback(
     (newQuery: string) => {
-      router.push({
+      navigate({
         ...location,
         query: {...location.query, cursor: undefined, query: newQuery},
       });
     },
-    [router, location]
+    [navigate, location]
   );
 
   const platformByProject = defined(project.platform)
     ? projectPlatformToDocsMap[project.platform]
     : undefined;
-  const platform = platformByProject ?? project.platform ?? 'javascript';
+  const platform = platformByProject ?? 'javascript';
   const sourceMapsLinks = getSourceMapsDocLinks(platform);
 
   return (
     <Fragment>
-      <SettingsPageHeader title={t('Source Map Uploads')} />
-      <TextBlock>
-        {tct(
-          `These source map archives help Sentry identify where to look when code is minified. By providing this information, you can get better context for your stack traces when debugging. To learn more about source maps, [link: read the docs].`,
+      <SettingsPageHeader
+        title={t('Source Map Uploads')}
+        subtitle={tct(
+          'These source map archives help Sentry identify where to look when code is minified. By providing this information, you can get better context for your stack traces when debugging. To learn more about source maps, [link: read the docs].',
           {
             link: <ExternalLink href={sourceMapsLinks.sourcemaps} />,
           }
         )}
-      </TextBlock>
+      />
       <SearchBarWithMarginBottom
         placeholder={t('Filter by Debug ID or Upload ID')}
         onSearch={handleSearch}
@@ -204,13 +231,14 @@ export function SourceMapsList({location, router, project}: Props) {
           deleteSourceMaps({bundleId: id, projectSlug: project.slug});
         }}
         docsLink={sourceMapsLinks.sourcemaps}
-        pageLinks={headers?.('Link') ?? ''}
+        pageLinks={pageLinks}
       />
     </Fragment>
   );
 }
 
 function ReactNativeCallOut() {
+  const theme = useTheme();
   const [selectedTab, setSelectedTab] = useState('expo');
 
   return (
@@ -218,7 +246,7 @@ function ReactNativeCallOut() {
       css={css`
         text-align: left;
         display: grid;
-        gap: ${space(1)};
+        gap: ${theme.space.md};
       `}
     >
       <div>
@@ -227,7 +255,7 @@ function ReactNativeCallOut() {
           {strong: <strong />}
         )}
       </div>
-      <CodeSnippet
+      <CodeBlock
         dark
         language="bash"
         tabs={[
@@ -240,7 +268,7 @@ function ReactNativeCallOut() {
         {selectedTab === 'expo'
           ? '# First run this to create a build and upload source maps\n./gradlew assembleRelease\n# Then run this to test your build locally\nnpx expo run:android --variant release\n\n# iOS version (pending confirmation)\nnpx expo run:ios --configuration Release'
           : 'npx react-native run-android --mode release\nnpx react-native run-ios --mode Release'}
-      </CodeSnippet>
+      </CodeBlock>
     </div>
   );
 }
@@ -266,29 +294,28 @@ function SourceMapsEmptyState({
             ? t('No source maps uploads matching your search')
             : t('No source maps uploaded')
         }
-        description={
-          query
-            ? tct(
-                'Try to modify or [clear:clear] your search to see all source maps uploads.',
-                {
-                  clear: (
-                    <Button
-                      priority="link"
-                      aria-label={t('Clear Search')}
-                      onClick={onClearSearch}
-                    />
-                  ),
-                }
-              )
-            : tct(
-                'Source maps allow Sentry to map your production code to your source code. See our [docs:docs] to learn more about configuring your application to upload source maps to Sentry.',
-                {
-                  docs: <ExternalLink href={docsLink} />,
-                }
-              )
-        }
         action={project.platform === 'react-native' ? <ReactNativeCallOut /> : undefined}
-      />
+      >
+        {query
+          ? tct(
+              'Try to modify or [clear:clear] your search to see all source maps uploads.',
+              {
+                clear: (
+                  <Button
+                    variant="link"
+                    aria-label={t('Clear Search')}
+                    onClick={onClearSearch}
+                  />
+                ),
+              }
+            )
+          : tct(
+              'Source maps allow Sentry to map your production code to your source code. See our [docs:docs] to learn more about configuring your application to upload source maps to Sentry.',
+              {
+                docs: <ExternalLink href={docsLink} />,
+              }
+            )}
+      </EmptyMessage>
     </Panel>
   );
 }
@@ -360,7 +387,10 @@ function SourceMapUploadsList({
               />
             </ItemHeader>
             <ItemContent>
-              <SourceMapUploadDetails sourceMapUpload={sourceMapUpload} />
+              <SourceMapUploadDetails
+                sourceMapUpload={sourceMapUpload}
+                projectId={project.id}
+              />
             </ItemContent>
           </Item>
         ))}
@@ -370,7 +400,13 @@ function SourceMapUploadsList({
   );
 }
 
-function SourceMapUploadDetails({sourceMapUpload}: {sourceMapUpload: SourceMapUpload}) {
+function SourceMapUploadDetails({
+  sourceMapUpload,
+  projectId,
+}: {
+  projectId: string;
+  sourceMapUpload: SourceMapUpload;
+}) {
   const [showAll, setShowAll] = useState(false);
   const detailsData = useMemo<KeyValueListData>(() => {
     const rows = sourceMapUpload.associations;
@@ -390,39 +426,18 @@ function SourceMapUploadDetails({sourceMapUpload}: {sourceMapUpload: SourceMapUp
             {showAll ? t('Show Less') : t('Show All')}
           </Button>
         ),
-        value:
-          rows.length > 0 ? (
-            <ReleasesWrapper className="val-string-multiline">
-              {visibleAssociations.map(association => (
-                <Fragment key={association.release}>
-                  <Version version={association.release ?? association.dist} />
-                  {association.dist && `(Dist: ${formatDist(association.dist)})`}
-                </Fragment>
-              ))}
-            </ReleasesWrapper>
-          ) : (
-            t('No releases associated with this upload.')
-          ),
+        value: (
+          <AssociatedReleases associations={visibleAssociations} projectId={projectId} />
+        ),
       },
     ];
-  }, [sourceMapUpload, showAll]);
+  }, [sourceMapUpload, showAll, projectId]);
 
   return <StyledKeyValueList data={detailsData} shouldSort={false} />;
 }
 
-const formatDist = (dist: string | string[] | null) => {
-  if (Array.isArray(dist)) {
-    return dist.join(', ');
-  }
-  if (dist === null) {
-    return t('none');
-  }
-  return dist;
-};
-
 interface SourceMapUploadDeleteButtonProps {
   onDelete?: () => void;
-  size?: ButtonProps['size'];
 }
 
 function SourceMapUploadDeleteButton({onDelete}: SourceMapUploadDeleteButtonProps) {
@@ -458,10 +473,6 @@ function SourceMapUploadDeleteButton({onDelete}: SourceMapUploadDeleteButtonProp
   );
 }
 
-const ReleasesWrapper = styled('pre')`
-  max-height: 200px;
-`;
-
 const StyledKeyValueList = styled(KeyValueList)`
   && {
     margin-bottom: 0;
@@ -471,7 +482,7 @@ const StyledKeyValueList = styled(KeyValueList)`
 const List = styled('div')`
   display: grid;
   grid-template-columns: 1fr;
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
 `;
 
 const Item = styled(Panel)`
@@ -482,22 +493,22 @@ const ItemHeader = styled('div')`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: ${p => p.theme.fontSize.md};
-  border-bottom: 1px solid ${p => p.theme.border};
+  font-size: ${p => p.theme.font.size.md};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
   line-height: 1;
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
 `;
 
 const ItemTitle = styled(Link)`
   display: flex;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
 const ItemContent = styled('div')`
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
 `;
 
 const SearchBarWithMarginBottom = styled(SearchBar)`
-  margin-bottom: ${space(3)};
+  margin-bottom: ${p => p.theme.space['2xl']};
 `;

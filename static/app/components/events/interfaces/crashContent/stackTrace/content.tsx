@@ -1,24 +1,22 @@
 import {Fragment, useState} from 'react';
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import type {DeprecatedLineProps} from 'sentry/components/events/interfaces/frame/deprecatedLine';
-import DeprecatedLine from 'sentry/components/events/interfaces/frame/deprecatedLine';
+import {
+  DeprecatedLine,
+  type DeprecatedLineProps,
+} from 'sentry/components/events/interfaces/frame/deprecatedLine';
 import type {FrameSourceMapDebuggerData} from 'sentry/components/events/interfaces/sourceMapsDebuggerModal';
 import {
   getHiddenFrameIndices,
   getLastFrameIndex,
   isRepeatedFrame,
-  stackTracePlatformIcon,
 } from 'sentry/components/events/interfaces/utils';
-import Panel from 'sentry/components/panels/panel';
+import {Panel} from 'sentry/components/panels/panel';
 import type {Event, Frame} from 'sentry/types/event';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import type {StackTraceMechanism, StacktraceType} from 'sentry/types/stacktrace';
-import {defined} from 'sentry/utils';
 
 import {OmittedFrames} from './omittedFrames';
-import StacktracePlatformIcon from './platformIcon';
 
 type DefaultProps = {
   expandFirstFrame: boolean;
@@ -32,17 +30,15 @@ type Props = {
   platform: PlatformKey;
   className?: string;
   frameSourceMapDebuggerData?: FrameSourceMapDebuggerData[];
-  hideIcon?: boolean;
   hideSourceMapDebugger?: boolean;
   isHoverPreviewed?: boolean;
   lockAddress?: string;
-  maxDepth?: number;
   mechanism?: StackTraceMechanism | null;
   meta?: Record<any, any>;
   threadId?: number;
 } & Partial<DefaultProps>;
 
-function Content({
+export function Content({
   data,
   event,
   className,
@@ -51,9 +47,7 @@ function Content({
   platform,
   includeSystemFrames = true,
   isHoverPreviewed = false,
-  maxDepth,
   meta,
-  hideIcon,
   threadId,
   lockAddress,
   frameSourceMapDebuggerData,
@@ -117,7 +111,7 @@ function Content({
 
   const lastFrameIndex = getLastFrameIndex(frames);
   const frameCountMap = getInitialFrameCounts();
-  const hiddenFrameIndices: number[] = getHiddenFrameIndices({
+  const hiddenFrameIndices = getHiddenFrameIndices({
     data,
     toggleFrameMap,
     frameCountMap,
@@ -129,7 +123,7 @@ function Content({
 
   let nRepeats = 0;
 
-  let convertedFrames = frames
+  const convertedFrames = frames
     .map((frame, frameIndex) => {
       const nextFrame = frames[frameIndex + 1]!;
       const repeatedFrame = isRepeatedFrame(frame, nextFrame);
@@ -194,26 +188,18 @@ function Content({
     })
     .filter((frame): frame is React.ReactElement => !!frame);
 
-  if (defined(maxDepth)) {
-    convertedFrames = convertedFrames.slice(-maxDepth);
-  }
-
   const wrapperClassName = `${!!className && className} traceback ${
     includeSystemFrames ? 'full-traceback' : 'in-app-traceback'
   }`;
 
-  const platformIcon = stackTracePlatformIcon(platform, data.frames ?? []);
-
   return (
     <Wrapper>
-      {hideIcon ? null : <StacktracePlatformIcon platform={platformIcon} />}
       <StackTraceContentPanel
         className={wrapperClassName}
         data-test-id="stack-trace-content"
-        hideIcon={hideIcon}
       >
         <StyledList data-test-id="frames">
-          {newestFirst ? [...convertedFrames].reverse() : convertedFrames}
+          {newestFirst ? convertedFrames.toReversed() : convertedFrames}
         </StyledList>
       </StackTraceContentPanel>
     </Wrapper>
@@ -224,22 +210,11 @@ const Wrapper = styled('div')`
   position: relative;
 `;
 
-export const StackTraceContentPanel = styled(Panel)<{hideIcon?: boolean}>`
+const StackTraceContentPanel = styled(Panel)`
   position: relative;
   overflow: hidden;
-
-  ${p =>
-    !p.hideIcon &&
-    css`
-      border-top-left-radius: 0;
-      @media (max-width: ${p.theme.breakpoints.medium}) {
-        border-top-left-radius: ${p.theme.borderRadius};
-      }
-    `}
 `;
 
 const StyledList = styled('ul')`
   list-style: none;
 `;
-
-export default Content;

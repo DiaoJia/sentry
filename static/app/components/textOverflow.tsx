@@ -21,46 +21,41 @@ type Props = {
    * @default 'right'
    */
   ellipsisDirection?: 'left' | 'right';
-  /**
-   * @default false
-   */
-  isParagraph?: boolean;
   style?: CSSProperties;
 };
 
-const TextOverflow = styled(
+export const TextOverflow = styled(
   ({
     children,
     className,
     ellipsisDirection = 'right',
-    isParagraph = false,
-    ['data-test-id']: dataTestId,
+    'data-test-id': dataTestId,
     style,
   }: Props) => {
-    const Component = isParagraph ? 'p' : 'div';
     if (ellipsisDirection === 'left') {
       return (
-        <Component className={className} style={style} data-test-id={dataTestId}>
+        <div className={className} style={style} data-test-id={dataTestId}>
           <bdi>{children}</bdi>
-        </Component>
+        </div>
       );
     }
     return (
-      <Component className={className} style={style} data-test-id={dataTestId}>
+      <div className={className} style={style} data-test-id={dataTestId}>
         {children}
-      </Component>
+      </div>
     );
   }
 )`
-  ${p => p.theme.overflowEllipsis}
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   ${p =>
     p.ellipsisDirection === 'left' &&
     css`
       direction: rtl;
       text-align: left;
-    `};
+    `}
   width: auto;
   line-height: 1.2;
 `;
-
-export default TextOverflow;

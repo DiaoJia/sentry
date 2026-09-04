@@ -2,7 +2,7 @@ from datetime import date
 
 import click
 
-from flagpole import Feature, Segment
+from flagpole import Feature, OwnerInfo, Segment
 from flagpole.conditions import (
     ConditionBase,
     ConditionOperatorKind,
@@ -39,7 +39,12 @@ def condition_wizard(display_sample_condition_properties: bool = False) -> Condi
     operator_kind = click.prompt("Operator type", type=condition_type_choices, show_choices=True)
 
     value: str | list[str] = ""
-    if operator_kind in {ConditionOperatorKind.IN, ConditionOperatorKind.NOT_IN}:
+    if operator_kind in {
+        ConditionOperatorKind.IN,
+        ConditionOperatorKind.NOT_IN,
+        ConditionOperatorKind.MATCHES,
+        ConditionOperatorKind.NOT_MATCHES,
+    }:
         value = []
     condition = {
         "property": property_name,
@@ -133,7 +138,7 @@ def createflag(
             segments = segment_wizard()
         feature = Feature(
             name=f"feature.{scope}:{name}",
-            owner=owner,
+            owner=OwnerInfo(team=owner),
             segments=segments,
             created_at=date.today().isoformat(),
         )
@@ -162,9 +167,9 @@ def createissueflag(
 
         assert slug, "Feature must have a non-empty string for 'slug'"
         group_type = registry.get_by_slug(slug)
-        assert (
-            group_type
-        ), f"Invalid GroupType slug. Valid grouptypes: {[gt.slug for gt in registry.all()]}"
+        assert group_type, (
+            f"Invalid GroupType slug. Valid grouptypes: {[gt.slug for gt in registry.all()]}"
+        )
 
         if not owner:
             entered_owner = click.prompt("Owner (team name or email address)", type=str)
@@ -179,7 +184,7 @@ def createissueflag(
                 conditions=[
                     InCondition(
                         "organization_slug",
-                        ["sentry", "codecov", "sentry", "sentry-eu", "sentry-sdks", "sentry-st"],
+                        ["sentry", "sentry-eu", "sentry-sdks", "sentry-st"],
                         operator=ConditionOperatorKind.IN.value,
                     )
                 ],
@@ -204,14 +209,13 @@ def createissueflag(
         click.echo("")
         click.echo("=== GENERATED YAML ===\n")
         for feature_name in [
-            group_type.build_visible_feature_name(),
+            *group_type.build_visible_feature_name(),
             group_type.build_ingest_feature_name(),
             group_type.build_post_process_group_feature_name(),
         ]:
-
             feature = Feature(
                 name=f"feature.{feature_name}",
-                owner=owner,
+                owner=OwnerInfo(team=owner),
                 segments=segments,
                 created_at=date.today().isoformat(),
             )

@@ -1,17 +1,15 @@
 import {useState} from 'react';
-import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
 import {PerformanceLayoutBodyRow} from 'sentry/components/performance/layouts';
-import {space} from 'sentry/styles/space';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {usePerformanceDisplayType} from 'sentry/utils/performance/contexts/performanceDisplayContext';
 import {getChartSetting} from 'sentry/views/performance/landing/widgets/utils';
 import type {PerformanceWidgetSetting} from 'sentry/views/performance/landing/widgets/widgetDefinitions';
 import type {ProjectPerformanceType} from 'sentry/views/performance/utils';
 
-import WidgetContainer from './widgetContainer';
+import {WidgetContainer} from './widgetContainer';
 
 export interface ChartRowProps {
   allowedCharts: PerformanceWidgetSetting[];
@@ -28,7 +26,7 @@ function getInitialChartSettings(
   performanceType: ProjectPerformanceType,
   allowedCharts: PerformanceWidgetSetting[]
 ) {
-  return new Array(chartCount)
+  return Array.from<number>({length: chartCount})
     .fill(0)
     .map((_, index) =>
       getChartSetting(index, chartHeight, performanceType, allowedCharts[index]!)
@@ -36,10 +34,8 @@ function getInitialChartSettings(
 }
 
 function ChartRow(props: ChartRowProps) {
-  const theme = useTheme();
   const {chartCount, chartHeight, allowedCharts} = props;
   const performanceType = usePerformanceDisplayType();
-  const palette = theme.chart.getColorPalette(chartCount);
 
   const [chartSettings, setChartSettings] = useState(
     getInitialChartSettings(chartCount, chartHeight, performanceType, allowedCharts)
@@ -51,18 +47,19 @@ function ChartRow(props: ChartRowProps) {
 
   return (
     <StyledRow minSize={200}>
-      {new Array(chartCount).fill(0).map((_, index) => (
-        <WidgetContainer
-          {...props}
-          key={index}
-          index={index}
-          chartHeight={chartHeight}
-          chartColor={palette[index]}
-          defaultChartSetting={allowedCharts[index]!}
-          rowChartSettings={chartSettings}
-          setRowChartSettings={setChartSettings}
-        />
-      ))}
+      {Array.from<number>({length: chartCount})
+        .fill(0)
+        .map((_, index) => (
+          <WidgetContainer
+            {...props}
+            key={index}
+            index={index}
+            chartHeight={chartHeight}
+            defaultChartSetting={allowedCharts[index]!}
+            rowChartSettings={chartSettings}
+            setRowChartSettings={setChartSettings}
+          />
+        ))}
     </StyledRow>
   );
 }
@@ -80,5 +77,5 @@ export function DoubleChartRow(props: ChartRowPropsWithDefaults) {
 }
 
 const StyledRow = styled(PerformanceLayoutBodyRow)`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;

@@ -1,14 +1,15 @@
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import KeyValueList from 'sentry/components/events/interfaces/keyValueList';
+import {LinkButton} from '@sentry/scraps/button';
+
+import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
 import {IconProfiling} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
 import {generateProfileFlamechartRouteWithHighlightFrame} from 'sentry/utils/profiling/routes';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 type ProfileEvidenceProps = {event: Event; projectSlug: string};
 
@@ -33,7 +34,6 @@ export function ProfileEventEvidence({event, projectSlug}: ProfileEvidenceProps)
                   traceSlug,
                   timestamp: evidenceData.timestamp,
                   eventId: evidenceData.transactionId,
-                  projectSlug,
                   location: {...location, query: {...location.query, referrer: 'issue'}},
                   organization,
                 })}
@@ -79,8 +79,8 @@ export function ProfileEventEvidence({event, projectSlug}: ProfileEvidenceProps)
   ];
 
   return (
-    <InterimSection title={t('Function Evidence')} type={SectionKey.EVIDENCE}>
+    <FoldSection title={t('Function Evidence')} sectionKey={SectionKey.EVIDENCE}>
       <KeyValueList data={keyValueListData} shouldSort={false} />
-    </InterimSection>
+    </FoldSection>
   );
 }

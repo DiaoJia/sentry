@@ -12,17 +12,14 @@ from typing import cast
 from sentry.exceptions import InvalidParams
 from sentry.snuba.metrics.naming_layer.mri import (
     MRI_EXPRESSION_REGEX,
-    ErrorsMRI,
     SessionMRI,
     SpanMRI,
     TransactionMRI,
     parse_mri,
 )
 from sentry.snuba.metrics.naming_layer.public import (
-    ErrorsMetricKey,
     SessionMetricKey,
     SpanMetricKey,
-    TransactionMetricKey,
 )
 
 
@@ -41,9 +38,7 @@ def create_name_mapping_layers() -> None:
 
     for MetricKey, MRI in (
         (SessionMetricKey, SessionMRI),
-        (TransactionMetricKey, TransactionMRI),
         (SpanMetricKey, SpanMRI),
-        (ErrorsMetricKey, ErrorsMRI),
     ):
         # Adds new names at the end, so that when the reverse mapping is created
         for metric_key in MetricKey:

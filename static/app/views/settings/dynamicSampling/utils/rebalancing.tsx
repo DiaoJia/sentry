@@ -7,8 +7,6 @@ interface BalancingItem {
 interface Params<T extends BalancingItem> {
   items: T[];
   targetSampleRate: number;
-  intensity?: number;
-  minBudget?: number;
 }
 
 /**
@@ -20,26 +18,22 @@ interface Params<T extends BalancingItem> {
  *
  * @param targetSampleRate The target sample rate to balance the items to.
  * @param items The items to balance.
- * @param intensity The intensity of the balancing. How close to the ideal should we go from our current position (0=do not change, 1 go to ideal)
- * @param minBudget Ensure that we use at least min_budget (in order to keep the overall rate)
  * @returns The balanced items and the used budget.
  */
 export function balanceSampleRate<T extends BalancingItem>({
   targetSampleRate,
   items,
-  intensity = 1,
-  minBudget: minBudgetParam,
 }: Params<T>): {
   balancedItems: T[];
   usedBudget: number;
 } {
   // Sort the items ascending by count, so the available budget is distributed to the items with the lowest count first
-  const sortedItems = items.toSorted((a: any, b: any) => a.count - b.count);
+  const sortedItems = items.toSorted((a, b) => a.count - b.count);
   const total = items.reduce((acc, item) => acc + item.count, 0);
 
   let numItems = items.length;
   let ideal = (total * targetSampleRate) / numItems;
-  let minBudget = Math.min(total, minBudgetParam ?? total * targetSampleRate);
+  let minBudget = Math.min(total, total * targetSampleRate);
   let usedBudget = 0;
 
   const balancedItems: T[] = [];
@@ -55,7 +49,7 @@ export function balanceSampleRate<T extends BalancingItem>({
 
     const sampled = count * targetSampleRate;
     const delta = ideal - sampled;
-    const correction = delta * intensity;
+    const correction = delta;
     const desiredCount = sampled + correction;
 
     if (desiredCount > count) {

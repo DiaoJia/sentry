@@ -1,17 +1,24 @@
+import {useMatches} from 'react-router-dom';
 import {duration} from 'moment-timezone';
 import {GroupFixture} from 'sentry-fixture/group';
+import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
-import {RRWebInitFrameEventsFixture} from 'sentry-fixture/replay/rrweb';
+import {
+  RRWebFullSnapshotFrameEventFixture,
+  RRWebInitFrameEventsFixture,
+} from 'sentry-fixture/replay/rrweb';
 import {ReplayListFixture} from 'sentry-fixture/replayList';
 import {ReplayRecordFixture} from 'sentry-fixture/replayRecord';
+import {UserFixture} from 'sentry-fixture/user';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
+import {stubIframeScrollTo} from 'sentry-test/iframeScrollTo';
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 import {resetMockDate, setMockDate} from 'sentry-test/utils';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
-import useLoadReplayReader from 'sentry/utils/replays/hooks/useLoadReplayReader';
-import ReplayReader from 'sentry/utils/replays/replayReader';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {useLoadReplayReader} from 'sentry/utils/replays/hooks/useLoadReplayReader';
+import {ReplayReader} from 'sentry/utils/replays/replayReader';
 import GroupReplays from 'sentry/views/issueDetails/groupReplays';
 
 const mockReplayCountUrl = '/organizations/org-slug/replay-count/';
@@ -22,6 +29,12 @@ const REPLAY_ID_2 = 'b05dae9b6be54d21a4d5ad9f8f02b780';
 
 jest.mock('sentry/utils/replays/hooks/useLoadReplayReader');
 const mockUseLoadReplayReader = jest.mocked(useLoadReplayReader);
+
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useMatches: jest.fn(),
+}));
+const mockUseMatches = jest.mocked(useMatches);
 
 const mockEventTimestamp = new Date('2022-09-22T16:59:41Z');
 const mockEventTimestampMs = mockEventTimestamp.getTime();
@@ -40,9 +53,14 @@ const mockReplay = ReplayReader.factory({
   }),
   errors: [],
   fetching: false,
-  attachments: RRWebInitFrameEventsFixture({
-    timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
-  }),
+  attachments: [
+    ...RRWebInitFrameEventsFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+    RRWebFullSnapshotFrameEventFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+  ],
   clipWindow: {
     startTimestampMs: mockEventTimestampMs - 5_000,
     endTimestampMs: mockEventTimestampMs + 5_000,
@@ -67,51 +85,52 @@ mockUseLoadReplayReader.mockImplementation(() => {
 });
 
 type InitializeOrgProps = {
-  organizationProps?: {
-    features?: string[];
-  };
+  organizationProps?: Parameters<typeof OrganizationFixture>[0];
 };
 
 describe('GroupReplays', () => {
+  beforeAll(stubIframeScrollTo);
+
   const mockGroup = GroupFixture();
+  const user = UserFixture({id: '1'});
+
+  const initialRouterConfig = {
+    route: '/organizations/:orgId/issues/:groupId/replays/',
+    location: {
+      pathname: `/organizations/org-slug/issues/${mockGroup.id}/replays/`,
+      query: {},
+    },
+  };
 
   function init({
     organizationProps = {features: ['session-replay']},
   }: InitializeOrgProps) {
     const mockProject = ProjectFixture();
-    const {router, projects, organization} = initializeOrg({
-      organization: {
-        ...organizationProps,
-      },
-      projects: [mockProject],
-      router: {
-        routes: [
-          {path: '/'},
-          {path: '/organizations/:orgId/issues/:groupId/'},
-          {path: 'replays/'},
-        ],
-        location: {
-          pathname: '/organizations/org-slug/replays/',
-          query: {},
-        },
-        params: {
-          orgId: 'org-slug',
-          groupId: mockGroup.id,
-        },
-      },
+    const organization = OrganizationFixture({
+      ...organizationProps,
     });
 
     ProjectsStore.init();
-    ProjectsStore.loadInitialData(projects);
+    ProjectsStore.loadInitialData([mockProject]);
 
-    return {router, organization};
+    return {organization};
   }
 
   beforeEach(() => {
+    ConfigStore.set('user', user);
     MockApiClient.addMockResponse({
       url: `/organizations/org-slug/issues/${mockGroup.id}/`,
       body: mockGroup,
     });
+    mockUseMatches.mockImplementation(() => [
+      {
+        id: '0',
+        pathname: `/organizations/org-slug/issues/${mockGroup.id}/replays/`,
+        params: {orgId: 'org-slug', groupId: mockGroup.id},
+        data: null,
+        handle: {path: '/organizations/:orgId/issues/:groupId/replays/'},
+      },
+    ]);
   });
   afterEach(() => {
     resetMockDate();
@@ -121,22 +140,39 @@ describe('GroupReplays', () => {
 
   describe('Replay Feature Disabled', () => {
     it("should show a message when the organization doesn't have access to the replay feature", () => {
-      const {router, organization} = init({organizationProps: {features: []}});
+      const {organization} = init({organizationProps: {features: []}});
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       expect(
         screen.getByText("You don't have access to this feature")
       ).toBeInTheDocument();
     });
+
+    it('should show access denied when user does not have granular replay permissions', async () => {
+      const {organization} = init({
+        organizationProps: {
+          features: ['session-replay'],
+          hasGranularReplayPermissions: true,
+          replayAccessMembers: [999], // User ID 1 is not in this list
+        },
+      });
+      render(<GroupReplays />, {
+        organization,
+        initialRouterConfig,
+      });
+
+      expect(
+        await screen.findByText("You don't have access to this feature")
+      ).toBeInTheDocument();
+    });
   });
 
   describe('Replay Feature Enabled', () => {
     it('should query the replay-count endpoint with the fetched replayIds', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -153,9 +189,8 @@ describe('GroupReplays', () => {
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       await waitFor(() => {
@@ -224,7 +259,7 @@ describe('GroupReplays', () => {
     });
 
     it('should show empty message when no replays are found', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -241,20 +276,17 @@ describe('GroupReplays', () => {
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
-      expect(
-        await screen.findByText('There are no items to display')
-      ).toBeInTheDocument();
+      expect(await screen.findByText('No replays found')).toBeInTheDocument();
       expect(mockReplayCountApi).toHaveBeenCalled();
       expect(mockReplayApi).toHaveBeenCalledTimes(1);
     });
 
     it('should display error message when api call fails', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -272,9 +304,8 @@ describe('GroupReplays', () => {
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       expect(
@@ -290,7 +321,7 @@ describe('GroupReplays', () => {
     });
 
     it('should display default error message when api call fails without a body', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -306,9 +337,8 @@ describe('GroupReplays', () => {
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       expect(
@@ -324,7 +354,7 @@ describe('GroupReplays', () => {
     });
 
     it('should show loading indicator when loading replays', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -342,9 +372,8 @@ describe('GroupReplays', () => {
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       expect(screen.getByTestId('loading-indicator')).toBeInTheDocument();
@@ -355,7 +384,7 @@ describe('GroupReplays', () => {
     });
 
     it('should show a list of replays and have the correct values', async () => {
-      const {router, organization} = init({});
+      const {organization} = init({});
 
       const mockReplayCountApi = MockApiClient.addMockResponse({
         url: mockReplayCountUrl,
@@ -403,7 +432,7 @@ describe('GroupReplays', () => {
       });
 
       const mockReplayRecord = mockReplay?.getReplay();
-      MockApiClient.addMockResponse({
+      const mockReplayViewedApi = MockApiClient.addMockResponse({
         method: 'POST',
         url: `/projects/${organization.slug}/${mockReplayRecord?.project_id}/replays/${mockReplayRecord?.id}/viewed-by/`,
       });
@@ -412,32 +441,42 @@ describe('GroupReplays', () => {
       setMockDate(new Date('Sep 28, 2022 11:29:13 PM UTC'));
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       await waitFor(() => {
         expect(mockReplayCountApi).toHaveBeenCalled();
       });
-      expect(mockReplayApi).toHaveBeenCalledTimes(1);
 
       // Expect the table to have 2 rows
       expect(await screen.findAllByText('testDisplayName')).toHaveLength(2);
 
+      await waitFor(() => {
+        expect(mockReplayApi).toHaveBeenCalledTimes(1);
+      });
+
       const expectedQuery =
-        'query=&referrer=%2Forganizations%2F%3AorgId%2Fissues%2F%3AgroupId%2Freplays%2F&statsPeriod=14d&yAxis=count%28%29';
+        'playlistEnd=2022-09-28T23%3A29%3A13&playlistStart=2022-06-30T23%3A29%3A13&query=id%3A%5B346789a703f6454384f1de473b8b9fcc%2Cb05dae9b6be54d21a4d5ad9f8f02b780%5D&referrer=issueReplays';
 
       // Expect the first row to have the correct href
-      expect(screen.getAllByRole('link', {name: 'testDisplayName'})[0]).toHaveAttribute(
+      expect(
+        screen.getByRole('link', {
+          name: 'T testDisplayName project-slug 346789a7 14 days ago',
+        })
+      ).toHaveAttribute(
         'href',
-        `/organizations/org-slug/replays/${REPLAY_ID_1}/?${expectedQuery}`
+        `/organizations/org-slug/explore/replays/${REPLAY_ID_1}/?${expectedQuery}`
       );
 
       // Expect the second row to have the correct href
-      expect(screen.getAllByRole('link', {name: 'testDisplayName'})[1]).toHaveAttribute(
+      expect(
+        screen.getByRole('link', {
+          name: 'T testDisplayName project-slug b05dae9b 7 days ago',
+        })
+      ).toHaveAttribute(
         'href',
-        `/organizations/org-slug/replays/${REPLAY_ID_2}/?${expectedQuery}`
+        `/organizations/org-slug/explore/replays/${REPLAY_ID_2}/?${expectedQuery}`
       );
 
       // Expect the first row to have the correct duration
@@ -447,24 +486,26 @@ describe('GroupReplays', () => {
       expect(screen.getByText('06:40')).toBeInTheDocument();
 
       // Expect the first row to have the correct errors
-      expect(screen.getAllByTestId('replay-table-count-errors')[0]).toHaveTextContent(
-        '1'
-      );
+      expect(
+        screen.getAllByTestId('replay-table-column-count-errors')[0]
+      ).toHaveTextContent('1');
 
       // Expect the second row to have the correct errors
-      expect(screen.getAllByTestId('replay-table-count-errors')[1]).toHaveTextContent(
-        '4'
-      );
+      expect(
+        screen.getAllByTestId('replay-table-column-count-errors')[1]
+      ).toHaveTextContent('4');
 
       // Expect the first row to have the correct date
       expect(screen.getByText('14 days ago')).toBeInTheDocument();
 
       // Expect the second row to have the correct date
       expect(screen.getByText('7 days ago')).toBeInTheDocument();
+
+      await waitFor(() => expect(mockReplayViewedApi).toHaveBeenCalled());
     });
 
     it('Should render the replay player', async () => {
-      const {router, organization} = init({
+      const {organization} = init({
         organizationProps: {features: ['session-replay']},
       });
 
@@ -513,18 +554,18 @@ describe('GroupReplays', () => {
       });
 
       const mockReplayRecord = mockReplay?.getReplay();
-      MockApiClient.addMockResponse({
+      const mockReplayViewedApi = MockApiClient.addMockResponse({
         method: 'POST',
         url: `/projects/${organization.slug}/${mockReplayRecord?.project_id}/replays/${mockReplayRecord?.id}/viewed-by/`,
       });
 
       render(<GroupReplays />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       expect(await screen.findByText('See Full Replay')).toBeInTheDocument();
+      await waitFor(() => expect(mockReplayViewedApi).toHaveBeenCalled());
       expect(mockReplayCountApi).toHaveBeenCalledWith(
         mockReplayCountUrl,
         expect.objectContaining({
@@ -540,7 +581,7 @@ describe('GroupReplays', () => {
     });
 
     it('Should switch replays when clicking', async () => {
-      const {router, organization} = init({
+      const {organization} = init({
         organizationProps: {features: ['session-replay']},
       });
       const mockReplayRecord = mockReplay?.getReplay();
@@ -593,10 +634,9 @@ describe('GroupReplays', () => {
         url: `/projects/${organization.slug}/${mockReplayRecord?.project_id}/replays/${mockReplayRecord?.id}/viewed-by/`,
       });
 
-      render(<GroupReplays />, {
-        router,
+      const {router} = render(<GroupReplays />, {
         organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       await waitFor(() => {
@@ -620,11 +660,11 @@ describe('GroupReplays', () => {
       await userEvent.click(replayPlayPlause);
 
       await waitFor(() =>
-        expect(router.replace).toHaveBeenCalledWith(
+        expect(router.location).toEqual(
           expect.objectContaining({
-            pathname: '/organizations/org-slug/replays/',
+            pathname: `/organizations/${organization.slug}/issues/${mockGroup.id}/replays/`,
             query: {
-              selected_replay_index: 1,
+              selected_replay_index: '1',
             },
           })
         )

@@ -1,5 +1,7 @@
+import {statsPeriodToDays} from 'sentry/utils/duration/statsPeriodToDays';
 import {OurLogKnownFieldKey} from 'sentry/views/explore/logs/types';
-import {SpanFields, SpanIndexedField} from 'sentry/views/insights/types';
+import {TraceMetricKnownFieldKey} from 'sentry/views/explore/metrics/types';
+import {SpanFields} from 'sentry/views/insights/types';
 
 export const SENTRY_SEARCHABLE_SPAN_STRING_TAGS: string[] = [
   // NOTE: intentionally choose to not expose transaction id
@@ -7,59 +9,89 @@ export const SENTRY_SEARCHABLE_SPAN_STRING_TAGS: string[] = [
 
   'id', // SpanIndexedField.SPAN_ID is actually `span_id`
   'profile.id', // SpanIndexedField.PROFILE_ID is actually `profile_id`
-  SpanIndexedField.BROWSER_NAME,
-  SpanIndexedField.ENVIRONMENT,
-  SpanIndexedField.ORIGIN_TRANSACTION,
-  SpanIndexedField.PROJECT,
-  SpanIndexedField.RAW_DOMAIN,
-  SpanIndexedField.RELEASE,
-  SpanIndexedField.SDK_NAME,
-  SpanIndexedField.SDK_VERSION,
-  SpanIndexedField.SPAN_ACTION,
-  SpanIndexedField.SPAN_CATEGORY,
-  SpanIndexedField.SPAN_DESCRIPTION,
-  SpanIndexedField.SPAN_DOMAIN,
-  SpanIndexedField.SPAN_GROUP,
-  SpanIndexedField.SPAN_OP,
-  SpanIndexedField.SPAN_STATUS,
-  SpanIndexedField.TIMESTAMP,
-  SpanIndexedField.TRACE,
-  SpanIndexedField.TRANSACTION,
-  SpanIndexedField.TRANSACTION_METHOD,
-  SpanIndexedField.TRANSACTION_OP,
-  SpanIndexedField.USER,
-  SpanIndexedField.USER_EMAIL,
-  SpanIndexedField.USER_GEO_SUBREGION,
-  SpanIndexedField.USER_ID,
-  SpanIndexedField.USER_IP,
-  SpanIndexedField.USER_USERNAME,
-  SpanIndexedField.IS_TRANSACTION, // boolean field but we can expose it as a string
-  SpanIndexedField.NORMALIZED_DESCRIPTION,
-  SpanIndexedField.CACHE_HIT,
+  SpanFields.BROWSER_NAME,
+  SpanFields.ENVIRONMENT,
+  SpanFields.ORIGIN_TRANSACTION,
+  SpanFields.PROJECT,
+  SpanFields.RAW_DOMAIN,
+  SpanFields.RELEASE,
+  SpanFields.SDK_NAME,
+  SpanFields.SDK_VERSION,
+  SpanFields.SPAN_ACTION,
+  SpanFields.SPAN_CATEGORY,
+  SpanFields.SPAN_DESCRIPTION,
+  SpanFields.SPAN_DOMAIN,
+  SpanFields.SPAN_GROUP,
+  SpanFields.SPAN_OP,
+  SpanFields.SPAN_STATUS,
+  SpanFields.TIMESTAMP,
+  SpanFields.TRACE,
+  SpanFields.TRANSACTION,
+  SpanFields.TRANSACTION_METHOD,
+  SpanFields.TRANSACTION_OP,
+  SpanFields.USER,
+  SpanFields.USER_EMAIL,
+  SpanFields.USER_GEO_SUBREGION,
+  SpanFields.USER_ID,
+  SpanFields.USER_IP,
+  SpanFields.USER_USERNAME,
+  SpanFields.NORMALIZED_DESCRIPTION,
+  SpanFields.CACHE_HIT,
 ];
 
 export const SENTRY_SEARCHABLE_SPAN_NUMBER_TAGS: string[] = [
-  SpanIndexedField.SPAN_DURATION,
-  SpanIndexedField.SPAN_SELF_TIME,
+  SpanFields.SPAN_DURATION,
+  SpanFields.SPAN_SELF_TIME,
 ];
 
 export const SENTRY_SPAN_STRING_TAGS: string[] = [
   'id', // SpanIndexedField.SPAN_ID is actually `span_id`
-  SpanIndexedField.PROJECT,
-  SpanIndexedField.SPAN_DESCRIPTION,
-  SpanIndexedField.SPAN_OP,
-  SpanIndexedField.TIMESTAMP,
-  SpanIndexedField.TRANSACTION,
-  SpanIndexedField.TRACE,
-  SpanIndexedField.IS_TRANSACTION, // boolean field but we can expose it as a string
-  SpanIndexedField.NORMALIZED_DESCRIPTION,
-  SpanIndexedField.RELEASE, // temporary as orgs with >1k keys still want releases
+  SpanFields.PROJECT,
+  SpanFields.SPAN_DESCRIPTION,
+  SpanFields.SPAN_OP,
+  SpanFields.TIMESTAMP,
+  SpanFields.TRANSACTION,
+  SpanFields.TRACE,
+  SpanFields.NORMALIZED_DESCRIPTION,
+  SpanFields.RELEASE, // temporary as orgs with >1k keys still want releases
   SpanFields.PROJECT_ID,
+  SpanFields.SDK_NAME,
+  SpanFields.SDK_VERSION,
   SpanFields.SPAN_SYSTEM,
   SpanFields.SPAN_CATEGORY,
+  SpanFields.USER_ID,
+  SpanFields.USER_IP,
+  SpanFields.USER_EMAIL,
+  SpanFields.USER_USERNAME,
+  SpanFields.GEN_AI_CONVERSATION_ID,
+  SpanFields.GEN_AI_INPUT_MESSAGES,
+  SpanFields.GEN_AI_OUTPUT_MESSAGES,
+  SpanFields.GEN_AI_RESPONSE_MODEL,
 ];
 
-export const SENTRY_SPAN_NUMBER_TAGS: string[] = [...SENTRY_SEARCHABLE_SPAN_NUMBER_TAGS];
+export const SENTRY_SPAN_NUMBER_TAGS: string[] = [
+  ...SENTRY_SEARCHABLE_SPAN_NUMBER_TAGS,
+  SpanFields.AI_TOTAL_COST,
+  SpanFields.GEN_AI_COST_INPUT_TOKENS,
+  SpanFields.GEN_AI_COST_OUTPUT_TOKENS,
+  SpanFields.GEN_AI_COST_TOTAL_TOKENS,
+  SpanFields.GEN_AI_USAGE_INPUT_TOKENS,
+  SpanFields.GEN_AI_USAGE_OUTPUT_TOKENS,
+  SpanFields.GEN_AI_USAGE_TOTAL_TOKENS,
+  'gen_ai.usage.total_cost',
+];
+
+export const SENTRY_SPAN_BOOLEAN_TAGS: string[] = [
+  SpanFields.IS_TRANSACTION,
+  SpanFields.IS_STARRED_TRANSACTION,
+];
+
+// Span attributes that should only appear in dashboards, not in Explore.
+// is_starred_transaction relies on the dashboard widget query cache for
+// starring mutations and is not supported in Explore.
+export const DASHBOARD_ONLY_SPAN_ATTRIBUTES: string[] = [
+  SpanFields.IS_STARRED_TRANSACTION,
+];
 
 export const SENTRY_LOG_STRING_TAGS: string[] = [
   OurLogKnownFieldKey.TRACE_ID,
@@ -70,3 +102,85 @@ export const SENTRY_LOG_STRING_TAGS: string[] = [
 ];
 
 export const SENTRY_LOG_NUMBER_TAGS: string[] = [OurLogKnownFieldKey.SEVERITY_NUMBER];
+
+// Preprod default attributes based on src/sentry/preprod/eap/write.py
+export const SENTRY_PREPROD_STRING_TAGS: string[] = [
+  'app_id',
+  'app_name',
+  'artifact_type',
+  'build_configuration_name',
+  'build_number',
+  'build_version',
+  'git_base_ref',
+  'git_base_sha',
+  'git_head_ref',
+  'git_head_sha',
+  'install_groups',
+  'platform_name',
+  'snapshot_status',
+];
+
+const PREPROD_IMAGE_FIELDS = [
+  'image_count',
+  'images_added',
+  'images_changed',
+  'images_removed',
+  'images_renamed',
+  'images_skipped',
+  'images_unchanged',
+] as const;
+
+export const SENTRY_PREPROD_NUMBER_TAGS: string[] = [
+  'git_pr_number',
+  ...PREPROD_IMAGE_FIELDS,
+];
+
+export const SENTRY_PREPROD_BOOLEAN_TAGS: string[] = [];
+
+export const HIDDEN_PREPROD_ATTRIBUTES = [
+  'min_install_size',
+  'tags[min_install_size,number]',
+  'tags[max_install_size,number]',
+  'min_download_size',
+  'tags[min_download_size,number]',
+  'tags[max_download_size,number]',
+  'size_metric_id',
+  'tags[size_metric_id,number]',
+  'preprod_artifact_id',
+  'tags[preprod_artifact_id,number]',
+  'processing_version',
+  'tags[processing_version,number]',
+  'sub_item_type',
+  'artifact_state',
+  'tags[artifact_state,number]',
+  'tags[artifact_date_built,number]',
+  'tags[build_number,number]',
+  'metrics_artifact_type',
+  'tags[metrics_artifact_type,number]',
+  'tags[artifact_type,number]',
+  ...PREPROD_IMAGE_FIELDS,
+  // Distribution-only; explicitly allowlisted by the Mobile Builds distribution views.
+  'install_groups',
+  'snapshot_status',
+];
+
+export const SENTRY_TRACEMETRIC_STRING_TAGS: string[] = [
+  TraceMetricKnownFieldKey.TIMESTAMP,
+];
+
+export const SENTRY_TRACEMETRIC_NUMBER_TAGS: string[] = [];
+
+export const SENTRY_LOG_BOOLEAN_TAGS: string[] = [];
+
+export const SENTRY_TRACEMETRIC_BOOLEAN_TAGS: string[] = [];
+
+export const MAX_CROSS_EVENT_QUERIES = 2;
+// We want a maximum of 7 days for cross events to avoid overwhelming the backend.
+export const MAX_PERIOD_FOR_CROSS_EVENTS = '7d';
+export const MAX_DAYS_FOR_CROSS_EVENTS = statsPeriodToDays(MAX_PERIOD_FOR_CROSS_EVENTS);
+
+export const EXPLORE_FIVE_MIN_STALE_TIME = 5 * 60 * 1000;
+
+// Some fields don't make sense to allow users to group by as they create
+// very high cardinality groupings and is not useful.
+export const DISALLOWED_GROUP_BY_FIELDS = new Set(['id', 'timestamp']);

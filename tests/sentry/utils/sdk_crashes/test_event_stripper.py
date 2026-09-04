@@ -2,6 +2,9 @@ from collections.abc import Sequence
 
 import pytest
 
+from fixtures.sdk_crash_detection.crash_event_android import (
+    get_crash_event as get_android_crash_event,
+)
 from fixtures.sdk_crash_detection.crash_event_cocoa import (
     get_crash_event,
     get_crash_event_with_frames,
@@ -54,7 +57,7 @@ def store_and_strip_event(configs, store_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_keeps_allowed_keys(store_and_strip_event):
+def test_strip_event_data_keeps_allowed_keys(store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event())
 
     keys_removed = {"tags", "user", "threads", "breadcrumbs", "environment"}
@@ -76,7 +79,7 @@ def test_strip_event_data_keeps_allowed_keys(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_strips_context(store_and_strip_event):
+def test_strip_event_data_strips_context(store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event())
 
     assert stripped_event_data.get("contexts") == {
@@ -84,19 +87,87 @@ def test_strip_event_data_strips_context(store_and_strip_event):
             "name": "iOS",
             "version": "16.3",
             "build": "20D47",
+            "kernel_version": "Darwin Kernel Version 22.3.0: Wed Jan  4 21:25:19 PST 2023; root:xnu-8792.82.2~1/RELEASE_ARM64_T8110",
+            "rooted": False,
         },
         "device": {
             "family": "iOS",
             "model": "iPhone14,8",
+            "model_id": "D28AP",
             "arch": "arm64e",
             "simulator": True,
+            "memory_size": 5944508416,
         },
+        "app": {},
     }
 
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_strips_sdk(store_and_strip_event):
+def test_strip_event_data_keeps_android_device_os_app_fields(
+    configs, store_and_strip_event
+) -> None:
+    """Android-specific device, os, and app context fields must survive stripping."""
+    event_data = get_android_crash_event(
+        contexts={
+            "device": {
+                "family": "Pixel",
+                "model": "Pixel 7",
+                "model_id": "GVU6C",
+                "arch": "arm64-v8a",
+                "simulator": False,
+                "manufacturer": "Google",
+                "brand": "google",
+                "memory_size": 8053063680,
+                "processor_count": 8,
+                "processor_frequency": 2800.0,
+                "name": "John's Pixel",  # PII — must be stripped
+                "id": "abc123",  # PII — must be stripped
+            },
+            "os": {
+                "name": "Android",
+                "version": "14",
+                "build": "UP1A.231005.007",
+                "kernel_version": "6.1.21-android14-3-00001",
+                "rooted": False,
+            },
+            "app": {
+                "in_foreground": True,
+                "app_name": "ExampleApp",  # PII — must be stripped
+                "app_identifier": "com.example.myapp",  # PII — must be stripped
+            },
+        }
+    )
+    java_config = configs[2]
+    stripped = store_and_strip_event(data=event_data, config=java_config)
+
+    assert stripped["contexts"]["device"] == {
+        "family": "Pixel",
+        "model": "Pixel 7",
+        "model_id": "GVU6C",
+        "arch": "arm64-v8a",
+        "simulator": False,
+        "manufacturer": "Google",
+        "brand": "google",
+        "memory_size": 8053063680,
+        "processor_count": 8,
+        "processor_frequency": 2800.0,
+    }
+    assert stripped["contexts"]["os"] == {
+        "name": "Android",
+        "version": "14",
+        "build": "UP1A.231005.007",
+        "kernel_version": "6.1.21-android14-3-00001",
+        "rooted": False,
+    }
+    assert stripped["contexts"]["app"] == {
+        "in_foreground": True,
+    }
+
+
+@django_db_all
+@pytest.mark.snuba
+def test_strip_event_data_strips_sdk(store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event())
 
     assert stripped_event_data.get("sdk") == {
@@ -107,7 +178,7 @@ def test_strip_event_data_strips_sdk(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_strips_value_if_not_simple_type(store_event, configs):
+def test_strip_event_data_strips_value_if_not_simple_type(store_event, configs) -> None:
     event = store_event(data=get_crash_event())
     event.data["type"] = {"foo": "bar"}
 
@@ -118,7 +189,7 @@ def test_strip_event_data_strips_value_if_not_simple_type(store_event, configs):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_keeps_simple_types(store_event, configs):
+def test_strip_event_data_keeps_simple_types(store_event, configs) -> None:
     event = store_event(data=get_crash_event())
     event.data["type"] = True
     event.data["datetime"] = 0.1
@@ -135,7 +206,9 @@ def test_strip_event_data_keeps_simple_types(store_event, configs):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_keeps_simple_exception_properties(store_and_strip_event):
+def test_strip_event_data_keeps_simple_exception_properties(
+    store_and_strip_event,
+) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event())
 
     assert get_path(stripped_event_data, "exception", "values", 0, "type") == "EXC_BAD_ACCESS"
@@ -144,13 +217,21 @@ def test_strip_event_data_keeps_simple_exception_properties(store_and_strip_even
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_keeps_exception_mechanism(store_event, configs):
+def test_strip_event_data_keeps_exception_mechanism(store_event, configs) -> None:
     event = store_event(data=get_crash_event())
 
     # set extra data that should be stripped
     set_path(event.data, "exception", "values", 0, "mechanism", "foo", value="bar")
     set_path(
-        event.data, "exception", "values", 0, "mechanism", "meta", "signal", "foo", value="bar"
+        event.data,
+        "exception",
+        "values",
+        0,
+        "mechanism",
+        "meta",
+        "signal",
+        "foo",
+        value="bar",
     )
     set_path(
         event.data,
@@ -173,7 +254,12 @@ def test_strip_event_data_keeps_exception_mechanism(store_event, configs):
         "synthetic": False,
         "type": "mach",
         "meta": {
-            "signal": {"number": 11, "code": 0, "name": "SIGSEGV", "code_name": "SEGV_NOOP"},
+            "signal": {
+                "number": 11,
+                "code": 0,
+                "name": "SIGSEGV",
+                "code_name": "SEGV_NOOP",
+            },
             "mach_exception": {
                 "exception": 1,
                 "code": 1,
@@ -190,7 +276,7 @@ def test_strip_event_data_keeps_exception_mechanism(store_event, configs):
 
 @django_db_all
 @pytest.mark.snuba
-def test_set_in_app_only_for_sdk_frames(store_and_strip_event):
+def test_set_in_app_only_for_sdk_frames(store_and_strip_event) -> None:
     frames = get_frames("SentryCrashMonitor_CPPException.cpp", sentry_frame_in_app=False)
 
     system_frame_in_app = [
@@ -222,7 +308,7 @@ def test_set_in_app_only_for_sdk_frames(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_data_keeps_exception_stacktrace(store_and_strip_event):
+def test_strip_event_data_keeps_exception_stacktrace(store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event())
 
     first_frame = get_path(stripped_event_data, "exception", "values", 0, "stacktrace", "frames", 0)
@@ -247,7 +333,7 @@ def test_strip_event_data_keeps_exception_stacktrace(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_frames(store_and_strip_event):
+def test_strip_frames(store_and_strip_event) -> None:
     frames = get_frames("SentryCrashMonitor_CPPException.cpp", sentry_frame_in_app=False)
 
     frames_kept = [
@@ -297,7 +383,7 @@ def test_strip_frames(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_frames_sdk_frames(store_and_strip_event):
+def test_strip_frames_sdk_frames(store_and_strip_event) -> None:
     frames = get_frames("SentryCrashMonitor_CPPException.cpp", sentry_frame_in_app=False)
     # When statically linked the package or module is usually set to the app name
     sentry_sdk_frame = frames[-1]
@@ -327,7 +413,7 @@ def test_strip_frames_sdk_frames(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_frames_sdk_frames_keep_after_matcher(store_and_strip_event, configs):
+def test_strip_frames_sdk_frames_keep_after_matcher(store_and_strip_event, configs) -> None:
     frames = get_frames("SentryCrashMonitor_CPPException.cpp", sentry_frame_in_app=False)
 
     sentry_sdk_frame = frames[-1]
@@ -365,7 +451,7 @@ def test_strip_frames_sdk_frames_keep_after_matcher(store_and_strip_event, confi
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_frames_with_keep_for_fields_path_replacer(store_and_strip_event, configs):
+def test_strip_frames_with_keep_for_fields_path_replacer(store_and_strip_event, configs) -> None:
     frames = get_frames("register", sentry_frame_in_app=False)
 
     sentry_sdk_frame = frames[-1]
@@ -426,7 +512,7 @@ def test_strip_frames_with_keep_for_fields_path_replacer(store_and_strip_event, 
     ],
 )
 @django_db_all
-def test_event_data_with_registers(registers, expected_registers, store_and_strip_event):
+def test_event_data_with_registers(registers, expected_registers, store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data=get_crash_event(registers=registers))
 
     stripped_registers = get_path(
@@ -437,7 +523,7 @@ def test_event_data_with_registers(registers, expected_registers, store_and_stri
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_without_data_returns_empty_dict(store_and_strip_event):
+def test_strip_event_without_data_returns_empty_dict(store_and_strip_event) -> None:
     stripped_event_data = store_and_strip_event(data={})
 
     assert stripped_event_data == {}
@@ -445,10 +531,86 @@ def test_strip_event_without_data_returns_empty_dict(store_and_strip_event):
 
 @django_db_all
 @pytest.mark.snuba
-def test_strip_event_without_frames_returns_empty_dict(store_and_strip_event):
+def test_strip_event_without_frames_returns_empty_dict(store_and_strip_event) -> None:
     event_data = get_crash_event_with_frames([])
     set_path(event_data, "exception", value=None)
 
     stripped_event_data = store_and_strip_event(data=event_data)
 
     assert stripped_event_data == {}
+
+
+@django_db_all
+@pytest.mark.snuba
+def test_strip_event_with_multiple_exceptions_only_keep_last_one(
+    store_and_strip_event,
+) -> None:
+    event_data = get_crash_event()
+
+    exception_values = list(get_path(event_data, "exception", "values"))
+
+    crash_exception = dict(exception_values[0])
+    set_path(crash_exception, "type", value="SIGPIPE")
+    set_path(crash_exception, "value", value="Broken pipe")
+
+    exception_values.append(crash_exception)
+
+    set_path(event_data, "exception", "values", value=exception_values)
+
+    stripped_event_data = store_and_strip_event(data=event_data)
+
+    assert len(get_path(stripped_event_data, "exception", "values")) == 1
+
+    exception = get_path(stripped_event_data, "exception", "values", 0)
+    assert exception["type"] == "SIGPIPE"
+    assert "value" not in exception
+
+
+@django_db_all
+@pytest.mark.snuba
+def test_strip_event_with_multiple_exceptions_last_without_frames_discard_event(
+    store_and_strip_event,
+) -> None:
+    event_data = get_crash_event()
+
+    exception_values = list(get_path(event_data, "exception", "values"))
+
+    crash_exception = dict(exception_values[0])
+    set_path(crash_exception, "type", value="SIGPIPE")
+    set_path(crash_exception, "value", value="Broken pipe")
+    set_path(crash_exception, "stacktrace", value=None)
+    exception_values.append(crash_exception)
+
+    set_path(event_data, "exception", "values", value=exception_values)
+
+    stripped_event_data = store_and_strip_event(data=event_data)
+
+    assert stripped_event_data == {}
+
+
+@django_db_all
+@pytest.mark.snuba
+def test_strip_event_with_multiple_exceptions_first_without_frames_keeps_last_exception(
+    store_and_strip_event,
+) -> None:
+    event_data = get_crash_event()
+
+    exception_values = list(get_path(event_data, "exception", "values"))
+
+    crash_exception = dict(exception_values[0])
+    set_path(crash_exception, "type", value="SIGPIPE")
+    set_path(crash_exception, "value", value="Broken pipe")
+    exception_values.append(crash_exception)
+
+    # Remove the stacktrace from the first exception.
+    exception_values[0]["stacktrace"] = None
+
+    set_path(event_data, "exception", "values", value=exception_values)
+
+    stripped_event_data = store_and_strip_event(data=event_data)
+
+    assert len(get_path(stripped_event_data, "exception", "values")) == 1
+
+    exception = get_path(stripped_event_data, "exception", "values", 0)
+    assert exception["type"] == "SIGPIPE"
+    assert "value" not in exception

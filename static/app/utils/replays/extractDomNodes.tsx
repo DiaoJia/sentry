@@ -2,7 +2,7 @@ import type {Mirror} from '@sentry-internal/rrweb-snapshot';
 
 import type {ReplayFrame} from 'sentry/utils/replays/types';
 import {getNodeIds} from 'sentry/utils/replays/types';
-import constructSelector from 'sentry/views/replays/deadRageClick/constructSelector';
+import {constructSelector} from 'sentry/views/explore/replays/selectors/constructSelector';
 
 export type Extraction = {
   frame: ReplayFrame;
@@ -11,7 +11,7 @@ export type Extraction = {
   timestamp: number;
 };
 
-const extractDomNodes = {
+export const extractDomNodes = {
   shouldVisitFrame: (frame: any) => {
     const nodeIds = getNodeIds(frame);
     return nodeIds.some((nodeId: any) => nodeId !== -1);
@@ -28,8 +28,6 @@ const extractDomNodes = {
     });
   },
 };
-
-export default extractDomNodes;
 
 function extractHtmlAndSelector(
   nodeIds: number[],
@@ -96,11 +94,13 @@ function removeChildLevel(max: number, collection: HTMLCollection, current = 0) 
       child.textContent = '/* Inline CSS */';
     }
     if (child.nodeName === 'svg') {
-      child.innerHTML = '<!-- SVG -->';
+      child.replaceChildren(document.createComment(' SVG '));
     }
     if (max <= current) {
       if (child.childElementCount > 0) {
-        child.innerHTML = `<!-- ${child.childElementCount} descendents -->`;
+        child.replaceChildren(
+          document.createComment(` ${child.childElementCount} descendents `)
+        );
       }
     } else {
       removeChildLevel(max, child.children, current + 1);

@@ -5,7 +5,6 @@ from typing import Any
 
 from rest_framework import serializers
 
-from sentry.eventstore.models import GroupEvent
 from sentry.models.project import Project
 from sentry.rules.actions.sentry_apps import SentryAppEventAction
 from sentry.rules.base import CallbackFuture
@@ -16,6 +15,7 @@ from sentry.sentry_apps.services.app import (
     app_service,
 )
 from sentry.sentry_apps.tasks.sentry_apps import notify_sentry_app
+from sentry.services.eventstore.models import GroupEvent
 
 ValidationError = serializers.ValidationError
 
@@ -82,7 +82,7 @@ class NotifyEventSentryAppAction(SentryAppEventAction):
                 return component
 
         raise ValidationError(
-            f"Alert Rule Actions are not enabled for the {sentry_app_name} integration."
+            f"Alert Actions are not enabled for the {sentry_app_name} integration."
         )
 
     def get_custom_actions(self, project: Project) -> Sequence[Mapping[str, Any]]:
@@ -158,6 +158,11 @@ class NotifyEventSentryAppAction(SentryAppEventAction):
             raise ValidationError("Could not identify integration from the installation uuid.")
 
         sentry_app = installations[0].sentry_app
-        alert_rule_component = self._get_alert_rule_component(sentry_app.id, sentry_app.name)
+        components = app_service.find_app_components(app_id=sentry_app.id)
+        for component in components:
+            if component.type == "alert-rule-action":
+                title = component.app_schema.get("title")
+                if title is not None:
+                    return str(title)
 
-        return str(alert_rule_component.app_schema.get("title"))
+        return sentry_app.name

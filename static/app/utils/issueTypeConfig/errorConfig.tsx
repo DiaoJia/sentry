@@ -1,13 +1,14 @@
 import {Fragment} from 'react';
 
 import {t, tct} from 'sentry/locale';
-import type {PlatformKey, Project} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project} from 'sentry/types/project';
 import type {
   IssueCategoryConfigMapping,
   IssueTypeConfig,
 } from 'sentry/utils/issueTypeConfig/types';
 import {ErrorHelpType} from 'sentry/utils/issueTypeConfig/types';
-import isHydrationError from 'sentry/utils/react/isHydrationError';
+import {isHydrationError} from 'sentry/utils/react/isHydrationError';
 import {Tab} from 'sentry/views/issueDetails/types';
 
 export const errorConfig: IssueCategoryConfigMapping = {

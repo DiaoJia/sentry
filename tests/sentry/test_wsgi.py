@@ -7,7 +7,6 @@ modules = [
     "django.db.models.sql.compiler",
     "sentry.identity.services.identity.impl",
     "sentry.integrations.services.integration.impl",
-    "sentry.middleware.integrations.parsers.plugin",
     "sentry.notifications.services.impl",
     "sentry.sentry_apps.services.app.impl",
     "sentry.users.services.user.impl",
@@ -36,7 +35,7 @@ for lang, _ in settings.LANGUAGES:
 """
 
 
-def test_wsgi_init():
+def test_wsgi_init() -> None:
     """
     This test ensures that the wsgi.py file correctly pre-loads the application and
     various resources we want to be "warm"

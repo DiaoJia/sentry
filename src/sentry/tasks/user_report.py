@@ -3,17 +3,14 @@ from typing import Any
 
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import issues_tasks
 from sentry.utils.safe import safe_execute
 
 
 @instrumented_task(
     name="sentry.tasks.user_report",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=issues_tasks,
-    ),
+    namespace=issues_tasks,
+    silo_mode=SiloMode.CELL,
 )
 def user_report(
     project_id: int, report: Mapping[str, Any] | None = None, report_id: int | None = None, **kwargs
@@ -34,7 +31,7 @@ def user_report(
     project = Project.objects.get_from_cache(id=project_id)
     if report_id:
         user_report = UserReport.objects.get(id=report_id)
-        user_report = serialize(user_report, AnonymousUser(), UserReportWithGroupSerializer())
-        safe_execute(mail_adapter.handle_user_report, report=user_report, project=project)
+        serialized_report = serialize(user_report, AnonymousUser(), UserReportWithGroupSerializer())
+        safe_execute(mail_adapter.handle_user_report, report=serialized_report, project=project)
     else:
         safe_execute(mail_adapter.handle_user_report, report=report, project=project)

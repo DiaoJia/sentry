@@ -1,0 +1,655 @@
+import {useEffect, useState} from 'react';
+import {useTheme} from '@emotion/react';
+import styled from '@emotion/styled';
+import {PlatformIcon} from 'platformicons';
+
+import emptyTraceImg from 'sentry-images/spot/profiling-empty-state.svg';
+
+import {Button} from '@sentry/scraps/button';
+import {Container, Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {GuidedSteps} from 'sentry/components/guidedSteps/guidedSteps';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {AuthTokenGeneratorProvider} from 'sentry/components/onboarding/gettingStartedDoc/authTokenGenerator';
+import {ContentBlocksRenderer} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/renderer';
+import {
+  CopyMarkdownButton,
+  OnboardingCopyMarkdownButton,
+} from 'sentry/components/onboarding/gettingStartedDoc/onboardingCopyMarkdownButton';
+import {
+  StepIndexProvider,
+  TabSelectionScope,
+} from 'sentry/components/onboarding/gettingStartedDoc/selectedCodeTabContext';
+import {StepTitles} from 'sentry/components/onboarding/gettingStartedDoc/step';
+import type {
+  BasePlatformOptions,
+  DocsParams,
+  OnboardingStep,
+} from 'sentry/components/onboarding/gettingStartedDoc/types';
+import {DocsPageLocation} from 'sentry/components/onboarding/gettingStartedDoc/types';
+import {useSourcePackageRegistries} from 'sentry/components/onboarding/gettingStartedDoc/useSourcePackageRegistries';
+import {useLoadGettingStarted} from 'sentry/components/onboarding/gettingStartedDoc/utils/useLoadGettingStarted';
+import {PlatformOptionDropdown} from 'sentry/components/onboarding/platformOptionDropdown';
+import {useUrlPlatformOptions} from 'sentry/components/onboarding/platformOptionsControl';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {SetupTitle} from 'sentry/components/updatedEmptyState';
+import {agentMonitoringPlatforms} from 'sentry/data/platformCategories';
+import {otherPlatform, allPlatforms as platforms} from 'sentry/data/platforms';
+import {t, tct} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
+import type {Project} from 'sentry/types/project';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {decodeInteger} from 'sentry/utils/queryString';
+import {useApi} from 'sentry/utils/useApi';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {useSpans} from 'sentry/views/insights/common/queries/useDiscover';
+import {LLM_ONBOARDING_COPY_MARKDOWN} from 'sentry/views/insights/pages/agents/llmOnboardingInstructions';
+import {
+  AGENT_INTEGRATION_ICONS,
+  AGENT_INTEGRATION_LABELS,
+  AgentIntegration,
+  DENO_AGENT_INTEGRATIONS,
+  DEPLOYMENT_TARGET_ICONS,
+  DEPLOYMENT_TARGET_LABELS,
+  DeploymentTarget,
+  getIntegrationDeploymentTarget,
+  NODE_AGENT_INTEGRATIONS,
+  PHP_AGENT_INTEGRATIONS,
+  PYTHON_AGENT_INTEGRATIONS,
+} from 'sentry/views/insights/pages/agents/utils/agentIntegrations';
+import {getHasAiSpansFilter} from 'sentry/views/insights/pages/agents/utils/query';
+import {Referrer} from 'sentry/views/insights/pages/agents/utils/referrers';
+import {
+  BulletList,
+  HeaderText,
+  PulseSpacer,
+  PulsingIndicator,
+  SubTitle,
+  useOnboardingProject,
+} from 'sentry/views/insights/pages/onboardingUtils';
+
+function useAiSpanWaiter(project: Project) {
+  const {selection} = usePageFilters();
+  const [shouldRefetch, setShouldRefetch] = useState(true);
+
+  const request = useSpans(
+    {
+      search: getHasAiSpansFilter(),
+      fields: ['id'],
+      limit: 1,
+      enabled: !!project,
+      useQueryOptions: {
+        refetchInterval: shouldRefetch ? 5000 : undefined,
+      },
+      pageFilters: {
+        ...selection,
+        projects: [Number(project.id)],
+        datetime: {
+          period: '6h',
+          utc: true,
+          start: null,
+          end: null,
+        },
+      },
+    },
+    Referrer.ONBOARDING
+  );
+
+  const hasEvents = Boolean(request.data?.length);
+
+  useEffect(() => {
+    if (hasEvents && shouldRefetch) {
+      setShouldRefetch(false);
+    }
+  }, [hasEvents, shouldRefetch]);
+
+  return request;
+}
+
+function WaitingIndicator({project}: {project: Project}) {
+  const spanRequest = useAiSpanWaiter(project);
+  const {reloadProjects, fetching} = useProjects();
+  const hasEvents = Boolean(spanRequest.data?.length);
+
+  return hasEvents ? (
+    <Button variant="primary" busy={fetching} onClick={reloadProjects}>
+      {t('View Agent Monitoring')}
+    </Button>
+  ) : (
+    <EventWaitingIndicator />
+  );
+}
+
+function StepRenderer({
+  project,
+  step,
+  stepIndex,
+  isLastStep,
+  trailingItems,
+}: {
+  isLastStep: boolean;
+  project: Project;
+  step: OnboardingStep;
+  stepIndex: number;
+  trailingItems?: React.ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <GuidedSteps.Step
+      stepKey={step.type || step.title}
+      title={step.title || (step.type && StepTitles[step.type])}
+      trailingItems={trailingItems}
+    >
+      <StepIndexProvider index={stepIndex}>
+        <ContentBlocksRenderer spacing={theme.space.md} contentBlocks={step.content} />
+      </StepIndexProvider>
+      <GuidedSteps.ButtonWrapper>
+        <GuidedSteps.BackButton size="md" />
+        <GuidedSteps.NextButton size="md" />
+        {isLastStep && <WaitingIndicator project={project} />}
+      </GuidedSteps.ButtonWrapper>
+      {/* This spacer ensures the whole pulse effect is visible, as the parent has overflow: hidden */}
+      {isLastStep && <PulseSpacer />}
+    </GuidedSteps.Step>
+  );
+}
+
+function OnboardingPanel({
+  project,
+  children,
+}: {
+  children: React.ReactNode;
+  project: Project;
+}) {
+  return (
+    <Panel>
+      <PanelBody>
+        <AuthTokenGeneratorProvider projectSlug={project?.slug}>
+          <TabSelectionScope>
+            <div>
+              <Flex justify="between" gap="2xl" radius="md" padding="3xl">
+                <HeaderText>
+                  <Title>{t('Monitor AI Agents')}</Title>
+                  <SubTitle>
+                    {t(
+                      'Get comprehensive visibility into your AI agents and LLM applications to understand performance, costs, and user interactions.'
+                    )}
+                  </SubTitle>
+                  <BulletList>
+                    <li>
+                      {t(
+                        'Track token usage, costs, and latency across all your LLM calls'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        'Monitor agent conversations, tool usage, and decision-making processes'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        'Set a conversation ID for each chat so Sentry can group related spans in Conversations'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        'Debug failed requests and optimize prompt performance with detailed traces'
+                      )}
+                    </li>
+                  </BulletList>
+                </HeaderText>
+                <Container display={{zero: 'none', xl: 'block'}}>
+                  {imageProps => <Image {...imageProps} src={emptyTraceImg} />}
+                </Container>
+              </Flex>
+              <Divider />
+              <Body>
+                <Setup>{children}</Setup>
+                <Preview>
+                  <BodyTitle>{t('Preview Agent Insights')}</BodyTitle>
+                  <Arcade
+                    src="https://demo.arcade.software/aEDAYP7ebTJvWKABSBdc?embed"
+                    loading="lazy"
+                    allowFullScreen
+                  />
+                </Preview>
+              </Body>
+            </div>
+          </TabSelectionScope>
+        </AuthTokenGeneratorProvider>
+      </PanelBody>
+    </Panel>
+  );
+}
+
+export function Onboarding() {
+  const api = useApi();
+  const {isSelfHosted, urlPrefix} = useLegacyStore(ConfigStore);
+  const project = useOnboardingProject();
+  const organization = useOrganization();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const currentPlatform = project?.platform
+    ? platforms.find(p => p.id === project.platform)
+    : undefined;
+
+  const {isLoading, docs, dsn, projectKeyId} = useLoadGettingStarted({
+    platform: currentPlatform || otherPlatform,
+    orgSlug: organization.slug,
+    projSlug: project?.slug,
+  });
+
+  // Local integration options for Agent Monitoring only
+  const isPythonPlatform = (project?.platform ?? '').startsWith('python');
+  const isDenoPlatform = project?.platform === 'deno';
+  const isPhpPlatform = (project?.platform ?? '').startsWith('php');
+  // Node-based platforms can deploy their agents to either the Node runtime or
+  // Cloudflare Workers, so we let the user pick a target that tailors the setup.
+  const isNodePlatform = (project?.platform ?? '').startsWith('node');
+  // Cloudflare Workers projects are pinned to the Cloudflare (withSentry) setup.
+  // Cloudflare Pages bootstraps via `sentryPagesPlugin` instead, so it's left out
+  // of this selector for now and keeps its existing onboarding.
+  const isCloudflareWorkers = project?.platform === 'node-cloudflare-workers';
+  const isCloudflarePages = project?.platform === 'node-cloudflare-pages';
+  const showDeploymentTarget =
+    isNodePlatform && !isCloudflareWorkers && !isCloudflarePages;
+
+  const deploymentTargetOptions: BasePlatformOptions = showDeploymentTarget
+    ? {
+        deploymentTarget: {
+          label: t('Deployment'),
+          defaultValue: DeploymentTarget.NODE,
+          items: [DeploymentTarget.NODE, DeploymentTarget.CLOUDFLARE].map(target => ({
+            label: DEPLOYMENT_TARGET_LABELS[target],
+            value: target,
+            leadingItems: (
+              <PlatformIcon platform={DEPLOYMENT_TARGET_ICONS[target]} size={16} alt="" />
+            ),
+          })),
+        },
+      }
+    : {};
+
+  // The SDK list is no longer filtered by runtime: Node projects see every
+  // Node/Cloudflare agent SDK, and the chosen SDK drives the runtime below.
+  const integrations = isPythonPlatform
+    ? PYTHON_AGENT_INTEGRATIONS
+    : isDenoPlatform
+      ? DENO_AGENT_INTEGRATIONS
+      : isPhpPlatform
+        ? PHP_AGENT_INTEGRATIONS
+        : NODE_AGENT_INTEGRATIONS;
+
+  const platformOptions: BasePlatformOptions = {
+    integration: {
+      label: t('Integration'),
+      items: integrations.map(integration => ({
+        label: isPhpPlatform
+          ? (currentPlatform?.name ?? t('Laravel'))
+          : AGENT_INTEGRATION_LABELS[integration],
+        value: integration,
+        leadingItems: (
+          <PlatformIcon
+            platform={
+              isPhpPlatform
+                ? (project?.platform ?? 'php-laravel')
+                : AGENT_INTEGRATION_ICONS[integration]
+            }
+            size={16}
+            alt=""
+          />
+        ),
+      })),
+    },
+    ...deploymentTargetOptions,
+  };
+
+  const selectedPlatformOptions = useUrlPlatformOptions(platformOptions);
+
+  // A runtime-specific SDK (e.g. Workers AI -> Cloudflare, Mastra -> Node) pins
+  // the runtime and locks the selector; otherwise the user's dropdown choice
+  // wins (the selector defaults to Node). Cloudflare Workers projects stay
+  // pinned to Cloudflare regardless of the SDK.
+  const integrationDeploymentTarget = getIntegrationDeploymentTarget(
+    selectedPlatformOptions.integration
+  );
+  const selectedDeploymentTarget = selectedPlatformOptions.deploymentTarget as
+    | DeploymentTarget
+    | undefined;
+  const deploymentTarget = isCloudflareWorkers
+    ? DeploymentTarget.CLOUDFLARE
+    : (integrationDeploymentTarget ?? selectedDeploymentTarget);
+
+  const {isPending: isLoadingRegistry, data: registryData} =
+    useSourcePackageRegistries(organization);
+
+  if (!project) {
+    return <div>{t('No project found')}</div>;
+  }
+
+  if (!agentMonitoringPlatforms.has(project.platform!)) {
+    return (
+      <UnsupportedPlatformOnboarding
+        project={project}
+        platformName={currentPlatform?.name || project.slug}
+      />
+    );
+  }
+
+  if (isLoading) {
+    return <LoadingIndicator />;
+  }
+
+  const agentMonitoringDocs = docs?.agentMonitoringOnboarding;
+
+  if (!agentMonitoringDocs || !dsn || !projectKeyId) {
+    return <NoDocsOnboarding project={project} />;
+  }
+
+  const docParams: DocsParams<any> = {
+    api,
+    projectKeyId,
+    dsn,
+    organization,
+    platformKey: project.platform || 'other',
+    project,
+    isLogsSelected: false,
+    isFeedbackSelected: false,
+    isMetricsSelected: false,
+    isPerformanceSelected: true,
+    isProfilingSelected: false,
+    isReplaySelected: false,
+    sourcePackageRegistries: {
+      isLoading: isLoadingRegistry,
+      data: registryData,
+    },
+    platformOptions: {...selectedPlatformOptions, deploymentTarget},
+    docsLocation: DocsPageLocation.PROFILING_PAGE,
+    urlPrefix,
+    isSelfHosted,
+  };
+
+  const introduction = agentMonitoringDocs.introduction?.(docParams);
+
+  const steps = [
+    ...(agentMonitoringDocs.install?.(docParams) || []),
+    ...(agentMonitoringDocs.configure?.(docParams) || []),
+    ...(agentMonitoringDocs.verify?.(docParams) || []),
+  ].filter(s => !s.collapsible);
+
+  return (
+    <OnboardingPanel project={project}>
+      <SetupTitle project={project} />
+      <OptionsWrapper>
+        <PlatformOptionDropdown
+          platformOptions={platformOptions}
+          connectors={{deploymentTarget: t('on')}}
+          lockedValues={
+            integrationDeploymentTarget
+              ? {deploymentTarget: integrationDeploymentTarget}
+              : undefined
+          }
+        />
+      </OptionsWrapper>
+      {introduction && <DescriptionWrapper>{introduction}</DescriptionWrapper>}
+      {/* Eve only drains OpenTelemetry traces, so there's no Sentry SDK call to
+          set a conversation ID - hide the Conversations pointer for it. */}
+      {selectedPlatformOptions.integration !== AgentIntegration.EVE && (
+        <DescriptionWrapper>
+          <p>
+            {tct(
+              'To use [link:Conversations], set a conversation ID for each chat. Sentry uses the [code:gen_ai.conversation.id] attribute to group related AI spans.',
+              {
+                code: <code />,
+                link: (
+                  <ExternalLink href="https://docs.sentry.io/ai/monitoring/conversations/" />
+                ),
+              }
+            )}
+          </p>
+        </DescriptionWrapper>
+      )}
+      <GuidedSteps
+        // Remount when the integration or runtime changes so the stepper doesn't
+        // carry over stale per-step state from the previous selection.
+        key={`${selectedPlatformOptions.integration}-${deploymentTarget}`}
+        initialStep={decodeInteger(location.query.guidedStep)}
+        onStepChange={step => {
+          navigate({
+            pathname: location.pathname,
+            query: {
+              ...location.query,
+              guidedStep: step,
+            },
+          });
+        }}
+      >
+        {steps.map((step, index) => (
+          <StepRenderer
+            key={step.title || step.type}
+            project={project}
+            step={step}
+            stepIndex={index}
+            isLastStep={index === steps.length - 1}
+            trailingItems={
+              index === 0 ? (
+                <OnboardingCopyMarkdownButton
+                  borderless
+                  steps={steps}
+                  source="agent_monitoring_onboarding"
+                  postamble={LLM_ONBOARDING_COPY_MARKDOWN}
+                  onCopy={() => {
+                    trackAnalytics('agent-monitoring.copy-llm-prompt-click', {
+                      organization,
+                    });
+                  }}
+                />
+              ) : undefined
+            }
+          />
+        ))}
+      </GuidedSteps>
+    </OnboardingPanel>
+  );
+}
+
+function CopyInstructionsButton() {
+  const organization = useOrganization();
+
+  return (
+    <CopyMarkdownButton
+      title={t('Copies setup instructions as Markdown, optimized for use with an LLM.')}
+      source="agent_monitoring_onboarding"
+      getMarkdown={() => LLM_ONBOARDING_COPY_MARKDOWN}
+      onCopy={() => {
+        trackAnalytics('agent-monitoring.copy-llm-prompt-click', {
+          organization,
+        });
+      }}
+    />
+  );
+}
+
+export function UnsupportedPlatformOnboarding({
+  project,
+  platformName,
+}: {
+  platformName: string;
+  project: Project;
+}) {
+  return (
+    <OnboardingPanel project={project}>
+      <DescriptionWrapper>
+        <p>
+          {tct(
+            'Fiddlesticks. Auto instrumentation of AI Agents is not available for your [platform] project.',
+            {
+              platform: platformName,
+            }
+          )}
+        </p>
+        <p>
+          {tct(
+            'You can [link:manually instrument] your agents using the Sentry SDK tracing API, or click [bold:Copy instructions] to have an AI coding agent do it for you.',
+            {
+              link: (
+                <ExternalLink href="https://docs.sentry.io/platforms/python/tracing/instrumentation/custom-instrumentation/ai-agents-module/" />
+              ),
+              bold: <strong />,
+            }
+          )}
+        </p>
+        <CopyInstructionsButton />
+      </DescriptionWrapper>
+    </OnboardingPanel>
+  );
+}
+
+export function NoDocsOnboarding({project}: {project: Project}) {
+  return (
+    <OnboardingPanel project={project}>
+      <DescriptionWrapper>
+        <p>
+          {tct(
+            "The agent monitoring onboarding checklist isn't available for your [project] project yet.",
+            {project: project.slug}
+          )}
+        </p>
+        <p>
+          {tct(
+            'You can set up the Sentry SDK by following our [link:documentation], or click [bold:Copy instructions] to have an AI coding agent do it for you.',
+            {
+              link: (
+                <ExternalLink href="https://docs.sentry.io/product/insights/ai/agents/getting-started/" />
+              ),
+              bold: <strong />,
+            }
+          )}
+        </p>
+        <CopyInstructionsButton />
+      </DescriptionWrapper>
+    </OnboardingPanel>
+  );
+}
+
+const EventWaitingIndicator = styled((p: React.HTMLAttributes<HTMLDivElement>) => (
+  <div {...p}>
+    {t("Waiting for this project's first agent events")}
+    <PulsingIndicator />
+  </div>
+))`
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding: 0 ${p => p.theme.space.md};
+  z-index: 10;
+  gap: ${p => p.theme.space.md};
+  flex-grow: 1;
+  font-size: ${p => p.theme.font.size.md};
+  color: ${p => p.theme.colors.pink500};
+  padding-right: ${p => p.theme.space['3xl']};
+`;
+
+const Title = styled('div')`
+  font-size: 26px;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+`;
+
+const BodyTitle = styled('div')`
+  font-size: ${p => p.theme.font.size.xl};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin-bottom: ${p => p.theme.space.md};
+`;
+
+const Setup = styled('div')`
+  padding: ${p => p.theme.space['3xl']};
+
+  &:after {
+    content: '';
+    position: absolute;
+    right: 50%;
+    top: 2.5%;
+    height: 95%;
+    border-right: 1px ${p => p.theme.tokens.border.primary} solid;
+  }
+`;
+
+const Preview = styled('div')`
+  padding: ${p => p.theme.space['3xl']};
+`;
+
+const Body = styled('div')`
+  display: grid;
+  position: relative;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+
+  h4 {
+    margin-bottom: 0;
+  }
+`;
+
+const Arcade = styled('iframe')`
+  width: 750px;
+  max-width: 100%;
+  min-height: 370px;
+  margin-top: ${p => p.theme.space['2xl']};
+  border: 0;
+`;
+
+const Image = styled('img')`
+  pointer-events: none;
+  height: 120px;
+  overflow: hidden;
+`;
+
+const Divider = styled('hr')`
+  height: 1px;
+  width: 95%;
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  background: ${p => p.theme.tokens.border.primary};
+  border: none;
+  margin-top: 0;
+  margin-bottom: 0;
+`;
+
+const DescriptionWrapper = styled('div')`
+  code:not([class*='language-']) {
+    color: ${p => p.theme.colors.pink500};
+  }
+
+  :not(:last-child) {
+    margin-bottom: ${p => p.theme.space.md};
+  }
+
+  && > h4,
+  && > h5,
+  && > h6 {
+    font-size: ${p => p.theme.font.size.xl};
+    font-weight: ${p => p.theme.font.weight.sans.medium};
+    line-height: 34px;
+  }
+
+  && > * {
+    margin: 0;
+    &:not(:last-child) {
+      margin-bottom: ${p => p.theme.space.md};
+    }
+  }
+`;
+
+const OptionsWrapper = styled('div')`
+  display: flex;
+  gap: ${p => p.theme.space.md};
+  align-items: center;
+  flex-wrap: wrap;
+  padding-bottom: ${p => p.theme.space.md};
+`;

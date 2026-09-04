@@ -8,22 +8,24 @@ from sentry.grouping.component import (
     TemplateGroupingComponent,
 )
 from sentry.grouping.strategies.base import (
-    GroupingContext,
-    ReturnedVariants,
+    ComponentsByVariant,
     produces_variants,
     strategy,
 )
 from sentry.interfaces.template import Template
 
 if TYPE_CHECKING:
-    from sentry.eventstore.models import Event
+    from sentry.grouping.context import GroupingContext
+    from sentry.services.eventstore.models import BaseEvent
 
 
 @strategy(ids=["template:v1"], interface=Template, score=1100)
 @produces_variants(["default"])
 def template_v1(
-    interface: Template, event: Event, context: GroupingContext, **meta: Any
-) -> ReturnedVariants:
+    interface: Template, event: BaseEvent, context: GroupingContext, **kwargs: Any
+) -> ComponentsByVariant:
+    variant_name = context["variant_name"]
+
     filename_component = FilenameGroupingComponent()
     if interface.filename is not None:
         filename_component.update(values=[interface.filename])
@@ -33,7 +35,7 @@ def template_v1(
         context_line_component.update(values=[interface.context_line])
 
     return {
-        context["variant"]: TemplateGroupingComponent(
-            values=[filename_component, context_line_component]
+        variant_name: TemplateGroupingComponent(
+            values=[filename_component, context_line_component],
         )
     }

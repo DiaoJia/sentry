@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
+from django.conf import settings
+
 from sentry import features, options
 from sentry.app import env
 from sentry.utils.http import absolute_uri, is_using_customer_domain
@@ -12,13 +14,13 @@ _path_patterns: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\/?organizations\/(?!new)[^/]+\/(.*)"), r"/\1"),
     # For /settings/:orgId/ -> /settings/organization/
     (
-        re.compile(r"\/settings\/(?!account\/|!billing\/|projects\/|teams)[^/]+\/?$"),
+        re.compile(r"\/settings\/(?!account\/|!billing\/|projects\/|seer\/|teams)[^/]+\/?$"),
         "/settings/organization/",
     ),
     # Move /settings/:orgId/:section -> /settings/:section
     # but not /settings/organization or /settings/projects which is a new URL
     (
-        re.compile(r"^\/?settings\/(?!account\/|billing\/|projects\/|teams)[^/]+\/(.*)"),
+        re.compile(r"^\/?settings\/(?!account\/|billing\/|projects\/|seer\/|teams)[^/]+\/(.*)"),
         r"/settings/\1",
     ),
     (re.compile(r"^\/?join-request\/[^/]+\/?.*"), r"/join-request/"),
@@ -27,6 +29,7 @@ _path_patterns: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"^\/?(?!settings)[^/]+\/([^/]+)\/getting-started\/(.*)"),
         r"/getting-started/\1/\2",
     ),
+    (re.compile(r"^\/?checkout\/[^/]+\/(.*)"), r"/checkout/\1"),
 ]
 
 
@@ -43,7 +46,7 @@ def customer_domain_path(path: str) -> str:
 
 def _generate_organization_hostname(org_slug: str) -> str:
     url_prefix_hostname: str = urlparse(options.get("system.url-prefix")).netloc
-    org_base_hostname_template: str = options.get("system.organization-base-hostname")
+    org_base_hostname_template: str | None = settings.SENTRY_ORGANIZATION_BASE_HOSTNAME
     if not org_base_hostname_template:
         return url_prefix_hostname
     has_org_slug_placeholder = "{slug}" in org_base_hostname_template
@@ -54,7 +57,7 @@ def _generate_organization_hostname(org_slug: str) -> str:
 
 
 def generate_organization_url(org_slug: str) -> str:
-    org_url_template: str = options.get("system.organization-url-template")
+    org_url_template: str | None = settings.SENTRY_ORGANIZATION_URL_TEMPLATE
     if not org_url_template:
         return options.get("system.url-prefix")
     return org_url_template.replace("{hostname}", _generate_organization_hostname(org_slug))
@@ -94,10 +97,8 @@ def organization_absolute_url(
 def api_absolute_url(
     *, slug: str, path: str, query: str | None = None, fragment: str | None = None
 ) -> str:
-    if path and path[0] != "/":
-        path = f"/{path}"
-    path = f"/api/0/organizations/{slug}{path}"
-    uri = absolute_uri(path)
+    full_path = f"/api/0/organizations/{slug}/{path.lstrip('/')}/"
+    uri = absolute_uri(full_path)
     parts = construct_url_parts(uri=uri, query=query, fragment=fragment)
     return "".join(parts)
 

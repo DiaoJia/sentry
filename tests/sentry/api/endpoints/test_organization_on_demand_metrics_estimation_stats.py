@@ -14,7 +14,6 @@ from sentry.api.endpoints.organization_on_demand_metrics_estimation_stats import
     estimate_stats_quality,
     estimate_volume,
 )
-from sentry.snuba.metrics.naming_layer.mri import TransactionMRI
 from sentry.testutils.cases import APITestCase, BaseMetricsLayerTestCase
 from sentry.testutils.helpers.datetime import freeze_time
 from sentry.utils.samples import load_data
@@ -26,7 +25,12 @@ MOCK_DATETIME = (timezone.now() - timedelta(days=1)).replace(
 SECOND = timedelta(seconds=1)
 MINUTE = timedelta(minutes=1)
 
-pytestmark = pytest.mark.sentry_metrics
+pytestmark = [
+    pytest.mark.sentry_metrics,
+    pytest.mark.skip(
+        reason="Generic metrics sets, gauges, and distributions are no longer queryable"
+    ),
+]
 
 
 @freeze_time(MOCK_DATETIME)
@@ -61,11 +65,11 @@ class OrganizationOnDemandMetricsEstimationStatsEndpointTest(APITestCase, BaseMe
         )
         return self.store_event(data, project_id=self.project.id)
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         """
         Tests that the volume estimation endpoint correctly looks up the data in the Db and
         returns the correct volume.
@@ -94,7 +98,7 @@ class OrganizationOnDemandMetricsEstimationStatsEndpointTest(APITestCase, BaseMe
             # transaction metrics
             for _ in range(transaction_metrics[idx]):
                 self.store_performance_metric(
-                    name=TransactionMRI.DURATION.value,
+                    name="d:transactions/duration@millisecond",
                     tags={"transaction": "t1"},
                     minutes_before_now=minutes_before,
                     value=3.14,
@@ -140,7 +144,7 @@ class OrganizationOnDemandMetricsEstimationStatsEndpointTest(APITestCase, BaseMe
                 )
                 assert pytest.approx(count, 0.001) == expected
 
-    def test_apdex(self):
+    def test_apdex(self) -> None:
         """
         Tests that the apdex calculation works as expected.
 
@@ -208,7 +212,7 @@ class OrganizationOnDemandMetricsEstimationStatsEndpointTest(APITestCase, BaseMe
         [[0, 1, 7], [8, 8, 8], [120, 120, 120], [0, 1 * 120 / 8, 7 * 120 / 8]],
     ],
 )
-def test_estimate_volume(indexed, base_indexed, metrics, expected):
+def test_estimate_volume(indexed, base_indexed, metrics, expected) -> None:
     """
     Tests volume estimation calculation
     """
@@ -236,7 +240,7 @@ def test_estimate_volume(indexed, base_indexed, metrics, expected):
         ("avg(measurements.cls)", False),  # First Input Delay
     ],
 )
-def test_should_scale(metric: str, should_scale: bool):
+def test_should_scale(metric: str, should_scale: bool) -> None:
     """
     Tests the _should_scale function
     """
@@ -252,7 +256,7 @@ def test_should_scale(metric: str, should_scale: bool):
         (100, StatsQualityEstimation.NO_INDEXED_DATA),
     ],
 )
-def test_estimate_stats_quality(zero_samples, expected_result):
+def test_estimate_stats_quality(zero_samples, expected_result) -> None:
     num_samples = 100
 
     start_timestamp = 1_500_000_000
@@ -270,7 +274,7 @@ def test_estimate_stats_quality(zero_samples, expected_result):
 
 
 @pytest.mark.parametrize("zero_samples", [0, 1, 5, 9, 10])
-def test_count_non_zero_intervals(zero_samples):
+def test_count_non_zero_intervals(zero_samples) -> None:
     num_samples = 10
 
     start_timestamp = 1_500_000_000

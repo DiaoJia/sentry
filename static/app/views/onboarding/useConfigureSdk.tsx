@@ -1,20 +1,23 @@
 import {useCallback} from 'react';
 import * as Sentry from '@sentry/react';
 
+import {useModal} from '@sentry/scraps/modal';
+
 import {
   addErrorMessage,
   addLoadingMessage,
   clearIndicators,
 } from 'sentry/actionCreators/indicator';
-import {openModal} from 'sentry/actionCreators/modal';
+import {openConsoleModal} from 'sentry/actionCreators/modal';
 import {SupportedLanguages} from 'sentry/components/onboarding/frameworkSuggestionModal';
 import {useOnboardingContext} from 'sentry/components/onboarding/onboardingContext';
 import {useCreateProject} from 'sentry/components/onboarding/useCreateProject';
 import {t} from 'sentry/locale';
 import type {OnboardingSelectedSDK} from 'sentry/types/onboarding';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {isDisabledGamingPlatform} from 'sentry/utils/platform';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {useTeams} from 'sentry/utils/useTeams';
 
 /**
@@ -26,6 +29,8 @@ export function useConfigureSdk({
 }: {
   onComplete: (selectedPlatform: OnboardingSelectedSDK) => void;
 }) {
+  const {openModal} = useModal();
+
   const {teams, fetching: isLoadingTeams} = useTeams();
   const {projects, initiallyLoaded: projectsLoaded} = useProjects();
   const organization = useOrganization();
@@ -41,9 +46,7 @@ export function useConfigureSdk({
         return;
       }
 
-      const createProjectForPlatform: OnboardingSelectedSDK | undefined = projects.some(
-        p => p.slug === selectedPlatform.key
-      )
+      const createProjectForPlatform = projects.some(p => p.slug === selectedPlatform.key)
         ? undefined
         : selectedPlatform;
 
@@ -94,6 +97,23 @@ export function useConfigureSdk({
       }
 
       if (
+        isDisabledGamingPlatform({
+          platform: {
+            ...selectedPlatform,
+            id: selectedPlatform.key,
+          },
+          enabledConsolePlatforms: organization.enabledConsolePlatforms,
+        })
+      ) {
+        openConsoleModal({
+          organization,
+          selectedPlatform,
+          origin: 'onboarding',
+        });
+        return;
+      }
+
+      if (
         selectedPlatform.type !== 'language' ||
         !Object.values(SupportedLanguages).includes(
           selectedPlatform.language as SupportedLanguages
@@ -103,9 +123,8 @@ export function useConfigureSdk({
         return;
       }
 
-      const {FrameworkSuggestionModal, modalCss} = await import(
-        'sentry/components/onboarding/frameworkSuggestionModal'
-      );
+      const {FrameworkSuggestionModal, modalCss} =
+        await import('sentry/components/onboarding/frameworkSuggestionModal');
 
       openModal(
         deps => (
@@ -127,12 +146,12 @@ export function useConfigureSdk({
               platform: selectedPlatform.key,
               organization,
             });
-            onboardingContext.setSelectedPlatform(undefined);
+            onboardingContext.resetOnboarding();
           },
         }
       );
     },
-    [createPlatformProject, onboardingContext, organization, createProject]
+    [createPlatformProject, onboardingContext, organization, createProject, openModal]
   );
 
   return {

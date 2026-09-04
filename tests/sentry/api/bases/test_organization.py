@@ -6,16 +6,19 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.backends.base import SessionBase
 from django.db.models import F
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.views import APIView
 
+from sentry.api.authentication import ViewerContextAuthentication
 from sentry.api.bases.organization import (
+    ControlSiloOrganizationEndpoint,
     NoProjects,
     OrganizationAndStaffPermission,
     OrganizationEndpoint,
     OrganizationPermission,
+    OrganizationReleasesBaseEndpoint,
 )
 from sentry.api.exceptions import (
     MemberDisabledOverLimit,
@@ -42,16 +45,28 @@ from sentry.testutils.silo import assume_test_silo_mode
 from sentry.users.services.user.serial import serialize_rpc_user
 from sentry.users.services.user.service import user_service
 from sentry.utils.security.orgauthtoken_token import hash_token
+from sentry.viewer_context import (
+    ActorType,
+    ViewerContext,
+    encode_viewer_context,
+    get_viewer_context,
+    viewer_context_scope,
+)
 
 
 class MockSuperUser:
     @property
-    def is_active(self):
+    def is_active(self) -> bool:
         return True
 
 
+class LightweightControlSiloOrganizationEndpoint(ControlSiloOrganizationEndpoint):
+    include_organization_projects = False
+    include_organization_teams = False
+
+
 class PermissionBaseTestCase(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.org = self.create_organization()
         # default to the organization permission class
         self.permission_cls = OrganizationPermission
@@ -96,57 +111,59 @@ class PermissionBaseTestCase(TestCase):
 
 
 class OrganizationPermissionTest(PermissionBaseTestCase):
+    VIEWER_CONTEXT_SHARED_SECRET = "test-seer-api-shared-secret"
+
     def org_require_2fa(self):
         self.org.update(flags=F("flags").bitor(Organization.flags.require_2fa))
         assert self.org.flags.require_2fa.is_set is True
 
-    def test_regular_user(self):
+    def test_regular_user(self) -> None:
         user = self.create_user()
         assert not self.has_object_perm("GET", self.org, user=user)
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         user = self.create_user(is_superuser=True)
         assert self.has_object_perm("GET", self.org, user=user, is_superuser=True)
 
-    def test_org_member(self):
+    def test_org_member(self) -> None:
         user = self.create_user()
         self.create_member(user=user, organization=self.org, role="member")
         assert self.has_object_perm("GET", self.org, user=user)
         assert not self.has_object_perm("POST", self.org, user=user)
 
-    def test_api_key_with_org_access(self):
+    def test_api_key_with_org_access(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             key = ApiKey.objects.create(organization_id=self.org.id, scope_list=["org:read"])
         assert self.has_object_perm("GET", self.org, auth=key)
 
-    def test_api_key_without_org_access(self):
+    def test_api_key_without_org_access(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             key = ApiKey.objects.create(
                 organization_id=self.create_organization().id, scope_list=["org:read"]
             )
         assert not self.has_object_perm("GET", self.org, auth=key)
 
-    def test_api_key_without_access(self):
+    def test_api_key_without_access(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             key = ApiKey.objects.create(organization_id=self.org.id)
         assert not self.has_object_perm("GET", self.org, auth=key)
 
-    def test_api_key_with_wrong_access(self):
+    def test_api_key_with_wrong_access(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             key = ApiKey.objects.create(organization_id=self.org.id, scope_list=["team:read"])
         assert not self.has_object_perm("GET", self.org, auth=key)
 
-    def test_api_key_with_wrong_access_for_method(self):
+    def test_api_key_with_wrong_access_for_method(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             key = ApiKey.objects.create(organization_id=self.org.id, scope_list=["org:read"])
         assert not self.has_object_perm("PUT", self.org, auth=key)
 
-    def test_org_requires_2fa_with_superuser(self):
+    def test_org_requires_2fa_with_superuser(self) -> None:
         self.org_require_2fa()
         user = self.create_user(is_superuser=True)
         assert self.has_object_perm("GET", self.org, user=user, is_superuser=True)
 
-    def test_org_requires_2fa_with_enrolled_user(self):
+    def test_org_requires_2fa_with_enrolled_user(self) -> None:
         self.org_require_2fa()
         user = self.create_user()
         self.create_member(user=user, organization=self.org, role="member")
@@ -155,7 +172,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
             TotpInterface().enroll(user)
         assert self.has_object_perm("GET", self.org, user=user)
 
-    def test_org_requires_2fa_with_unenrolled_user(self):
+    def test_org_requires_2fa_with_unenrolled_user(self) -> None:
         self.org_require_2fa()
         user = self.create_user()
         self.create_member(user=user, organization=self.org, role="member")
@@ -163,14 +180,14 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with pytest.raises(TwoFactorRequired):
             self.has_object_perm("GET", self.org, user=user)
 
-    def test_org_requires_2fa_with_superuser_not_active(self):
+    def test_org_requires_2fa_with_superuser_not_active(self) -> None:
         self.org_require_2fa()
         user = self.create_user(is_superuser=True)
         self.create_member(user=user, organization=self.org, role="member")
         with pytest.raises(SuperuserRequired):
             assert self.has_object_perm("GET", self.org, user=user)
 
-    def test_org_requires_2fa_for_user_auth_token_request(self):
+    def test_org_requires_2fa_for_user_auth_token_request(self) -> None:
         self.org_require_2fa()
         user = self.create_user()
         self.create_member(user=user, organization=self.org, role="owner")
@@ -182,7 +199,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with pytest.raises(TwoFactorRequired), assume_test_silo_mode(SiloMode.CONTROL):
             permission.determine_access(request=request, organization=self.org)
 
-    def test_member_limit_error_for_user_auth_token_request(self):
+    def test_member_limit_error_for_user_auth_token_request(self) -> None:
         user = self.create_user()
         self.create_member(
             user=user,
@@ -206,7 +223,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
             }
         }
 
-    def test_org_does_not_require_2fa_for_user_auth_token_request_if_no_membership(self):
+    def test_org_does_not_require_2fa_for_user_auth_token_request_if_no_membership(self) -> None:
         # make sure that 2FA requirement is not visible to the outsiders
         self.org_require_2fa()
 
@@ -221,7 +238,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with assume_test_silo_mode(SiloMode.CONTROL):
             permission.determine_access(request=request, organization=self.org)
 
-    def test_sentryapp_passes_2fa(self):
+    def test_sentryapp_passes_2fa(self) -> None:
         self.org_require_2fa()
         internal_sentry_app = self.create_internal_integration(
             name="My Internal App",
@@ -240,7 +257,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with assume_test_silo_mode(SiloMode.CONTROL):
             permission.determine_access(request=request, organization=self.org)
 
-    def test_org_auth_token_passes_2fa(self):
+    def test_org_auth_token_passes_2fa(self) -> None:
         self.org_require_2fa()
 
         self.token = "sntrys_abc123_xyz"
@@ -261,7 +278,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with assume_test_silo_mode(SiloMode.CONTROL):
             permission.determine_access(request=request, organization=self.org)
 
-    def test_member_limit_error(self):
+    def test_member_limit_error(self) -> None:
         user = self.create_user()
         self.create_member(
             user=user,
@@ -281,7 +298,7 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
             }
         }
 
-    def test_member_limit_with_superuser(self):
+    def test_member_limit_with_superuser(self) -> None:
         user = self.create_user(is_superuser=True)
         self.create_member(
             user=user,
@@ -291,13 +308,13 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         )
         assert self.has_object_perm("GET", self.org, user=user, is_superuser=True)
 
-    def test_member_limit_sentry_app(self):
+    def test_member_limit_sentry_app(self) -> None:
         app = self.create_internal_integration(
             name="integration", organization=self.org, scopes=("org:admin",)
         )
         assert self.has_object_perm("GET", self.org, user=app.proxy_user)
 
-    def test_sso_required(self):
+    def test_sso_required(self) -> None:
         user = self.create_user()
         with assume_test_silo_mode(SiloMode.CONTROL):
             auth_provider = AuthProvider.objects.create(
@@ -311,25 +328,55 @@ class OrganizationPermissionTest(PermissionBaseTestCase):
         with pytest.raises(SsoRequired):
             assert not self.has_object_perm("POST", self.org, user=user)
 
+    @override_settings(SEER_API_SHARED_SECRET=VIEWER_CONTEXT_SHARED_SECRET)
+    def test_viewer_context_auth_bypasses_sso_gate(self) -> None:
+        user = self.create_user()
+        self.create_member(user=user, organization=self.org, role="member")
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            auth_provider = AuthProvider.objects.create(
+                organization_id=self.org.id, provider="dummy"
+            )
+            AuthIdentity.objects.create(auth_provider=auth_provider, user=user)
+
+        context = encode_viewer_context(
+            ViewerContext(user_id=user.id, actor_type=ActorType.USER),
+            key=self.VIEWER_CONTEXT_SHARED_SECRET,
+        )
+
+        request = RequestFactory().get("/api/0/organizations/")
+        request.session = SessionBase()
+        request.META["HTTP_X_VIEWER_CONTEXT"] = context
+
+        drf_request = drf_request_from_request(request)
+        result = ViewerContextAuthentication().authenticate(drf_request)
+
+        assert result is not None
+        drf_request.user, drf_request.auth = result
+        assert getattr(drf_request, "user_from_viewer_context", False) is True
+
+        permission = self.permission_cls()
+        permission.determine_access(request=drf_request, organization=self.org)
+
 
 class OrganizationAndStaffPermissionTest(PermissionBaseTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.permission_cls = OrganizationAndStaffPermission
 
-    def test_regular_user(self):
+    def test_regular_user(self) -> None:
         user = self.create_user()
         assert not self.has_object_perm("GET", self.org, user=user)
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         superuser = self.create_user(is_superuser=True)
         assert self.has_object_perm("GET", self.org, user=superuser, is_superuser=True)
 
-    def test_staff(self):
+    def test_staff(self) -> None:
         staff_user = self.create_user(is_staff=True)
         assert self.has_object_perm("GET", self.org, user=staff_user, is_staff=True)
 
-    def test_staff_passes_2FA(self):
+    def test_staff_passes_2FA(self) -> None:
         staff_user = self.create_user(is_staff=True)
         request = self.make_request(user=serialize_rpc_user(staff_user), is_staff=True)
         drf_request = drf_request_from_request(request)
@@ -377,8 +424,93 @@ class BaseOrganizationEndpointTest(TestCase):
         return request
 
 
+class ControlSiloOrganizationEndpointTest(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user = self.create_user()
+        self.organization = self.create_organization(owner=self.user)
+
+    def build_request(self):
+        request = RequestFactory().get("/")
+        request.session = SessionBase()
+        request.user = self.user
+        request.auth = None
+        return drf_request_from_request(request)
+
+    @mock.patch.object(
+        organization_service,
+        "get_organization_by_slug",
+        wraps=organization_service.get_organization_by_slug,
+    )
+    def test_convert_args_includes_projects_and_teams_by_default(
+        self, mock_get_organization: mock.MagicMock
+    ) -> None:
+        ControlSiloOrganizationEndpoint().convert_args(self.build_request(), self.organization.slug)
+
+        mock_get_organization.assert_called_once_with(
+            slug=self.organization.slug,
+            only_visible=False,
+            user_id=self.user.id,
+            include_projects=True,
+            include_teams=True,
+        )
+
+    @mock.patch.object(
+        organization_service,
+        "get_organization_by_slug",
+        wraps=organization_service.get_organization_by_slug,
+    )
+    def test_convert_args_can_omit_projects_and_teams_for_slug(
+        self, mock_get_organization: mock.MagicMock
+    ) -> None:
+        LightweightControlSiloOrganizationEndpoint().convert_args(
+            self.build_request(), self.organization.slug
+        )
+
+        mock_get_organization.assert_called_once_with(
+            slug=self.organization.slug,
+            only_visible=False,
+            user_id=self.user.id,
+            include_projects=False,
+            include_teams=False,
+        )
+
+    @mock.patch.object(
+        organization_service,
+        "get_organization_by_id",
+        wraps=organization_service.get_organization_by_id,
+    )
+    def test_convert_args_can_omit_projects_and_teams_for_id(
+        self, mock_get_organization: mock.MagicMock
+    ) -> None:
+        LightweightControlSiloOrganizationEndpoint().convert_args(
+            self.build_request(), self.organization.id
+        )
+
+        mock_get_organization.assert_called_once_with(
+            id=self.organization.id,
+            user_id=self.user.id,
+            include_projects=False,
+            include_teams=False,
+        )
+
+
+class OrganizationEndpointViewerContextTest(BaseOrganizationEndpointTest):
+    def test_convert_args_enriches_viewer_context_with_organization(self) -> None:
+        request = drf_request_from_request(self.build_request(user=self.owner))
+        request._request.organization = None
+
+        with viewer_context_scope(ViewerContext(user_id=self.owner.id)):
+            self.endpoint.convert_args(request, self.org.slug)
+            ctx = get_viewer_context()
+
+        assert ctx is not None
+        assert ctx.user_id == self.owner.id
+        assert ctx.organization_id == self.org.id
+
+
 class GetProjectIdsTest(BaseOrganizationEndpointTest):
-    def setUp(self):
+    def setUp(self) -> None:
         self.team_1 = self.create_team(organization=self.org)
         self.team_2 = self.create_team(organization=self.org)
         self.team_3 = self.create_team(organization=self.org)
@@ -409,7 +541,7 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
         )
         assert {p.id for p in expected_projects} == {p.id for p in result}
 
-    def test_no_ids_no_teams(self):
+    def test_no_ids_no_teams(self) -> None:
         # Should get nothing if not part of the org
         self.run_test([])
         # Should get everything if super user
@@ -434,14 +566,14 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
         )
         self.run_test([], include_all_accessible=False)
 
-    def test_no_ids_teams(self):
+    def test_no_ids_teams(self) -> None:
         membership = self.create_team_membership(user=self.user, team=self.team_1)
         self.run_test([self.project_1])
         membership.delete()
         self.create_team_membership(user=self.user, team=self.team_3)
         self.run_test([self.project_1, self.project_2])
 
-    def test_ids_no_teams(self):
+    def test_ids_no_teams(self) -> None:
         with pytest.raises(PermissionDenied):
             self.run_test([], project_ids=[self.project_1.id])
 
@@ -462,7 +594,7 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
         with pytest.raises(PermissionDenied):
             self.run_test([self.project_1], user=self.member, project_ids=[self.project_1.id])
 
-    def test_ids_teams(self):
+    def test_ids_teams(self) -> None:
         membership = self.create_team_membership(user=self.user, team=self.team_1)
         self.run_test([self.project_1], project_ids=[self.project_1.id])
         with pytest.raises(PermissionDenied):
@@ -473,7 +605,7 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
             [self.project_1, self.project_2], project_ids=[self.project_1.id, self.project_2.id]
         )
 
-    def test_none_user(self):
+    def test_none_user(self) -> None:
         request = RequestFactory().get("/")
         request.session = SessionBase()
         request.access = NoAccess()
@@ -485,13 +617,13 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
         result = self.endpoint.get_projects(request, self.org)
         assert [] == result
 
-    def test_all_accessible_sigil_value_no_open_join(self):
+    def test_all_accessible_sigil_value_no_open_join(self) -> None:
         assert self.org.flags.allow_joinleave.number == 0, "precondition not met"
 
         self.create_team_membership(user=self.user, team=self.team_1)
         self.run_test([self.project_1], project_ids=[-1])
 
-    def test_all_accessible_sigil_value_allow_joinleave(self):
+    def test_all_accessible_sigil_value_allow_joinleave(self) -> None:
         self.org.flags.allow_joinleave = True
         self.org.save()
 
@@ -502,15 +634,8 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
     @mock.patch(
         "sentry.api.bases.organization.OrganizationEndpoint._filter_projects_by_permissions"
     )
-    @mock.patch(
-        "sentry.api.bases.organization.OrganizationEndpoint.get_requested_project_ids_unchecked"
-    )
-    def test_get_projects_no_slug_fallsback_to_ids(
-        self, mock_get_project_ids_unchecked, mock__filter_projects_by_permissions
-    ):
-        project_slugs = [""]
-        request = self.build_request(projectSlug=project_slugs)
-        mock_get_project_ids_unchecked.return_value = {self.project_1.id}
+    def test_get_projects_no_slug_fallsback_to_ids(self, mock__filter_projects_by_permissions):
+        request = self.build_request(projectSlug=[""], project=[str(self.project_1.id)])
 
         def side_effect(
             projects,
@@ -525,7 +650,6 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
             self.org,
         )
 
-        mock_get_project_ids_unchecked.assert_called_with(request)
         mock__filter_projects_by_permissions.assert_called_with(
             projects=[self.project_1],
             request=request,
@@ -537,7 +661,9 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
     @mock.patch(
         "sentry.api.bases.organization.OrganizationEndpoint._filter_projects_by_permissions"
     )
-    def test_get_projects_by_slugs(self, mock__filter_projects_by_permissions):
+    def test_get_projects_by_slugs(
+        self, mock__filter_projects_by_permissions: mock.MagicMock
+    ) -> None:
         project_slugs = [self.project_1.slug]
         request = self.build_request(projectSlug=project_slugs)
 
@@ -564,7 +690,9 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
     @mock.patch(
         "sentry.api.bases.organization.OrganizationEndpoint._filter_projects_by_permissions"
     )
-    def test_get_projects_by_slugs_all(self, mock__filter_projects_by_permissions):
+    def test_get_projects_by_slugs_all(
+        self, mock__filter_projects_by_permissions: mock.MagicMock
+    ) -> None:
         project_slugs = ALL_ACCESS_PROJECTS_SLUG
         request = self.build_request(projectSlug=project_slugs)
 
@@ -581,27 +709,171 @@ class GetProjectIdsTest(BaseOrganizationEndpointTest):
             self.org,
         )
 
-        mock__filter_projects_by_permissions.assert_called_with(
-            projects=[self.project_1, self.project_2],
-            request=request,
-            filter_by_membership=False,
-            force_global_perms=False,
-            include_all_accessible=True,
-        )
+        mock__filter_projects_by_permissions.assert_called_once()
+        call_kwargs = mock__filter_projects_by_permissions.call_args.kwargs
+        assert set(call_kwargs["projects"]) == {self.project_1, self.project_2}
+        assert call_kwargs["request"] == request
+        assert call_kwargs["filter_by_membership"] is False
+        assert call_kwargs["force_global_perms"] is False
+        assert call_kwargs["include_all_accessible"] is True
         assert len(response) == 2
         assert self.project_1 in response
         assert self.project_2 in response
 
-    def test_get_projects_by_slugs_no_projects_with_slug(self):
+    def test_get_projects_by_slugs_no_projects_with_slug(self) -> None:
         project_slugs = ["hello"]
         request = self.build_request(projectSlug=project_slugs)
 
         with pytest.raises(PermissionDenied):
             self.endpoint.get_projects(request, self.org)
 
+    def test_project_param_with_slug(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_1)
+        request = self.build_request(project=[self.project_1.slug])
+
+        result = self.endpoint.get_projects(request, self.org)
+
+        assert {p.id for p in result} == {self.project_1.id}
+
+    def test_project_param_with_mixed_ids_and_slugs(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        request = self.build_request(project=[str(self.project_1.id), self.project_2.slug])
+
+        result = self.endpoint.get_projects(request, self.org)
+
+        assert {p.id for p in result} == {self.project_1.id, self.project_2.id}
+
+    def test_explicit_project_ids_and_slugs(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        request = self.build_request()
+
+        result = self.endpoint.get_projects(
+            request,
+            self.org,
+            project_ids={self.project_1.id},
+            project_slugs={self.project_2.slug},
+        )
+
+        assert {p.id for p in result} == {self.project_1.id, self.project_2.id}
+
+    def test_project_param_with_nonexistent_slug(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_1)
+        request = self.build_request(project=["nonexistent-slug"])
+
+        with pytest.raises(PermissionDenied):
+            self.endpoint.get_projects(request, self.org)
+
+    def test_project_slug_param_takes_precedence_over_project_param(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        request = self.build_request(
+            project=[str(self.project_1.id)], projectSlug=[self.project_2.slug]
+        )
+
+        result = self.endpoint.get_projects(request, self.org)
+
+        assert {p.id for p in result} == {self.project_2.id}
+
+    def test_empty_explicit_project_slugs_falls_back_to_project_param(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_1)
+        request = self.build_request(project=[str(self.project_1.id)])
+
+        result = self.endpoint.get_projects(request, self.org, project_slugs=set())
+
+        assert {p.id for p in result} == {self.project_1.id}
+
+    def test_empty_explicit_project_ids_falls_back_to_project_param_slugs(self) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        request = self.build_request(project=[self.project_1.slug])
+
+        result = self.endpoint.get_projects(request, self.org, project_ids=set())
+
+        assert {p.id for p in result} == {self.project_1.id}
+
+    @mock.patch("sentry.api.bases.organization.cache")
+    def test_release_permission_cache_key_uses_project_slug_precedence(
+        self, mock_cache: mock.MagicMock
+    ) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        mock_cache.get.return_value = None
+        endpoint = OrganizationReleasesBaseEndpoint()
+
+        endpoint.has_release_permission(
+            self.build_request(project=[self.project_1.slug], projectSlug=[self.project_2.slug]),
+            self.org,
+        )
+        first_cache_key = mock_cache.get.call_args.args[0]
+
+        endpoint.has_release_permission(
+            self.build_request(project=[self.project_2.slug], projectSlug=[self.project_1.slug]),
+            self.org,
+        )
+        second_cache_key = mock_cache.get.call_args.args[0]
+
+        assert first_cache_key != second_cache_key
+
+    @mock.patch("sentry.api.bases.organization.cache")
+    def test_release_permission_cache_key_uses_project_param_slugs_when_project_ids_empty(
+        self, mock_cache: mock.MagicMock
+    ) -> None:
+        self.create_team_membership(user=self.user, team=self.team_3)
+        mock_cache.get.return_value = None
+        endpoint = OrganizationReleasesBaseEndpoint()
+
+        endpoint.has_release_permission(
+            self.build_request(project=[self.project_1.slug]), self.org, project_ids=set()
+        )
+        first_cache_key = mock_cache.get.call_args.args[0]
+
+        endpoint.has_release_permission(
+            self.build_request(project=[self.project_2.slug]), self.org, project_ids=set()
+        )
+        second_cache_key = mock_cache.get.call_args.args[0]
+
+        assert first_cache_key != second_cache_key
+
+    def test_get_requested_project_ids_unchecked_ignores_slugs(self) -> None:
+        request = self.build_request(project=["1", "my-slug", "42"])
+
+        result = self.endpoint.get_requested_project_ids_unchecked(request)
+
+        assert result == {1, 42}
+
+    def test_get_requested_project_ids_and_slugs_unchecked(self) -> None:
+        request = self.build_request(project=["1", "my-slug", "42"])
+
+        result = self.endpoint.get_requested_project_ids_and_slugs_unchecked(request)
+
+        assert result.ids == {1, 42}
+        assert result.slugs == {"my-slug"}
+
+    def test_query_params_with_project_slug_precedence(self) -> None:
+        request = self.build_request(project=["1", ""], projectSlug=["", "my-slug"])
+
+        result = self.endpoint.get_query_params_with_project_slug_precedence(request)
+
+        assert result.getlist("projectSlug") == ["my-slug"]
+        assert "project" not in result
+        assert request.GET.getlist("project") == ["1", ""]
+
+    def test_query_params_without_empty_project_params(self) -> None:
+        request = self.build_request(project=["", "1"])
+
+        result = self.endpoint.get_query_params_without_empty_project_params(request)
+
+        assert result.getlist("project") == ["1"]
+        assert request.GET.getlist("project") == ["", "1"]
+
+    def test_query_params_with_empty_project_slug_keeps_project(self) -> None:
+        request = self.build_request(project=["", "1"], projectSlug=[""])
+
+        result = self.endpoint.get_query_params_with_project_slug_precedence(request)
+
+        assert result.getlist("projectSlug") == []
+        assert result.getlist("project") == ["1"]
+
 
 class GetEnvironmentsTest(BaseOrganizationEndpointTest):
-    def setUp(self):
+    def setUp(self) -> None:
         self.project = self.create_project(organization=self.org)
         self.env_1 = self.create_environment(project=self.project)
         self.env_2 = self.create_environment(project=self.project)
@@ -613,14 +885,14 @@ class GetEnvironmentsTest(BaseOrganizationEndpointTest):
         result = self.endpoint.get_environments(self.build_request(**request_args), self.org)
         assert {e.name for e in expected_envs} == {e.name for e in result}
 
-    def test_no_params(self):
+    def test_no_params(self) -> None:
         self.run_test([])
 
-    def test_valid_params(self):
+    def test_valid_params(self) -> None:
         self.run_test([self.env_1], [self.env_1.name])
         self.run_test([self.env_1, self.env_2], [self.env_1.name, self.env_2.name])
 
-    def test_invalid_params(self):
+    def test_invalid_params(self) -> None:
         with pytest.raises(ResourceDoesNotExist):
             self.run_test([], ["fake"])
         with pytest.raises(ResourceDoesNotExist):
@@ -628,7 +900,7 @@ class GetEnvironmentsTest(BaseOrganizationEndpointTest):
 
 
 class GetFilterParamsTest(BaseOrganizationEndpointTest):
-    def setUp(self):
+    def setUp(self) -> None:
         self.team_1 = self.create_team(organization=self.org)
         self.project_1 = self.create_project(organization=self.org, teams=[self.team_1])
         self.project_2 = self.create_project(organization=self.org, teams=[self.team_1])
@@ -677,7 +949,7 @@ class GetFilterParamsTest(BaseOrganizationEndpointTest):
             assert "environment" not in result
 
     @freeze_time("2018-12-11 03:21:34")
-    def test_no_params(self):
+    def test_no_params(self) -> None:
         with pytest.raises(NoProjects):
             self.run_test([])
         self.run_test(
@@ -696,7 +968,7 @@ class GetFilterParamsTest(BaseOrganizationEndpointTest):
             active_superuser=True,
         )
 
-    def test_params(self):
+    def test_params(self) -> None:
         start = timezone.now() - timedelta(days=3)
         end = timezone.now()
         self.create_team_membership(user=self.user, team=self.team_1)

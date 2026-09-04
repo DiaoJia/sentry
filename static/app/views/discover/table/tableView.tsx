@@ -1,31 +1,26 @@
 import {Fragment} from 'react';
+import {useMatches} from 'react-router-dom';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
-import type {Location, LocationDescriptorObject} from 'history';
+import type {Location, LocationDescriptor} from 'history';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import GridEditable, {
-  COL_WIDTH_MINIMUM,
-  COL_WIDTH_UNDEFINED,
-} from 'sentry/components/gridEditable';
-import SortLink from 'sentry/components/gridEditable/sortLink';
-import Link from 'sentry/components/links/link';
-import Truncate from 'sentry/components/truncate';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {COL_WIDTH_MINIMUM, GridEditable} from 'sentry/components/tables/gridEditable';
+import {useQueryBasedColumnResize} from 'sentry/components/tables/gridEditable/useQueryBasedColumnResize';
+import {Truncate} from 'sentry/components/truncate';
 import {IconStack} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {browserHistory} from 'sentry/utils/browserHistory';
 import type {CustomMeasurementCollection} from 'sentry/utils/customMeasurements/customMeasurements';
 import {getTimeStampFromTableDateField} from 'sentry/utils/dates';
 import type {TableData, TableDataRow} from 'sentry/utils/discover/discoverQuery';
-import type EventView from 'sentry/utils/discover/eventView';
-import {
-  isFieldSortable,
-  pickRelevantLocationQueryStrings,
-} from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {
   DURATION_UNITS,
   getFieldRenderer,
@@ -37,38 +32,37 @@ import {
   getEquationAliasIndex,
   isEquationAlias,
 } from 'sentry/utils/discover/fields';
+import {getEventViewColumnSort} from 'sentry/utils/discover/getEventViewColumnSort';
 import {
-  type DiscoverDatasets,
   DisplayModes,
   SavedQueryDatasets,
   TOP_N,
+  type DiscoverDatasets,
 } from 'sentry/utils/discover/types';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
-import ViewReplayLink from 'sentry/utils/discover/viewReplayLink';
+import {ViewReplayLink} from 'sentry/utils/discover/viewReplayLink';
 import {getShortEventId} from 'sentry/utils/events';
 import {generateProfileFlamechartRoute} from 'sentry/utils/profiling/routes';
 import {decodeList} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useProjects from 'sentry/utils/useProjects';
-import {useRoutes} from 'sentry/utils/useRoutes';
+import {useProjects} from 'sentry/utils/useProjects';
 import {appendQueryDatasetParam, hasDatasetSelector} from 'sentry/views/dashboards/utils';
 import {
   getExpandedResults,
   getTargetForTransactionSummaryLink,
-  pushEventViewToLocation,
 } from 'sentry/views/discover/utils';
+import {makeReleasesPathname} from 'sentry/views/explore/releases/utils/pathnames';
 import {TraceViewSources} from 'sentry/views/performance/newTraceDetails/traceHeader/breadcrumbs';
 import {getTraceDetailsUrl} from 'sentry/views/performance/traceDetails/utils';
 import {generateReplayLink} from 'sentry/views/performance/transactionSummary/utils';
-import {makeReleasesPathname} from 'sentry/views/releases/utils/pathnames';
 
 import {QuickContextHoverWrapper} from './quickContext/quickContextWrapper';
 import {ContextType} from './quickContext/utils';
-import CellAction, {Actions, copyToClipBoard, updateQuery} from './cellAction';
-import ColumnEditModal, {modalCss} from './columnEditModal';
-import TableActions from './tableActions';
+import {Actions, CellAction, updateQuery} from './cellAction';
+import {ColumnEditModal, modalCss} from './columnEditModal';
+import {TableActions} from './tableActions';
 import {TopResultsIndicator} from './topResultsIndicator';
 import type {TableColumn} from './types';
 
@@ -108,43 +102,21 @@ type TableViewProps = {
  * In most cases, the new EventView object differs from the previous EventView
  * object. The new EventView object is pushed to the location object.
  */
-function TableView(props: TableViewProps) {
+export function TableView(props: TableViewProps) {
+  const {openModal} = useModal();
+
   const theme = useTheme();
-  const {projects} = useProjects();
-  const routes = useRoutes();
   const navigate = useNavigate();
-  const replayLinkGenerator = generateReplayLink(routes);
-
-  /**
-   * Updates a column on resizing
-   */
-  function _resizeColumn(
-    columnIndex: number,
-    nextColumn: TableColumn<keyof TableDataRow>
-  ) {
-    const {location, eventView, organization, queryDataset} = props;
-
-    const newWidth = nextColumn.width ? Number(nextColumn.width) : COL_WIDTH_UNDEFINED;
-    const nextEventView = eventView.withResizedColumn(columnIndex, newWidth);
-
-    pushEventViewToLocation({
-      navigate,
-      location,
-      nextEventView,
-      extraQuery: {
-        ...pickRelevantLocationQueryStrings(location),
-        ...appendQueryDatasetParam(organization, queryDataset),
-      },
-    });
-  }
+  const {projects} = useProjects();
+  const matches = useMatches();
+  const replayLinkGenerator = generateReplayLink(matches);
 
   function _renderPrependColumns(
     isHeader: boolean,
     dataRow?: any,
     rowIndex?: number
   ): React.ReactNode[] {
-    const {organization, eventView, tableData, location, isHomepage, queryDataset} =
-      props;
+    const {organization, eventView, tableData, location, queryDataset} = props;
     const hasAggregates = eventView.hasAggregateField();
     const hasIdField = eventView.hasIdField();
 
@@ -161,17 +133,7 @@ function TableView(props: TableViewProps) {
         ];
       }
       if (!hasIdField) {
-        return [
-          <PrependHeader key="header-event-id">
-            <SortLink
-              align="left"
-              title={t('event id')}
-              direction={undefined}
-              canSort={false}
-              generateSortLink={() => undefined}
-            />
-          </PrependHeader>,
-        ];
+        return [<PrependHeader key="header-event-id">{t('event id')}</PrependHeader>];
       }
       return [];
     }
@@ -208,44 +170,20 @@ function TableView(props: TableViewProps) {
 
       if (tableData?.meta) {
         const fieldRenderer = getFieldRenderer('id', tableData.meta);
-        value = fieldRenderer(dataRow, {organization, location, theme});
-      }
-
-      let target: any;
-
-      if (dataRow['event.type'] !== 'transaction' && !isTransactionsDataset) {
-        const project = dataRow.project || dataRow['project.name'];
-        target = {
-          // NOTE: This uses a legacy redirect for project event to the issue group event link
-          // This only works with dev-server or production.
-          pathname: normalizeUrl(
-            `/${organization.slug}/${project}/events/${dataRow.id}/`
-          ),
-          query: {...location.query, referrer: 'discover-events-table'},
-        };
-      } else {
-        if (!dataRow.trace) {
-          throw new Error(
-            'Transaction event should always have a trace associated with it.'
-          );
-        }
-
-        target = generateLinkToEventInTraceView({
-          traceSlug: dataRow.trace,
-          eventId: dataRow.id,
-          projectSlug: dataRow.project || dataRow['project.name'],
-          timestamp: dataRow.timestamp,
-          organization,
-          isHomepage,
-          location,
-          eventView,
-          type: 'discover',
-          source: TraceViewSources.DISCOVER,
-        });
+        value = fieldRenderer(dataRow, {navigate, organization, location, theme});
       }
 
       const eventIdLink = (
-        <StyledLink data-test-id="view-event" to={target}>
+        <StyledLink
+          data-test-id="view-event"
+          to={getEventTarget({
+            dataRow,
+            eventView,
+            isTransactionsDataset,
+            location,
+            organization,
+          })}
+        >
           {value}
         </StyledLink>
       );
@@ -266,34 +204,29 @@ function TableView(props: TableViewProps) {
     return [];
   }
 
-  function _renderGridHeaderCell(
-    column: TableColumn<keyof TableDataRow>
-  ): React.ReactNode {
+  function _getGridColumnSort(column: TableColumn<keyof TableDataRow>) {
     const {eventView, location, tableData, organization, queryDataset} = props;
     const tableMeta = tableData?.meta;
 
-    const align = fieldAlignment(column.name, column.type, tableMeta);
-    const field = {field: column.key as string, width: column.width};
-    function generateSortLink(): LocationDescriptorObject | undefined {
-      if (!tableMeta) {
-        return undefined;
-      }
-
-      const nextEventView = eventView.sortOnField(field, tableMeta);
-      const queryStringObject = nextEventView.generateQueryStringObject();
+    return getEventViewColumnSort({
+      align: fieldAlignment(column.name, column.type, tableMeta),
+      eventView,
+      field: {field: column.key as string, width: column.width},
+      location,
       // Need to pull yAxis from location since eventView only stores 1 yAxis field at time
-      queryStringObject.yAxis = decodeList(location.query.yAxis);
+      makeQuery: queryStringObject => ({
+        ...queryStringObject,
+        yAxis: decodeList(location.query.yAxis),
+        ...appendQueryDatasetParam(organization, queryDataset),
+      }),
+      meta: tableMeta,
+    });
+  }
 
-      return {
-        ...location,
-        query: {
-          ...queryStringObject,
-          ...appendQueryDatasetParam(organization, queryDataset),
-        },
-      };
-    }
-    const currentSort = eventView.sortForField(field, tableMeta);
-    const canSort = isFieldSortable(field, tableMeta);
+  function _renderGridHeaderCell(
+    column: TableColumn<keyof TableDataRow>
+  ): React.ReactNode {
+    const {eventView} = props;
     let titleText = isEquationAlias(column.name)
       ? eventView.getEquations()[getEquationAliasIndex(column.name)]!
       : column.name;
@@ -302,20 +235,10 @@ function TableView(props: TableViewProps) {
       titleText = 'Replay';
     }
 
-    const title = (
+    return (
       <StyledTooltip title={titleText}>
         <Truncate value={titleText} maxLength={60} expandable={false} />
       </StyledTooltip>
-    );
-
-    return (
-      <SortLink
-        align={align}
-        title={title}
-        direction={currentSort ? currentSort.kind : undefined}
-        canSort={canSort}
-        generateSortLink={generateSortLink}
-      />
     );
   }
 
@@ -325,17 +248,10 @@ function TableView(props: TableViewProps) {
     rowIndex: number,
     columnIndex: number
   ): React.ReactNode {
-    const {
-      isFirstPage,
-      eventView,
-      location,
-      organization,
-      tableData,
-      isHomepage,
-      queryDataset,
-    } = props;
+    const {isFirstPage, eventView, location, organization, tableData, queryDataset} =
+      props;
 
-    if (!tableData || !tableData.meta) {
+    if (!tableData?.meta) {
       return dataRow[column.key];
     }
 
@@ -350,49 +266,24 @@ function TableView(props: TableViewProps) {
     const count = Math.min(tableData?.data?.length ?? topEvents, topEvents);
 
     const unit = tableData.meta.units?.[columnKey];
-    let cell = fieldRenderer(dataRow, {organization, location, unit, theme});
+    let cell = fieldRenderer(dataRow, {navigate, organization, location, unit, theme});
 
     const isTransactionsDataset =
       hasDatasetSelector(organization) &&
       queryDataset === SavedQueryDatasets.TRANSACTIONS;
 
     if (columnKey === 'id') {
-      let target: any;
-
-      if (dataRow['event.type'] !== 'transaction' && !isTransactionsDataset) {
-        const project = dataRow.project || dataRow['project.name'];
-
-        target = {
-          // NOTE: This uses a legacy redirect for project event to the issue group event link.
-          // This only works with dev-server or production.
-          pathname: normalizeUrl(
-            `/${organization.slug}/${project}/events/${dataRow.id}/`
-          ),
-          query: {...location.query, referrer: 'discover-events-table'},
-        };
-      } else {
-        if (!dataRow.trace) {
-          throw new Error(
-            'Transaction event should always have a trace associated with it.'
-          );
-        }
-
-        target = generateLinkToEventInTraceView({
-          traceSlug: dataRow.trace?.toString(),
-          eventId: dataRow.id,
-          projectSlug: (dataRow.project || dataRow['project.name']!).toString(),
-          timestamp: dataRow.timestamp!,
-          organization,
-          isHomepage,
-          location,
-          eventView,
-          type: 'discover',
-          source: TraceViewSources.DISCOVER,
-        });
-      }
-
       const idLink = (
-        <StyledLink data-test-id="view-event" to={target}>
+        <StyledLink
+          data-test-id="view-event"
+          to={getEventTarget({
+            dataRow,
+            eventView,
+            isTransactionsDataset,
+            location,
+            organization,
+          })}
+        >
           {cell}
         </StyledLink>
       );
@@ -428,10 +319,11 @@ function TableView(props: TableViewProps) {
         dataRow['max(timestamp)'] ?? dataRow.timestamp
       );
       const dateSelection = eventView.normalizeDateSelection(location);
-      if (dataRow.trace) {
+      const traceSlug = dataRow.trace;
+      if (typeof traceSlug === 'string' && traceSlug) {
         const target = getTraceDetailsUrl({
           organization,
-          traceSlug: String(dataRow.trace),
+          traceSlug,
           dateSelection,
           timestamp,
           location,
@@ -544,6 +436,10 @@ function TableView(props: TableViewProps) {
       dataset,
     } = props;
 
+    const selectedProjects = eventView
+      .getFullSelectedProjects(projects)
+      .filter((project): project is Project => project !== undefined);
+
     openModal(
       modalProps => (
         <ColumnEditModal
@@ -555,6 +451,7 @@ function TableView(props: TableViewProps) {
           onApply={handleUpdateColumns}
           customMeasurements={customMeasurements}
           dataset={dataset}
+          selectedProjects={selectedProjects}
         />
       ),
       {modalCss: modalCss(theme), closeEvents: 'escape-key'}
@@ -583,7 +480,7 @@ function TableView(props: TableViewProps) {
             return project.slug === dataRow.project;
           });
 
-          browserHistory.push(
+          navigate(
             normalizeUrl({
               pathname: makeReleasesPathname({
                 organization,
@@ -611,7 +508,7 @@ function TableView(props: TableViewProps) {
             function: ['count', '', undefined, undefined],
           });
 
-          browserHistory.push(
+          navigate(
             normalizeUrl(
               nextView.getResultsViewUrlTarget(
                 organization,
@@ -622,10 +519,6 @@ function TableView(props: TableViewProps) {
           );
 
           return;
-        }
-        case Actions.COPY_TO_CLIPBOARD: {
-          copyToClipBoard(value);
-          break;
         }
         default: {
           // Some custom perf metrics have units.
@@ -653,7 +546,7 @@ function TableView(props: TableViewProps) {
       );
       // Get yAxis from location
       target.query.yAxis = decodeList(location.query.yAxis);
-      browserHistory.push(normalizeUrl(target));
+      navigate(normalizeUrl(target));
     };
   }
 
@@ -676,7 +569,7 @@ function TableView(props: TableViewProps) {
     resultsViewUrlTarget.query.yAxis = previousYAxis.filter(yAxis =>
       nextView.getYAxisOptions().find(({value}) => value === yAxis)
     );
-    browserHistory.push(normalizeUrl(resultsViewUrlTarget));
+    navigate(normalizeUrl(resultsViewUrlTarget));
   }
 
   function renderHeaderButtons() {
@@ -705,7 +598,6 @@ function TableView(props: TableViewProps) {
         location={location}
         onChangeShowTags={onChangeShowTags}
         showTags={showTags}
-        supportsInvestigationRule
         queryDataset={queryDataset}
       />
     );
@@ -714,7 +606,6 @@ function TableView(props: TableViewProps) {
   const {error, eventView, isLoading, tableData} = props;
 
   const columnOrder = eventView.getColumns();
-  const columnSortBy = eventView.getSorts();
 
   const prependColumnWidths = eventView.hasAggregateField()
     ? ['40px']
@@ -722,18 +613,22 @@ function TableView(props: TableViewProps) {
       ? []
       : [`minmax(${COL_WIDTH_MINIMUM}px, max-content)`];
 
+  const {columns, handleResizeColumn} = useQueryBasedColumnResize({
+    columns: columnOrder,
+  });
+
   return (
     <GridEditable
       isLoading={isLoading}
       error={error}
       data={tableData ? tableData.data : []}
-      columnOrder={columnOrder}
-      columnSortBy={columnSortBy}
+      columnOrder={columns}
       title={t('Results')}
       grid={{
+        getColumnSort: _getGridColumnSort,
         renderHeadCell: _renderGridHeaderCell as any,
         renderBodyCell: _renderGridBodyCell as any,
-        onResizeColumn: _resizeColumn as any,
+        onResizeColumn: handleResizeColumn,
         renderPrependColumns: _renderPrependColumns as any,
         prependColumnWidths,
       }}
@@ -742,8 +637,95 @@ function TableView(props: TableViewProps) {
   );
 }
 
+type EventTargetOptions = {
+  dataRow: TableDataRow;
+  eventView: EventView;
+  isTransactionsDataset: boolean;
+  location: Location;
+  organization: Organization;
+};
+
+type TraceEventDataRow = TableDataRow & {
+  timestamp: string | number;
+  trace: string;
+};
+
+type IssueEventDataRow = TableDataRow & {
+  'issue.id': string | number;
+};
+
+function getEventTarget({
+  dataRow,
+  eventView,
+  isTransactionsDataset,
+  location,
+  organization,
+}: EventTargetOptions): LocationDescriptor {
+  if (dataRow['event.type'] !== 'transaction' && !isTransactionsDataset) {
+    if (isIssueEventDataRow(dataRow)) {
+      return getIssueEventTarget(dataRow, organization);
+    }
+
+    return getProjectEventRedirectTarget(dataRow, organization, location);
+  }
+
+  if (!isTraceEventDataRow(dataRow)) {
+    return getProjectEventRedirectTarget(dataRow, organization, location);
+  }
+
+  return generateLinkToEventInTraceView({
+    traceSlug: dataRow.trace,
+    eventId: dataRow.id,
+    timestamp: dataRow.timestamp,
+    organization,
+    location,
+    eventView,
+    source: TraceViewSources.DISCOVER,
+  });
+}
+
+function isIssueEventDataRow(dataRow: TableDataRow): dataRow is IssueEventDataRow {
+  const issueId = dataRow['issue.id'];
+  // Discover coalesces missing issue IDs to 0, so treat 0 as no issue.
+  return issueId !== undefined && issueId !== null && issueId !== 0 && issueId !== '0';
+}
+
+function isTraceEventDataRow(dataRow: TableDataRow): dataRow is TraceEventDataRow {
+  return (
+    typeof dataRow.trace === 'string' &&
+    dataRow.trace !== '' &&
+    dataRow.timestamp !== undefined
+  );
+}
+
+function getIssueEventTarget(
+  dataRow: IssueEventDataRow,
+  organization: Organization
+): LocationDescriptor {
+  return normalizeUrl({
+    pathname: `/organizations/${organization.slug}/issues/${dataRow['issue.id']}/events/${dataRow.id}/`,
+    query: {
+      referrer: 'discover-events-table',
+    },
+  });
+}
+
+function getProjectEventRedirectTarget(
+  dataRow: TableDataRow,
+  organization: Organization,
+  location: Location
+): LocationDescriptor {
+  const project = dataRow.project || dataRow['project.name'];
+
+  return {
+    // Redirects to the issue group event page via ProjectEventRedirect
+    pathname: normalizeUrl(`/${organization.slug}/${project}/events/${dataRow.id}/`),
+    query: {...location.query, referrer: 'discover-events-table'},
+  };
+}
+
 const PrependHeader = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledTooltip = styled(Tooltip)`
@@ -758,11 +740,13 @@ const StyledLink = styled(Link)`
 `;
 
 export const TransactionLink = styled(Link)`
-  ${p => p.theme.overflowEllipsis}
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const StyledIcon = styled(IconStack)`
   vertical-align: middle;
 `;
-
-export default TableView;

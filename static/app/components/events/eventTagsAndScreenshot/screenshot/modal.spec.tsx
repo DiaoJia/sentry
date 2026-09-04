@@ -1,34 +1,24 @@
 import {EventAttachmentFixture} from 'sentry-fixture/eventAttachment';
-import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import ScreenshotModal from 'sentry/components/events/eventTagsAndScreenshot/screenshot/modal';
-import GroupStore from 'sentry/stores/groupStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ScreenshotModal} from 'sentry/components/events/eventTagsAndScreenshot/screenshot/modal';
+import {GroupStore} from 'sentry/stores/groupStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 
 const stubEl = (props: {children?: React.ReactNode}) => <div>{props.children}</div>;
 
-describe('ScreenshotModal', function () {
-  let initialData: ReturnType<typeof initializeOrg>;
+describe('ScreenshotModal', () => {
   const project = ProjectFixture();
 
   beforeEach(() => {
-    initialData = initializeOrg({
-      organization: OrganizationFixture(),
-      router: {
-        params: {groupId: 'group-id'},
-        location: {query: {types: 'event.screenshot'}},
-      },
-    });
     ProjectsStore.loadInitialData([project]);
     GroupStore.init();
   });
 
-  it('paginates single screenshots correctly', async function () {
+  it('paginates single screenshots correctly', async () => {
     const eventAttachment = EventAttachmentFixture();
     const attachments = [
       eventAttachment,
@@ -44,7 +34,7 @@ describe('ScreenshotModal', function () {
         Footer={stubEl as ModalRenderProps['Footer']}
         Body={stubEl as ModalRenderProps['Body']}
         CloseButton={stubEl}
-        closeModal={() => undefined}
+        closeModal={() => {}}
         onDelete={jest.fn()}
         onDownload={jest.fn()}
         projectSlug={project.slug}
@@ -52,10 +42,7 @@ describe('ScreenshotModal', function () {
         downloadUrl="/testing/download-href"
         groupId="group-id"
         attachments={attachments}
-      />,
-      {
-        organization: initialData.organization,
-      }
+      />
     );
     expect(screen.getByRole('button', {name: 'Previous'})).toBeDisabled();
     await userEvent.click(screen.getByRole('button', {name: 'Next'}));
@@ -64,7 +51,7 @@ describe('ScreenshotModal', function () {
     expect(screen.getByRole('button', {name: 'Previous'})).toBeEnabled();
   });
 
-  it('renders with previous and next buttons when passed attachments', async function () {
+  it('renders with previous and next buttons when passed attachments', async () => {
     const eventAttachment = EventAttachmentFixture();
     const attachments = [
       eventAttachment,
@@ -83,7 +70,7 @@ describe('ScreenshotModal', function () {
         Footer={stubEl as ModalRenderProps['Footer']}
         Body={stubEl as ModalRenderProps['Body']}
         CloseButton={stubEl}
-        closeModal={() => undefined}
+        closeModal={() => {}}
         onDelete={jest.fn()}
         onDownload={jest.fn()}
         projectSlug={project.slug}
@@ -91,10 +78,7 @@ describe('ScreenshotModal', function () {
         attachments={attachments}
         downloadUrl="/testing/download-href"
         groupId="group-id"
-      />,
-      {
-        organization: initialData.organization,
-      }
+      />
     );
 
     expect(screen.getByRole('button', {name: 'Previous'})).toBeDisabled();
@@ -105,7 +89,7 @@ describe('ScreenshotModal', function () {
     expect(screen.getByText('2 of 2')).toBeInTheDocument();
   });
 
-  it('does not render pagination buttons when only one screenshot', function () {
+  it('does not render pagination buttons when only one screenshot', () => {
     const eventAttachment = EventAttachmentFixture();
     render(
       <ScreenshotModal
@@ -113,17 +97,14 @@ describe('ScreenshotModal', function () {
         Footer={stubEl as ModalRenderProps['Footer']}
         Body={stubEl as ModalRenderProps['Body']}
         CloseButton={stubEl}
-        closeModal={() => undefined}
+        closeModal={() => {}}
         onDelete={jest.fn()}
         onDownload={jest.fn()}
         projectSlug={project.slug}
         eventAttachment={eventAttachment}
         downloadUrl="/testing/download-href"
         groupId="group-id"
-      />,
-      {
-        organization: initialData.organization,
-      }
+      />
     );
 
     expect(screen.getByText(eventAttachment.name)).toBeInTheDocument();

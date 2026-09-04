@@ -1,29 +1,32 @@
 import styled from '@emotion/styled';
-import moment from 'moment-timezone';
 
-import Panel from 'sentry/components/panels/panel';
-import {IconFire, IconStats, IconWarning} from 'sentry/icons';
+import {Container, Stack} from '@sentry/scraps/layout';
+
+import {IconFire, IconStats} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {DataCategory} from 'sentry/types/core';
-import oxfordizeArray from 'sentry/utils/oxfordizeArray';
-import useOrganization from 'sentry/utils/useOrganization';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {oxfordizeArray} from 'sentry/utils/oxfordizeArray';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
 
 import AddEventsCTA from 'getsentry/components/addEventsCTA';
-import {GIGABYTE, RESERVED_BUDGET_QUOTA} from 'getsentry/constants';
-import OrgStatsBanner from 'getsentry/hooks/orgStatsBanner';
+import {RESERVED_BUDGET_QUOTA} from 'getsentry/constants';
+import OrgStatsBanner from 'getsentry/overrides/orgStatsBanner';
 import type {CustomerUsage, Subscription} from 'getsentry/types';
 import {
+  convertUsageToReservedUnit,
   formatReservedWithUnits,
-  formatUsageWithUnits,
   getBestActionToIncreaseEventLimits,
   hasPerformance,
   isBizPlanFamily,
   isUnlimitedReserved,
   UsageAction,
 } from 'getsentry/utils/billing';
-import {getPlanCategoryName, sortCategoriesWithKeys} from 'getsentry/utils/dataCategory';
+import {
+  getCategoryInfoFromPlural,
+  getPlanCategoryName,
+  sortCategoriesWithKeys,
+} from 'getsentry/utils/dataCategory';
 
 import {ButtonWrapper, SubscriptionBody} from './styles';
 
@@ -34,7 +37,7 @@ type Props = {
   usage: CustomerUsage;
 };
 
-function UsageAlert({subscription, usage}: Props) {
+export function UsageAlert({subscription, usage}: Props) {
   const organization = useOrganization();
 
   function getActionSentence() {
@@ -63,16 +66,21 @@ function UsageAlert({subscription, usage}: Props) {
       hadCustomDynamicSampling: subscription.hadCustomDynamicSampling,
     });
 
-    return category === DataCategory.ATTACHMENTS
-      ? `${formatUsageWithUnits(projected, category)} of attachments`
-      : `${formatReservedWithUnits(projected, category, {
-          isAbbreviated: true,
-        })} ${displayName}`;
+    const categoryInfo = getCategoryInfoFromPlural(category);
+    const isAbbreviated = categoryInfo?.formatting.projectedAbbreviated ?? true;
+
+    const formattedAmount = formatReservedWithUnits(projected, category, {
+      isAbbreviated,
+    });
+
+    return isAbbreviated
+      ? `${formattedAmount} ${displayName}`
+      : `${formattedAmount} of ${displayName}`;
   }
 
   function projectedCategoryOverages() {
-    // hide projected overages for plans with on-demand for now since
-    // shared on-demand budget can be applied to any data category
+    // hide projected overages for plans with on-demand/PAYG for now since
+    // shared on-demand/PAYG budget can be applied to any data category
     if (subscription.onDemandMaxSpend) {
       return [];
     }
@@ -86,15 +94,14 @@ function UsageAlert({subscription, usage}: Props) {
           return acc;
         }
         const projected = usage.totals[category]?.projected || 0;
-        const projectedWithReservedUnit =
-          category === DataCategory.ATTACHMENTS ? projected / GIGABYTE : projected;
+        const projectedWithReservedUnit = convertUsageToReservedUnit(projected, category);
 
         const hasOverage =
           !!currentHistory.reserved &&
           projectedWithReservedUnit > (currentHistory.prepaid ?? 0);
 
         if (hasOverage) {
-          acc.push(formatProjected(projected, category as DataCategory));
+          acc.push(formatProjected(projectedWithReservedUnit, category as DataCategory));
         }
         return acc;
       },
@@ -103,7 +110,7 @@ function UsageAlert({subscription, usage}: Props) {
   }
 
   function getProjectedOverages(): ProjectedOverages {
-    if (subscription.isEnterpriseTrial || subscription.hasOverageNotificationsDisabled) {
+    if (subscription.isEnterpriseTrial) {
       return [];
     }
     return projectedCategoryOverages();
@@ -115,15 +122,20 @@ function UsageAlert({subscription, usage}: Props) {
     }
 
     return (
-      <Panel data-test-id="projected-overage-alert">
+      <Container
+        background="primary"
+        border="primary"
+        radius="md"
+        data-test-id="projected-overage-alert"
+      >
         <SubscriptionBody withPadding>
           <UsageInfo>
-            <IconStats size="md" color="blue300" />
+            <IconStats size="md" variant="accent" />
             <div>
               <h3>{t('Projected Overage')}</h3>
               <Description>
                 {tct(
-                  `Based on your previous usage, we predict your organization will need at least [totals].`,
+                  'Based on your previous usage, we predict your organization will need at least [totals].',
                   {totals: oxfordizeArray(projectedOverages)}
                 )}{' '}
                 {getActionSentence()}
@@ -132,32 +144,7 @@ function UsageAlert({subscription, usage}: Props) {
           </UsageInfo>
           {renderPrimaryCTA('projected-overage')}
         </SubscriptionBody>
-      </Panel>
-    );
-  }
-
-  function renderGracePeriodInfo() {
-    return (
-      <Panel data-test-id="grace-period-alert">
-        <SubscriptionBody withPadding>
-          <UsageInfo>
-            <IconWarning size="md" color="yellow300" />
-            <div>
-              <h3>{t('Grace Period')}</h3>
-              <Description>
-                {tct(
-                  `Your organization has depleted its error capacity for the current usage period.
-                  We've put your account into a one time grace period, which will continue to accept errors at a limited rate.
-                  This grace period ends on [gracePeriodEnd].`,
-                  {gracePeriodEnd: moment(subscription.gracePeriodEnd).format('ll')}
-                )}{' '}
-                {getActionSentence()}
-              </Description>
-            </div>
-          </UsageInfo>
-          {renderPrimaryCTA('grace-period')}
-        </SubscriptionBody>
-      </Panel>
+      </Container>
     );
   }
 
@@ -167,7 +154,7 @@ function UsageAlert({subscription, usage}: Props) {
         ([category]) =>
           category !== DataCategory.SPANS_INDEXED || subscription.hadCustomDynamicSampling
       )
-      .reduce((acc, [category, currentHistory]) => {
+      .reduce<string[]>((acc, [category, currentHistory]) => {
         if (currentHistory.usageExceeded) {
           acc.push(
             getPlanCategoryName({
@@ -179,7 +166,7 @@ function UsageAlert({subscription, usage}: Props) {
           );
         }
         return acc;
-      }, [] as string[]);
+      }, []);
 
     const quotasExceeded =
       exceededList.length > 0
@@ -192,15 +179,20 @@ function UsageAlert({subscription, usage}: Props) {
           });
 
     return (
-      <Panel data-test-id="usage-exceeded-alert">
+      <Container
+        background="primary"
+        border="primary"
+        radius="md"
+        data-test-id="usage-exceeded-alert"
+      >
         <SubscriptionBody withPadding>
           <UsageInfo>
-            <IconFire size="md" color="red300" />
+            <IconFire size="md" variant="danger" />
             <div>
               <h3>{t('Usage Exceeded')}</h3>
               <Description>
                 {tct(
-                  `Your organization has depleted its [quotasExceeded] capacity for the current usage period.`,
+                  'Your organization has depleted its [quotasExceeded] capacity for the current usage period.',
                   {quotasExceeded}
                 )}{' '}
                 {getActionSentence()}
@@ -209,7 +201,7 @@ function UsageAlert({subscription, usage}: Props) {
           </UsageInfo>
           {renderPrimaryCTA('exceded-quota')}
         </SubscriptionBody>
-      </Panel>
+      </Container>
     );
   }
 
@@ -238,7 +230,7 @@ function UsageAlert({subscription, usage}: Props) {
     }
 
     return (
-      <ButtonWrapper>
+      <ButtonWrapper gap="0">
         <AddEventsCTA
           {...{
             organization,
@@ -258,40 +250,35 @@ function UsageAlert({subscription, usage}: Props) {
     return null;
   }
 
-  const hasExceeded =
-    Object.values(subscription.categories).some(({usageExceeded}) => usageExceeded) ||
-    // TODO: Remove when mmx plans have error BillingMetricHistory
-    subscription.usageExceeded;
+  const hasExceeded = Object.values(subscription.categories).some(
+    ({usageExceeded}) => usageExceeded
+  );
   const projectedOverages = getProjectedOverages();
-  const hasOverage =
-    subscription.isGracePeriod || hasExceeded || !!projectedOverages.length;
+  const hasOverage = hasExceeded || !!projectedOverages.length;
 
   // if no overage, we can still have a CTA
   if (!hasOverage) {
     return renderDefaultEventCTA();
   }
 
-  const showProjected = !hasExceeded && !subscription.isGracePeriod;
+  const showProjected = !hasExceeded;
 
   return (
-    <div data-test-id="usage-alert">
+    <Stack gap="xl" data-test-id="usage-alert">
       {hasExceeded && renderExceededInfo()}
-      {subscription.isGracePeriod && renderGracePeriodInfo()}
       {showProjected && renderProjectedInfo(projectedOverages)}
-    </div>
+    </Stack>
   );
 }
-
-export default UsageAlert;
 
 const UsageInfo = styled('div')`
   display: grid;
   grid-template-columns: max-content auto;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
 const Description = styled(TextBlock)`
-  font-size: ${p => p.theme.fontSize.md};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.md};
+  color: ${p => p.theme.tokens.content.secondary};
   margin-bottom: 0;
 `;

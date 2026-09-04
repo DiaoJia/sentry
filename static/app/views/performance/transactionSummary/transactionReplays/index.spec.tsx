@@ -1,15 +1,19 @@
 import {ProjectFixture} from 'sentry-fixture/project';
 import {ReplayListFixture} from 'sentry-fixture/replayList';
+import {UserFixture} from 'sentry-fixture/user';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, waitFor} from 'sentry-test/reactTestingLibrary';
 import {resetMockDate, setMockDate} from 'sentry-test/utils';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {
   SPAN_OP_BREAKDOWN_FIELDS,
   SPAN_OP_RELATIVE_BREAKDOWN_FIELD,
 } from 'sentry/utils/discover/fields';
+import TransactionSummaryLayout from 'sentry/views/performance/transactionSummary/layout';
+import {Tab as TransactionSummaryTab} from 'sentry/views/performance/transactionSummary/tabs';
 import TransactionReplays from 'sentry/views/performance/transactionSummary/transactionReplays';
 
 type InitializeOrgProps = {
@@ -19,13 +23,10 @@ type InitializeOrgProps = {
   };
   organizationProps?: {
     features?: string[];
+    hasGranularReplayPermissions?: boolean;
+    replayAccessMembers?: number[];
   };
 };
-
-jest.mock('sentry/utils/useMedia', () => ({
-  __esModule: true,
-  default: jest.fn(() => true),
-}));
 
 const mockEventsUrl = '/organizations/org-slug/events/';
 const mockReplaysUrl = '/organizations/org-slug/replays/';
@@ -34,19 +35,23 @@ const renderComponent = ({
   location,
   organizationProps = {features: ['performance-view', 'session-replay']},
 }: InitializeOrgProps = {}) => {
-  const {organization, projects, router} = initializeOrg({
+  const {organization, projects} = initializeOrg({
     organization: {
       ...organizationProps,
     },
     projects: [ProjectFixture()],
-    router: {
-      routes: [
-        {path: '/'},
-        {path: '/organizations/:orgId/insights/summary/'},
-        {path: 'replays/'},
-      ],
+  });
+
+  ProjectsStore.init();
+  ProjectsStore.loadInitialData(projects);
+  const user = UserFixture({id: '1'});
+  ConfigStore.set('user', user);
+
+  return render(<TransactionSummaryLayout />, {
+    organization,
+    initialRouterConfig: {
       location: {
-        pathname: '/organizations/org-slug/replays/',
+        pathname: '/performance/summary/replays/',
         ...location,
         query: {
           project: '1',
@@ -54,26 +59,24 @@ const renderComponent = ({
           ...location?.query,
         },
       },
+      route: '/performance/summary/',
+      children: [
+        {
+          path: 'replays/',
+          handle: {tab: TransactionSummaryTab.REPLAYS, path: 'replays/'},
+          element: <TransactionReplays />,
+        },
+      ],
     },
-  });
-
-  ProjectsStore.init();
-  ProjectsStore.loadInitialData(projects);
-
-  return render(<TransactionReplays />, {
-    router,
-    organization,
-    deprecatedRouterMocks: true,
   });
 };
 
 describe('TransactionReplays', () => {
-  let eventsMockApi: jest.Mock<any, any>;
-  let replaysMockApi: jest.Mock<any, any>;
+  let eventsMockApi: jest.Mock;
   beforeEach(() => {
     MockApiClient.addMockResponse({
       method: 'GET',
-      url: `/organizations/org-slug/sdk-updates/`,
+      url: '/organizations/org-slug/sdk-updates/',
       body: [],
     });
     MockApiClient.addMockResponse({
@@ -89,13 +92,6 @@ describe('TransactionReplays', () => {
     });
     eventsMockApi = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/events/',
-      body: {
-        data: [],
-      },
-      statusCode: 200,
-    });
-    replaysMockApi = MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/replays/',
       body: {
         data: [],
       },
@@ -137,29 +133,10 @@ describe('TransactionReplays', () => {
     });
   });
 
-  it('should snapshot empty state', async () => {
-    const mockApi = MockApiClient.addMockResponse({
-      url: mockReplaysUrl,
-      body: {
-        data: [],
-      },
-      statusCode: 200,
-    });
-
-    renderComponent();
-
-    await waitFor(() => {
-      expect(mockApi).toHaveBeenCalledTimes(1);
-    });
-  });
-
   it('should show empty message when no replays are found', async () => {
     renderComponent();
 
-    await waitFor(() => {
-      expect(replaysMockApi).toHaveBeenCalledTimes(1);
-    });
-    expect(screen.getByText('There are no items to display')).toBeInTheDocument();
+    await screen.findByText('No replays found');
   });
 
   it('should show loading indicator when loading replays', async () => {
@@ -175,7 +152,14 @@ describe('TransactionReplays', () => {
 
     expect(screen.getByTestId('loading-indicator')).toBeInTheDocument();
     await waitFor(() => {
-      expect(mockApi).toHaveBeenCalledTimes(1);
+      expect(mockApi).toHaveBeenCalledWith(
+        mockEventsUrl,
+        expect.objectContaining({
+          query: expect.objectContaining({
+            query: 'event.type:transaction transaction:"Settings Page" !replayId:""',
+          }),
+        })
+      );
     });
   });
 
@@ -231,17 +215,25 @@ describe('TransactionReplays', () => {
     expect(screen.getAllByText('testDisplayName')).toHaveLength(2);
 
     const expectedQuery =
-      'project=1&query=test&referrer=%2Forganizations%2F%3AorgId%2Finsights%2Fsummary%2Freplays%2F&statsPeriod=14d&yAxis=count%28%29';
+      'playlistEnd=2022-09-28T23%3A29%3A13&playlistStart=2022-09-14T23%3A29%3A13&query=test&referrer=transactionReplays';
     // Expect the first row to have the correct href
-    expect(screen.getAllByRole('link', {name: 'testDisplayName'})[0]).toHaveAttribute(
+    expect(
+      screen.getByRole('link', {
+        name: 'T testDisplayName project-slug 346789a7 14 days ago',
+      })
+    ).toHaveAttribute(
       'href',
-      `/organizations/org-slug/replays/346789a703f6454384f1de473b8b9fcc/?${expectedQuery}`
+      `/organizations/org-slug/explore/replays/346789a703f6454384f1de473b8b9fcc/?${expectedQuery}`
     );
 
     // Expect the second row to have the correct href
-    expect(screen.getAllByRole('link', {name: 'testDisplayName'})[1]).toHaveAttribute(
+    expect(
+      screen.getByRole('link', {
+        name: 'T testDisplayName project-slug b05dae9b 7 days ago',
+      })
+    ).toHaveAttribute(
       'href',
-      `/organizations/org-slug/replays/b05dae9b6be54d21a4d5ad9f8f02b780/?${expectedQuery}`
+      `/organizations/org-slug/explore/replays/b05dae9b6be54d21a4d5ad9f8f02b780/?${expectedQuery}`
     );
 
     // Expect the first row to have the correct duration
@@ -251,10 +243,14 @@ describe('TransactionReplays', () => {
     expect(screen.getByText('06:40')).toBeInTheDocument();
 
     // Expect the first row to have the correct errors
-    expect(screen.getAllByTestId('replay-table-count-errors')[0]).toHaveTextContent('1');
+    expect(
+      screen.getAllByTestId('replay-table-column-count-errors')[0]
+    ).toHaveTextContent('1');
 
     // Expect the second row to have the correct errors
-    expect(screen.getAllByTestId('replay-table-count-errors')[1]).toHaveTextContent('4');
+    expect(
+      screen.getAllByTestId('replay-table-column-count-errors')[1]
+    ).toHaveTextContent('4');
 
     // Expect the first row to have the correct date
     expect(screen.getByText('14 days ago')).toBeInTheDocument();
@@ -275,5 +271,24 @@ describe('TransactionReplays', () => {
         screen.getByText("You don't have access to this feature")
       ).toBeInTheDocument();
     });
+  });
+
+  it('should hide replay content when user does not have granular replay permissions', async () => {
+    renderComponent({
+      organizationProps: {
+        features: ['performance-view', 'session-replay'],
+        hasGranularReplayPermissions: true,
+        replayAccessMembers: [999], // User ID 1 is not in this list
+      },
+    });
+
+    // hack: Wait for any pending updates to complete
+    // without await the test fails with "An update to _GenericDiscoverQuery inside a test was not wrapped in act(...)"
+    await waitFor(() => {
+      expect(screen.queryByTestId('replay-table')).not.toBeInTheDocument();
+    });
+
+    // Content should be hidden, not showing a message or table
+    expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument();
   });
 });

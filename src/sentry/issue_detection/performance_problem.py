@@ -1,0 +1,86 @@
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Self, TypedDict
+
+from sentry.issues.grouptype import GroupType, get_group_type_by_type_id
+from sentry.issues.issue_occurrence import IssueEvidence, IssueEvidenceData
+
+
+# A serialized version of the `PerformanceProblem` dataclass
+class PerformanceProblemDict(TypedDict):
+    fingerprint: str
+    op: str
+    desc: str
+    type: int
+    parent_span_ids: list[str]
+    cause_span_ids: list[str]
+    offender_span_ids: list[str]
+    evidence_data: dict[str, Any]
+    evidence_display: list[IssueEvidenceData]
+
+
+@dataclass
+class PerformanceProblem:
+    fingerprint: str
+    op: str
+    desc: str
+    type: type[GroupType]
+    parent_span_ids: Sequence[str]
+    # For related spans that caused the bad spans
+    cause_span_ids: Sequence[str]
+    # The actual bad spans
+    offender_span_ids: Sequence[str]
+    # Evidence to be used for the group
+    evidence_data: dict[str, Any]
+    # User-friendly evidence to be displayed directly
+    evidence_display: Sequence[IssueEvidence]
+
+    def to_dict(
+        self,
+    ) -> PerformanceProblemDict:
+        return {
+            "fingerprint": self.fingerprint,
+            "op": self.op,
+            "desc": self.desc,
+            "type": self.type.type_id,
+            "parent_span_ids": list(self.parent_span_ids),
+            "cause_span_ids": list(self.cause_span_ids),
+            "offender_span_ids": list(self.offender_span_ids),
+            "evidence_data": dict(self.evidence_data),
+            "evidence_display": [evidence.to_dict() for evidence in self.evidence_display],
+        }
+
+    @property
+    def title(self) -> str:
+        return self.type.description
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        return cls(
+            data["fingerprint"],
+            data["op"],
+            data["desc"],
+            get_group_type_by_type_id(data["type"]),
+            data["parent_span_ids"],
+            data["cause_span_ids"],
+            data["offender_span_ids"],
+            data["evidence_data"],
+            [
+                IssueEvidence(evidence["name"], evidence["value"], evidence["important"])
+                for evidence in data["evidence_display"]
+            ],
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PerformanceProblem):
+            return NotImplemented
+        return (
+            self.fingerprint == other.fingerprint
+            and self.offender_span_ids == other.offender_span_ids
+            and self.type == other.type
+        )
+
+    def __hash__(self) -> int:
+        # This will de-duplicate on fingerprint and type and only for offending span ids.
+        # Fingerprint should incorporate the 'uniqueness' enough that parent and span checks etc. are not required.
+        return hash((self.fingerprint, frozenset(self.offender_span_ids), self.type))

@@ -1,21 +1,36 @@
 import type {Span} from '@sentry/core';
 import * as Sentry from '@sentry/react';
 
-import HookStore from 'sentry/stores/hookStore';
-import type {Hooks} from 'sentry/types/hooks';
-import {agentsInsightsEventMap} from 'sentry/utils/analytics/agentsInsightsAnalyticsEvents';
+import {getOverride} from 'sentry/overrideRegistry';
+import type {Overrides} from 'sentry/types/overrides';
 import {
   alertsEventMap,
   type AlertsEventParameters,
 } from 'sentry/utils/analytics/alertsAnalyticsEvents';
 import {
+  commandPaletteEventMap,
+  type CommandPaletteEventParameters,
+} from 'sentry/utils/analytics/commandPaletteAnalyticsEvents';
+import {
+  exploreAnalyticsEventMap,
+  type ExploreAnalyticsEventParameters,
+} from 'sentry/utils/analytics/exploreAnalyticsEvents';
+import {
   featureFlagEventMap,
   type FeatureFlagEventParameters,
 } from 'sentry/utils/analytics/featureFlagAnalyticsEvents';
 import {
+  gamingEventMap,
+  type GamingAnalyticsEventParameters,
+} from 'sentry/utils/analytics/gamingAnalyticsEvents';
+import {
   logsAnalyticsEventMap,
   type LogsAnalyticsEventParameters,
 } from 'sentry/utils/analytics/logsAnalyticsEvent';
+import {
+  metricsAnalyticsEventMap,
+  type MetricsAnalyticsEventParameters,
+} from 'sentry/utils/analytics/metricsAnalyticsEvent';
 import {navigationAnalyticsEventMap} from 'sentry/utils/analytics/navigationAnalyticsEvents';
 import {nextJsInsightsEventMap} from 'sentry/utils/analytics/nextJsInsightsAnalyticsEvents';
 import {
@@ -29,6 +44,12 @@ import {
 
 import type {AgentMonitoringEventParameters} from './analytics/agentMonitoringAnalyticsEvents';
 import {agentMonitoringEventMap} from './analytics/agentMonitoringAnalyticsEvents';
+import type {AuthV2EventParameters} from './analytics/authV2AnalyticsEvents';
+import {authV2EventMap} from './analytics/authV2AnalyticsEvents';
+import type {BreadcrumbsAnalyticsEventParameters} from './analytics/breadcrumbsAnalyticsEvents';
+import {breadcrumbsAnalyticsEventMap} from './analytics/breadcrumbsAnalyticsEvents';
+import type {ConversationsEventParameters} from './analytics/conversationsAnalyticsEvents';
+import {conversationsEventMap} from './analytics/conversationsAnalyticsEvents';
 import type {CoreUIEventParameters} from './analytics/coreuiAnalyticsEvents';
 import {coreUIEventMap} from './analytics/coreuiAnalyticsEvents';
 import type {DashboardsEventParameters} from './analytics/dashboardsAnalyticsEvents';
@@ -51,13 +72,17 @@ import type {IssueEventParameters} from './analytics/issueAnalyticsEvents';
 import {issueEventMap} from './analytics/issueAnalyticsEvents';
 import type {LaravelInsightsEventParameters} from './analytics/laravelInsightsAnalyticsEvents';
 import {laravelInsightsEventMap} from './analytics/laravelInsightsAnalyticsEvents';
-import makeAnalyticsFunction from './analytics/makeAnalyticsFunction';
+import {makeAnalyticsFunction} from './analytics/makeAnalyticsFunction';
+import type {McpMonitoringEventParameters} from './analytics/mcpMonitoringAnalyticsEvents';
+import {mcpMonitoringEventMap} from './analytics/mcpMonitoringAnalyticsEvents';
 import type {MonitorsEventParameters} from './analytics/monitorsAnalyticsEvents';
 import {monitorsEventMap} from './analytics/monitorsAnalyticsEvents';
 import type {OnboardingEventParameters} from './analytics/onboardingAnalyticsEvents';
 import {onboardingEventMap} from './analytics/onboardingAnalyticsEvents';
 import type {PerformanceEventParameters} from './analytics/performanceAnalyticsEvents';
 import {performanceEventMap} from './analytics/performanceAnalyticsEvents';
+import type {PreprodBuildEventParameters} from './analytics/preprodBuildAnalyticsEvents';
+import {preprodBuildEventMap} from './analytics/preprodBuildAnalyticsEvents';
 import type {ProfilingEventParameters} from './analytics/profilingAnalyticsEvents';
 import {profilingEventMap} from './analytics/profilingAnalyticsEvents';
 import type {ProjectCreationEventParameters} from './analytics/projectCreationAnalyticsEvents';
@@ -68,6 +93,8 @@ import type {ReplayEventParameters} from './analytics/replayAnalyticsEvents';
 import {replayEventMap} from './analytics/replayAnalyticsEvents';
 import type {SearchEventParameters} from './analytics/searchAnalyticsEvents';
 import {searchEventMap} from './analytics/searchAnalyticsEvents';
+import {seerAnalyticsEventsMap} from './analytics/seerAnalyticsEvents';
+import type {SeerAnalyticsEventsParameters} from './analytics/seerAnalyticsEvents';
 import type {SettingsEventParameters} from './analytics/settingsAnalyticsEvents';
 import {settingsEventMap} from './analytics/settingsAnalyticsEvents';
 import type {SignupAnalyticsParameters} from './analytics/signupAnalyticsEvents';
@@ -82,9 +109,14 @@ import type {TeamInsightsEventParameters} from './analytics/workflowAnalyticsEve
 import {workflowEventMap} from './analytics/workflowAnalyticsEvents';
 
 interface EventParameters
-  extends GrowthEventParameters,
+  extends
+    CommandPaletteEventParameters,
+    AuthV2EventParameters,
+    GrowthEventParameters,
     AgentMonitoringEventParameters,
     AlertsEventParameters,
+    ConversationsEventParameters,
+    BreadcrumbsAnalyticsEventParameters,
     CoreUIEventParameters,
     DashboardsEventParameters,
     DiscoverEventParameters,
@@ -93,31 +125,41 @@ interface EventParameters
     InsightEventParameters,
     IssueEventParameters,
     LaravelInsightsEventParameters,
+    McpMonitoringEventParameters,
     MonitorsEventParameters,
     PerformanceEventParameters,
     ProfilingEventParameters,
+    PreprodBuildEventParameters,
     ReleasesEventParameters,
     ReplayEventParameters,
     SearchEventParameters,
+    SeerAnalyticsEventsParameters,
     SettingsEventParameters,
     TeamInsightsEventParameters,
     DynamicSamplingEventParameters,
     OnboardingEventParameters,
+    GamingAnalyticsEventParameters,
     StackTraceEventParameters,
     EcosystemEventParameters,
     IntegrationEventParameters,
     ProjectCreationEventParameters,
     SignupAnalyticsParameters,
     LogsAnalyticsEventParameters,
+    MetricsAnalyticsEventParameters,
     TracingEventParameters,
     StatsEventParameters,
+    ExploreAnalyticsEventParameters,
     QuickStartEventParameters,
     TempestEventParameters,
     Record<string, Record<string, any>> {}
 
 const allEventMap: Record<string, string | null> = {
+  ...commandPaletteEventMap,
+  ...authV2EventMap,
   ...agentMonitoringEventMap,
   ...alertsEventMap,
+  ...conversationsEventMap,
+  ...breadcrumbsAnalyticsEventMap,
   ...coreUIEventMap,
   ...dashboardsEventMap,
   ...discoverEventMap,
@@ -129,18 +171,22 @@ const allEventMap: Record<string, string | null> = {
   ...laravelInsightsEventMap,
   ...monitorsEventMap,
   ...nextJsInsightsEventMap,
-  ...agentsInsightsEventMap,
   ...performanceEventMap,
+  ...preprodBuildEventMap,
   ...tracingEventMap,
   ...profilingEventMap,
+  ...exploreAnalyticsEventMap,
   ...logsAnalyticsEventMap,
+  ...metricsAnalyticsEventMap,
   ...releasesEventMap,
   ...replayEventMap,
   ...searchEventMap,
+  ...seerAnalyticsEventsMap,
   ...settingsEventMap,
   ...workflowEventMap,
   ...dynamicSamplingEventMap,
   ...onboardingEventMap,
+  ...gamingEventMap,
   ...stackTraceEventMap,
   ...ecosystemEventMap,
   ...integrationEventMap,
@@ -151,12 +197,13 @@ const allEventMap: Record<string, string | null> = {
   ...quickStartEventMap,
   ...navigationAnalyticsEventMap,
   ...tempestEventMap,
+  ...mcpMonitoringEventMap,
 };
 
 /**
  * Analytics and metric tracking functionality.
  *
- * These are primarily driven through hooks provided through the hookstore. For
+ * These are primarily driven through hooks provided through the hook registry. For
  * sentry.io these are currently mapped to our in-house analytics backend
  * 'Reload' and the Amplitude service.
  *
@@ -181,16 +228,7 @@ const allEventMap: Record<string, string | null> = {
  */
 export const trackAnalytics = makeAnalyticsFunction<EventParameters>(allEventMap);
 
-/**
- * Should NOT be used directly. Instead, use makeAnalyticsFunction to generate
- * an analytics function.
- */
-export const rawTrackAnalyticsEvent: Hooks['analytics:raw-track-event'] = (
-  data,
-  options
-) => HookStore.get('analytics:raw-track-event').forEach(cb => cb(data, options));
-
-type RecordMetric = Hooks['metrics:event'] & {
+type RecordMetric = Overrides['metrics:event'] & {
   endSpan: (opts: {
     /**
      * Name of the transaction to end
@@ -255,10 +293,10 @@ const metricDataStore = new Map<string, Record<PropertyKey, unknown>>();
  * Record metrics.
  */
 export const metric: RecordMetric = (name, value, tags) =>
-  HookStore.get('metrics:event').forEach(cb => cb(name, value, tags));
+  getOverride('metrics:event')?.(name, value, tags);
 
 // JSDOM implements window.performance but not window.performance.mark
-const CAN_MARK =
+export const CAN_MARK =
   window.performance &&
   typeof window.performance.mark === 'function' &&
   typeof window.performance.measure === 'function' &&
@@ -283,7 +321,7 @@ metric.mark = function metricMark({name, data = {}}) {
  * Performs a measurement between `start` and `end` (or now if `end` is not
  * specified) Calls `metric` with `name` and the measured time difference.
  */
-metric.measure = function metricMeasure({name, start, end, data = {}, noCleanup} = {}) {
+metric.measure = function metricMeasure({name, start, end, data = {}, noCleanup}) {
   // Just ignore if browser is old enough that it doesn't support this
   if (!CAN_MARK) {
     return;

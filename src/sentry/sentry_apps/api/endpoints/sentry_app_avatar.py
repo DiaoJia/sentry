@@ -13,7 +13,7 @@ from sentry.sentry_apps.models.sentry_app_avatar import SentryAppAvatar
 
 @control_silo_endpoint
 class SentryAppAvatarEndpoint(AvatarMixin[SentryAppAvatar], SentryAppBaseEndpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.INTEGRATION_PLATFORM
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
         "PUT": ApiPublishStatus.PRIVATE,
@@ -32,5 +32,5 @@ class SentryAppAvatarEndpoint(AvatarMixin[SentryAppAvatar], SentryAppBaseEndpoin
             request, access=request.access, serializer=SentryAppSerializer(), **kwargs
         )
 
-    def get_avatar_filename(self, obj):
+    def get_avatar_filename(self, obj) -> str:
         return f"{obj.slug}.png"

@@ -1,228 +1,388 @@
-import {useCallback, useMemo} from 'react';
+import type {MouseEventHandler, ReactNode} from 'react';
+import {useCallback, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
+import {useDebouncedValue} from '@tanstack/react-pacer';
+import cloneDeep from 'lodash/cloneDeep';
 
-import {Button} from 'sentry/components/core/button';
-import type {SelectKey, SelectOption} from 'sentry/components/core/compactSelect';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {IconAdd} from 'sentry/icons';
-import {IconDelete} from 'sentry/icons/iconDelete';
+import type {SelectKey, SelectOption} from '@sentry/scraps/compactSelect';
+
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {useSpanSearchQueryBuilderProps} from 'sentry/components/performance/spanSearchQueryBuilder';
+import {InvalidReason} from 'sentry/components/searchSyntax/parser';
+import {IconHide} from 'sentry/icons/iconHide';
 import {t} from 'sentry/locale';
-import {parseFunction} from 'sentry/utils/discover/fields';
+import {EQUATION_PREFIX} from 'sentry/utils/discover/fields';
 import {ALLOWED_EXPLORE_VISUALIZE_AGGREGATES} from 'sentry/utils/fields';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {
-  useExploreVisualizes,
-  useSetExploreVisualizes,
-} from 'sentry/views/explore/contexts/pageParamsContext';
+  ToolbarFooter,
+  ToolbarSection,
+} from 'sentry/views/explore/components/toolbar/styles';
+import {
+  ToolbarVisualizeAddChart,
+  ToolbarVisualizeAddEquation,
+  ToolbarVisualizeDropdown,
+  ToolbarVisualizeHeader,
+} from 'sentry/views/explore/components/toolbar/toolbarVisualize';
+import {VisualizeEquation as VisualizeEquationInput} from 'sentry/views/explore/components/toolbar/toolbarVisualize/visualizeEquation';
+import {TraceItemSearchQueryBuilder} from 'sentry/views/explore/components/traceItemSearchQueryBuilder';
+import {DragNDropContext} from 'sentry/views/explore/contexts/dragNDropContext';
 import type {BaseVisualize} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
 import {
   DEFAULT_VISUALIZATION,
-  MAX_VISUALIZES,
   updateVisualizeAggregate,
-  Visualize,
 } from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
+import {useSpanItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 import {useVisualizeFields} from 'sentry/views/explore/hooks/useVisualizeFields';
-
 import {
-  ToolbarFooter,
-  ToolbarFooterButton,
-  ToolbarHeader,
-  ToolbarLabel,
-  ToolbarRow,
-  ToolbarSection,
-} from './styles';
+  isVisualizeEquation,
+  isVisualizeFunction,
+  MAX_VISUALIZES,
+  Visualize,
+  VisualizeEquation,
+  VisualizeFunction,
+} from 'sentry/views/explore/queryParams/visualize';
+import {TraceItemDataset} from 'sentry/views/explore/types';
+import {
+  applyConditionalFilter,
+  buildConditionalAggregate,
+  CONDITIONAL_FILTER_AGGREGATE_INVALID_MESSAGE,
+  parseConditionalAggregate,
+  supportsConditionalAggregateFilter,
+} from 'sentry/views/explore/utils/conditionalAggregate';
 
-export function ToolbarVisualize() {
-  const visualizes = useExploreVisualizes();
-  const setVisualizes = useSetExploreVisualizes();
+interface ToolbarVisualizeProps {
+  allowEquations: boolean;
+  setVisualizes: (visualizes: BaseVisualize[]) => void;
+  visualizes: readonly Visualize[];
+}
 
+export function ToolbarVisualize({
+  allowEquations,
+  setVisualizes,
+  visualizes,
+}: ToolbarVisualizeProps) {
   const addChart = useCallback(() => {
-    const newVisualizes = [...visualizes, new Visualize(DEFAULT_VISUALIZATION)].map(
-      visualize => visualize.toJSON()
+    const newVisualizes = [
+      ...visualizes,
+      new VisualizeFunction(DEFAULT_VISUALIZATION),
+    ].map(visualize => visualize.serialize());
+    setVisualizes(newVisualizes);
+  }, [setVisualizes, visualizes]);
+
+  const addEquation = useCallback(() => {
+    const newVisualizes = [...visualizes, new VisualizeEquation(EQUATION_PREFIX)].map(
+      visualize => visualize.serialize()
     );
     setVisualizes(newVisualizes);
   }, [setVisualizes, visualizes]);
 
-  const deleteOverlay = useCallback(
-    (group: number) => {
-      const newVisualizes = visualizes
-        .toSpliced(group, 1)
-        .map(visualize => visualize.toJSON());
-      setVisualizes(newVisualizes);
+  const replaceOverlay = (group: number, newVisualize: Visualize) => {
+    const newVisualizes = visualizes.map((visualize, i) => {
+      if (i === group) {
+        return newVisualize.serialize();
+      }
+      return visualize.serialize();
+    });
+    setVisualizes(newVisualizes);
+  };
+
+  const toggleVisibility = (group: number) => {
+    const newVisualizes = visualizes.map((visualize, i) => {
+      if (i === group) {
+        visualize = visualize.replace({visible: !visualize.visible});
+      }
+      return visualize.serialize();
+    });
+    setVisualizes(newVisualizes);
+  };
+
+  const setVisualizesWithOp = useCallback(
+    (columns: Visualize[]) => {
+      setVisualizes(columns.map(v => v.serialize()));
     },
-    [setVisualizes, visualizes]
+    [setVisualizes]
   );
 
-  const canDelete = visualizes.length > 1;
-
-  const shouldRenderLabel = visualizes.length > 1;
-
   return (
-    <ToolbarSection data-test-id="section-visualizes">
-      <ToolbarHeader>
-        <Tooltip
-          position="right"
-          title={t(
-            'Primary metric that appears in your chart. You can also overlay a series onto an existing chart or add an equation.'
-          )}
-        >
-          <ToolbarLabel>{t('Visualize')}</ToolbarLabel>
-        </Tooltip>
-      </ToolbarHeader>
-      {visualizes.map((visualize, group) => {
-        return (
-          <VisualizeDropdown
-            key={group}
-            canDelete={canDelete}
-            deleteOverlay={deleteOverlay}
-            group={group}
-            label={shouldRenderLabel ? visualize.label : undefined}
-            yAxis={visualize.yAxis}
-            visualizes={visualizes}
-            setVisualizes={setVisualizes}
-          />
-        );
-      })}
-      <ToolbarFooter>
-        <ToolbarFooterButton
-          borderless
-          size="zero"
-          icon={<IconAdd />}
-          onClick={addChart}
-          priority="link"
-          aria-label={t('Add Chart')}
-          disabled={visualizes.length >= MAX_VISUALIZES}
-        >
-          {t('Add Chart')}
-        </ToolbarFooterButton>
-      </ToolbarFooter>
-    </ToolbarSection>
+    <DragNDropContext columns={[...visualizes]} setColumns={setVisualizesWithOp}>
+      {({editableColumns, deleteColumnAtIndex}) => (
+        <ToolbarSection data-test-id="section-visualizes">
+          <ToolbarVisualizeHeader />
+          {editableColumns.map((column, i) => {
+            const visualize = column.column;
+            const isOnlyVisualize = editableColumns.length === 1;
+            const canReset = isOnlyVisualize && !isDefaultVisualize(visualize);
+            const onDelete = isOnlyVisualize
+              ? canReset
+                ? () => replaceOverlay(i, new VisualizeFunction(DEFAULT_VISUALIZATION))
+                : undefined
+              : () => deleteColumnAtIndex(i);
+
+            const rowProps = {
+              dragColumnId: isOnlyVisualize ? undefined : column.id,
+              onDelete,
+              deleteLabel: canReset ? t('Clear Visualize') : undefined,
+              onReplace: (newVisualize: Visualize) => replaceOverlay(i, newVisualize),
+              visualize,
+              label: (
+                <VisualizeLabel
+                  index={i}
+                  visualize={visualize}
+                  onClick={() => toggleVisibility(i)}
+                />
+              ),
+            };
+
+            return isVisualizeEquation(visualize) ? (
+              <VisualizeEquationInput key={column.uniqueId} {...rowProps} />
+            ) : (
+              <ToolbarVisualizeItem key={column.uniqueId} {...rowProps} />
+            );
+          })}
+          <ToolbarFooter>
+            <ToolbarVisualizeAddChart
+              add={addChart}
+              disabled={visualizes.length >= MAX_VISUALIZES}
+            />
+            {allowEquations && (
+              <ToolbarVisualizeAddEquation
+                add={addEquation}
+                disabled={visualizes.length >= MAX_VISUALIZES}
+              />
+            )}
+          </ToolbarFooter>
+        </ToolbarSection>
+      )}
+    </DragNDropContext>
   );
 }
 
 interface VisualizeDropdownProps {
-  canDelete: boolean;
-  deleteOverlay: (group: number) => void;
-  group: number;
-  setVisualizes: (visualizes: BaseVisualize[]) => void;
-  visualizes: Visualize[];
-  yAxis: string;
-  label?: string;
+  label: ReactNode;
+  onReplace: (visualize: Visualize) => void;
+  visualize: Visualize;
+  deleteLabel?: string;
+  dragColumnId?: number;
+  onDelete?: () => void;
 }
 
-function VisualizeDropdown({
-  canDelete,
-  deleteOverlay,
-  group,
-  setVisualizes,
-  visualizes,
-  yAxis,
+function ToolbarVisualizeItem({
+  dragColumnId,
   label,
+  onDelete,
+  deleteLabel,
+  onReplace,
+  visualize,
 }: VisualizeDropdownProps) {
-  const {tags: stringTags} = useTraceItemTags('string');
-  const {tags: numberTags} = useTraceItemTags('number');
+  const [search, setSearch] = useState<string | undefined>(undefined);
+  const [debouncedSearch] = useDebouncedValue(search, {wait: 200});
+  const {selection} = usePageFilters();
+  const organization = useOrganization();
+  const hasConditionalAggregates = organization.features.includes(
+    'explore-conditional-aggregates'
+  );
 
-  const parsedFunction = useMemo(() => parseFunction(yAxis), [yAxis]);
+  const {attributes: stringTags, isLoading: stringTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'string'
+  );
+  const {attributes: numberTags, isLoading: numberTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'number'
+  );
+  const {attributes: booleanTags, isLoading: booleanTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'boolean'
+  );
 
-  const aggregateOptions: Array<SelectOption<string>> = useMemo(() => {
-    return ALLOWED_EXPLORE_VISUALIZE_AGGREGATES.map(aggregate => {
-      return {
-        label: aggregate,
-        value: aggregate,
-        textValue: aggregate,
-      };
-    });
-  }, []);
+  const aggregateOptions = useMemo(
+    () =>
+      ALLOWED_EXPLORE_VISUALIZE_AGGREGATES.map(aggregate => {
+        return {
+          label: aggregate,
+          value: aggregate,
+          textValue: aggregate,
+        };
+      }),
+    []
+  );
 
-  const fieldOptions: Array<SelectOption<string>> = useVisualizeFields({
+  // The dropdowns operate on the base aggregate, with the `_if` combinator and its
+  // filter argument stripped off.
+  const parsedFunction = useMemo(
+    () => parseConditionalAggregate(visualize.yAxis),
+    [visualize.yAxis]
+  );
+
+  const fieldOptions = useVisualizeFields({
     numberTags,
     stringTags,
+    booleanTags,
     parsedFunction,
+    traceItemType: TraceItemDataset.SPANS,
   });
 
-  const setYAxis = useCallback(
-    (newYAxis: string) => {
-      const newVisualizes = visualizes
-        .toSpliced(group, 1, visualizes[group]!.replace({yAxis: newYAxis}))
-        .map(visualize => visualize.toJSON());
-      setVisualizes(newVisualizes);
-    },
-    [group, setVisualizes, visualizes]
+  // Filters only survive a swap to another aggregate that supports them, and are dropped
+  // entirely while the feature is off so that toggling it never leaves a stale filter.
+  const filter = useMemo(
+    () => (hasConditionalAggregates ? (parsedFunction?.filter ?? '') : ''),
+    [hasConditionalAggregates, parsedFunction?.filter]
   );
 
-  const setChartAggregate = useCallback(
+  const onChangeAggregate = useCallback(
     (option: SelectOption<SelectKey>) => {
-      const newYAxis = updateVisualizeAggregate({
-        newAggregate: option.value as string,
-        oldAggregate: parsedFunction?.name,
-        oldArgument: parsedFunction?.arguments[0]!,
-      });
-      setYAxis(newYAxis);
+      if (typeof option.value === 'string') {
+        const yAxis = updateVisualizeAggregate({
+          newAggregate: option.value,
+          oldAggregate: parsedFunction?.name,
+          oldArguments: parsedFunction?.arguments,
+        });
+        onReplace(
+          visualize.replace({
+            yAxis: supportsConditionalAggregateFilter(option.value)
+              ? applyConditionalFilter(yAxis, filter)
+              : yAxis,
+          })
+        );
+      }
     },
-    [parsedFunction, setYAxis]
+    [filter, onReplace, parsedFunction, visualize]
   );
 
-  const setChartField = useCallback(
-    (option: SelectOption<SelectKey>) => {
-      setYAxis(`${parsedFunction?.name}(${option.value})`);
+  const onChangeArgument = useCallback(
+    (index: number, option: SelectOption<SelectKey>) => {
+      if (typeof option.value === 'string') {
+        let args = cloneDeep(parsedFunction?.arguments);
+        if (args) {
+          args[index] = option.value;
+        } else {
+          args = [option.value];
+        }
+        onReplace(
+          visualize.replace({
+            yAxis: buildConditionalAggregate({
+              name: parsedFunction?.name ?? '',
+              arguments: args,
+              filter,
+            }),
+          })
+        );
+      }
     },
-    [parsedFunction?.name, setYAxis]
+    [filter, onReplace, parsedFunction, visualize]
   );
+
+  const onFilterSearch = useCallback(
+    (newFilter: string) => {
+      if (!parsedFunction) {
+        return;
+      }
+      onReplace(
+        visualize.replace({
+          yAxis: buildConditionalAggregate({
+            name: parsedFunction.name,
+            arguments: parsedFunction.arguments,
+            filter: newFilter,
+          }),
+        })
+      );
+    },
+    [onReplace, parsedFunction, visualize]
+  );
+
+  const {spanSearchQueryBuilderProps} = useSpanSearchQueryBuilderProps({
+    projects: selection.projects,
+    initialQuery: filter,
+    onSearch: onFilterSearch,
+    searchSource: 'explore-conditional-aggregate',
+    placeholder: t('Filter spans for this series'),
+    // Attribute-only, same as metrics / samples-mode search: never offer visualize
+    // aggregates (p95, count, …) as series-filter keys.
+    supportedAggregates: [],
+  });
+
+  const showFilterSearchBar =
+    hasConditionalAggregates &&
+    supportsConditionalAggregateFilter(parsedFunction?.name ?? '');
 
   return (
-    <ToolbarRow>
-      {label && <ChartLabel>{label}</ChartLabel>}
-      <AggregateCompactSelect
-        options={aggregateOptions}
-        value={parsedFunction?.name ?? ''}
-        onChange={setChartAggregate}
-      />
-      <ColumnCompactSelect
-        searchable
-        options={fieldOptions}
-        value={parsedFunction?.arguments[0] ?? ''}
-        onChange={setChartField}
-        disabled={fieldOptions.length === 1}
-      />
-      {canDelete ? (
-        <Button
-          borderless
-          icon={<IconDelete />}
-          size="zero"
-          onClick={() => deleteOverlay(group)}
-          aria-label={t('Remove Overlay')}
-        />
-      ) : null}
-    </ToolbarRow>
+    <ToolbarVisualizeDropdown
+      dragColumnId={dragColumnId}
+      aggregateOptions={aggregateOptions}
+      fieldOptions={fieldOptions}
+      onChangeAggregate={onChangeAggregate}
+      onChangeArgument={onChangeArgument}
+      onDelete={onDelete}
+      deleteLabel={deleteLabel}
+      parsedFunction={parsedFunction}
+      label={label}
+      loading={numberTagsLoading || stringTagsLoading || booleanTagsLoading}
+      onSearch={setSearch}
+      onClose={() => setSearch(undefined)}
+      filterSearchBar={
+        showFilterSearchBar ? (
+          <TraceItemSearchQueryBuilder
+            {...spanSearchQueryBuilderProps}
+            showSearchIcon={false}
+            // This spans toolbar clips menus that are not portaled, and the full width
+            // filter key menu anchors itself inside the bar, so it has to be turned off for
+            // portaling to cover every menu.
+            portalTarget={document.body}
+            disableFullWidthFilterKeyMenu
+            // Same "Invalid key" UX as metrics: aggregates are not valid series-filter
+            // keys (metrics gets this from validate; we list visualize aggregates).
+            invalidFilterKeys={[
+              ...(spanSearchQueryBuilderProps.invalidFilterKeys ?? []),
+              ...ALLOWED_EXPLORE_VISUALIZE_AGGREGATES,
+            ]}
+            invalidMessages={{
+              [InvalidReason.INVALID_KEY]: CONDITIONAL_FILTER_AGGREGATE_INVALID_MESSAGE,
+            }}
+          />
+        ) : undefined
+      }
+    />
   );
 }
 
-const ChartLabel = styled('div')`
-  background-color: ${p => p.theme.purple100};
-  border-radius: ${p => p.theme.borderRadius};
-  text-align: center;
-  width: 38px;
-  color: ${p => p.theme.purple400};
-  white-space: nowrap;
-  font-weight: ${p => p.theme.fontWeightBold};
-  align-content: center;
-  align-self: stretch;
-`;
+function isDefaultVisualize(visualize: Visualize): boolean {
+  return isVisualizeFunction(visualize) && visualize.yAxis === DEFAULT_VISUALIZATION;
+}
 
-const ColumnCompactSelect = styled(CompactSelect)`
-  flex: 1 1;
-  min-width: 0;
+interface VisualizeLabelProps {
+  index: number;
+  onClick: MouseEventHandler<HTMLDivElement>;
+  visualize: Visualize;
+}
 
-  > button {
-    width: 100%;
-  }
-`;
+export function getFunctionLabel(index: number) {
+  return String.fromCharCode('A'.charCodeAt(0) + index);
+}
 
-const AggregateCompactSelect = styled(CompactSelect)`
-  width: 100px;
+function getEquationLabel(index: number) {
+  return `ƒ${index}`;
+}
 
-  > button {
-    width: 100%;
-  }
+export function getVisualizeLabel(labelIndex: number, isEquation: boolean): string {
+  return isEquation ? getEquationLabel(labelIndex) : getFunctionLabel(labelIndex);
+}
+
+export function VisualizeLabel({index, onClick, visualize}: VisualizeLabelProps) {
+  const label = visualize.visible ? getFunctionLabel(index) : <IconHide />;
+
+  return <Label onClick={onClick}>{label}</Label>;
+}
+
+const Label = styled('div')`
+  cursor: pointer;
+  border-radius: ${p => p.theme.radius.md};
+  background-color: ${p => p.theme.tokens.background.transparent.accent.muted};
+  color: ${p => p.theme.tokens.content.accent};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  width: 24px;
+  height: 36px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 `;

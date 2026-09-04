@@ -23,7 +23,7 @@ class IssueListPage(BasePage):
 
     def navigate_to_issue(self, position):
         self.browser.click(f'[data-test-id="group"]:nth-child({position}) a')
-        self.browser.wait_until(".group-detail")
+        self.browser.wait_until('[data-test-id="group-event-details"]')
         self.issue_details = IssueDetailsPage(self.browser, self.client)
 
     def resolve_issues(self):
@@ -50,8 +50,8 @@ class IssueListPage(BasePage):
 
     def merge_issues(self):
         # Merge button gets put into an overflow menu for small viewports
-        if self.browser.element_exists('[aria-label="Merge Selected Issues"]'):
-            self.browser.click('[aria-label="Merge Selected Issues"]')
+        if self.browser.element_exists('[aria-label="Merge"]'):
+            self.browser.click('[aria-label="Merge"]')
             self.browser.click('[data-test-id="confirm-button"]')
         else:
             self.browser.click('[aria-label="More issue actions"]')

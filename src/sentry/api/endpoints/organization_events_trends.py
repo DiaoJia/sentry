@@ -2,7 +2,6 @@ from datetime import timedelta
 from re import Match
 from typing import TypedDict
 
-import sentry_sdk
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -12,12 +11,13 @@ from snuba_sdk.function import Function
 
 from sentry import features
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import NoProjects, OrganizationEventsV2EndpointBase
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases import NoProjects, OrganizationEventsEndpointBase
 from sentry.api.event_search import AggregateFilter
 from sentry.api.paginator import GenericOffsetPaginator
 from sentry.api.utils import handle_query_errors
 from sentry.exceptions import InvalidSearchQuery
+from sentry.models.organization import Organization
 from sentry.search.events.builder.discover import DiscoverQueryBuilder
 from sentry.search.events.datasets import function_aliases
 from sentry.search.events.fields import DateArg, parse_function
@@ -26,6 +26,7 @@ from sentry.search.utils import InvalidQuery, parse_datetime_string
 from sentry.snuba import discover
 from sentry.snuba.dataset import Dataset
 from sentry.utils.snuba import raw_snql_query
+from sentry.utils.tracing import start_span
 
 
 class TrendColumns(TypedDict):
@@ -79,7 +80,7 @@ class TrendQueryBuilder(DiscoverQueryBuilder):
             return super().resolve_function(function, match, resolve_only, overwrite_alias)
 
 
-class OrganizationEventsTrendsEndpointBase(OrganizationEventsV2EndpointBase):
+class OrganizationEventsTrendsEndpointBase(OrganizationEventsEndpointBase):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
@@ -301,7 +302,7 @@ class OrganizationEventsTrendsEndpointBase(OrganizationEventsV2EndpointBase):
     def has_feature(self, organization, request):
         return features.has("organizations:performance-view", organization, actor=request.user)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return Response(status=404)
 
@@ -310,7 +311,7 @@ class OrganizationEventsTrendsEndpointBase(OrganizationEventsV2EndpointBase):
         except NoProjects:
             return Response([])
 
-        with sentry_sdk.start_span(op="discover.endpoint", name="trend_dates"):
+        with start_span(op="discover.endpoint", name="trend_dates"):
             middle_date = request.GET.get("middle")
             if middle_date:
                 try:
@@ -411,7 +412,7 @@ class OrganizationEventsTrendsEndpointBase(OrganizationEventsV2EndpointBase):
         raise NotImplementedError
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationEventsTrendsStatsEndpoint(OrganizationEventsTrendsEndpointBase):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
@@ -469,7 +470,7 @@ class OrganizationEventsTrendsStatsEndpoint(OrganizationEventsTrendsEndpointBase
         return on_results
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationEventsTrendsEndpoint(OrganizationEventsTrendsEndpointBase):
     def build_result_handler(
         self,

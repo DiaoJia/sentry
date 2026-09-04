@@ -1,11 +1,10 @@
 import {Fragment, useCallback, useEffect, useRef, useState} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import {AnimatePresence, motion} from 'framer-motion';
 
 import {Overlay} from 'sentry/components/overlay';
 import {Sticky} from 'sentry/components/sticky';
-import {space} from 'sentry/styles/space';
-import testableTransition from 'sentry/utils/testableTransition';
 
 const TOOLTIP_OFFSET = 10;
 
@@ -143,7 +142,7 @@ function useTimelineCursor<E extends HTMLElement>({
             initial="initial"
             animate="animate"
             exit="exit"
-            transition={testableTransition({duration: 0.1})}
+            transition={{duration: 0.1}}
             variants={{
               initial: {opacity: 0},
               animate: {opacity: 1},
@@ -162,7 +161,7 @@ function useTimelineCursor<E extends HTMLElement>({
 
 const Cursor = styled(motion.div)`
   pointer-events: none;
-  background: ${p => p.theme.translucentBorder};
+  background: ${p => p.theme.tokens.background.transparent.neutral.muted};
   width: 2px;
   height: 100%;
   position: absolute;
@@ -179,13 +178,19 @@ const CursorLabel = styled(Overlay)<{
 }>`
   font-variant-numeric: tabular-nums;
   width: max-content;
-  padding: ${space(0.75)} ${space(1)};
-  color: ${p => p.theme.textColor};
-  font-size: ${p => p.theme.fontSize.sm};
+  padding: ${p => p.theme.space.sm} ${p => p.theme.space.md};
+  color: ${p => p.theme.tokens.content.primary};
+  font-size: ${p => p.theme.font.size.sm};
   line-height: 1.2;
   position: absolute;
   ${p =>
-    p.anchor === 'top' ? `top: ${p.anchorOffset}px;` : `bottom: ${p.anchorOffset}px;`}
+    p.anchor === 'top'
+      ? css`
+          top: ${p.anchorOffset}px;
+        `
+      : css`
+          bottom: ${p.anchorOffset}px;
+        `}
   left: clamp(
     0px,
     calc(var(--cursorOffset) + ${p => p.offsets?.left ?? 0}px + ${TOOLTIP_OFFSET}px),

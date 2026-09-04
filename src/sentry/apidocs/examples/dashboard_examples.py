@@ -11,6 +11,7 @@ DASHBOARD_OBJECT = {
         "email": "admin@sentry.io",
         "avatarUrl": "www.example.com",
         "isActive": True,
+        "isSuspended": False,
         "hasPasswordAuth": True,
         "isManaged": False,
         "dateJoined": "2021-10-25T17:07:33.190596Z",
@@ -58,21 +59,28 @@ DASHBOARD_OBJECT = {
                     ],
                     "isHidden": False,
                     "selectedAggregate": None,
+                    "linkedDashboards": [],
                 }
             ],
             "limit": None,
             "widgetType": "transaction-like",
             "layout": {"w": 2, "y": 0, "h": 2, "minH": 2, "x": 0},
+            "exploreUrls": None,
+            "changedReason": None,
+            "axisRange": None,
+            "legendType": "default",
         }
     ],
     "projects": [1],
     "filters": {},
+    "environment": ["alpha"],
     "period": "7d",
     "permissions": {
         "isEditableByEveryone": True,
         "teamsWithEditAccess": [],
     },
     "isFavorited": False,
+    "prebuiltId": None,
 }
 
 DASHBOARDS_OBJECT = [
@@ -80,7 +88,15 @@ DASHBOARDS_OBJECT = [
         "id": "1",
         "title": "Dashboard",
         "dateCreated": "2024-06-20T14:38:03.498574Z",
+        "lastVisited": "2024-06-20T14:38:03.498574Z",
         "projects": [1],
+        "environment": ["alpha"],
+        "filters": {
+            "release": [
+                "frontend@a02311a400636ff9640b3e4ca2991ee153dbbdcc",
+                "frontend@36934c05140c16df93aa8ebf671f9386e916b501",
+            ]
+        },
         "createdBy": {
             "id": "1",
             "name": "Admin",
@@ -88,6 +104,7 @@ DASHBOARDS_OBJECT = [
             "email": "admin@sentry.io",
             "avatarUrl": "www.example.com",
             "isActive": True,
+            "isSuspended": False,
             "hasPasswordAuth": True,
             "isManaged": False,
             "dateJoined": "2021-10-25T17:07:33.190596Z",
@@ -108,12 +125,21 @@ DASHBOARDS_OBJECT = [
         "widgetPreview": [],
         "permissions": {"isEditableByEveryone": True, "teamsWithEditAccess": []},
         "isFavorited": False,
+        "prebuiltId": None,
     },
     {
         "id": "2",
         "title": "Dashboard",
         "dateCreated": "2024-06-20T14:38:03.498574Z",
+        "lastVisited": "2024-06-20T14:38:03.498574Z",
         "projects": [],
+        "environment": ["alpha"],
+        "filters": {
+            "release": [
+                "frontend@a02311a400636ff9640b3e4ca2991ee153dbbdcc",
+                "frontend@36934c05140c16df93aa8ebf671f9386e916b501",
+            ]
+        },
         "createdBy": {
             "id": "1",
             "name": "Admin",
@@ -121,6 +147,7 @@ DASHBOARDS_OBJECT = [
             "email": "admin@sentry.io",
             "avatarUrl": "www.example.com",
             "isActive": True,
+            "isSuspended": False,
             "hasPasswordAuth": True,
             "isManaged": False,
             "dateJoined": "2021-10-25T17:07:33.190596Z",
@@ -141,6 +168,7 @@ DASHBOARDS_OBJECT = [
         "widgetPreview": [],
         "permissions": None,
         "isFavorited": False,
+        "prebuiltId": None,
     },
 ]
 

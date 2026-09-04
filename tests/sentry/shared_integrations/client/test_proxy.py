@@ -14,7 +14,12 @@ from sentry.shared_integrations.client.proxy import (
 )
 from sentry.shared_integrations.exceptions import ApiHostError
 from sentry.silo.base import SiloMode
-from sentry.silo.util import PROXY_OI_HEADER, PROXY_PATH, PROXY_SIGNATURE_HEADER
+from sentry.silo.util import (
+    PROXY_OI_HEADER,
+    PROXY_PATH,
+    PROXY_SIGNATURE_HEADER,
+    PROXY_TIMEOUT_HEADER,
+)
 from sentry.testutils.cases import TestCase
 from sentry.testutils.silo import assume_test_silo_mode
 
@@ -26,7 +31,7 @@ class IntegrationProxyClientTest(TestCase):
     base_url = "https://example.com"
     test_url = f"{base_url}/get?query=1&user=me"
 
-    def setUp(self):
+    def setUp(self) -> None:
         class TestClient(IntegrationProxyClient):
             integration_type = "integration"
             integration_name = "test"
@@ -35,7 +40,7 @@ class IntegrationProxyClientTest(TestCase):
 
         self.client_cls = TestClient
 
-    def test_infer_organization_is_active(self):
+    def test_infer_organization_is_active(self) -> None:
         integration = self.create_provider_integration(provider="slack", external_id="workspace:1")
         # Share the slack workspace across two organizations
         organization_invalid = self.create_organization()
@@ -60,7 +65,7 @@ class IntegrationProxyClientTest(TestCase):
         assert second_inference is None
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    def test_authorize_request_noop(self):
+    def test_authorize_request_noop(self) -> None:
         prepared_request = Request(method="GET", url=self.test_url).prepare()
         raw_headers = prepared_request.headers
         client = self.client_cls(org_integration_id=self.oi_id)
@@ -68,7 +73,7 @@ class IntegrationProxyClientTest(TestCase):
         assert prepared_request.headers == raw_headers
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    def test_authorize_request_basic(self):
+    def test_authorize_request_basic(self) -> None:
         prepared_request = Request(method="POST", url=self.test_url).prepare()
 
         def authorize_request(prepared_request):
@@ -83,7 +88,7 @@ class IntegrationProxyClientTest(TestCase):
             assert prepared_request.headers.get("Authorization") == "Bearer tkn"
 
     @patch.object(IntegrationProxyClient, "authorize_request")
-    def test_finalize_request_noop(self, mock_authorize):
+    def test_finalize_request_noop(self, mock_authorize: MagicMock) -> None:
         """Only applies proxy details if the request originates from a region silo."""
         prepared_request = Request(method="PATCH", url=self.test_url).prepare()
         raw_url = prepared_request.url
@@ -103,7 +108,7 @@ class IntegrationProxyClientTest(TestCase):
             assert prepared_request.headers == raw_headers
 
     @patch.object(IntegrationProxyClient, "authorize_request")
-    def test_finalize_request_region(self, mock_authorize):
+    def test_finalize_request_region(self, mock_authorize: MagicMock) -> None:
         """In a region silo, should change the URL and headers"""
         prepared_request = Request(method="DELETE", url=self.test_url).prepare()
         raw_url = prepared_request.url
@@ -119,6 +124,33 @@ class IntegrationProxyClientTest(TestCase):
         for header in [PROXY_OI_HEADER, PROXY_SIGNATURE_HEADER, PROXY_PATH]:
             assert header in prepared_request.headers
         assert prepared_request.headers[PROXY_PATH] == "get?query=1&user=me"
+
+    def test_set_proxy_request_options_forwards_timeout(self) -> None:
+        """When proxying to control, the per-call timeout is forwarded as a header."""
+        prepared_request = Request(method="GET", url=self.test_url).prepare()
+        client = self.client_cls(org_integration_id=self.oi_id)
+        client._should_proxy_to_control = True
+
+        client.set_proxy_request_options(prepared_request, timeout=60.0)
+        assert prepared_request.headers[PROXY_TIMEOUT_HEADER] == "60.0"
+
+    def test_set_proxy_request_options_no_timeout(self) -> None:
+        """A ``None`` timeout omits the header so control falls back to its default."""
+        prepared_request = Request(method="GET", url=self.test_url).prepare()
+        client = self.client_cls(org_integration_id=self.oi_id)
+        client._should_proxy_to_control = True
+
+        client.set_proxy_request_options(prepared_request, timeout=None)
+        assert PROXY_TIMEOUT_HEADER not in prepared_request.headers
+
+    def test_set_proxy_request_options_noop_without_proxy(self) -> None:
+        """Outside the proxy-to-control path the header is never added."""
+        prepared_request = Request(method="GET", url=self.test_url).prepare()
+        client = self.client_cls(org_integration_id=self.oi_id)
+        client._should_proxy_to_control = False
+
+        client.set_proxy_request_options(prepared_request, timeout=60.0)
+        assert PROXY_TIMEOUT_HEADER not in prepared_request.headers
 
     @patch("sentry.shared_integrations.client.proxy.get_control_silo_ip_address")
     @patch("socket.getaddrinfo")
@@ -149,7 +181,7 @@ class IntegrationProxyClientTest(TestCase):
         class BailOut(Exception):
             pass
 
-        def test_is_control_silo_ip_address(ip):
+        def test_is_control_silo_ip_address(ip) -> None:
             assert ip == "172.31.255.255"
             # We can't use responses library for this unit test as it hooks Session.send. So we assert that the
             # is_control_silo_ip_address function is properly called.
@@ -162,20 +194,26 @@ class IntegrationProxyClientTest(TestCase):
         assert mock_is_control_silo_ip_address.call_count == 1
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
+    @patch("sentry.net.socket.is_ipaddress_allowed")
     @patch("sentry.shared_integrations.client.proxy.is_control_silo_ip_address")
     @patch("sentry.shared_integrations.client.proxy.get_control_silo_ip_address")
     @patch("socket.getaddrinfo")
     def test_does_not_validate_control_silo_ip_address_in_control(
-        self, mock_getaddrinfo, mock_get_control_silo_ip_address, mock_is_control_silo_ip_address
+        self,
+        mock_getaddrinfo,
+        mock_get_control_silo_ip_address,
+        mock_is_control_silo_ip_address,
+        mock_is_ipaddress_allowed,
     ):
         mock_get_control_silo_ip_address.return_value = ipaddress.ip_address("172.31.255.255")
         mock_getaddrinfo.return_value = [(2, 1, 6, "", ("172.31.255.255", 0))]
+        mock_is_ipaddress_allowed.return_value = True
         client = self.client_cls(org_integration_id=self.oi_id)
 
         class BailOut(Exception):
             pass
 
-        def test_socket_connection(*args, **kwargs):
+        def test_socket_connection(*args, **kwargs) -> None:
             # We can't use responses library for this unit test as it hooks Session.send. So we assert that the
             # socket connection is being opened.
             raise BailOut()
@@ -187,9 +225,11 @@ class IntegrationProxyClientTest(TestCase):
         # Assert control silo ip address was not validated
         assert mock_get_control_silo_ip_address.call_count == 0
         assert mock_is_control_silo_ip_address.call_count == 0
+        # But validation of is_ipaddress_allowed was used instead
+        assert mock_is_ipaddress_allowed.call_count == 1
 
     @patch.object(Session, "send")
-    def test_custom_timeout(self, mock_session_send):
+    def test_custom_timeout(self, mock_session_send: MagicMock) -> None:
         client = self.client_cls(org_integration_id=self.oi_id)
         response = MagicMock()
         response.status_code = 204
@@ -200,7 +240,7 @@ class IntegrationProxyClientTest(TestCase):
         assert mock_session_send.mock_calls[0].kwargs["timeout"] == 10
 
 
-def test_get_control_silo_ip_address():
+def test_get_control_silo_ip_address() -> None:
     with override_settings(SENTRY_CONTROL_ADDRESS=None):
         assert get_control_silo_ip_address() is None
 

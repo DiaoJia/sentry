@@ -2,7 +2,7 @@ import type {Span} from '@sentry/core';
 import * as Sentry from '@sentry/react';
 
 import type {Image} from 'sentry/types/debugImage';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import type {Frame} from 'sentry/utils/profiling/frame';
 import {
   isEventedProfile,
@@ -27,6 +27,7 @@ import {
   createFrameIndex,
   createSentrySampleProfileFrameIndex,
   wrapWithSpan,
+  type FrameIndex,
 } from './utils';
 
 interface ImportOptions {
@@ -35,9 +36,7 @@ interface ImportOptions {
   activeThreadId?: string | null;
   continuous?: boolean;
   frameFilter?: (frame: Frame) => boolean;
-  profileIds?:
-    | Profiling.Schema['shared']['profiles']
-    | Profiling.Schema['shared']['profile_ids'];
+  profiles?: Profiling.Schema['shared']['profiles'];
 }
 
 export interface ProfileGroup {
@@ -68,6 +67,7 @@ export function importProfile(
     try {
       if (isSentryContinuousProfileChunk(input)) {
         scope.setTag('profile.type', 'sentry-continuous');
+        scope.setAttribute('profile.type', 'sentry-continuous');
         if (isSentryAndroidContinuousProfileChunk(input)) {
           return importAndroidContinuousProfileChunk(input, traceID, {
             span,
@@ -87,16 +87,19 @@ export function importProfile(
       }
       if (isJSProfile(input)) {
         scope.setTag('profile.type', 'js-self-profile');
+        scope.setAttribute('profile.type', 'js-self-profile');
         return importJSSelfProfile(input, traceID, {span, type});
       }
 
       if (isSentrySampledProfile(input)) {
         scope.setTag('profile.type', 'sentry-sampled');
+        scope.setAttribute('profile.type', 'sentry-sampled');
         return importSentrySampledProfile(input, {span, type, frameFilter});
       }
 
       if (isSchema(input)) {
         scope.setTag('profile.type', 'schema');
+        scope.setAttribute('profile.type', 'schema');
         return importSchema(input, traceID, {span, type, frameFilter});
       }
 
@@ -115,7 +118,7 @@ function importJSSelfProfile(
   traceID: string,
   options: ImportOptions
 ): ProfileGroup {
-  const frameIndex = createFrameIndex('javascript', input.frames);
+  const frameIndex = createFrameIndex('javascript', input.frames, input);
   const profile = importSingleProfile(input, frameIndex, options);
 
   return {
@@ -231,7 +234,14 @@ function importSchema(
       : input.metadata.platform === 'javascript'
         ? 'javascript'
         : 'mobile',
-    input.shared.frames
+    input.shared.frames.map((frame, i) => {
+      const frameInfo = input.shared.frame_infos?.[i];
+      return {
+        ...frame,
+        count: frameInfo?.count,
+        weight: frameInfo?.sumDuration,
+      };
+    })
   );
 
   return {
@@ -245,7 +255,7 @@ function importSchema(
     profiles: input.profiles.map(profile =>
       importSingleProfile(profile, frameIndex, {
         ...options,
-        profileIds: input.shared.profile_ids ?? input.shared.profiles,
+        profiles: input.shared.profiles,
       })
     ),
   };
@@ -277,7 +287,7 @@ export function eventedProfileToSampledProfile(
       thread_id: String(profile.threadID),
       timestamp: profileTimestamp + profile.events[0]!.at * 1e-9,
     });
-    stacks[stackId] = stack.slice().reverse();
+    stacks[stackId] = stack.toReversed();
     stackId++;
 
     for (let i = 1; i < profile.events.length; i++) {
@@ -306,7 +316,7 @@ export function eventedProfileToSampledProfile(
           timestamp: profileTimestamp + current.at * 1e-9,
         });
 
-        stacks[stackId] = stack.slice().reverse();
+        stacks[stackId] = stack.toReversed();
         stackId++;
       }
     }
@@ -318,7 +328,7 @@ export function eventedProfileToSampledProfile(
         timestamp:
           profileTimestamp + profile.events[profile.events.length - 1]!.at * 1e-9,
       });
-      stacks[stackId] = stack.slice().reverse();
+      stacks[stackId] = stack.toReversed();
       stackId++;
     }
   }
@@ -557,11 +567,8 @@ function importSingleProfile(
     | Profiling.EventedProfile
     | Profiling.SampledProfile
     | JSSelfProfiling.Trace,
-  frameIndex:
-    | ReturnType<typeof createFrameIndex>
-    | ReturnType<typeof createContinuousProfileFrameIndex>
-    | ReturnType<typeof createSentrySampleProfileFrameIndex>,
-  {span, type, frameFilter, profileIds}: ImportOptions
+  frameIndex: FrameIndex,
+  {span, type, frameFilter, profiles}: ImportOptions
 ): Profile {
   if (isSentryContinuousProfile(profile)) {
     const minTimestamp = minTimestampInChunk(profile);
@@ -610,14 +617,14 @@ function importSingleProfile(
       return SampledProfile.FromProfile(profile, frameIndex, {
         type,
         frameFilter,
-        profileIds,
+        profiles,
       });
     }
 
     return wrapWithSpan(
       span,
       () =>
-        SampledProfile.FromProfile(profile, frameIndex, {type, frameFilter, profileIds}),
+        SampledProfile.FromProfile(profile, frameIndex, {type, frameFilter, profiles}),
       {
         op: 'profile.import',
         description: 'sampled',
@@ -653,62 +660,4 @@ function importSingleProfile(
     );
   }
   throw new Error('Unrecognized trace format');
-}
-
-const tryParseInputString: JSONParser = input => {
-  try {
-    return [JSON.parse(input), null];
-  } catch (e) {
-    return [null, e];
-  }
-};
-
-type JSONParser = (input: string) => [any, null] | [null, Error];
-
-// @ts-expect-error TS(7051): Parameter has a name but no type. Did you mean 'ar... Remove this comment to see the full error message
-const TRACE_JSON_PARSERS: Array<(string) => ReturnType<JSONParser>> = [
-  (input: string) => tryParseInputString(input),
-  (input: string) => tryParseInputString(input + ']'),
-];
-
-function readFileAsString(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.addEventListener('load', (e: ProgressEvent<FileReader>) => {
-      if (typeof e.target?.result === 'string') {
-        resolve(e.target.result);
-        return;
-      }
-
-      reject('Failed to read string contents of input file');
-    });
-
-    reader.addEventListener('error', () => {
-      reject('Failed to read string contents of input file');
-    });
-
-    reader.readAsText(file);
-  });
-}
-
-export async function parseDroppedProfile(
-  file: File,
-  parsers: JSONParser[] = TRACE_JSON_PARSERS
-): Promise<Profiling.ProfileInput> {
-  const fileContents = await readFileAsString(file);
-
-  for (const parser of parsers) {
-    const [json] = parser(fileContents);
-
-    if (json) {
-      if (typeof json !== 'object' || json === null) {
-        throw new TypeError('Input JSON is not an object');
-      }
-
-      return json;
-    }
-  }
-
-  throw new Error('Failed to parse input JSON');
 }

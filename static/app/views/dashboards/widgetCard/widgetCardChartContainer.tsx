@@ -1,50 +1,60 @@
-import {Fragment} from 'react';
-import styled from '@emotion/styled';
+import {Fragment, useRef} from 'react';
+import {useDebouncedValue} from '@tanstack/react-pacer';
 import type {LegendComponentOption} from 'echarts';
-import type {Location} from 'history';
+
+import {Container} from '@sentry/scraps/layout';
 
 import type {Client} from 'sentry/api';
-import TransparentLoadingMask from 'sentry/components/charts/transparentLoadingMask';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {PageFilters} from 'sentry/types/core';
 import type {
   EChartDataZoomHandler,
   EChartEventHandler,
+  EChartLegendSelectChangeHandler,
   Series,
 } from 'sentry/types/echarts';
-import type {Organization} from 'sentry/types/organization';
+import type {Confidence} from 'sentry/types/organization';
 import type {TableDataWithTitle} from 'sentry/utils/discover/discoverQuery';
-import type {AggregationOutputType} from 'sentry/utils/discover/fields';
-import {useLocation} from 'sentry/utils/useLocation';
-import type {DashboardFilters, Widget} from 'sentry/views/dashboards/types';
+import type {AggregationOutputType, Sort} from 'sentry/utils/discover/fields';
+import {getIntervalOptionsForPageFilter} from 'sentry/utils/useChartInterval';
+import {useDimensions} from 'sentry/utils/useDimensions';
+import {useWidgetErrorCallback} from 'sentry/views/dashboards/contexts/widgetErrorContext';
+import type {DashboardFilters, Widget as TWidget} from 'sentry/views/dashboards/types';
 import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
-import WidgetLegendNameEncoderDecoder from 'sentry/views/dashboards/widgetLegendNameEncoderDecoder';
-import type WidgetLegendSelectionState from 'sentry/views/dashboards/widgetLegendSelectionState';
+import {usesTimeSeriesData, widgetFetchesOwnData} from 'sentry/views/dashboards/utils';
+import {WidgetLegendNameEncoderDecoder} from 'sentry/views/dashboards/widgetLegendNameEncoderDecoder';
+import type {WidgetLegendSelectionState} from 'sentry/views/dashboards/widgetLegendSelectionState';
+import type {
+  HeatMapSeries,
+  TabularColumn,
+} from 'sentry/views/dashboards/widgets/common/types';
+import {HEATMAP_RESIZE_DEBOUNCE_MS} from 'sentry/views/dashboards/widgets/heatMapWidget/settings';
+import {calculateHeatMapBucketDimensions} from 'sentry/views/dashboards/widgets/heatMapWidget/utils/calculateHeatMapBucketDimensions';
+import {Widget} from 'sentry/views/dashboards/widgets/widget/widget';
 
 import WidgetCardChart from './chart';
-import {IssueWidgetCard} from './issueWidgetCard';
 import {WidgetCardDataLoader} from './widgetCardDataLoader';
 
 type Props = {
-  api: Client;
-  location: Location;
-  organization: Organization;
   selection: PageFilters;
-  widget: Widget;
+  widget: TWidget;
   widgetLegendState: WidgetLegendSelectionState;
+  api?: Client;
   chartGroup?: string;
   dashboardFilters?: DashboardFilters;
+  disableTableActions?: boolean;
   disableZoom?: boolean;
-  expandNumbers?: boolean;
   isMobile?: boolean;
   legendOptions?: LegendComponentOption;
-  minTableColumnWidth?: string;
+  minTableColumnWidth?: number;
   noPadding?: boolean;
   onDataFetchStart?: () => void;
   onDataFetched?: (results: {
+    confidence?: Confidence;
+    dataScanned?: 'full' | 'partial';
+    isSampled?: boolean | null;
     pageLinks?: string;
+    sampleCount?: number;
     tableResults?: TableDataWithTitle[];
     timeseriesResults?: Series[];
     timeseriesResultsTypes?: Record<string, AggregationOutputType>;
@@ -56,28 +66,27 @@ type Props = {
     type: 'legendselectchanged';
   }>;
   onWidgetSplitDecision?: (splitDecision: WidgetType) => void;
+  onWidgetTableResizeColumn?: (columns: TabularColumn[]) => void;
+  onWidgetTableSort?: (sort: Sort) => void;
   onZoom?: EChartDataZoomHandler;
-  renderErrorMessage?: (errorMessage?: string) => React.ReactNode;
   shouldResize?: boolean;
   showConfidenceWarning?: boolean;
   showLoadingText?: boolean;
   tableItemLimit?: number;
+  widgetInterval?: string;
   windowWidth?: number;
 };
 
 export function WidgetCardChartContainer({
-  organization,
   selection,
   widget,
   dashboardFilters,
   isMobile,
-  renderErrorMessage,
   tableItemLimit,
   windowWidth,
   onZoom,
   onLegendSelectChanged,
   legendOptions,
-  expandNumbers,
   onDataFetched,
   noPadding,
   onWidgetSplitDecision,
@@ -89,29 +98,41 @@ export function WidgetCardChartContainer({
   onDataFetchStart,
   disableZoom,
   showLoadingText,
+  onWidgetTableSort,
+  onWidgetTableResizeColumn,
+  disableTableActions,
+  widgetInterval,
 }: Props) {
-  const location = useLocation();
+  const onWidgetError = useWidgetErrorCallback();
 
-  function keepLegendState({
-    selected,
-  }: {
-    selected: Record<string, boolean>;
-    type: 'legendselectchanged';
-  }) {
+  const isHeatmap = widget.displayType === DisplayType.HEATMAP;
+
+  const keepLegendState: EChartLegendSelectChangeHandler = ({selected}) => {
     widgetLegendState.setWidgetSelectionState(selected, widget);
-  }
+  };
 
   function getErrorOrEmptyMessage(
     errorMessage: string | undefined,
     timeseriesResults: Series[] | undefined,
     tableResults: TableDataWithTitle[] | undefined,
+    heatmapResults: HeatMapSeries | undefined,
     widgetType: DisplayType
   ) {
+    if (widgetFetchesOwnData(widgetType)) {
+      return;
+    }
+
+    // Heat maps return a single series object rather than table/timeseries rows.
+    if (widgetType === DisplayType.HEATMAP) {
+      return errorMessage
+        ? errorMessage
+        : heatmapResults === undefined || heatmapResults.values.length === 0
+          ? t('No data found')
+          : undefined;
+    }
+
     // non-chart widgets need to look at tableResults
-    const results =
-      widgetType === DisplayType.BIG_NUMBER || widgetType === DisplayType.TABLE
-        ? tableResults
-        : timeseriesResults;
+    const results = usesTimeSeriesData(widgetType) ? timeseriesResults : tableResults;
 
     return errorMessage
       ? errorMessage
@@ -120,23 +141,31 @@ export function WidgetCardChartContainer({
         : undefined;
   }
 
-  return (
+  const renderDataLoader = (
+    resolvedWidgetInterval: string | undefined,
+    yBuckets: number | undefined
+  ) => (
     <WidgetCardDataLoader
       widget={widget}
-      dashboardFilters={dashboardFilters}
       selection={selection}
+      dashboardFilters={dashboardFilters}
       onDataFetched={onDataFetched}
       onWidgetSplitDecision={onWidgetSplitDecision}
       onDataFetchStart={onDataFetchStart}
       tableItemLimit={tableItemLimit}
+      widgetInterval={resolvedWidgetInterval}
+      yBuckets={yBuckets}
     >
       {({
         tableResults,
         timeseriesResults,
+        heatmapResults,
         errorMessage,
         loading,
         timeseriesResultsTypes,
+        timeseriesResultsUnits,
         confidence,
+        dataScanned,
         sampleCount,
         isSampled,
       }) => {
@@ -150,48 +179,38 @@ export function WidgetCardChartContainer({
               errorMessage,
               modifiedTimeseriesResults,
               tableResults,
+              heatmapResults,
               widget.displayType
             );
 
-        if (widget.widgetType === WidgetType.ISSUE) {
-          return (
-            <Fragment>
-              {typeof renderErrorMessage === 'function'
-                ? renderErrorMessage(errorOrEmptyMessage)
-                : null}
-              <LoadingScreen loading={loading} showLoadingText={showLoadingText} />
-              <IssueWidgetCard
-                tableResults={tableResults}
-                loading={loading}
-                errorMessage={errorOrEmptyMessage}
-                widget={widget}
-                location={location}
-                selection={selection}
-              />
-            </Fragment>
-          );
+        if (errorOrEmptyMessage) {
+          if (
+            typeof errorOrEmptyMessage === 'string' &&
+            errorOrEmptyMessage !== t('No data found') &&
+            onWidgetError
+          ) {
+            onWidgetError(widget, errorOrEmptyMessage);
+          }
+
+          return <Widget.WidgetError error={errorOrEmptyMessage} />;
         }
 
         return (
           <Fragment>
-            {typeof renderErrorMessage === 'function'
-              ? renderErrorMessage(errorOrEmptyMessage)
-              : null}
             <WidgetCardChart
               disableZoom={disableZoom}
               timeseriesResults={modifiedTimeseriesResults}
               tableResults={tableResults}
+              heatmapResults={heatmapResults}
               errorMessage={errorOrEmptyMessage}
               loading={loading}
-              location={location}
               widget={widget}
               selection={selection}
-              organization={organization}
               isMobile={isMobile}
               windowWidth={windowWidth}
-              expandNumbers={expandNumbers}
               onZoom={onZoom}
               timeseriesResultsTypes={timeseriesResultsTypes}
+              timeseriesResultsUnits={timeseriesResultsUnits}
               noPadding={noPadding}
               chartGroup={chartGroup}
               shouldResize={shouldResize}
@@ -206,43 +225,77 @@ export function WidgetCardChartContainer({
               widgetLegendState={widgetLegendState}
               showConfidenceWarning={showConfidenceWarning}
               confidence={confidence}
+              dataScanned={dataScanned}
               sampleCount={sampleCount}
               minTableColumnWidth={minTableColumnWidth}
               isSampled={isSampled}
               showLoadingText={showLoadingText}
+              onWidgetTableSort={onWidgetTableSort}
+              onWidgetTableResizeColumn={onWidgetTableResizeColumn}
+              disableTableActions={disableTableActions}
+              dashboardFilters={dashboardFilters}
             />
           </Fragment>
         );
       }}
     </WidgetCardDataLoader>
   );
+
+  // Heat maps size their request from the rendered dimensions, so they go
+  // through a measured wrapper that resolves the bucket interval/count before
+  // the query fires. Everything else doesn't need to be measured.
+  if (isHeatmap) {
+    return (
+      <HeatmapMeasuredArea selection={selection}>
+        {({widgetInterval: heatmapInterval, yBuckets}) =>
+          renderDataLoader(heatmapInterval, yBuckets)
+        }
+      </HeatmapMeasuredArea>
+    );
+  }
+
+  return renderDataLoader(widgetInterval, undefined);
 }
 
-const StyledTransparentLoadingMask = styled((props: any) => (
-  <TransparentLoadingMask {...props} maskBackgroundColor="transparent" />
-))`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-  justify-content: center;
-  align-items: center;
-  pointer-events: none;
-`;
-
-function LoadingScreen({
-  loading,
-  showLoadingText,
+/**
+ * Measures its rendered size and resolves the heat map's X-axis interval and
+ * Y-axis bucket count from it, passing them to `children`. Keeping this in a
+ * dedicated component means the measuring hook only runs for heat maps.
+ */
+function HeatmapMeasuredArea({
+  selection,
+  children,
 }: {
-  loading: boolean;
-  showLoadingText?: boolean;
+  children: (params: {
+    widgetInterval: string | undefined;
+    yBuckets: number | undefined;
+  }) => React.ReactNode;
+  selection: PageFilters;
 }) {
-  if (!loading) {
-    return null;
-  }
+  const chartAreaRef = useRef<HTMLDivElement>(null);
+  const dimensions = useDimensions({elementRef: chartAreaRef});
+  // A leading update keeps the first usable measurement fast; mid-resize churn
+  // collapses into a single trailing update once the drag settles.
+  const [debouncedDimensions] = useDebouncedValue(dimensions, {
+    wait: HEATMAP_RESIZE_DEBOUNCE_MS,
+    // The initial zero-sized value must not consume the leading execution.
+    leading: dimensions.width > 0 && dimensions.height > 0,
+  });
+
+  // Returns null until the container is measured, which keeps the query
+  // disabled (no interval/yBuckets) until layout settles.
+  const bucketDimensions = calculateHeatMapBucketDimensions(
+    selection,
+    debouncedDimensions,
+    getIntervalOptionsForPageFilter(selection.datetime).map(option => option.value)
+  );
+
   return (
-    <StyledTransparentLoadingMask visible={loading}>
-      <LoadingIndicator mini />
-      {showLoadingText && <p>{t('Turning data into pixels - almost ready')}</p>}
-    </StyledTransparentLoadingMask>
+    <Container ref={chartAreaRef} height="100%" width="100%">
+      {children({
+        widgetInterval: bucketDimensions?.interval,
+        yBuckets: bucketDimensions?.yBuckets,
+      })}
+    </Container>
   );
 }

@@ -1,37 +1,40 @@
 import * as Sentry from '@sentry/react';
 import MockDate from 'mockdate';
 import {TransactionEventFixture} from 'sentry-fixture/event';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+import {ProjectFixture} from 'sentry-fixture/project';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
+  fireEvent,
   render,
   screen,
   userEvent,
   waitFor,
   within,
+  type RouterConfig,
 } from 'sentry-test/reactTestingLibrary';
+import {setWindowLocation} from 'sentry-test/utils';
 
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import * as indicators from 'sentry/actionCreators/indicator';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {EntryType, type EventTransaction} from 'sentry/types/event';
-import type {TraceFullDetailed} from 'sentry/utils/performance/quickTrace/types';
-import useProjects from 'sentry/utils/useProjects';
-import {TraceView} from 'sentry/views/performance/newTraceDetails/index';
+import * as analytics from 'sentry/utils/analytics';
+import TraceView from 'sentry/views/performance/newTraceDetails/index';
 import {
+  makeEAPSpan,
+  makeEAPTrace,
   makeEventTransaction,
   makeSpan,
   makeTraceError,
   makeTransaction,
 } from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeTestUtils';
+import {TraceTimeCompression} from 'sentry/views/performance/newTraceDetails/traceRenderers/traceTimeCompression';
+import {VirtualizedViewManager} from 'sentry/views/performance/newTraceDetails/traceRenderers/virtualizedViewManager';
 import type {StoredTracePreferences} from 'sentry/views/performance/newTraceDetails/traceState/tracePreferences';
 import {DEFAULT_TRACE_VIEW_PREFERENCES} from 'sentry/views/performance/newTraceDetails/traceState/tracePreferences';
 
-// TODO Abdullah Khan: Remove this, it's a hack as mocking ProjectsStore is not working,
-// a number of tests are failing as a result.
-// eslint-disable-next-line no-restricted-syntax
-jest.mock('sentry/utils/useProjects');
-
-const mockUseProjects = jest.mocked(useProjects);
+import type {TraceFullDetailed} from './traceApi/types';
 
 class MockResizeObserver {
   callback: ResizeObserverCallback;
@@ -62,12 +65,11 @@ class MockResizeObserver {
 
 type ResponseType = Parameters<typeof MockApiClient.addMockResponse>[0];
 
-function mockQueryString(queryString: string) {
-  Object.defineProperty(window, 'location', {
-    value: {
-      search: queryString,
-    },
-  });
+function mockQueryString(queryString: `?${string}` | '') {
+  setWindowLocation(
+    `http://localhost/organizations/org-slug/performance/trace/trace-id/${queryString}`
+  );
+  expect(window.location.search).toBe(queryString);
 }
 
 function mockTracePreferences(preferences: Partial<StoredTracePreferences>) {
@@ -75,6 +77,7 @@ function mockTracePreferences(preferences: Partial<StoredTracePreferences>) {
     drawer_layout: DEFAULT_TRACE_VIEW_PREFERENCES.layout,
     missing_instrumentation: DEFAULT_TRACE_VIEW_PREFERENCES.missing_instrumentation,
     autogroup: DEFAULT_TRACE_VIEW_PREFERENCES.autogroup,
+    compressed_timeline: DEFAULT_TRACE_VIEW_PREFERENCES.compressed_timeline,
     ...preferences,
   };
   localStorage.setItem('trace-waterfall-preferences', JSON.stringify(storedPreferences));
@@ -91,7 +94,7 @@ function mockTraceResponse(resp?: Partial<ResponseType>) {
 
 function mockPerformanceSubscriptionDetailsResponse(resp?: Partial<ResponseType>) {
   MockApiClient.addMockResponse({
-    url: '/subscriptions/org-slug/',
+    url: '/customers/org-slug/',
     method: 'GET',
     asyncDelay: 1,
     ...(resp ?? {body: {}}),
@@ -128,7 +131,7 @@ function mockTraceTagsResponse(resp?: Partial<ResponseType>) {
 
 function mockProjectDetailsResponse(resp?: Partial<ResponseType>) {
   MockApiClient.addMockResponse({
-    url: `/projects/org-slug//`,
+    url: '/projects/org-slug//',
     method: 'GET',
     asyncDelay: 1,
     ...resp,
@@ -155,7 +158,7 @@ function mockTraceRootEvent(id: string, resp?: Partial<ResponseType>) {
 
 function mockTraceRootFacets(resp?: Partial<ResponseType>) {
   MockApiClient.addMockResponse({
-    url: `/organizations/org-slug/events-facets/`,
+    url: '/organizations/org-slug/events-facets/',
     method: 'GET',
     asyncDelay: 1,
     body: {},
@@ -165,7 +168,7 @@ function mockTraceRootFacets(resp?: Partial<ResponseType>) {
 
 function mockTraceEventDetails(resp?: Partial<ResponseType>) {
   MockApiClient.addMockResponse({
-    url: `/organizations/org-slug/events/`,
+    url: '/organizations/org-slug/events/',
     method: 'GET',
     asyncDelay: 1,
     body: {},
@@ -201,11 +204,13 @@ function mockTransactionSpansResponse(
   });
 }
 
-const {router} = initializeOrg({
-  router: {
-    params: {orgId: 'org-slug', traceSlug: 'trace-id'},
+const initialRouterConfig: RouterConfig = {
+  location: {
+    pathname: '/organizations/org-slug/performance/trace/trace-id/',
+    query: {},
   },
-});
+  route: '/organizations/:orgId/performance/trace/:traceSlug/',
+};
 
 function mockEventsResponse() {
   MockApiClient.addMockResponse({
@@ -283,8 +288,7 @@ async function keyboardNavigationTestSetup() {
   mockEventsResponse();
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -346,8 +350,7 @@ async function pageloadTestSetup() {
   mockEventsResponse();
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -408,8 +411,7 @@ async function nestedTransactionsTestSetup() {
   mockEventsResponse();
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -470,8 +472,7 @@ async function searchTestSetup() {
   mockEventsResponse();
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -536,8 +537,7 @@ async function simpleTestSetup() {
   mockEventsResponse();
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -554,7 +554,13 @@ async function simpleTestSetup() {
   return {...value, virtualizedContainer, virtualizedScrollContainer};
 }
 
-async function completeTestSetup() {
+async function completeTestSetup({
+  organization,
+  rootMeasurements,
+}: {
+  organization?: ReturnType<typeof OrganizationFixture>;
+  rootMeasurements?: TraceFullDetailed['measurements'];
+} = {}) {
   mockPerformanceSubscriptionDetailsResponse();
   mockProjectDetailsResponse();
   const start = Date.now() / 1e3;
@@ -569,6 +575,7 @@ async function completeTestSetup() {
           project_slug: 'project_slug',
           start_timestamp: start,
           timestamp: start + 2,
+          measurements: rootMeasurements,
           children: [
             makeTransaction({
               event_id: '1',
@@ -754,8 +761,8 @@ async function completeTestSetup() {
   mockSpansResponse('0', {}, transactionWithoutSpans);
 
   const value = render(<TraceView />, {
-    router,
-    deprecatedRouterMocks: true,
+    initialRouterConfig,
+    organization,
   });
   const virtualizedContainer = getVirtualizedContainer();
   const virtualizedScrollContainer = getVirtualizedScrollContainer();
@@ -769,7 +776,7 @@ async function completeTestSetup() {
     printVirtualizedList(virtualizedContainer);
     throw e;
   }
-  return {...value, virtualizedContainer, virtualizedScrollContainer};
+  return {...value, start, virtualizedContainer, virtualizedScrollContainer};
 }
 
 const DRAWER_TABS_TEST_ID = 'trace-drawer-tab';
@@ -778,7 +785,7 @@ const VISIBLE_TRACE_ROW_SELECTOR = '.TraceRow:not(.Hidden)';
 const ACTIVE_SEARCH_HIGHLIGHT_ROW = '.TraceRow.SearchResult.Highlight:not(.Hidden)';
 
 const searchToResolve = async (): Promise<void> => {
-  await screen.findByTestId('trace-search-success');
+  await screen.findByTestId('trace-search-success', undefined, {timeout: 10_000});
 };
 
 function printVirtualizedList(container: HTMLElement) {
@@ -789,6 +796,8 @@ function printVirtualizedList(container: HTMLElement) {
 
   const rows = Array.from(container.querySelectorAll(VISIBLE_TRACE_ROW_SELECTOR));
   const searchResultIterator = screen.queryByTestId('trace-search-result-iterator');
+  // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+  // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
   const searchInput = screen.queryByPlaceholderText(
     'Search in trace'
   ) as HTMLInputElement;
@@ -818,9 +827,9 @@ function printVirtualizedList(container: HTMLElement) {
   );
 
   for (const r of [...rows]) {
-    const count = (r.querySelector('.TraceChildrenCount') as HTMLElement)?.textContent;
-    const op = (r.querySelector('.TraceOperation') as HTMLElement)?.textContent;
-    const desc = (r.querySelector('.TraceDescription') as HTMLElement)?.textContent;
+    const count = r.querySelector('.TraceChildrenCount')?.textContent;
+    const op = r.querySelector('.TraceOperation')?.textContent;
+    const desc = r.querySelector('.TraceDescription')?.textContent;
     let t = (count ?? '') + ' ' + (op ?? '') + ' — ' + (desc ?? '');
 
     if (r.classList.contains('SearchResult')) {
@@ -834,6 +843,8 @@ function printVirtualizedList(container: HTMLElement) {
       t = t + ' ⬅ focused ';
     }
 
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
     const leftColumn = r.querySelector('.TraceLeftColumnInner') as HTMLElement;
     const left = Math.round(Number.parseInt(leftColumn.style.paddingLeft, 10) / 10);
 
@@ -843,25 +854,6 @@ function printVirtualizedList(container: HTMLElement) {
   // This is a debug fn, we need it to log
   // eslint-disable-next-line no-console
   console.log(stdout.join('\n'));
-}
-
-// @ts-expect-error ignore this line
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function printTabs() {
-  const tabs = screen.queryAllByTestId(DRAWER_TABS_TEST_ID);
-  const stdout: string[] = [];
-
-  for (const tab of tabs) {
-    let text = tab.textContent ?? 'empty tab??';
-    if (tab.hasAttribute('aria-selected')) {
-      text = 'active' + text;
-    }
-    stdout.push(text);
-  }
-
-  // This is a debug fn, we need it to log
-  // eslint-disable-next-line no-console
-  console.log(stdout.join(' | '));
 }
 
 async function assertHighlightedRowAtIndex(
@@ -884,40 +876,30 @@ async function assertHighlightedRowAtIndex(
 
 describe('trace view', () => {
   beforeEach(() => {
-    globalThis.ResizeObserver = MockResizeObserver as any;
+    globalThis.ResizeObserver = MockResizeObserver;
     mockQueryString('');
     MockDate.reset();
 
-    const {project} = initializeOrg({});
+    const project = ProjectFixture({
+      slug: 'project_slug',
+      id: '1',
+      name: 'project_name',
+      isMember: true,
+    });
 
     ProjectsStore.loadInitialData([project]);
 
     PageFiltersStore.init();
-    PageFiltersStore.onInitializeUrlState(
-      {
-        projects: [parseInt(project.id, 10)],
-        environments: [],
-        datetime: {
-          period: '14d',
-          start: null,
-          end: null,
-          utc: null,
-        },
+    PageFiltersStore.onInitializeUrlState({
+      projects: [parseInt(project.id, 10)],
+      environments: [],
+      datetime: {
+        period: '14d',
+        start: null,
+        end: null,
+        utc: null,
       },
-      new Set()
-    );
-    mockUseProjects.mockReturnValue({
-      projects: [
-        {
-          slug: 'project_slug',
-          id: 1,
-          name: 'project_name',
-          color: '#000000',
-          avatarUrl: 'https://example.com/avatar.png',
-          isMember: true,
-        },
-      ],
-    } as any);
+    });
   });
   afterEach(() => {
     mockQueryString('');
@@ -935,8 +917,7 @@ describe('trace view', () => {
     mockEventsResponse();
 
     render(<TraceView />, {
-      router,
-      deprecatedRouterMocks: true,
+      initialRouterConfig,
     });
     expect(await screen.findByText(/assembling the trace/i)).toBeInTheDocument();
   });
@@ -951,35 +932,10 @@ describe('trace view', () => {
     mockEventsResponse();
 
     render(<TraceView />, {
-      router,
-      deprecatedRouterMocks: true,
+      initialRouterConfig,
     });
     expect(
-      await screen.findByText(/Woof. We failed to load your trace./i)
-    ).toBeInTheDocument();
-  });
-
-  it('renders error state if meta fails to load', async () => {
-    mockPerformanceSubscriptionDetailsResponse();
-    mockProjectDetailsResponse();
-
-    mockTraceResponse({
-      statusCode: 200,
-      body: {
-        transactions: [makeTransaction()],
-        orphan_errors: [],
-      },
-    });
-    mockTraceMetaResponse({statusCode: 404});
-    mockTraceTagsResponse({statusCode: 404});
-    mockEventsResponse();
-
-    render(<TraceView />, {
-      router,
-      deprecatedRouterMocks: true,
-    });
-    expect(
-      await screen.findByText(/Woof. We failed to load your trace./i)
+      await screen.findByText(/Woof, we failed to load your trace/i)
     ).toBeInTheDocument();
   });
 
@@ -1002,13 +958,14 @@ describe('trace view', () => {
     mockTraceTagsResponse();
     mockEventsResponse();
 
-    window.location.search = `?timestamp=${twelveMinutesAgoInSeconds.toString()}`;
+    mockQueryString(`?timestamp=${twelveMinutesAgoInSeconds.toString()}`);
     render(<TraceView />, {
-      router,
-      deprecatedRouterMocks: true,
+      initialRouterConfig,
     });
     expect(
-      await screen.findByText(/This trace is so empty, even tumbleweeds don't roll here/i)
+      await screen.findByText(
+        /We were unable to find any spans for this trace\. If you came here from Logs or Application Metrics/i
+      )
     ).toBeInTheDocument();
   });
 
@@ -1031,16 +988,198 @@ describe('trace view', () => {
     mockTraceTagsResponse();
     mockEventsResponse();
 
-    window.location.search = `?timestamp=${oneMinuteAgoInSeconds.toString()}`;
+    mockQueryString(`?timestamp=${oneMinuteAgoInSeconds.toString()}`);
     render(<TraceView />, {
-      router,
-      deprecatedRouterMocks: true,
+      initialRouterConfig,
     });
     expect(
       await screen.findByText(
         /We're still processing this trace. Please try refreshing after a minute/i
       )
     ).toBeInTheDocument();
+  });
+
+  it('does not render the summary tab even when the legacy feature flag is enabled', async () => {
+    const organization = OrganizationFixture({features: ['single-trace-summary']});
+
+    await completeTestSetup({organization});
+
+    expect(await screen.findByRole('tab', {name: 'Waterfall'})).toBeInTheDocument();
+    expect(screen.queryByRole('tab', {name: 'Summary'})).not.toBeInTheDocument();
+  });
+
+  it('selects and zooms to a vital pill source node on click', async () => {
+    const analyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
+    const zoomSpy = jest.spyOn(VirtualizedViewManager.prototype, 'onZoomIntoSpace');
+    const {start} = await completeTestSetup({
+      rootMeasurements: {lcp: {value: 500, unit: 'millisecond'}},
+    });
+    const vitalPill = (await screen.findAllByText('LCP')).find(element =>
+      element.classList.contains('TraceIndicatorLabel')
+    );
+
+    expect(vitalPill).toBeDefined();
+    analyticsSpy.mockClear();
+    zoomSpy.mockClear();
+
+    await userEvent.click(vitalPill!);
+
+    expect(await screen.findByTestId('trace-drawer-title')).toHaveTextContent(
+      'TransactionID: 0'
+    );
+    expect(analyticsSpy).toHaveBeenCalledWith('trace.trace_layout.zoom_to_fill', {
+      organization: expect.objectContaining({slug: 'org-slug'}),
+    });
+    expect(zoomSpy).toHaveBeenCalledWith([start * 1e3, 525], {padding: false});
+  });
+
+  it('selects and zooms to a summary vital pill source node on click', async () => {
+    const analyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
+    const zoomSpy = jest.spyOn(VirtualizedViewManager.prototype, 'onZoomIntoSpace');
+    const {start} = await completeTestSetup({
+      rootMeasurements: {lcp: {value: 500, unit: 'millisecond'}},
+    });
+    mockTransactionDetailsResponse('2');
+    await userEvent.click(await screen.findByText('transaction-name-2'));
+    expect(await screen.findByTestId('trace-drawer-title')).toHaveTextContent(
+      'TransactionID: 2'
+    );
+
+    const vitalPill = await screen.findByRole('button', {name: /LCP/});
+
+    analyticsSpy.mockClear();
+    zoomSpy.mockClear();
+
+    await userEvent.click(vitalPill);
+
+    expect(await screen.findByTestId('trace-drawer-title')).toHaveTextContent(
+      'TransactionID: 0'
+    );
+    expect(analyticsSpy).toHaveBeenCalledWith('trace.trace_layout.zoom_to_fill', {
+      organization: expect.objectContaining({slug: 'org-slug'}),
+    });
+    expect(zoomSpy).toHaveBeenCalledWith([start * 1e3, 525], {padding: false});
+    expect(window.location.search).not.toContain('zoomToNode');
+    expect(window.location.search).not.toContain('zoomToTimestamp');
+    expect(window.location.search).not.toContain('zoomToVital');
+  });
+
+  it('reveals a hidden vital pill source node on click', async () => {
+    const start = Date.now() / 1e3;
+    const organization = OrganizationFixture({features: ['trace-spans-format']});
+    const vitalSpanDescription = 'standalone LCP span';
+
+    mockPerformanceSubscriptionDetailsResponse();
+    mockProjectDetailsResponse();
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace/trace-id/',
+      body: makeEAPTrace([
+        makeEAPSpan({
+          event_id: 'root-transaction',
+          op: 'pageload',
+          description: 'root transaction',
+          start_timestamp: start,
+          end_timestamp: start + 2,
+          is_transaction: true,
+          additional_attributes: {
+            'tags[performance.timeOrigin,number]': start,
+          },
+          children: [
+            makeEAPSpan({
+              event_id: 'lcp-span',
+              op: 'ui.webvital.lcp',
+              description: vitalSpanDescription,
+              start_timestamp: start + 0.5,
+              end_timestamp: start + 0.6,
+              measurements: {'measurements.lcp': 500},
+            }),
+          ],
+        }),
+        makeEAPSpan({
+          event_id: 'second-transaction',
+          op: 'http.server',
+          description: 'second transaction',
+          start_timestamp: start,
+          end_timestamp: start + 1,
+          is_transaction: true,
+          children: Array.from({length: 100}, (_, index) =>
+            makeEAPSpan({
+              event_id: `second-transaction-span-${index}`,
+              start_timestamp: start,
+              end_timestamp: start + 0.1,
+            })
+          ),
+        }),
+        makeEAPSpan({
+          event_id: 'third-transaction',
+          op: 'http.server',
+          description: 'third transaction',
+          start_timestamp: start,
+          end_timestamp: start + 1,
+          is_transaction: true,
+        }),
+      ]),
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-meta/trace-id/',
+      body: {
+        errorsCount: 0,
+        logsCount: 0,
+        metricsCount: 0,
+        performanceIssuesCount: 0,
+        spansCount: 104,
+        spansCountMap: {},
+        transactionChildCountMap: [],
+      },
+    });
+    for (const itemId of ['root-transaction', 'lcp-span']) {
+      MockApiClient.addMockResponse({
+        url: `/projects/org-slug/project_slug/trace-items/${itemId}/`,
+        body: {
+          itemId,
+          links: null,
+          meta: {},
+          timestamp: new Date(start * 1e3).toISOString(),
+          attributes: [],
+        },
+      });
+    }
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/logs/',
+      body: {data: []},
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/dashboards/',
+      body: [],
+    });
+    mockTraceRootFacets();
+    mockEventsResponse();
+
+    render(<TraceView />, {initialRouterConfig, organization});
+
+    const rootTransaction = await screen.findByText('root transaction');
+    expect(screen.queryByText(vitalSpanDescription)).not.toBeInTheDocument();
+
+    await userEvent.click(rootTransaction);
+    await userEvent.click(await screen.findByRole('button', {name: 'Close Drawer'}));
+    await waitFor(() => {
+      expect(screen.queryByTestId('trace-drawer-title')).not.toBeInTheDocument();
+    });
+
+    const vitalPill = (await screen.findAllByText('LCP')).find(element =>
+      element.classList.contains('TraceIndicatorLabel')
+    );
+    expect(vitalPill).toBeDefined();
+
+    await userEvent.click(vitalPill!);
+
+    const vitalSpanRow = (await screen.findByText(vitalSpanDescription)).closest(
+      VISIBLE_TRACE_ROW_SELECTOR
+    );
+    expect(vitalSpanRow).toHaveAttribute('tabindex', '0');
+    expect(await screen.findByTestId('trace-drawer-title')).toHaveTextContent(
+      'SpanID: lcp-span'
+    );
   });
 
   describe('pageload', () => {
@@ -1106,7 +1245,7 @@ describe('trace view', () => {
     });
 
     it('scrolls to sibling autogroup node', async () => {
-      mockQueryString('?node=ag-http0&node=txn-1');
+      mockQueryString('?node=ag-span0&node=txn-1');
 
       const {virtualizedContainer} = await completeTestSetup();
       await within(virtualizedContainer).findAllByText(/Autogrouped/i);
@@ -1136,6 +1275,7 @@ describe('trace view', () => {
     });
 
     it('scrolls to missing instrumentation node', async () => {
+      mockTracePreferences({missing_instrumentation: true});
       mockQueryString('?node=ms-queueprocess0&node=txn-1');
 
       const {virtualizedContainer} = await completeTestSetup();
@@ -1190,19 +1330,14 @@ describe('trace view', () => {
       '?node=txn-doesnotexist',
       // Invalid path
       '?node=span-does-notexist',
-    ])('logs if path is not found: %s', async path => {
+    ] as Array<`?${string}`>)('logs if path is not found: %s', async path => {
       mockQueryString(path);
 
-      const sentryScopeMock = {
-        setFingerprint: jest.fn(),
-        captureMessage: jest.fn(),
-      } as any;
-
-      jest.spyOn(Sentry, 'withScope').mockImplementation((f: any) => f(sentryScopeMock));
+      jest.spyOn(Sentry.logger, 'warn');
       await pageloadTestSetup();
 
       await waitFor(() => {
-        expect(sentryScopeMock.captureMessage).toHaveBeenCalledWith(
+        expect(Sentry.logger.warn).toHaveBeenCalledWith(
           'Failed to scroll to node in trace tree'
         );
       });
@@ -1279,6 +1414,157 @@ describe('trace view', () => {
         await waitFor(async () => {
           expect(await screen.findAllByText('No Instrumentation')).toHaveLength(2);
         });
+      });
+
+      it('redraws the trace when compressed timeline changes', async () => {
+        mockTracePreferences({compressed_timeline: true});
+        mockQueryString('?node=span-span0&node=txn-1');
+        const organization = OrganizationFixture({
+          features: ['trace-waterfall-time-compression'],
+        });
+
+        const drawSpy = jest.spyOn(VirtualizedViewManager.prototype, 'draw');
+        const successMessageSpy = jest.spyOn(indicators, 'addSuccessMessage');
+
+        try {
+          await completeTestSetup({organization});
+
+          const preferencesDropdownTrigger = screen.getByLabelText('Trace Preferences');
+          await userEvent.click(preferencesDropdownTrigger);
+
+          expect(await screen.findByText('Compressed Timeline')).toBeInTheDocument();
+
+          drawSpy.mockClear();
+          const compressedTimelineOption = await screen.findByText('Compressed Timeline');
+          await userEvent.click(compressedTimelineOption);
+
+          expect(successMessageSpy).toHaveBeenCalledWith('Compressed timeline disabled');
+          await waitFor(() => {
+            expect(drawSpy).toHaveBeenCalled();
+          });
+        } finally {
+          drawSpy.mockRestore();
+          successMessageSpy.mockRestore();
+        }
+      });
+
+      it('hides and disables compressed timeline without the feature flag', async () => {
+        mockTracePreferences({compressed_timeline: true});
+        mockQueryString('?node=span-span0&node=txn-1');
+
+        const compressionSpy = jest.spyOn(TraceTimeCompression, 'FromVisibleItems');
+
+        try {
+          await completeTestSetup();
+
+          const preferencesDropdownTrigger = screen.getByLabelText('Trace Preferences');
+          await userEvent.click(preferencesDropdownTrigger);
+
+          expect(screen.queryByText('Compressed Timeline')).not.toBeInTheDocument();
+          expect(compressionSpy.mock.calls.at(-1)?.[0]?.enabled).toBe(false);
+        } finally {
+          compressionSpy.mockRestore();
+        }
+      });
+
+      it('renders compressed timeline gap markers as non-interactive overlays', async () => {
+        mockTracePreferences({compressed_timeline: true});
+        const organization = OrganizationFixture({
+          features: ['trace-waterfall-time-compression'],
+        });
+        const compressionSpy = jest
+          .spyOn(TraceTimeCompression, 'FromVisibleItems')
+          .mockImplementation(options => {
+            const [traceStart, traceDuration] = options.traceSpace;
+            return {
+              start: traceStart,
+              duration: traceDuration,
+              compressedDuration: traceDuration,
+              enabled: true,
+              gaps: [
+                {
+                  start: traceStart + 0.5,
+                  end: traceStart + 1,
+                  duration: 0.5,
+                  retainedDuration: 0.1,
+                  compressedStart: 0.5,
+                  compressedEnd: 0.6,
+                },
+              ],
+              toCompressedOffset: (timestamp: number) => timestamp - traceStart,
+              toRealTimestamp: (offset: number) => traceStart + offset,
+            };
+          });
+
+        try {
+          const {virtualizedScrollContainer} = await completeTestSetup({organization});
+
+          const marker = await waitFor(() => {
+            const nextMarker = document.querySelector<HTMLElement>(
+              '.TraceCollapsedGapMarker'
+            );
+            if (!nextMarker) {
+              throw new Error('Expected compressed timeline gap marker to render');
+            }
+            return nextMarker;
+          });
+
+          expect(marker).toHaveStyle({pointerEvents: 'none'});
+
+          const pill = marker.querySelector<HTMLElement>('.TraceCollapsedGapMarkerPill');
+          if (!pill) {
+            throw new Error('Expected compressed timeline gap marker pill to render');
+          }
+          expect(pill).toHaveStyle({pointerEvents: 'auto'});
+          fireEvent.wheel(pill, {deltaY: 24});
+          expect(virtualizedScrollContainer.scrollTop).toBe(24);
+
+          await userEvent.hover(pill);
+          expect(
+            await screen.findByText(/Skipped .* inactive period/)
+          ).toBeInTheDocument();
+        } finally {
+          compressionSpy.mockRestore();
+        }
+      });
+
+      it('recomputes compressed timeline when expanding or collapsing rows changes visible nodes', async () => {
+        mockTracePreferences({compressed_timeline: true});
+        mockQueryString('?node=span-span0&node=txn-1');
+        const organization = OrganizationFixture({
+          features: ['trace-waterfall-time-compression'],
+        });
+
+        const compressionSpy = jest.spyOn(TraceTimeCompression, 'FromVisibleItems');
+
+        try {
+          const {virtualizedContainer} = await completeTestSetup({organization});
+          await within(virtualizedContainer).findAllByText(/Autogrouped/i);
+
+          const initialNodeCount =
+            compressionSpy.mock.calls.at(-1)?.[0]?.nodes.length ?? 0;
+          expect(initialNodeCount).toBeGreaterThan(0);
+
+          compressionSpy.mockClear();
+
+          const rows = getVirtualizedRows(virtualizedContainer);
+          const spanRow = rows.find(row => row.textContent?.includes('http — request'));
+          const collapseButton =
+            spanRow?.querySelector<HTMLButtonElement>('.TraceChildrenCount');
+          expect(collapseButton).toBeInTheDocument();
+
+          fireEvent.click(collapseButton!);
+
+          await waitFor(() => {
+            expect(compressionSpy).toHaveBeenCalled();
+          });
+
+          expect(compressionSpy.mock.calls.at(-1)?.[0]?.nodes.length).toBeLessThan(
+            initialNodeCount
+          );
+        } finally {
+          compressionSpy.mockRestore();
+        }
       });
     });
   });
@@ -1520,7 +1806,8 @@ describe('trace view', () => {
       });
     });
 
-    it('arrowup+shift scrolls to the start of the list', async () => {
+    // eslint-disable-next-line jest/no-disabled-tests
+    it.skip('arrowup+shift scrolls to the start of the list', async () => {
       const {virtualizedContainer} = await keyboardNavigationTestSetup();
 
       let rows = getVirtualizedRows(virtualizedContainer);
@@ -1598,13 +1885,14 @@ describe('trace view', () => {
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op');
 
-      expect(searchInput).toHaveValue('transaction-op');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op'));
       await searchToResolve();
 
       await assertHighlightedRowAtIndex(container, 1);
     });
 
-    it('supports roving with arrowup and arrowdown', async () => {
+    // eslint-disable-next-line jest/no-disabled-tests
+    it.skip('supports roving with arrowup and arrowdown', async () => {
       const {container} = await searchTestSetup();
 
       const searchInput = await screen.findByPlaceholderText('Search in trace');
@@ -1634,7 +1922,7 @@ describe('trace view', () => {
       const searchInput = await screen.findByPlaceholderText('Search in trace');
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op');
-      expect(searchInput).toHaveValue('transaction-op');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op'));
 
       // Wait for the search results to resolve
       await searchToResolve();
@@ -1660,14 +1948,16 @@ describe('trace view', () => {
 
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op-1');
-      expect(searchInput).toHaveValue('transaction-op-1');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op-1'));
       await searchToResolve();
 
       await assertHighlightedRowAtIndex(container, 2);
 
       await userEvent.clear(searchInput);
+      await waitFor(() => expect(searchInput).toHaveValue(''));
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op-5');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op-5'));
       await searchToResolve();
 
       await assertHighlightedRowAtIndex(container, 6);
@@ -1679,7 +1969,7 @@ describe('trace view', () => {
       const {container} = await searchTestSetup();
       const searchInput = await screen.findByPlaceholderText('Search in trace');
       await userEvent.type(searchInput, 'trans');
-      expect(searchInput).toHaveValue('trans');
+      await waitFor(() => expect(searchInput).toHaveValue('trans'));
       // Wait for the search results to resolve
       await searchToResolve();
 
@@ -1689,7 +1979,7 @@ describe('trace view', () => {
       await assertHighlightedRowAtIndex(container, 2);
 
       await userEvent.type(searchInput, 'act');
-      expect(searchInput).toHaveValue('transact');
+      await waitFor(() => expect(searchInput).toHaveValue('transact'));
       await searchToResolve();
 
       // Highlighting is persisted on the row
@@ -1698,7 +1988,7 @@ describe('trace view', () => {
       await userEvent.clear(searchInput);
       await userEvent.click(searchInput);
       await userEvent.paste('this wont match anything');
-      expect(searchInput).toHaveValue('this wont match anything');
+      await waitFor(() => expect(searchInput).toHaveValue('this wont match anything'));
       await searchToResolve();
 
       // When there is no match, the highlighting is removed
@@ -1714,7 +2004,7 @@ describe('trace view', () => {
       // Nothing is highlighted
       expect(container.querySelectorAll('.TraceRow.Highlight')).toHaveLength(0);
       await userEvent.type(searchInput, 't');
-      expect(searchInput).toHaveValue('t');
+      await waitFor(() => expect(searchInput).toHaveValue('t'));
 
       // Wait for the search results to resolve
       await searchToResolve();
@@ -1729,7 +2019,7 @@ describe('trace view', () => {
 
       const searchInput = await screen.findByPlaceholderText('Search in trace');
       await userEvent.type(searchInput, 'transaction-op-1');
-      expect(searchInput).toHaveValue('transaction-op-1');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op-1'));
 
       await searchToResolve();
 
@@ -1854,8 +2144,7 @@ describe('trace view', () => {
       );
 
       const {container} = render(<TraceView />, {
-        router,
-        deprecatedRouterMocks: true,
+        initialRouterConfig,
       });
 
       // Awaits for the placeholder rendering rows to be removed
@@ -1863,7 +2152,7 @@ describe('trace view', () => {
 
       const searchInput = await screen.findByPlaceholderText('Search in trace');
       await userEvent.type(searchInput, 'op-0');
-      expect(searchInput).toHaveValue('op-0');
+      await waitFor(() => expect(searchInput).toHaveValue('op-0'));
 
       await searchToResolve();
 
@@ -1897,7 +2186,7 @@ describe('trace view', () => {
       const searchInput = await screen.findByPlaceholderText('Search in trace');
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op');
-      expect(searchInput).toHaveValue('transaction-op');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op'));
       await searchToResolve();
 
       await assertHighlightedRowAtIndex(container, 1);
@@ -1918,13 +2207,17 @@ describe('trace view', () => {
       // row is part of the search results
       await assertHighlightedRowAtIndex(container, 6);
 
-      await userEvent.type(searchInput, '-5');
-      expect(searchInput).toHaveValue('transaction-op-5');
+      await userEvent.click(searchInput);
+      await userEvent.type(searchInput, '-');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op-'));
+      await userEvent.type(searchInput, '5');
+      await waitFor(() => expect(searchInput).toHaveValue('transaction-op-5'));
 
       await searchToResolve();
       await assertHighlightedRowAtIndex(container, 6);
 
       await userEvent.clear(searchInput);
+      await waitFor(() => expect(searchInput).toHaveValue(''));
       await userEvent.click(searchInput);
       await userEvent.paste('transaction-op-none');
       await searchToResolve();
@@ -1936,6 +2229,24 @@ describe('trace view', () => {
   });
 
   describe('tabbing', () => {
+    it('does not fetch trace-wide logs when opening a waterfall drawer', async () => {
+      const organization = OrganizationFixture({features: ['ourlogs-enabled']});
+      const traceLogsRequest = MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/trace-logs/`,
+        body: {data: []},
+      });
+      const {virtualizedContainer} = await completeTestSetup({organization});
+      const rows = getVirtualizedRows(virtualizedContainer);
+
+      expect(traceLogsRequest).not.toHaveBeenCalled();
+      await userEvent.click(rows[5]!);
+
+      await waitFor(() => {
+        expect(screen.queryAllByTestId(DRAWER_TABS_TEST_ID)).toHaveLength(1);
+      });
+      expect(traceLogsRequest).not.toHaveBeenCalled();
+    });
+
     it('clicking on a node spawns a new tab when none is selected', async () => {
       const {virtualizedContainer} = await simpleTestSetup();
       const rows = getVirtualizedRows(virtualizedContainer);

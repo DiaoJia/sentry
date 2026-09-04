@@ -2,11 +2,11 @@ import {lazy, Suspense, useMemo} from 'react';
 import styled from '@emotion/styled';
 
 import {TRACE_WATERFALL_PREFERENCES_KEY} from 'sentry/components/events/interfaces/performance/utils';
+import {getEventTimestampInSeconds} from 'sentry/components/events/interfaces/utils';
 import type {Event} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
 import {useIssuesTraceTree} from 'sentry/views/performance/newTraceDetails/traceApi/useIssuesTraceTree';
 import {useTrace} from 'sentry/views/performance/newTraceDetails/traceApi/useTrace';
-import {useTraceMeta} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceMeta';
 import {useTraceRootEvent} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceRootEvent';
 import {
   getInitialTracePreferences,
@@ -15,7 +15,7 @@ import {
 import {TraceStateProvider} from 'sentry/views/performance/newTraceDetails/traceState/traceStateProvider';
 import {useTraceEventView} from 'sentry/views/performance/newTraceDetails/useTraceEventView';
 import {useTraceQueryParams} from 'sentry/views/performance/newTraceDetails/useTraceQueryParams';
-import {useTraceWaterfallModels} from 'sentry/views/performance/newTraceDetails/useTraceWaterfallModels';
+import {useTraceStateAnalytics} from 'sentry/views/performance/newTraceDetails/useTraceStateAnalytics';
 
 const LazyIssuesTraceWaterfall = lazy(() =>
   import('sentry/views/performance/newTraceDetails/issuesTraceWaterfall').then(
@@ -38,6 +38,7 @@ const DEFAULT_ISSUE_DETAILS_TRACE_VIEW_PREFERENCES: TracePreferencesState = {
     parent: true,
     sibling: true,
   },
+  compressed_timeline: false,
   layout: 'drawer bottom',
   list: {
     width: 0.5,
@@ -55,7 +56,8 @@ export function SpanEvidenceTraceView(props: SpanEvidenceTraceViewProps) {
     () =>
       getInitialTracePreferences(
         TRACE_WATERFALL_PREFERENCES_KEY,
-        DEFAULT_ISSUE_DETAILS_TRACE_VIEW_PREFERENCES
+        DEFAULT_ISSUE_DETAILS_TRACE_VIEW_PREFERENCES,
+        'issues'
       ),
     []
   );
@@ -75,26 +77,32 @@ function SpanEvidenceTraceViewImpl({
   organization,
   traceId,
 }: SpanEvidenceTraceViewProps) {
-  const timestamp = new Date(event.dateReceived).getTime() / 1e3;
+  const timestamp = getEventTimestampInSeconds(event);
 
   const trace = useTrace({
     timestamp,
     traceSlug: traceId,
     limit: 10000,
+    targetEventId: event.id,
   });
-  const meta = useTraceMeta([{traceSlug: traceId, timestamp}]);
-  const tree = useIssuesTraceTree({trace, meta, replay: null});
+  const tree = useIssuesTraceTree({trace, replay: null});
+
+  useTraceStateAnalytics({
+    trace,
+    organization,
+    traceTreeSource: 'issue_details_span_evidence',
+    tree,
+  });
 
   const rootEventResults = useTraceRootEvent({
     tree,
     logs: undefined,
+    timestamp,
     traceId,
   });
 
   const params = useTraceQueryParams({timestamp});
   const traceEventView = useTraceEventView(traceId, params);
-
-  const traceWaterfallModels = useTraceWaterfallModels();
 
   if (!traceId) {
     return null;
@@ -110,11 +118,9 @@ function SpanEvidenceTraceViewImpl({
           rootEventResults={rootEventResults}
           organization={organization}
           traceEventView={traceEventView}
-          meta={meta}
           source="issues"
           replay={null}
           event={event}
-          traceWaterfallModels={traceWaterfallModels}
         />
       </Suspense>
     </IssuesTraceContainer>

@@ -1,0 +1,47 @@
+import {useMutation, useQueryClient} from '@tanstack/react-query';
+
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {t} from 'sentry/locale';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {allDetectorListsQueryKey} from 'sentry/views/detectors/hooks';
+
+/** Bulk delete detectors */
+export function useDeleteDetectorsMutation() {
+  const org = useOrganization();
+  const api = useApi({persistInFlight: true});
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    void,
+    RequestError,
+    {ids?: string[]; projects?: number[]; query?: string}
+  >({
+    mutationFn: params => {
+      return api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/detectors/', {
+          path: {organizationIdOrSlug: org.slug},
+        }),
+        {
+          method: 'DELETE',
+          query: {
+            id: params.ids,
+            query: params.query,
+            project: params.projects,
+          },
+        }
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: allDetectorListsQueryKey(org),
+      });
+      addSuccessMessage(t('Monitors deleted'));
+    },
+    onError: () => {
+      addErrorMessage(t('Unable to delete monitors'));
+    },
+  });
+}

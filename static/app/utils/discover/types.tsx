@@ -1,5 +1,6 @@
+import type {SelectValue} from '@sentry/scraps/select';
+
 import {t} from 'sentry/locale';
-import type {SelectValue} from 'sentry/types/core';
 import {Dataset} from 'sentry/views/alerts/rules/metric/types';
 
 export const TOP_N = 5;
@@ -20,11 +21,10 @@ export enum DiscoverDatasets {
   METRICS_ENHANCED = 'metricsEnhanced',
   ISSUE_PLATFORM = 'issuePlatform',
   OURLOGS = 'ourlogs',
-  SPANS_EAP = 'spans',
-  SPANS_EAP_RPC = 'spansRpc',
-  SPANS_INDEXED = 'spansIndexed',
-  SPANS_METRICS = 'spansMetrics',
+  PREPROD_SIZE = 'preprodSize',
+  SPANS = 'spans',
   TRANSACTIONS = 'transactions',
+  TRACEMETRICS = 'tracemetrics',
 }
 
 export const DiscoverDatasetsToDatasetMap = {
@@ -43,6 +43,8 @@ export enum DatasetSource {
   UNKNOWN = 'unknown',
   INFERRED = 'inferred',
   FORCED = 'forced',
+  SPAN_MIGRATION = 'span_migration_version_1',
+  SPAN_MIGRATION_V2 = 'span_migration_version_2',
 }
 
 export const TOP_EVENT_MODES: string[] = [DisplayModes.TOP5, DisplayModes.DAILYTOP5];
@@ -117,6 +119,17 @@ export const CONDITIONS_ARGUMENTS: Array<{value: string; label?: string}> = [
   {
     label: 'is greater than or equal to',
     value: 'greaterOrEquals',
+  },
+];
+
+export const EQUALITY_CONDITIONS_ARGUMENTS: Array<{value: string; label?: string}> = [
+  {
+    label: 'is equal to',
+    value: 'equals',
+  },
+  {
+    label: 'is not equal to',
+    value: 'notEquals',
   },
 ];
 

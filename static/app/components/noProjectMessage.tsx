@@ -1,40 +1,41 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import NoProjectEmptyState from 'sentry/components/illustrations/NoProjectEmptyState';
-import * as Layout from 'sentry/components/layouts/thirds';
+import {LinkButton} from '@sentry/scraps/button';
+import {EmptyState} from '@sentry/scraps/emptyState';
+import {Container} from '@sentry/scraps/layout';
+
+import {NoProjectEmptyState} from 'sentry/components/illustrations/NoProjectEmptyState';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import {useCanCreateProject} from 'sentry/utils/useCanCreateProject';
-import useProjects from 'sentry/utils/useProjects';
-import {useUser} from 'sentry/utils/useUser';
+import {useHasProjectAccess} from 'sentry/utils/useHasProjectAccess';
+import {useProjects} from 'sentry/utils/useProjects';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
 type Props = {
   organization: Organization;
   children?: React.ReactNode;
+  requireProjectMembership?: boolean;
   superuserNeedsToBeProjectMember?: boolean;
 };
 
-function NoProjectMessage({
+export function NoProjectMessage({
   children,
   organization,
+  requireProjectMembership,
   superuserNeedsToBeProjectMember,
 }: Props) {
-  const user = useUser();
-  const {projects, initiallyLoaded: projectsLoaded} = useProjects();
+  const {projects} = useProjects();
+  const {hasProjectAccess, projectsLoaded} = useHasProjectAccess({
+    requireProjectMembership,
+    superuserNeedsToBeProjectMember,
+  });
 
   const canUserCreateProject = useCanCreateProject();
   const canJoinTeam = organization.access.includes('team:read');
 
   const orgHasProjects = !!projects?.length;
-  const hasProjectAccess =
-    user.isSuperuser && !superuserNeedsToBeProjectMember
-      ? !!projects?.some(p => p.hasAccess)
-      : !!projects?.some(p => p.isMember && p.hasAccess);
 
   if (hasProjectAccess || !projectsLoaded) {
     return <Fragment>{children}</Fragment>;
@@ -46,9 +47,11 @@ function NoProjectMessage({
 
   const joinTeamAction = (
     <LinkButton
-      title={canJoinTeam ? undefined : t('You do not have permission to join a team.')}
+      tooltipProps={{
+        title: canJoinTeam ? undefined : t('You do not have permission to join a team.'),
+      }}
       disabled={!canJoinTeam}
-      priority={orgHasProjects ? 'primary' : 'default'}
+      variant={orgHasProjects ? 'primary' : 'secondary'}
       to={`/settings/${organization.slug}/teams/`}
     >
       {t('Join a Team')}
@@ -57,13 +60,13 @@ function NoProjectMessage({
 
   const createProjectAction = (
     <LinkButton
-      title={
-        canUserCreateProject
+      tooltipProps={{
+        title: canUserCreateProject
           ? undefined
-          : t('You do not have permission to create a project.')
-      }
+          : t('You do not have permission to create a project.'),
+      }}
       disabled={!canUserCreateProject}
-      priority={orgHasProjects ? 'default' : 'primary'}
+      variant={orgHasProjects ? 'secondary' : 'primary'}
       to={makeProjectsPathname({path: '/new/', organization})}
     >
       {t('Create project')}
@@ -71,13 +74,20 @@ function NoProjectMessage({
   );
 
   return (
-    <Wrapper>
-      <NoProjectEmptyState />
-
-      <Content>
-        <Layout.Title>{t('Remain Calm')}</Layout.Title>
-        <HelpMessage>{t('You need at least one project to use this view')}</HelpMessage>
-        <Actions gap={1}>
+    <EmptyState
+      flex="1"
+      justify="center"
+      gap="3xl"
+      padding="lg"
+      title={t('Remain Calm')}
+      description={t('You need at least one project to use this view')}
+      illustration={
+        <Container width={{zero: '300px', xl: '480px', '4xl': '683px'}}>
+          <StyledNoProjectEmptyState />
+        </Container>
+      }
+      action={
+        <Fragment>
           {orgHasProjects ? (
             <Fragment>
               {joinTeamAction}
@@ -86,32 +96,13 @@ function NoProjectMessage({
           ) : (
             createProjectAction
           )}
-        </Actions>
-      </Content>
-    </Wrapper>
+        </Fragment>
+      }
+    />
   );
 }
 
-export default NoProjectMessage;
-
-const HelpMessage = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
-const Wrapper = styled('div')`
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-`;
-
-const Content = styled('div')`
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  margin-left: 40px;
-`;
-
-const Actions = styled(ButtonBar)`
-  width: fit-content;
+const StyledNoProjectEmptyState = styled(NoProjectEmptyState)`
+  width: 100%;
+  height: auto;
 `;

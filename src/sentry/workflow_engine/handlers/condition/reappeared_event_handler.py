@@ -9,11 +9,12 @@ from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
 class ReappearedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.WORKFLOW_TRIGGER
     comparison_json_schema = {"type": "boolean"}
+    label_template = "An issue escalates"
 
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
-        has_reappeared = event_data.has_reappeared
-        if has_reappeared is None:
+        has_escalated = event_data.has_escalated
+        if has_escalated is None:
             return False
 
-        return has_reappeared == comparison
+        return has_escalated == comparison

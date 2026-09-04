@@ -1,0 +1,1850 @@
+import json  # noqa: S003
+from datetime import timedelta
+from typing import Any
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
+
+from django.urls import reverse
+
+from sentry.ai_monitoring.utils import (
+    get_aggregated_first_input,
+    get_aggregated_last_output,
+)
+from sentry.ai_monitoring.utils import (
+    get_first_input_message as _get_first_input_message,
+)
+from sentry.ai_monitoring.utils import (
+    get_last_output as _get_last_output,
+)
+from sentry.testutils.helpers import parse_link_header
+from sentry.testutils.helpers.datetime import before_now
+
+from .test_organization_ai_conversations_base import (
+    LLM_COST,
+    LLM_INPUT_TOKENS,
+    LLM_OUTPUT_TOKENS,
+    LLM_TOKENS,
+    BaseAIConversationsTestCase,
+)
+
+
+def json_string(value: Any) -> str:
+    return json.dumps(value)
+
+
+class TestGetFirstInputMessage:
+    def test_prefers_input_messages(self) -> None:
+        row = {
+            "gen_ai.input.messages": json_string(
+                [{"role": "user", "parts": [{"type": "text", "content": "New"}]}]
+            ),
+            "gen_ai.request.messages": json_string([{"role": "user", "content": "Old"}]),
+        }
+        assert _get_first_input_message(row) == "New"
+
+    def test_falls_back_to_request_messages(self) -> None:
+        row = {"gen_ai.request.messages": json_string([{"role": "user", "content": "Old"}])}
+        assert _get_first_input_message(row) == "Old"
+
+    def test_returns_none_when_both_empty(self) -> None:
+        row: dict[str, Any] = {}
+        assert _get_first_input_message(row) is None
+
+    def test_skips_invalid_input_messages(self) -> None:
+        row = {
+            "gen_ai.input.messages": "[broken json",
+            "gen_ai.request.messages": json_string([{"role": "user", "content": "Old"}]),
+        }
+        assert _get_first_input_message(row) == "Old"
+
+    def test_returns_filtered_for_input_messages(self) -> None:
+        row = {"gen_ai.input.messages": "[Filtered]"}
+        assert _get_first_input_message(row) == "[Filtered]"
+
+    def test_python_repr_single_quotes(self) -> None:
+        row = {"gen_ai.input.messages": "[{'role': 'user', 'content': 'Hello'}]"}
+        assert _get_first_input_message(row) == "Hello"
+
+    def test_python_repr_mixed_quotes(self) -> None:
+        row = {"gen_ai.input.messages": """[{'role': 'user', 'content': "the user's message"}]"""}
+        assert _get_first_input_message(row) == "the user's message"
+
+    def test_returns_filtered_for_request_messages(self) -> None:
+        row = {"gen_ai.request.messages": "[Filtered]"}
+        assert _get_first_input_message(row) == "[Filtered]"
+
+    def test_skips_empty_user_message(self) -> None:
+        row = {
+            "gen_ai.input.messages": json_string(
+                [
+                    {"role": "user", "content": ""},
+                    {"role": "user", "content": "Hello"},
+                ]
+            )
+        }
+        assert _get_first_input_message(row) == "Hello"
+
+
+class TestGetLastOutput:
+    def test_prefers_output_messages_text_part(self) -> None:
+        row = {
+            "gen_ai.output.messages": json_string(
+                [{"role": "assistant", "parts": [{"type": "text", "content": "New"}]}]
+            ),
+            "gen_ai.response.text": "Old",
+        }
+        assert _get_last_output(row) == "New"
+
+    def test_prefers_output_messages_content(self) -> None:
+        row = {
+            "gen_ai.output.messages": json_string(
+                [{"role": "assistant", "content": "New content"}]
+            ),
+            "gen_ai.response.text": "Old",
+        }
+        assert _get_last_output(row) == "New content"
+
+    def test_falls_back_to_response_text(self) -> None:
+        row = {"gen_ai.response.text": "Old response"}
+        assert _get_last_output(row) == "Old response"
+
+    def test_returns_none_when_empty(self) -> None:
+        row: dict[str, Any] = {}
+        assert _get_last_output(row) is None
+
+    def test_falls_back_on_invalid_output_messages(self) -> None:
+        row = {
+            "gen_ai.output.messages": "[broken json",
+            "gen_ai.response.text": "Fallback",
+        }
+        assert _get_last_output(row) == "Fallback"
+
+    def test_returns_filtered(self) -> None:
+        row = {"gen_ai.output.messages": "[Filtered]"}
+        assert _get_last_output(row) == "[Filtered]"
+
+    def test_python_repr_output(self) -> None:
+        row = {"gen_ai.output.messages": "[{'role': 'assistant', 'content': 'Hello!'}]"}
+        assert _get_last_output(row) == "Hello!"
+
+
+class TestGetAggregatedMessages:
+    def test_first_input_uses_earliest_timestamp(self) -> None:
+        row = {
+            "input_messages": json_string([{"role": "user", "content": "New"}]),
+            "input_messages_timestamp": 2,
+            "request_messages": json_string([{"role": "user", "content": "Old"}]),
+            "request_messages_timestamp": 1,
+        }
+        assert get_aggregated_first_input(row) == "Old"
+
+    def test_first_input_prefers_input_messages_when_timestamps_match(self) -> None:
+        row = {
+            "input_messages": json_string([{"role": "user", "content": "New"}]),
+            "input_messages_timestamp": 1,
+            "request_messages": json_string([{"role": "user", "content": "Old"}]),
+            "request_messages_timestamp": 1,
+        }
+        assert get_aggregated_first_input(row) == "New"
+
+    def test_first_input_falls_back_when_preferred_field_is_empty(self) -> None:
+        row = {
+            "input_messages": json_string([{"role": "assistant", "content": ""}]),
+            "input_messages_timestamp": 1,
+            "request_messages": json_string([{"role": "user", "content": "Fallback"}]),
+            "request_messages_timestamp": 2,
+        }
+        assert get_aggregated_first_input(row) == "Fallback"
+
+    def test_last_output_uses_latest_timestamp(self) -> None:
+        row = {
+            "output_messages": json_string([{"role": "assistant", "content": "New"}]),
+            "output_messages_timestamp": 2,
+            "response_text": "Old",
+            "response_text_timestamp": 1,
+        }
+        assert get_aggregated_last_output(row) == "New"
+
+    def test_last_output_prefers_output_messages_when_timestamps_match(self) -> None:
+        row = {
+            "output_messages": json_string([{"role": "assistant", "content": "New"}]),
+            "output_messages_timestamp": 1,
+            "response_text": "Old",
+            "response_text_timestamp": 1,
+        }
+        assert get_aggregated_last_output(row) == "New"
+
+    def test_last_output_falls_back_when_preferred_field_is_empty(self) -> None:
+        row = {
+            "output_messages": json_string([{"role": "assistant", "content": ""}]),
+            "output_messages_timestamp": 2,
+            "response_text": "Fallback",
+            "response_text_timestamp": 1,
+        }
+        assert get_aggregated_last_output(row) == "Fallback"
+
+
+class OrganizationAIConversationsEndpointTest(BaseAIConversationsTestCase):
+    view = "sentry-api-0-organization-ai-conversations"
+
+    def test_agents_conversations_url(self) -> None:
+        assert (
+            reverse(
+                "sentry-api-0-organization-agent-conversations",
+                kwargs={"organization_id_or_slug": self.organization.slug},
+            )
+            == f"/api/0/organizations/{self.organization.slug}/agents/conversations/"
+        )
+
+    def do_request(self, query=None, **kwargs):
+        query = query or {}
+
+        return self.client.get(
+            reverse(
+                self.view,
+                kwargs={"organization_id_or_slug": self.organization.slug},
+            ),
+            query,
+            format="json",
+            **kwargs,
+        )
+
+    def test_no_project(self) -> None:
+        response = self.do_request()
+        assert response.status_code == 404
+
+    def test_no_conversations(self) -> None:
+        """Test endpoint returns empty list when there are no spans with gen_ai.conversation.id"""
+        now = before_now(days=10).replace(microsecond=0)
+
+        span = self.create_span(
+            {"description": "test", "sentry_tags": {"status": "ok"}},
+            start_ts=now,
+        )
+        self.store_spans([span])
+
+        query = {
+            "project": [self.project.id],
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 0
+
+    def test_single_query_requires_operation_type(self) -> None:
+        now = before_now(days=10).replace(microsecond=0)
+        self.store_ai_span(conversation_id=uuid4().hex, timestamp=now)
+
+        query = {
+            "project": [self.project.id],
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+
+        assert response.status_code == 200, response.data
+        assert response.data == []
+
+    @patch(
+        "sentry.ai_monitoring.endpoints.organization_ai_conversations.Spans.run_table_query",
+        return_value={"data": []},
+    )
+    def test_single_query_flag_uses_one_eap_query(self, mock_run_table_query: MagicMock) -> None:
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request({"project": [self.project.id]})
+
+        assert response.status_code == 200
+        mock_run_table_query.assert_called_once()
+        assert mock_run_table_query.call_args.kwargs["orderby"] == [
+            "-max(timestamp)",
+            "gen_ai.conversation.id",
+        ]
+
+    def test_single_query_sorts_duration_by_all_gen_ai_spans(self) -> None:
+        now = before_now(days=10).replace(microsecond=0)
+        shorter_id = uuid4().hex
+        longer_id = uuid4().hex
+        self.store_ai_span(
+            conversation_id=shorter_id,
+            timestamp=now,
+            operation_type="ai_client",
+            duration=2000,
+        )
+        self.store_ai_span(
+            conversation_id=longer_id,
+            timestamp=now - timedelta(minutes=1),
+            operation_type="ai_client",
+            duration=1000,
+        )
+        self.store_ai_span(
+            conversation_id=longer_id,
+            timestamp=now - timedelta(minutes=1),
+            operation_type="tool",
+            duration=2000,
+        )
+
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(
+                {
+                    "project": [self.project.id],
+                    "start": (now - timedelta(hours=1)).isoformat(),
+                    "end": (now + timedelta(hours=1)).isoformat(),
+                    "sort": "-duration",
+                }
+            )
+
+        assert response.status_code == 200, response.data
+        assert [row["conversationId"] for row in response.data] == [longer_id, shorter_id]
+
+    @patch(
+        "sentry.ai_monitoring.endpoints.organization_ai_conversations.Spans.run_table_query",
+        return_value={"data": []},
+    )
+    def test_single_query_supports_multiple_explore_and_frontend_sort_aliases(
+        self, mock_run_table_query: MagicMock
+    ) -> None:
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(
+                {
+                    "project": [self.project.id],
+                    "sort": [
+                        "-generationDuration",
+                        "sum_if_gen_ai_usage_input_tokens_gen_ai_operation_type_equals_ai_client",
+                        "duration",
+                        "-conversationId",
+                    ],
+                }
+            )
+
+        assert response.status_code == 200, response.data
+        assert mock_run_table_query.call_args.kwargs["orderby"] == [
+            "-generation_duration",
+            "input_tokens",
+            "duration",
+            "-gen_ai.conversation.id",
+        ]
+
+    @patch(
+        "sentry.ai_monitoring.endpoints.organization_ai_conversations.OrganizationAIConversationsEndpoint._get_conversations_single_query"
+    )
+    def test_single_query_flag_keeps_filtered_requests_on_legacy_path(
+        self, single_query: MagicMock
+    ) -> None:
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(
+                {"project": [self.project.id], "query": "gen_ai.tool.name:search"}
+            )
+
+        assert response.status_code == 200
+        single_query.assert_not_called()
+
+    def test_single_conversation_single_trace(self) -> None:
+        """Test a conversation with all spans in a single trace"""
+        now = before_now(days=20).replace(microsecond=0)
+        trace_id = uuid4().hex
+        conversation_id = uuid4().hex
+
+        first_messages = [{"role": "user", "content": "Hello, I need help"}]
+        last_response_text = "Here is the final answer"
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=4),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            description="Customer Support Agent",
+            agent_name="Customer Support Agent",
+            trace_id=trace_id,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=3),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            input_tokens=LLM_INPUT_TOKENS,
+            output_tokens=LLM_OUTPUT_TOKENS,
+            cost=LLM_COST,
+            trace_id=trace_id,
+            messages=first_messages,
+            response_text="Let me help you with that",
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.execute_tool",
+            operation_type="tool",
+            trace_id=trace_id,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            description="Response Generator",
+            agent_name="Response Generator",
+            trace_id=trace_id,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now,
+            op="gen_ai.chat",
+            status="internal_error",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            input_tokens=LLM_INPUT_TOKENS,
+            output_tokens=LLM_OUTPUT_TOKENS,
+            cost=LLM_COST,
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "Thanks"}],
+            response_text=last_response_text,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["conversationId"] == conversation_id
+        assert conversation["errors"] == 1
+        assert conversation["llmCalls"] == 2
+        assert conversation["toolCalls"] == 1
+        assert conversation["totalTokens"] == LLM_TOKENS * 2
+        assert conversation["inputTokens"] == LLM_INPUT_TOKENS * 2
+        assert conversation["outputTokens"] == LLM_OUTPUT_TOKENS * 2
+        assert conversation["totalCost"] == LLM_COST * 2
+        assert conversation["projectId"] == self.project.id
+        assert conversation["generationDuration"] > 0
+        assert conversation["traceCount"] == 1
+        assert conversation["startTimestamp"] > 0
+        assert conversation["endTimestamp"] > 0
+        assert conversation["endTimestamp"] >= conversation["startTimestamp"]
+        assert conversation["flow"] == ["Customer Support Agent", "Response Generator"]
+        assert len(conversation["traceIds"]) == 1
+        assert conversation["traceIds"][0] == trace_id
+        # firstInput: first user message content from first ai_client span
+        # lastOutput: gen_ai.response.text from last ai_client span
+        assert conversation["firstInput"] == "Hello, I need help"
+        assert conversation["lastOutput"] == last_response_text
+
+    def _store_minimal_conversation(self, conversation_id: str, timestamp) -> None:
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=timestamp,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            cost=LLM_COST,
+            messages=[{"role": "user", "content": "Hello"}],
+            response_text="Hi",
+        )
+
+    def test_direct_hit_header_set_for_single_id_lookup(self) -> None:
+        """A conversation-ID search resolving to exactly one conversation sets the header."""
+        now = before_now(days=15).replace(microsecond=0)
+        conversation_id_1 = uuid4().hex
+        conversation_id_2 = uuid4().hex
+        self._store_minimal_conversation(conversation_id_1, now)
+        self._store_minimal_conversation(conversation_id_2, now)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "query": f"gen_ai.conversation.id:{conversation_id_1}",
+        }
+
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        assert response.data[0]["conversationId"] == conversation_id_1
+        assert response.has_header("X-Sentry-Direct-Hit")
+        assert response["X-Sentry-Direct-Hit"] == "1"
+
+    def test_direct_hit_header_not_set_for_non_id_query(self) -> None:
+        """A non-ID query resolving to a single conversation does not set the header."""
+        now = before_now(days=16).replace(microsecond=0)
+        self._store_minimal_conversation(uuid4().hex, now)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        assert not response.has_header("X-Sentry-Direct-Hit")
+
+    def test_direct_hit_header_not_set_when_id_lookup_matches_nothing(self) -> None:
+        """A conversation-ID search that resolves to no conversation does not set the header."""
+        now = before_now(days=17).replace(microsecond=0)
+        self._store_minimal_conversation(uuid4().hex, now)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "query": f"gen_ai.conversation.id:{uuid4().hex}",
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 0
+        assert not response.has_header("X-Sentry-Direct-Hit")
+
+    def test_conversation_spanning_multiple_traces(self) -> None:
+        """Test a conversation with spans across multiple traces"""
+        now = before_now(days=30).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id_1 = uuid4().hex
+        trace_id_2 = uuid4().hex
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=3),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            description="Research Agent",
+            agent_name="Research Agent",
+            trace_id=trace_id_1,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            cost=LLM_COST,
+            trace_id=trace_id_1,
+            messages=[{"role": "user", "content": "Research this topic"}],
+            response_text="Here are the research results",
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            description="Summarization Agent",
+            agent_name="Summarization Agent",
+            trace_id=trace_id_2,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            cost=LLM_COST,
+            trace_id=trace_id_2,
+            messages=[{"role": "user", "content": "Summarize the results"}],
+            response_text="Here is the summary",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["conversationId"] == conversation_id
+        assert conversation["errors"] == 0
+        assert conversation["llmCalls"] == 2
+        assert conversation["toolCalls"] == 0
+        assert conversation["totalTokens"] == LLM_TOKENS * 2
+        assert conversation["totalCost"] == LLM_COST * 2
+        assert conversation["traceCount"] == 2
+        assert conversation["flow"] == ["Research Agent", "Summarization Agent"]
+        assert len(conversation["traceIds"]) == 2
+        assert set(conversation["traceIds"]) == {trace_id_1, trace_id_2}
+
+    def test_multiple_conversations(self) -> None:
+        """Test multiple conversations are returned correctly"""
+        now = before_now(days=24).replace(microsecond=0)
+        conversation_id_1 = uuid4().hex
+        conversation_id_2 = uuid4().hex
+
+        self.store_ai_span(
+            conversation_id=conversation_id_1,
+            timestamp=now - timedelta(minutes=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            cost=LLM_COST,
+            messages=[{"role": "user", "content": "Hello"}],
+            response_text="Hi there",
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id_2,
+            timestamp=now - timedelta(minutes=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=LLM_TOKENS,
+            cost=LLM_COST,
+            messages=[{"role": "user", "content": "Help me"}],
+            response_text="Sure thing",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 2
+
+        assert response.data[0]["conversationId"] == conversation_id_2
+        assert response.data[1]["conversationId"] == conversation_id_1
+
+    def test_pagination(self) -> None:
+        """Test pagination works correctly"""
+        now = before_now(days=25).replace(microsecond=0)
+
+        for i in range(3):
+            conversation_id = uuid4().hex
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(minutes=i),
+                op="gen_ai.chat",
+                operation_type="ai_client",
+                messages=[{"role": "user", "content": "test"}],
+                response_text="test response",
+            )
+
+        query = {
+            "project": [self.project.id],
+            "per_page": "2",
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 2
+
+        links = parse_link_header(response.headers["Link"])
+        next_link = next(link for link in links.values() if link["rel"] == "next")
+        assert next_link["results"] == "true"
+        assert next_link["cursor"]
+
+        query["cursor"] = next_link["cursor"]
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+    def test_zero_values(self) -> None:
+        """Test conversations with zero values for token metrics but with input/output"""
+        now = before_now(days=26).replace(microsecond=0)
+        conversation_id = uuid4().hex
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            messages=[{"role": "user", "content": "test"}],
+            response_text="test response",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["conversationId"] == conversation_id
+        assert conversation["errors"] == 0
+        assert conversation["llmCalls"] == 1
+        assert conversation["toolCalls"] == 0
+        assert conversation["totalTokens"] == 0
+        assert conversation["inputTokens"] == 0
+        assert conversation["outputTokens"] == 0
+        assert conversation["totalCost"] == 0.0
+        assert conversation["flow"] == []
+        assert len(conversation["traceIds"]) == 1
+        assert conversation["firstInput"] == "test"
+        assert conversation["lastOutput"] == "test response"
+        assert conversation["user"] is None
+
+    def test_mixed_error_statuses(self) -> None:
+        """Test that various error statuses are counted correctly"""
+        now = before_now(days=27).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        statuses = [
+            "ok",
+            "cancelled",
+            "unknown",
+            "internal_error",
+            "resource_exhausted",
+            "invalid_argument",
+        ]
+
+        for i, span_status in enumerate(statuses):
+            extra_kwargs: dict[str, Any] = {}
+            if i == 0:
+                extra_kwargs["messages"] = [{"role": "user", "content": "test"}]
+                extra_kwargs["response_text"] = "test response"
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=i),
+                op="gen_ai.chat",
+                operation_type="ai_client",
+                status=span_status,
+                trace_id=trace_id,
+                **extra_kwargs,
+            )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["errors"] == 3
+
+    def test_flow_ordering(self) -> None:
+        """Test that flow agents are ordered by timestamp"""
+        now = before_now(days=28).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        agents = [
+            ("Agent A", now - timedelta(seconds=5)),
+            ("Agent B", now - timedelta(seconds=3)),
+            ("Agent C", now - timedelta(seconds=1)),
+        ]
+
+        for agent_name, timestamp in agents:
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=timestamp,
+                op="gen_ai.invoke_agent",
+                operation_type="agent",
+                description=agent_name,
+                agent_name=agent_name,
+                trace_id=trace_id,
+            )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "test"}],
+            response_text="test response",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["flow"] == ["Agent A", "Agent B", "Agent C"]
+
+    def test_complete_conversation_data_across_time_range(self) -> None:
+        """Test that conversations show complete data even when spans are outside time range"""
+        now = before_now(days=15).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        old_span_time = now - timedelta(days=7)
+        recent_span_time = now - timedelta(minutes=10)
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=old_span_time,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=100,
+            cost=0.01,
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "old request"}],
+            response_text="old response",
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=recent_span_time,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            tokens=50,
+            input_tokens=35,
+            output_tokens=15,
+            cost=0.005,
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "recent request"}],
+            response_text="recent response",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=2)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["conversationId"] == conversation_id
+        assert conversation["llmCalls"] == 1
+        assert conversation["totalTokens"] == 50
+        assert conversation["inputTokens"] == 35
+        assert conversation["outputTokens"] == 15
+        assert conversation["totalCost"] == 0.005
+
+    def test_first_input_last_output(self) -> None:
+        """Test firstInput and lastOutput are correctly populated from ai_client spans"""
+        now = before_now(days=11).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        first_user_content = "What is the weather?"
+        last_response_text = "The weather is sunny!"
+
+        # First ai_client span with input
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=3),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": first_user_content}],
+            response_text="Let me check...",
+        )
+
+        # Middle ai_client span
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=[
+                {"role": "user", "content": "What is the weather?"},
+                {"role": "assistant", "content": "Let me check..."},
+                {"role": "user", "content": "Thanks"},
+            ],
+            response_text="Processing your request...",
+        )
+
+        # Last ai_client span with output
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "Any updates?"}],
+            response_text=last_response_text,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # firstInput: first user message content from first ai_client span
+        # lastOutput: gen_ai.response.text from last ai_client span
+        assert conversation["firstInput"] == first_user_content
+        assert conversation["lastOutput"] == last_response_text
+
+    def test_conversation_without_ai_client_spans_included(self) -> None:
+        """Conversations are surfaced based on gen_ai.operation.type, even without LLM I/O"""
+        now = before_now(days=12).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # Only agent and tool spans, no ai_client spans with input/output
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            agent_name="Test Agent",
+            trace_id=trace_id,
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.execute_tool",
+            operation_type="tool",
+            tool_name="weather",
+            trace_id=trace_id,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        conversation = response.data[0]
+        assert conversation["conversationId"] == conversation_id
+        assert conversation["toolNames"] == ["weather"]
+        assert conversation["firstInput"] is None
+        assert conversation["lastOutput"] is None
+
+    def test_query_filter_by_tool_name(self) -> None:
+        """Test that a tool-name query filters conversations by the tools they used"""
+        now = before_now(days=24).replace(microsecond=0)
+        conversation_with_tool = uuid4().hex
+        conversation_without_tool = uuid4().hex
+
+        # Conversation that uses the weather tool
+        self.store_ai_span(
+            conversation_id=conversation_with_tool,
+            timestamp=now - timedelta(seconds=3),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            response_text="Let me check",
+        )
+        self.store_ai_span(
+            conversation_id=conversation_with_tool,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.execute_tool",
+            operation_type="tool",
+            tool_name="weather",
+        )
+
+        # Conversation that does not use the weather tool
+        self.store_ai_span(
+            conversation_id=conversation_without_tool,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            messages=[{"role": "user", "content": "Tell me a joke"}],
+            response_text="Here is one",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "query": "gen_ai.tool.name:weather",
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        assert response.data[0]["conversationId"] == conversation_with_tool
+
+    def test_query_filter(self) -> None:
+        """Test that query parameter filters conversations"""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id_1 = uuid4().hex
+        conversation_id_2 = uuid4().hex
+
+        # Conversation 1 with specific response text
+        self.store_ai_span(
+            conversation_id=conversation_id_1,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            response_text="It is sunny today",
+        )
+
+        # Conversation 2 with different response text
+        self.store_ai_span(
+            conversation_id=conversation_id_2,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            messages=[{"role": "user", "content": "Tell me the news"}],
+            response_text="Here are the latest headlines",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "query": f"gen_ai.conversation.id:{conversation_id_1}",
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+        assert response.data[0]["conversationId"] == conversation_id_1
+
+    def test_conversation_with_user_data(self) -> None:
+        """Test that user data is extracted from spans and returned in the response"""
+        now = before_now(days=13).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # First span with user data (earliest timestamp)
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=3),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            user_id="user-123",
+            user_email="test@example.com",
+            user_username="testuser",
+            user_ip="192.168.1.1",
+            messages=[{"role": "user", "content": "Hello"}],
+            response_text="Hi there",
+        )
+
+        # Second span with different user data (should not override first)
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            user_id="user-456",
+            user_email="other@example.com",
+            messages=[{"role": "user", "content": "Thanks"}],
+            response_text="You're welcome",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # User should be from the first span (earliest timestamp)
+        assert conversation["user"] is not None
+        assert conversation["user"]["id"] == "user-123"
+        assert conversation["user"]["email"] == "test@example.com"
+        assert conversation["user"]["username"] == "testuser"
+        assert conversation["user"]["ip_address"] == "192.168.1.1"
+
+    def test_conversation_with_partial_user_data(self) -> None:
+        """Test that user is returned even with partial user data"""
+        now = before_now(days=14).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # Span with only email
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            user_email="partial@example.com",
+            messages=[{"role": "user", "content": "Hello"}],
+            response_text="Hi there",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["user"] is not None
+        assert conversation["user"]["id"] is None
+        assert conversation["user"]["email"] == "partial@example.com"
+        assert conversation["user"]["username"] is None
+        assert conversation["user"]["ip_address"] is None
+
+    def test_new_format_input_output_messages(self) -> None:
+        """Test that new format gen_ai.input.messages and gen_ai.output.messages are parsed correctly"""
+        now = before_now(days=16).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        first_user_content = "What is the weather today?"
+        last_response_text = "It's sunny and warm!"
+
+        # New format with parts array
+        input_messages = [
+            {
+                "role": "user",
+                "parts": [{"type": "text", "content": first_user_content}],
+            }
+        ]
+        output_messages = [
+            {
+                "role": "assistant",
+                "parts": [{"type": "text", "content": last_response_text}],
+            }
+        ]
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            input_messages=input_messages,
+            output_messages=output_messages,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["firstInput"] == first_user_content
+        assert conversation["lastOutput"] == last_response_text
+
+    def test_new_format_with_multiple_text_parts(self) -> None:
+        """Test that multiple text parts are concatenated correctly"""
+        now = before_now(days=17).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # New format with multiple text parts
+        input_messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "content": "First part."},
+                    {"type": "text", "content": "Second part."},
+                ],
+            }
+        ]
+        output_messages = [
+            {
+                "role": "assistant",
+                "parts": [
+                    {"type": "text", "content": "Response part one."},
+                    {"type": "text", "content": "Response part two."},
+                ],
+            }
+        ]
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            input_messages=input_messages,
+            output_messages=output_messages,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # Multiple text parts should be concatenated with newline
+        assert conversation["firstInput"] == "First part.\nSecond part."
+        assert conversation["lastOutput"] == "Response part one.\nResponse part two."
+
+    def test_new_format_priority_over_old_format(self) -> None:
+        """Test that new format attributes take priority over old format when both exist"""
+        now = before_now(days=18).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        old_user_content = "Old format user message"
+        old_response_text = "Old format response"
+        new_user_content = "New format user message"
+        new_response_text = "New format response"
+
+        # Old format
+        old_messages = [{"role": "user", "content": old_user_content}]
+
+        # New format with parts array
+        input_messages = [
+            {
+                "role": "user",
+                "parts": [{"type": "text", "content": new_user_content}],
+            }
+        ]
+        output_messages = [
+            {
+                "role": "assistant",
+                "parts": [{"type": "text", "content": new_response_text}],
+            }
+        ]
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=old_messages,  # Old format
+            response_text=old_response_text,  # Old format
+            input_messages=input_messages,  # New format (should take priority)
+            output_messages=output_messages,  # New format (should take priority)
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # New format should take priority
+        assert conversation["firstInput"] == new_user_content
+        assert conversation["lastOutput"] == new_response_text
+
+    def test_new_format_parts_structure(self) -> None:
+        """Test that new format with parts structure works correctly"""
+        now = before_now(days=19).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        user_content = "Weather in Paris?"
+        response_content = "It's rainy, 57°F"
+
+        input_messages = [
+            {
+                "role": "user",
+                "parts": [{"type": "text", "content": user_content}],
+            }
+        ]
+        output_messages = [
+            {
+                "role": "assistant",
+                "parts": [{"type": "text", "content": response_content}],
+            }
+        ]
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            input_messages=input_messages,
+            output_messages=output_messages,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        assert response.data[0]["firstInput"] == user_content
+        assert response.data[0]["lastOutput"] == response_content
+
+    def test_structured_user_part_populates_first_input(self) -> None:
+        now = before_now(days=19).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        input_messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "object",
+                        "data": {"question": "Weather in Paris?"},
+                    }
+                ],
+            }
+        ]
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            input_messages=input_messages,
+            output_messages=[{"role": "assistant", "content": "It's rainy"}],
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert response.data[0]["firstInput"] == (
+            '{"type": "object", "data": {"question": "Weather in Paris?"}}'
+        )
+
+    def test_tool_names_populated(self) -> None:
+        """Test that toolNames is populated with distinct tool names from tool spans"""
+        now = before_now(days=21).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        spans = [
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=5),
+                op="gen_ai.chat",
+                operation_type="ai_client",
+                trace_id=trace_id,
+                messages=[{"role": "user", "content": "Use tools to help me"}],
+                response_text="I'll use some tools",
+                store=False,
+            ),
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=4),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                trace_id=trace_id,
+                tool_name="weather_api",
+                store=False,
+            ),
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=3),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                trace_id=trace_id,
+                tool_name="calculator",
+                store=False,
+            ),
+            # Duplicate tool call should not create duplicate entry
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=2),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                trace_id=trace_id,
+                tool_name="weather_api",
+                store=False,
+            ),
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=1),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                trace_id=trace_id,
+                tool_name="search",
+                store=False,
+            ),
+        ]
+        self.store_spans(spans)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # toolNames should be sorted and distinct
+        assert conversation["toolNames"] == ["calculator", "search", "weather_api"]
+        assert conversation["toolCalls"] == 4
+        assert conversation["toolErrors"] == 0
+
+    def test_tool_errors_counted(self) -> None:
+        """Test that toolErrors counts only failed tool spans"""
+        now = before_now(days=29).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        spans = [
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=5),
+                op="gen_ai.chat",
+                operation_type="ai_client",
+                trace_id=trace_id,
+                messages=[{"role": "user", "content": "Run some tools"}],
+                response_text="Running tools",
+                store=False,
+            ),
+            # Successful tool call
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=4),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                status="ok",
+                trace_id=trace_id,
+                tool_name="weather_api",
+                store=False,
+            ),
+            # Failed tool call
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=3),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                status="internal_error",
+                trace_id=trace_id,
+                tool_name="database_query",
+                store=False,
+            ),
+            # Another failed tool call
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=2),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                status="resource_exhausted",
+                trace_id=trace_id,
+                tool_name="external_api",
+                store=False,
+            ),
+            # Successful tool call
+            self.store_ai_span(
+                conversation_id=conversation_id,
+                timestamp=now - timedelta(seconds=1),
+                op="gen_ai.execute_tool",
+                operation_type="tool",
+                status="ok",
+                trace_id=trace_id,
+                tool_name="calculator",
+                store=False,
+            ),
+        ]
+        self.store_spans(spans)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["toolCalls"] == 4
+        assert conversation["toolErrors"] == 2
+        assert set(conversation["toolNames"]) == {
+            "weather_api",
+            "database_query",
+            "external_api",
+            "calculator",
+        }
+
+    def test_empty_tool_names_when_no_tool_calls(self) -> None:
+        """Test that toolNames is empty when there are no tool calls"""
+        now = before_now(days=23).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # Only LLM calls, no tool calls
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            messages=[{"role": "user", "content": "Hello"}],
+            response_text="Hi there",
+        )
+
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            agent_name="Test Agent",
+            trace_id=trace_id,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        assert conversation["toolNames"] == []
+        assert conversation["toolCalls"] == 0
+        assert conversation["toolErrors"] == 0
+
+    def test_tokens_only_counted_from_ai_client_spans(self) -> None:
+        """Test that tokens and costs are only counted from ai_client spans, not agent spans.
+
+        This prevents double counting when both agent spans and their
+        child ai_client spans have token/cost data.
+        """
+        now = before_now(days=24).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        trace_id = uuid4().hex
+
+        # Agent span with tokens/cost (should NOT be counted)
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=2),
+            op="gen_ai.invoke_agent",
+            operation_type="agent",
+            description="Test Agent",
+            agent_name="Test Agent",
+            trace_id=trace_id,
+            tokens=500,
+            input_tokens=350,
+            output_tokens=150,
+            cost=0.05,
+        )
+
+        # ai_client span with tokens/cost (should be counted)
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=now - timedelta(seconds=1),
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=trace_id,
+            tokens=100,
+            input_tokens=70,
+            output_tokens=30,
+            cost=0.01,
+            messages=[{"role": "user", "content": "test"}],
+            response_text="test response",
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200
+        assert len(response.data) == 1
+
+        conversation = response.data[0]
+        # Tokens and cost should only come from ai_client span (100, 0.01)
+        # NOT the sum of both spans (600, 0.06) which would be double counting
+        assert conversation["totalTokens"] == 100
+        assert conversation["inputTokens"] == 70
+        assert conversation["outputTokens"] == 30
+        assert conversation["totalCost"] == 0.01
+        # Verify counts are correct
+        assert conversation["llmCalls"] == 1
+        assert conversation["flow"] == ["Test Agent"]
+
+    def _store_conversation_span(self, conversation_id, timestamp, project=None):
+        """Store one minimal ai_client span so a conversation shows up in the list."""
+        self.store_ai_span(
+            conversation_id=conversation_id,
+            timestamp=timestamp,
+            op="gen_ai.chat",
+            operation_type="ai_client",
+            trace_id=uuid4().hex,
+            messages=[{"role": "user", "content": "hello"}],
+            response_text="hi",
+            project=project,
+        )
+
+    def test_title_is_null_without_metadata(self) -> None:
+        """A conversation with no stored metadata still exposes a null title."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+
+        self._store_conversation_span(conversation_id, now)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] is None
+
+    def test_title_from_metadata(self) -> None:
+        """A stored title for this project is returned on the conversation."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+
+        self._store_conversation_span(conversation_id, now)
+        self.create_ai_conversation_metadata(
+            project=self.project,
+            conversation_id=conversation_id,
+            title="Refund a duplicate charge",
+            title_source_timestamp=now,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        with self.feature("organizations:gen-ai-conversations-single-query"):
+            response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] == "Refund a duplicate charge"
+
+    def test_title_is_null_when_metadata_row_is_untitled(self) -> None:
+        """A metadata row that never got a title does not change the response."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+
+        self._store_conversation_span(conversation_id, now)
+        self.create_ai_conversation_metadata(
+            project=self.project,
+            conversation_id=conversation_id,
+            title=None,
+        )
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] is None
+
+    def test_title_not_taken_from_unrelated_project(self) -> None:
+        """A same-named conversation in another project must not supply the title."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        other_project = self.create_project(organization=self.organization)
+
+        self._store_conversation_span(conversation_id, now)
+        self.create_ai_conversation_metadata(
+            project=other_project,
+            conversation_id=conversation_id,
+            title="Someone else's conversation",
+            title_source_timestamp=now,
+        )
+
+        query = {
+            "project": [self.project.id, other_project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] is None
+
+    def test_title_for_conversation_spanning_projects(self) -> None:
+        """Equal source timestamps: lowest project id breaks the tie."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        lower_project = self.create_project(organization=self.organization)
+        higher_project = self.create_project(organization=self.organization)
+        assert lower_project.id < higher_project.id
+
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=2), project=lower_project
+        )
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=1), project=higher_project
+        )
+
+        self.create_ai_conversation_metadata(
+            project=lower_project,
+            conversation_id=conversation_id,
+            title="Lower project id title",
+            title_source_timestamp=now,
+        )
+        self.create_ai_conversation_metadata(
+            project=higher_project,
+            conversation_id=conversation_id,
+            title="Higher project id title",
+            title_source_timestamp=now,
+        )
+
+        query = {
+            "project": [lower_project.id, higher_project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] == "Lower project id title"
+
+    def test_title_earliest_source_timestamp_wins_across_projects(self) -> None:
+        """Across projects, earliest title_source_timestamp wins (not lowest project id)."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        lower_project = self.create_project(organization=self.organization)
+        higher_project = self.create_project(organization=self.organization)
+        assert lower_project.id < higher_project.id
+
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=2), project=lower_project
+        )
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=1), project=higher_project
+        )
+
+        self.create_ai_conversation_metadata(
+            project=lower_project,
+            conversation_id=conversation_id,
+            title="Later titled project",
+            title_source_timestamp=now - timedelta(seconds=1),
+        )
+        self.create_ai_conversation_metadata(
+            project=higher_project,
+            conversation_id=conversation_id,
+            title="Earlier titled project",
+            title_source_timestamp=now - timedelta(seconds=2),
+        )
+
+        query = {
+            "project": [lower_project.id, higher_project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] == "Earlier titled project"
+
+    def test_title_found_when_only_higher_project_id_has_one(self) -> None:
+        """Every project the conversation spans is searched, not just the lowest."""
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+        lower_project = self.create_project(organization=self.organization)
+        higher_project = self.create_project(organization=self.organization)
+        assert lower_project.id < higher_project.id
+
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=2), project=lower_project
+        )
+        self._store_conversation_span(
+            conversation_id, now - timedelta(seconds=1), project=higher_project
+        )
+
+        self.create_ai_conversation_metadata(
+            project=higher_project,
+            conversation_id=conversation_id,
+            title="Higher project id title",
+            title_source_timestamp=now,
+        )
+
+        query = {
+            "project": [lower_project.id, higher_project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] == "Higher project id title"
+
+    @patch(
+        "sentry.ai_monitoring.endpoints.organization_ai_conversations.fetch_conversation_titles",
+        side_effect=Exception("metadata unavailable"),
+    )
+    def test_title_lookup_failure_does_not_break_list(
+        self, mock_fetch_conversation_titles: MagicMock
+    ) -> None:
+        now = before_now(days=25).replace(microsecond=0)
+        conversation_id = uuid4().hex
+
+        self._store_conversation_span(conversation_id, now)
+
+        query = {
+            "project": [self.project.id],
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+
+        response = self.do_request(query)
+        assert response.status_code == 200, response.data
+        assert len(response.data) == 1
+        assert response.data[0]["title"] is None
+        assert mock_fetch_conversation_titles.call_count == 1

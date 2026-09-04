@@ -1,3 +1,4 @@
+import {RouteComponentPropsFixture} from 'sentry-fixture/routeComponentPropsFixture';
 import {SecretFixture} from 'sentry-fixture/secret';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
@@ -8,31 +9,27 @@ import {
   userEvent,
 } from 'sentry-test/reactTestingLibrary';
 
-import OrganizationsStore from 'sentry/stores/organizationsStore';
-import type {Secret} from 'sentry/views/settings/featureFlags/changeTracking';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
 import {OrganizationFeatureFlagsProviderRow} from 'sentry/views/settings/featureFlags/changeTracking/organizationFeatureFlagsProviderRow';
 
-describe('OrganizationFeatureFlagsProviderRow', function () {
-  const {organization, router} = initializeOrg();
+describe('OrganizationFeatureFlagsProviderRow', () => {
+  const {organization} = initializeOrg();
 
   const removeSecret = jest.fn();
 
-  const secret: Secret = SecretFixture();
+  const secret = SecretFixture();
 
   const defaultProps = {
     organization,
     isRemoving: false,
     secret,
     removeSecret,
-    router,
-    location: router.location,
-    params: {orgId: organization.slug},
-    routes: router.routes,
+    ...RouteComponentPropsFixture({params: {orgId: organization.slug}}),
     route: {},
-    routeParams: router.params,
   };
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/users/1234/',
       body: {},
@@ -40,33 +37,45 @@ describe('OrganizationFeatureFlagsProviderRow', function () {
     OrganizationsStore.addOrReplace(organization);
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('shows secret and provider name', function () {
-    render(<OrganizationFeatureFlagsProviderRow {...defaultProps} />);
+  it('shows secret and provider name', () => {
+    render(
+      <SimpleTable>
+        <OrganizationFeatureFlagsProviderRow {...defaultProps} />
+      </SimpleTable>
+    );
 
     expect(screen.getByLabelText('Secret preview')).toHaveTextContent('123abc*****');
     expect(screen.getByText('launchdarkly')).toBeInTheDocument();
   });
 
-  describe('removing', function () {
-    it('does not allow to remove without access', function () {
+  describe('removing', () => {
+    it('does not allow to remove without access', () => {
       const props = {
         ...defaultProps,
         removeSecret: undefined,
       };
 
-      render(<OrganizationFeatureFlagsProviderRow {...props} />);
+      render(
+        <SimpleTable>
+          <OrganizationFeatureFlagsProviderRow {...props} />
+        </SimpleTable>
+      );
 
       expect(
         screen.getByRole('button', {name: 'Remove secret for launchdarkly provider'})
       ).toBeDisabled();
     });
 
-    it('allows to remove', async function () {
-      render(<OrganizationFeatureFlagsProviderRow {...defaultProps} />);
+    it('allows to remove', async () => {
+      render(
+        <SimpleTable>
+          <OrganizationFeatureFlagsProviderRow {...defaultProps} />
+        </SimpleTable>
+      );
       renderGlobalModal();
 
       expect(
@@ -82,13 +91,17 @@ describe('OrganizationFeatureFlagsProviderRow', function () {
       expect(removeSecret).toHaveBeenCalledWith(1); // the id of the secret
     });
 
-    it('does not allow to remove while removing in progress', function () {
+    it('does not allow to remove while removing in progress', () => {
       const props = {
         ...defaultProps,
         isRemoving: true,
       };
 
-      render(<OrganizationFeatureFlagsProviderRow {...props} />);
+      render(
+        <SimpleTable>
+          <OrganizationFeatureFlagsProviderRow {...props} />
+        </SimpleTable>
+      );
 
       expect(
         screen.getByRole('button', {name: 'Remove secret for launchdarkly provider'})

@@ -3,13 +3,11 @@
 # in modules such as this one where hybrid cloud data models or service classes are
 # defined, because we want to reflect on type annotations and avoid forward references.
 
-import ast
 import logging
 import traceback
 
+import psycopg2.errors
 import sentry_sdk
-from django.apps import apps
-from django.contrib.postgres.fields.array import ArrayField
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.serializers import deserialize, serialize
 from django.core.serializers.base import DeserializationError
@@ -90,28 +88,6 @@ def get_existing_import_chunk(
         min_inserted_pk=found_data["min_inserted_pk"],
         max_inserted_pk=found_data["max_inserted_pk"],
     )
-
-
-def fixup_array_fields[T: (str, str | bytes)](json_data: T) -> T:
-    # preserve for 3 versions as per https://docs.sentry.io/concepts/migration/#version-support-window
-    # so probably 2025.09 this can go away?
-    try:
-        contents = json.loads(json_data)
-    except Exception:  # let the actual import/export produce a better message
-        return json_data
-
-    for dct in contents:
-        model = apps.get_model(dct["model"])
-        for k, v in dct["fields"].items():
-            if isinstance(model._meta.get_field(k), ArrayField) and isinstance(v, str):
-                try:
-                    json.loads(v)
-                except Exception:
-                    # old ArrayField: value was not properly encoded as json
-                    dct["fields"][k] = json.dumps(ast.literal_eval(v))
-                else:
-                    pass
-    return json.dumps(contents)
 
 
 class UniversalImportExportService(ImportExportService):
@@ -217,16 +193,8 @@ class UniversalImportExportService(ImportExportService):
                 logger.info("import_by_model.already_imported", extra=extra)
                 return existing_import_chunk
 
-            # We don't need the control and region silo synced into the correct `*Replica` tables
-            # immediately. The locally silo-ed versions of the models are written by the scripts
-            # themselves, and the remote versions will be synced a few minutes later, well before
-            # any users are likely ot need to get ahold of them to view actual data in the UI.
             using = router.db_for_write(model)
-            # HACK(azaslavsky): Need to figure out why `OrganizationMemberTeam` in particular is failing, but we can just use async outboxes for it for now.
-            with outbox_context(
-                transaction.atomic(using=using),
-                flush=import_model_name != "sentry.organizationmemberteam",
-            ):
+            with outbox_context(transaction.atomic(using=using), flush=True):
                 ok_relocation_scopes = import_scope.value
                 out_pk_map = PrimaryKeyMap()
                 min_old_pk = 0
@@ -235,103 +203,115 @@ class UniversalImportExportService(ImportExportService):
                 max_inserted_pk: int | None = None
                 last_seen_ordinal = min_ordinal - 1
 
-                json_data = fixup_array_fields(json_data)
-
-                for deserialized_object in deserialize(
-                    "json", json_data, use_natural_keys=False, ignorenonexistent=True
-                ):
-                    model_instance = deserialized_object.object
-                    inst_model_name = get_model_name(model_instance)
-
-                    if not isinstance(model_instance, BaseModel):
+                # Do access checks on json dict data.
+                for item in json.loads(json_data):
+                    model_name = item["model"]
+                    inst_model_name = NormalizedModelName(model_name)
+                    model_class = get_model(inst_model_name)
+                    if not model_class:
+                        return RpcImportError(
+                            kind=RpcImportErrorKind.UnexpectedModel,
+                            on=InstanceID(model=model_name, ordinal=None),
+                            left_pk=item["pk"],
+                            reason=f"Received non-sentry model of kind `{model_name}`",
+                        )
+                    if not issubclass(model_class, BaseModel):
                         return RpcImportError(
                             kind=RpcImportErrorKind.UnexpectedModel,
                             on=InstanceID(model=str(inst_model_name), ordinal=None),
-                            left_pk=model_instance.pk,
+                            left_pk=item["pk"],
                             reason=f"Received non-sentry model of kind `{inst_model_name}`",
                         )
+                    if model_class._meta.app_label in EXCLUDED_APPS:
+                        return RpcImportError(
+                            kind=RpcImportErrorKind.UnexpectedModel,
+                            on=InstanceID(model=str(inst_model_name), ordinal=None),
+                            left_pk=item["pk"],
+                            reason=f"Received excluded model of kind `{inst_model_name}`",
+                        )
 
-                    if model_instance._meta.app_label not in EXCLUDED_APPS or model_instance:
-                        if model_instance.get_possible_relocation_scopes() & ok_relocation_scopes:
-                            if inst_model_name != batch_model_name:
-                                return RpcImportError(
-                                    kind=RpcImportErrorKind.UnexpectedModel,
-                                    on=InstanceID(model=str(inst_model_name), ordinal=None),
-                                    left_pk=model_instance.pk,
-                                    reason=f"Received model of kind `{inst_model_name}` when `{batch_model_name}` was expected",
-                                )
+                    if inst_model_name != batch_model_name:
+                        return RpcImportError(
+                            kind=RpcImportErrorKind.UnexpectedModel,
+                            on=InstanceID(model=str(inst_model_name), ordinal=None),
+                            left_pk=item["pk"],
+                            reason=f"Received model of kind `{inst_model_name}` when `{batch_model_name}` was expected",
+                        )
 
-                            for f in filters:
-                                if getattr(model_instance, f.field, None) not in f.values:
-                                    break
-                            else:
-                                try:
-                                    # We can only be sure `get_relocation_scope()` will be correct
-                                    # if it is fired AFTER normalization, as some
-                                    # `get_relocation_scope()` methods rely on being able to
-                                    # correctly resolve foreign keys, which is only possible after
-                                    # normalization.
-                                    old_pk = model_instance.normalize_before_relocation_import(
-                                        in_pk_map, import_scope, import_flags
-                                    )
-                                    if old_pk is None:
-                                        continue
+                    if not (model_class.get_possible_relocation_scopes() & ok_relocation_scopes):
+                        continue
 
-                                    # Now that the model has been normalized, we can ensure that
-                                    # this particular instance has a `RelocationScope` that permits
-                                    # importing.
-                                    if (
-                                        not model_instance.get_relocation_scope()
-                                        in ok_relocation_scopes
-                                    ):
-                                        continue
+                    # Convert the dict into a model object as it is allowed.
+                    deserialize_result = deserialize(
+                        "json", json.dumps([item]), use_natural_keys=False, ignorenonexistent=True
+                    )
+                    model_instance = next(deserialize_result).object
+                    assert isinstance(model_instance, BaseModel)
 
-                                    # Perform the actual database write.
-                                    written = model_instance.write_relocation_import(
-                                        import_scope, import_flags
-                                    )
-                                    if written is None:
-                                        continue
+                    for f in filters:
+                        if getattr(model_instance, f.field, None) not in f.values:
+                            break
+                    else:
+                        try:
+                            # We can only be sure `get_relocation_scope()` will be correct
+                            # if it is fired AFTER normalization, as some
+                            # `get_relocation_scope()` methods rely on being able to
+                            # correctly resolve foreign keys, which is only possible after
+                            # normalization.
+                            old_pk = model_instance.normalize_before_relocation_import(
+                                in_pk_map, import_scope, import_flags
+                            )
+                            if old_pk is None:
+                                continue
 
-                                    # For models that may have circular references to themselves
-                                    # (unlikely), keep track of the new pk in the input map as well.
-                                    last_seen_ordinal += 1
-                                    new_pk, import_kind = written
-                                    slug = getattr(model_instance, "slug", None)
-                                    in_pk_map.insert(
-                                        inst_model_name, old_pk, new_pk, import_kind, slug
-                                    )
-                                    out_pk_map.insert(
-                                        inst_model_name, old_pk, new_pk, import_kind, slug
-                                    )
+                            # Now that the model has been normalized, we can ensure that
+                            # this particular instance has a `RelocationScope` that permits
+                            # importing.
+                            if model_instance.get_relocation_scope() not in ok_relocation_scopes:
+                                continue
 
-                                    # Do a little bit of book-keeping for our future `ImportChunk`.
-                                    if min_old_pk == 0:
-                                        min_old_pk = old_pk
-                                    if old_pk > max_old_pk:
-                                        max_old_pk = old_pk
-                                    if import_kind == ImportKind.Inserted:
-                                        if min_inserted_pk is None:
-                                            min_inserted_pk = new_pk
-                                        if max_inserted_pk is None or new_pk > max_inserted_pk:
-                                            max_inserted_pk = new_pk
+                            # Perform the actual database write.
+                            written = model_instance.write_relocation_import(
+                                import_scope, import_flags
+                            )
+                            if written is None:
+                                continue
 
-                                except DjangoValidationError as e:
-                                    errs = {field: error for field, error in e.message_dict.items()}
-                                    return RpcImportError(
-                                        kind=RpcImportErrorKind.ValidationError,
-                                        on=InstanceID(import_model_name, ordinal=last_seen_ordinal),
-                                        left_pk=model_instance.pk,
-                                        reason=f"Django validation error encountered: {errs}",
-                                    )
+                            # For models that may have circular references to themselves
+                            # (unlikely), keep track of the new pk in the input map as well.
+                            last_seen_ordinal += 1
+                            new_pk, import_kind = written
+                            slug = getattr(model_instance, "slug", None)
+                            in_pk_map.insert(inst_model_name, old_pk, new_pk, import_kind, slug)
+                            out_pk_map.insert(inst_model_name, old_pk, new_pk, import_kind, slug)
 
-                                except DjangoRestFrameworkValidationError as e:
-                                    return RpcImportError(
-                                        kind=RpcImportErrorKind.ValidationError,
-                                        on=InstanceID(import_model_name, ordinal=last_seen_ordinal),
-                                        left_pk=model_instance.pk,
-                                        reason=str(e),
-                                    )
+                            # Do a little bit of book-keeping for our future `ImportChunk`.
+                            if min_old_pk == 0:
+                                min_old_pk = old_pk
+                            if old_pk > max_old_pk:
+                                max_old_pk = old_pk
+                            if import_kind == ImportKind.Inserted:
+                                if min_inserted_pk is None:
+                                    min_inserted_pk = new_pk
+                                if max_inserted_pk is None or new_pk > max_inserted_pk:
+                                    max_inserted_pk = new_pk
+
+                        except DjangoValidationError as e:
+                            errs = {field: error for field, error in e.message_dict.items()}
+                            return RpcImportError(
+                                kind=RpcImportErrorKind.ValidationError,
+                                on=InstanceID(import_model_name, ordinal=last_seen_ordinal),
+                                left_pk=model_instance.pk,
+                                reason=f"Django validation error encountered: {errs}",
+                            )
+
+                        except DjangoRestFrameworkValidationError as e:
+                            return RpcImportError(
+                                kind=RpcImportErrorKind.ValidationError,
+                                on=InstanceID(import_model_name, ordinal=last_seen_ordinal),
+                                left_pk=model_instance.pk,
+                                reason=str(e),
+                            )
 
                 # If the `last_seen_ordinal` has not been incremented, no actual writes were done.
                 if last_seen_ordinal == min_ordinal - 1:
@@ -396,7 +376,7 @@ class UniversalImportExportService(ImportExportService):
                     max_inserted_pk=max_inserted_pk,
                 )
 
-        except DeserializationError as err:
+        except (DeserializationError, json.JSONDecodeError) as err:
             sentry_sdk.capture_exception()
             reason = str(err) or "No additional information"
             if err.__cause__:
@@ -409,29 +389,24 @@ class UniversalImportExportService(ImportExportService):
             )
 
         except DatabaseError as e:
-            # This race-detection code is a bit hacky, since it relies on string matching the error
-            # description from postgres but... ¯\_(ツ)_/¯.
-            if len(e.args) > 0:
-                desc = str(e.args[0])
-
-                # Any `UniqueViolation` indicates the possibility that we've lost a race. Check for
-                # this explicitly by seeing if an `ImportChunk` with a matching unique signature has
-                # been written to the database already.
-                if desc.startswith("UniqueViolation"):
-                    try:
-                        existing_import_chunk = get_existing_import_chunk(
-                            batch_model_name, import_flags, import_chunk_type, min_ordinal
-                        )
-                        if existing_import_chunk is not None:
-                            logger.warning("import_by_model.lost_import_race", extra=extra)
-                            return existing_import_chunk
-                    except Exception:
-                        sentry_sdk.capture_exception()
-                        return RpcImportError(
-                            kind=RpcImportErrorKind.Unknown,
-                            on=InstanceID(import_model_name),
-                            reason=f"Unknown internal error occurred: {traceback.format_exc()}",
-                        )
+            # Any `UniqueViolation` indicates the possibility that we've lost a race. Check for
+            # this explicitly by seeing if an `ImportChunk` with a matching unique signature has
+            # been written to the database already.
+            if isinstance(e.__cause__, psycopg2.errors.UniqueViolation):
+                try:
+                    existing_import_chunk = get_existing_import_chunk(
+                        batch_model_name, import_flags, import_chunk_type, min_ordinal
+                    )
+                    if existing_import_chunk is not None:
+                        logger.warning("import_by_model.lost_import_race", extra=extra)
+                        return existing_import_chunk
+                except Exception:
+                    sentry_sdk.capture_exception()
+                    return RpcImportError(
+                        kind=RpcImportErrorKind.Unknown,
+                        on=InstanceID(import_model_name),
+                        reason=f"Unknown internal error occurred: {traceback.format_exc()}",
+                    )
 
             # All non-`ImportChunk`-related kinds of `IntegrityError` mean that the user's data was
             # not properly sanitized against collision. This could be the fault of either the import
@@ -523,7 +498,7 @@ class UniversalImportExportService(ImportExportService):
                 # they have, store it in the `pk_map`, and then yield it again. If they have not, we
                 # know that some upstream model was filtered out, so we ignore this one as well.
                 for item in queryset_iterator:
-                    if not item.get_relocation_scope() in allowed_relocation_scopes:
+                    if item.get_relocation_scope() not in allowed_relocation_scopes:
                         continue
 
                     model = type(item)
@@ -567,6 +542,7 @@ class UniversalImportExportService(ImportExportService):
                             # keep track of the new pk in the input map as well.
                             in_pk_map.insert(model_name, item.pk, item.pk, ImportKind.Inserted)
                             out_pk_map.insert(model_name, item.pk, item.pk, ImportKind.Inserted)
+                            item.normalize_before_relocation_export()
                             yield item
 
             def yield_objects():

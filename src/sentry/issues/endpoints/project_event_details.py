@@ -2,27 +2,35 @@ from datetime import datetime
 from typing import Any
 
 import sentry_sdk
+from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
 from snuba_sdk import Condition
 
-from sentry import eventstore, options
+from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
 from sentry.api.serializers import IssueEventSerializer, serialize
-from sentry.api.serializers.models.event import IssueEventSerializerResponse
-from sentry.api.utils import get_date_range_from_params
-from sentry.eventstore.models import Event, GroupEvent
+from sentry.api.serializers.models.event import GroupEventDetailsResponse
+from sentry.api.utils import get_date_range_from_params, to_valid_int_id
+from sentry.apidocs.constants import (
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NOT_FOUND,
+    RESPONSE_UNAUTHORIZED,
+)
+from sentry.apidocs.examples.event_examples import EventExamples
+from sentry.apidocs.parameters import EventParams, GlobalParams
+from sentry.apidocs.response_types import DetailResponse
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.exceptions import InvalidParams
 from sentry.models.project import Project
-
-
-class GroupEventDetailsResponse(IssueEventSerializerResponse):
-    nextEventID: str | None
-    previousEventID: str | None
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event, GroupEvent
+from sentry.types.ratelimit import RateLimit, RateLimitCategory
 
 
 def wrap_event_response(
@@ -31,15 +39,20 @@ def wrap_event_response(
     environments: list[str],
     include_full_release_data: bool = False,
     conditions: list[Condition] | None = None,
+    legacy_conditions: list[Any] | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-) -> GroupEventDetailsResponse:
+) -> GroupEventDetailsResponse | None:
     event_data = serialize(
         event,
         request_user,
         IssueEventSerializer(),
         include_full_release_data=include_full_release_data,
     )
+
+    if event_data is None:
+        return None
+
     # Used for paginating through events of a single issue in group details
     # Skip next/prev for issueless events
     next_event_id = None
@@ -47,6 +60,8 @@ def wrap_event_response(
 
     if conditions is None:
         conditions = []
+    if legacy_conditions is None:
+        legacy_conditions = []
 
     if event.group_id:
         if options.get("eventstore.adjacent_event_ids_use_snql"):
@@ -61,12 +76,15 @@ def wrap_event_response(
                 end=end,
             )
         else:
-            legacy_conditions = []
+            filter_conditions: list[Any] = []
             if environments:
-                legacy_conditions.append(["environment", "IN", environments])
+                filter_conditions.append(["environment", "IN", environments])
+
+            if legacy_conditions:
+                filter_conditions.extend(legacy_conditions)
 
             _filter = eventstore.Filter(
-                conditions=legacy_conditions,
+                conditions=filter_conditions,
                 project_ids=[event.project_id],
                 group_ids=[event.group_id],
                 start=start,
@@ -83,28 +101,48 @@ def wrap_event_response(
     return event_data
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Events"])
+@cell_silo_endpoint
 class ProjectEventDetailsEndpoint(ProjectEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
-        "GET": ApiPublishStatus.EXPERIMENTAL,
+        "GET": ApiPublishStatus.PUBLIC,
     }
 
-    def get(self, request: Request, project: Project, event_id: str) -> Response:
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "GET": {
+                RateLimitCategory.IP: RateLimit(limit=5, window=1),
+                RateLimitCategory.USER: RateLimit(limit=5, window=1),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=5, window=1),
+            },
+        }
+    )
+
+    @extend_schema(
+        operation_id="getProjectEvent",
+        summary="Retrieve an Event for a Project",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            EventParams.EVENT_ID,
+            GlobalParams.ENVIRONMENT,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ProjectEventDetailsResponse", GroupEventDetailsResponse
+            ),
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=EventExamples.GROUP_EVENT_DETAILS,
+    )
+    def get(
+        self, request: Request, project: Project, event_id: str
+    ) -> Response[GroupEventDetailsResponse] | Response[DetailResponse]:
         """
-        Retrieve an Event for a Project
-        ```````````````````````````````
-
         Return details on an individual event.
-
-        :pparam string organization_id_or_slug: the id or slug of the organization the
-                                          event belongs to.
-        :pparam string project_id_or_slug: the id or slug of the project the event
-                                     belongs to.
-        :pparam string event_id: the id of the event to retrieve.
-                                 It is the hexadecimal id as
-                                 reported by the raven client)
-        :auth: required
         """
         try:
             start, end = get_date_range_from_params(request.GET, optional=True)
@@ -112,12 +150,14 @@ class ProjectEventDetailsEndpoint(ProjectEndpoint):
             raise ParseError(detail="Invalid date range")
 
         group_id_s = request.GET.get("group_id")
-        group_id = int(group_id_s) if group_id_s else None
+        group_id = to_valid_int_id("group_id", group_id_s) if group_id_s else None
 
         event = eventstore.backend.get_event_by_id(project.id, event_id, group_id=group_id)
 
         if event is None:
             return Response({"detail": "Event not found"}, status=404)
+
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
 
         environments = set(request.GET.getlist("environment"))
 
@@ -129,10 +169,11 @@ class ProjectEventDetailsEndpoint(ProjectEndpoint):
             request_user=request.user,
             event=event,
             environments=list(environments),
-            include_full_release_data=True,
             start=start,
             end=end,
         )
+        if data is None:
+            return Response({"detail": "Failed to load event"}, status=500)
         return Response(data)
 
 
@@ -140,7 +181,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class EventJsonEndpoint(ProjectEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -152,6 +193,8 @@ class EventJsonEndpoint(ProjectEndpoint):
 
         if not event:
             return Response({"detail": "Event not found"}, status=404)
+
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
 
         event_dict = event.as_dict()
         if isinstance(event_dict["datetime"], datetime):

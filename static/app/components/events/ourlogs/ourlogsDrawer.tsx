@@ -1,7 +1,9 @@
-import {useRef} from 'react';
-import styled from '@emotion/styled';
+import {useMemo} from 'react';
 
-import {ProjectAvatar} from 'sentry/components/core/avatar/projectAvatar';
+import {ProjectAvatar} from '@sentry/scraps/avatar';
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex, Stack} from '@sentry/scraps/layout';
+
 import {
   CrumbContainer,
   EventDrawerBody,
@@ -11,55 +13,88 @@ import {
   NavigationCrumbs,
   ShortId,
 } from 'sentry/components/events/eventDrawer';
+import {useEventLogsUrl} from 'sentry/components/events/ourlogs/useEventLogsUrl';
 import {SearchQueryBuilderProvider} from 'sentry/components/searchQueryBuilder/context';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
+import {LogsAnalyticsPageSource} from 'sentry/utils/analytics/logsAnalyticsEvent';
 import {getShortEventId} from 'sentry/utils/events';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {
   TraceItemSearchQueryBuilder,
-  useSearchQueryBuilderProps,
+  useTraceItemSearchQueryBuilderProps,
 } from 'sentry/views/explore/components/traceItemSearchQueryBuilder';
-import {
-  useLogsSearch,
-  useSetLogsSearch,
-} from 'sentry/views/explore/contexts/logs/logsPageParams';
-import {useTraceItemAttributes} from 'sentry/views/explore/contexts/traceItemAttributeContext';
+import {useLogItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 import {LogsInfiniteTable} from 'sentry/views/explore/logs/tables/logsInfiniteTable';
-import {LogsTable} from 'sentry/views/explore/logs/tables/logsTable';
+import {
+  useQueryParamsSearch,
+  useSetQueryParamsQuery,
+} from 'sentry/views/explore/queryParams/context';
 import {TraceItemDataset} from 'sentry/views/explore/types';
 
 interface LogIssueDrawerProps {
   event: Event;
   group: Group;
   project: Project;
+  additionalData?: {
+    event?: Event;
+    scrollToDisabled?: boolean;
+  };
+  embeddedOptions?: {
+    openWithExpandedIds?: string[];
+  };
 }
 
-export function OurlogsDrawer({event, project, group}: LogIssueDrawerProps) {
-  const setLogsSearch = useSetLogsSearch();
-  const logsSearch = useLogsSearch();
-  const hasInfiniteFeature = useOrganization().features.includes(
-    'ourlogs-infinite-scroll'
-  );
-  const {attributes: stringAttributes} = useTraceItemAttributes('string');
-  const {attributes: numberAttributes} = useTraceItemAttributes('number');
+export function OurlogsDrawer({
+  event,
+  project,
+  group,
+  embeddedOptions,
+  additionalData: propAdditionalData,
+}: LogIssueDrawerProps) {
+  const organization = useOrganization();
+  const supportsArrays = organization.features.includes('trace-item-array-query-support');
+  const setLogsQuery = useSetQueryParamsQuery();
+  const logsSearch = useQueryParamsSearch();
+
+  const {attributes: stringAttributes, secondaryAliases: stringSecondaryAliases} =
+    useLogItemAttributes({}, 'string');
+  const {attributes: numberAttributes, secondaryAliases: numberSecondaryAliases} =
+    useLogItemAttributes({}, 'number');
+  const {attributes: booleanAttributes, secondaryAliases: booleanSecondaryAliases} =
+    useLogItemAttributes({}, 'boolean');
+  const {attributes: arrayAttributes, secondaryAliases: arraySecondaryAliases} =
+    useLogItemAttributes({enabled: supportsArrays}, 'array');
 
   const tracesItemSearchQueryBuilderProps = {
     initialQuery: logsSearch.formatString(),
     searchSource: 'ourlogs',
-    onSearch: (query: string) => setLogsSearch(new MutableSearch(query)),
+    onSearch: (query: string) => setLogsQuery(query),
+    arrayAttributes,
+    booleanAttributes,
     numberAttributes,
     stringAttributes,
     itemType: TraceItemDataset.LOGS,
+    arraySecondaryAliases,
+    booleanSecondaryAliases,
+    numberSecondaryAliases,
+    stringSecondaryAliases,
   };
-  const searchQueryBuilderProps = useSearchQueryBuilderProps(
+  const searchQueryBuilderProps = useTraceItemSearchQueryBuilderProps(
     tracesItemSearchQueryBuilderProps
   );
-  const containerRef = useRef<HTMLDivElement>(null);
+
+  const additionalData = useMemo(
+    () => ({
+      event,
+      scrollToDisabled: propAdditionalData?.scrollToDisabled,
+    }),
+    [event, propAdditionalData?.scrollToDisabled]
+  );
+
+  const exploreUrl = useEventLogsUrl(event);
 
   return (
     <SearchQueryBuilderProvider {...searchQueryBuilderProps}>
@@ -81,24 +116,28 @@ export function OurlogsDrawer({event, project, group}: LogIssueDrawerProps) {
           />
         </EventDrawerHeader>
         <EventNavigator>
-          <TraceItemSearchQueryBuilder {...tracesItemSearchQueryBuilderProps} />
-        </EventNavigator>
-        <EventDrawerBody ref={containerRef}>
-          <LogsTableContainer>
-            {hasInfiniteFeature ? (
-              <LogsInfiniteTable showHeader={false} scrollContainer={containerRef} />
-            ) : (
-              <LogsTable showHeader={false} allowPagination />
+          <Flex align="center" gap="sm">
+            <Flex flex="1">
+              <TraceItemSearchQueryBuilder {...tracesItemSearchQueryBuilderProps} />
+            </Flex>
+            {exploreUrl && (
+              <LinkButton size="sm" to={exploreUrl} openInNewTab>
+                {t('Open in Explore')}
+              </LinkButton>
             )}
-          </LogsTableContainer>
+          </Flex>
+        </EventNavigator>
+        <EventDrawerBody>
+          <Stack position="relative">
+            <LogsInfiniteTable
+              embedded
+              embeddedOptions={embeddedOptions}
+              additionalData={additionalData}
+              analyticsPageSource={LogsAnalyticsPageSource.ISSUE_DETAILS}
+            />
+          </Stack>
         </EventDrawerBody>
       </EventDrawerContainer>
     </SearchQueryBuilderProvider>
   );
 }
-
-const LogsTableContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-`;

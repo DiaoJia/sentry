@@ -9,11 +9,6 @@ export function GitLabIntegrationProviderFixture(
     name: 'GitLab',
     canAdd: true,
     features: [],
-    setupDialog: {
-      url: '/gitlab-integration-setup-uri/',
-      width: 100,
-      height: 100,
-    },
     canDisable: true,
     metadata: {
       description: '*markdown* formatted _description_',
@@ -31,7 +26,7 @@ export function GitLabIntegrationProviderFixture(
       aspects: {
         alerts: [
           {
-            type: 'warning',
+            variant: 'warning',
             text: 'This is a an alert example',
           },
         ],

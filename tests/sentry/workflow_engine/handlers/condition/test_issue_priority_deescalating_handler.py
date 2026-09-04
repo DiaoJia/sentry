@@ -1,5 +1,9 @@
-from sentry.models.group import GroupStatus
+from unittest.mock import MagicMock, patch
+
+from sentry.incidents.grouptype import MetricIssue
+from sentry.models.group import DEFAULT_TYPE_ID, GroupStatus
 from sentry.models.groupopenperiod import GroupOpenPeriod
+from sentry.testutils.helpers.options import override_options
 from sentry.types.group import PriorityLevel
 from sentry.users.services.user.service import user_service
 from sentry.workflow_engine.migration_helpers.alert_rule import (
@@ -7,16 +11,19 @@ from sentry.workflow_engine.migration_helpers.alert_rule import (
     migrate_metric_data_conditions,
 )
 from sentry.workflow_engine.models.data_condition import Condition
-from sentry.workflow_engine.types import DetectorPriorityLevel, WorkflowEventData
+from sentry.workflow_engine.types import ConditionError, DetectorPriorityLevel, WorkflowEventData
 from tests.sentry.workflow_engine.handlers.condition.test_base import ConditionTestCase
 
 
 class TestIssuePriorityGreaterOrEqualCondition(ConditionTestCase):
     condition = Condition.ISSUE_PRIORITY_DEESCALATING
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
-        self.event_data = WorkflowEventData(event=self.group_event)
+        self.group, self.event, self.group_event = self.create_group_event(
+            group_type_id=MetricIssue.type_id
+        )
+        self.event_data = WorkflowEventData(event=self.group_event, group=self.group_event.group)
         self.metric_alert = self.create_alert_rule()
         self.alert_rule_trigger_warning = self.create_alert_rule_trigger(
             alert_rule=self.metric_alert, label="warning"
@@ -63,7 +70,7 @@ class TestIssuePriorityGreaterOrEqualCondition(ConditionTestCase):
         open_period.data["highest_seen_priority"] = max(highest_seen_priority, priority)
         open_period.save()
 
-    def test_warning(self):
+    def test_warning(self) -> None:
         self.update_group_and_open_period(priority=PriorityLevel.MEDIUM)
         self.assert_does_not_pass(self.deescalating_dc_warning, self.event_data)
 
@@ -73,14 +80,14 @@ class TestIssuePriorityGreaterOrEqualCondition(ConditionTestCase):
         self.group.update(status=GroupStatus.RESOLVED)
         self.assert_passes(self.deescalating_dc_warning, self.event_data)
 
-    def test_critical_threshold_not_breached(self):
+    def test_critical_threshold_not_breached(self) -> None:
         self.update_group_and_open_period(priority=PriorityLevel.MEDIUM)
         self.assert_does_not_pass(self.deescalating_dc_critical, self.event_data)
 
         self.group.update(status=GroupStatus.RESOLVED)
         self.assert_does_not_pass(self.deescalating_dc_critical, self.event_data)
 
-    def test_critical(self):
+    def test_critical(self) -> None:
         self.update_group_and_open_period(priority=PriorityLevel.MEDIUM)
         self.assert_does_not_pass(self.deescalating_dc_critical, self.event_data)
 
@@ -92,3 +99,27 @@ class TestIssuePriorityGreaterOrEqualCondition(ConditionTestCase):
 
         self.group.update(status=GroupStatus.RESOLVED)
         self.assert_passes(self.deescalating_dc_critical, self.event_data)
+
+    @override_options(
+        {"workflow_engine.group.type_id.open_periods_type_denylist": [DEFAULT_TYPE_ID]}
+    )
+    def test_error_group_does_not_pass(self) -> None:
+        error_group, _, error_group_event = self.create_group_event()
+        error_event_data = WorkflowEventData(event=error_group_event, group=error_group_event.group)
+        self.assert_does_not_pass(self.deescalating_dc_warning, error_event_data)
+
+    @override_options(
+        {"workflow_engine.group.type_id.open_periods_type_denylist": [DEFAULT_TYPE_ID]}
+    )
+    @patch("sentry.workflow_engine.models.data_condition.logger")
+    def test_error_group_does_not_log(self, mock_logger: MagicMock) -> None:
+        error_group, _, error_group_event = self.create_group_event()
+        error_event_data = WorkflowEventData(event=error_group_event, group=error_group_event.group)
+        self.deescalating_dc_warning.evaluate_value(error_event_data)
+        mock_logger.info.assert_not_called()
+
+    def test_missing_open_period_for_supported_type(self) -> None:
+        GroupOpenPeriod.objects.filter(group=self.group).delete()
+        evaluation = self.deescalating_dc_warning.evaluate_value(self.event_data)
+        assert evaluation.result is None
+        assert isinstance(evaluation.error, ConditionError)

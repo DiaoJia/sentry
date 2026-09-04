@@ -1,25 +1,39 @@
-from django.contrib.auth.models import AnonymousUser
+from typing import Any, Literal
+
 from django.db.models import Count, F, OuterRef, Q, Subquery
+from django.db.models.expressions import Combinable
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
 from sentry.api.paginator import ChainPaginator
 from sentry.api.serializers import serialize
-from sentry.api.serializers.models.groupsearchview import GroupSearchViewSerializer
+from sentry.api.serializers.models.groupsearchview import (
+    GroupSearchViewSerializer,
+    GroupSearchViewSerializerResponse,
+)
 from sentry.api.serializers.rest_framework.groupsearchview import GroupSearchViewPostValidator
+from sentry.apidocs.constants import (
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NOT_FOUND,
+    RESPONSE_UNAUTHORIZED,
+)
+from sentry.apidocs.parameters import CursorQueryParam, GlobalParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.models.groupsearchview import GroupSearchView, GroupSearchViewVisibility
 from sentry.models.groupsearchviewlastvisited import GroupSearchViewLastVisited
 from sentry.models.groupsearchviewstarred import GroupSearchViewStarred
 from sentry.models.organization import Organization
 from sentry.models.project import Project
-from sentry.models.team import Team
-from sentry.users.models.user import User
 
 
 class MemberPermission(OrganizationPermission):
@@ -28,8 +42,22 @@ class MemberPermission(OrganizationPermission):
         "POST": ["member:read", "member:write"],
     }
 
+    def has_object_permission(self, request: Request, view: APIView, obj: Any) -> bool:
+        if isinstance(obj, Organization):
+            return super().has_object_permission(request, view, obj)
 
-SORT_MAP = {
+        if isinstance(obj, Project):
+            if obj.organization.flags.allow_joinleave:
+                return True
+
+            if not request.access.has_project_access(obj):
+                return False
+
+            return True
+        return False
+
+
+SORT_MAP: dict[str, str | Combinable] = {
     "popularity": "popularity",
     "-popularity": "-popularity",
     "visited": F("last_visited").asc(nulls_first=True),
@@ -45,28 +73,58 @@ class OrganizationGroupSearchViewGetSerializer(serializers.Serializer[None]):
     createdBy = serializers.ChoiceField(
         choices=("me", "others"),
         required=False,
+        help_text="Whether to return issue views created by the current user or other members.",
     )
     sort = serializers.ListField(
         child=serializers.ChoiceField(choices=list(SORT_MAP.keys())),
         required=False,
         default=["-visited"],
+        help_text="The fields used to sort issue views, in order of precedence.",
     )
-    query = serializers.CharField(required=False)
+    query = serializers.CharField(
+        required=False,
+        help_text="A case-insensitive search against issue view names and queries.",
+    )
 
     def validate_query(self, value: str | None) -> str | None:
         return value.strip() if value else None
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Events"])
+@cell_silo_endpoint
 class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
     publish_status = {
-        "GET": ApiPublishStatus.EXPERIMENTAL,
-        "POST": ApiPublishStatus.EXPERIMENTAL,
+        "GET": ApiPublishStatus.PUBLIC,
+        "POST": ApiPublishStatus.PUBLIC,
     }
     owner = ApiOwner.ISSUES
     permission_classes = (MemberPermission,)
 
-    def get(self, request: Request, organization: Organization) -> Response:
+    @extend_schema(
+        operation_id="listOrganizationIssueViews",
+        summary="List Issue Views",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            OrganizationGroupSearchViewGetSerializer,
+            CursorQueryParam,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "OrganizationIssueViewList", list[GroupSearchViewSerializerResponse]
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> (
+        Response[list[GroupSearchViewSerializerResponse]]
+        | Response[ValidationErrorResponse]
+        | Response[None]
+    ):
         """
         List the current organization member's custom views
         `````````````````````````````````````````
@@ -76,26 +134,15 @@ class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
         if not request.user.is_authenticated:
             return Response(status=status.HTTP_400_BAD_REQUEST)
 
-        has_global_views = features.has("organizations:global-views", organization)
-
         serializer = OrganizationGroupSearchViewGetSerializer(data=request.GET)
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(as_validation_errors(serializer), status=status.HTTP_400_BAD_REQUEST)
 
         starred_view_ids = GroupSearchViewStarred.objects.filter(
             organization=organization, user_id=request.user.id
         ).values_list("group_search_view_id", flat=True)
 
-        default_project = None
-        if not has_global_views:
-            default_project = pick_default_project(organization, request.user)
-            if default_project is None:
-                return Response(
-                    status=status.HTTP_400_BAD_REQUEST,
-                    data={"detail": "You do not have access to any projects."},
-                )
-
-        createdBy = serializer.validated_data.get("createdBy", "me")
+        createdBy: Literal["me", "others"] = serializer.validated_data.get("createdBy", "me")
         sorts = [SORT_MAP[sort] for sort in serializer.validated_data["sort"]]
         query = serializer.validated_data.get("query")
         base_queryset = (
@@ -156,23 +203,47 @@ class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
                 .annotate(popularity=starred_count_query, last_visited=last_visited_query)
                 .order_by(*sorts)
             )
+        else:
+            raise ValueError(f"Unexpected createdBy value: {createdBy}")
+
+        def serialize_views(
+            views: list[GroupSearchView],
+        ) -> list[GroupSearchViewSerializerResponse]:
+            return serialize(
+                views,
+                request.user,
+                serializer=GroupSearchViewSerializer(organization=organization),
+            )
 
         return self.paginate(
             request=request,
             sources=[starred_query, non_starred_query],
             paginator_cls=ChainPaginator,
-            on_results=lambda x: serialize(
-                x,
-                request.user,
-                serializer=GroupSearchViewSerializer(
-                    has_global_views=has_global_views,
-                    default_project=default_project,
-                    organization=organization,
-                ),
-            ),
+            on_results=serialize_views,
         )
 
-    def post(self, request: Request, organization: Organization) -> Response:
+    @extend_schema(
+        operation_id="createOrganizationIssueView",
+        summary="Create an Issue View",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG],
+        request=GroupSearchViewPostValidator,
+        responses={
+            201: inline_sentry_response_serializer(
+                "OrganizationIssueView", GroupSearchViewSerializerResponse
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def post(
+        self, request: Request, organization: Organization
+    ) -> (
+        Response[GroupSearchViewSerializerResponse]
+        | Response[ValidationErrorResponse]
+        | Response[None]
+    ):
         """
         Create a new custom view for the current organization member.
         """
@@ -187,9 +258,16 @@ class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
         )
 
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(as_validation_errors(serializer), status=status.HTTP_400_BAD_REQUEST)
 
         validated_data = serializer.validated_data
+
+        projects = Project.objects.filter(
+            id__in=validated_data["projects"], organization=organization
+        )
+
+        for project in projects:
+            self.check_object_permissions(request, project)
 
         # Create the new view
         view = GroupSearchView.objects.create(
@@ -212,30 +290,11 @@ class OrganizationGroupSearchViewsEndpoint(OrganizationEndpoint):
                 view=view,
             )
 
-        has_global_views = features.has("organizations:global-views", organization)
-        default_project = pick_default_project(organization, request.user)
-
-        return Response(
-            serialize(
-                view,
-                request.user,
-                serializer=GroupSearchViewSerializer(
-                    has_global_views=has_global_views,
-                    default_project=default_project,
-                    organization=organization,
-                ),
+        serialized_view: GroupSearchViewSerializerResponse = serialize(
+            view,
+            request.user,
+            serializer=GroupSearchViewSerializer(
+                organization=organization,
             ),
-            status=status.HTTP_201_CREATED,
         )
-
-
-def pick_default_project(org: Organization, user: User | AnonymousUser) -> int | None:
-    user_teams = Team.objects.get_for_user(organization=org, user=user)
-    user_team_ids = [team.id for team in user_teams]
-    default_user_project = (
-        Project.objects.get_for_team_ids(user_team_ids)
-        .order_by("slug")
-        .values_list("id", flat=True)
-        .first()
-    )
-    return default_user_project
+        return Response(serialized_view, status=status.HTTP_201_CREATED)

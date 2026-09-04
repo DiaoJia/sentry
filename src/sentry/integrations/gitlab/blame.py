@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import quote
 
 import orjson
@@ -13,18 +13,21 @@ from sentry.integrations.gitlab.utils import (
     GitLabApiClientPath,
     GitLabRateLimitInfo,
     get_rate_limit_info_from_response,
+    safe_quote,
 )
 from sentry.integrations.source_code_management.commit_context import (
     CommitInfo,
     FileBlameInfo,
     SourceLineInfo,
 )
-from sentry.shared_integrations.client.base import BaseApiClient
 from sentry.shared_integrations.exceptions import ApiError, ApiRateLimitedError
 from sentry.shared_integrations.response.sequence import SequenceApiResponse
 from sentry.utils import metrics
 
 logger = logging.getLogger("sentry.integrations.gitlab")
+
+if TYPE_CHECKING:
+    from sentry.integrations.gitlab.client import GitLabApiClient
 
 
 MINIMUM_REQUESTS = 100
@@ -46,7 +49,7 @@ class GitLabFileBlameResponseItem(TypedDict):
 
 
 def fetch_file_blames(
-    client: BaseApiClient, files: Sequence[SourceLineInfo], extra: Mapping[str, Any]
+    client: GitLabApiClient, files: Sequence[SourceLineInfo], extra: Mapping[str, Any]
 ) -> list[FileBlameInfo]:
     blames = []
 
@@ -66,7 +69,7 @@ def fetch_file_blames(
                 and rate_limit_info.remaining < (MINIMUM_REQUESTS - len(files))
             ):
                 metrics.incr("integrations.gitlab.get_blame_for_files.rate_limit")
-                logger.error(
+                logger.warning(
                     "get_blame_for_files.rate_limit_too_low",
                     extra={
                         **extra,
@@ -82,41 +85,30 @@ def fetch_file_blames(
 
 
 def _fetch_file_blame(
-    client: BaseApiClient, file: SourceLineInfo, extra: Mapping[str, Any]
+    client: GitLabApiClient, file: SourceLineInfo, extra: Mapping[str, Any]
 ) -> tuple[CommitInfo | None, GitLabRateLimitInfo | None]:
     project_id = file.repo.config.get("project_id")
 
     # GitLab returns an invalid file path error if there are leading or trailing slashes
     encoded_path = quote(file.path.strip("/"), safe="")
-    request_path = GitLabApiClientPath.blame.format(project=project_id, path=encoded_path)
+    request_path = GitLabApiClientPath.blame.format(
+        project=safe_quote(project_id), path=encoded_path
+    )
     params = {"ref": file.ref, "range[start]": file.lineno, "range[end]": file.lineno}
 
     cache_key = client.get_cache_key(request_path, orjson.dumps(params).decode())
     response = client.check_cache(cache_key)
     if response:
-        metrics.incr("integrations.gitlab.get_blame_for_files.got_cached")
         logger.info(
             "sentry.integrations.gitlab.get_blame_for_files.got_cached",
             extra=extra,
         )
     else:
-        try:
-            response = client.get(
-                request_path,
-                params=params,
-            )
-            client.set_cache(cache_key, response, 60)
-        except ApiError:
-            logger.exception(
-                "fetch_file_blame_ApiError",
-                extra={
-                    "file_path": file.path,
-                    "request_path": request_path,
-                    "repo_org_id": file.repo.organization_id,
-                    "repo_integration_id": file.repo.integration_id,
-                },
-            )
-            raise
+        response = client.get(
+            request_path,
+            params=params,
+        )
+        client.set_cache(cache_key, response, 60)
 
     if not isinstance(response, SequenceApiResponse):
         raise ApiError("Response is not in expected format", code=500)
@@ -133,9 +125,9 @@ def _create_file_blame_info(commit: CommitInfo, file: SourceLineInfo) -> FileBla
     )
 
 
-def _handle_file_blame_error(error: ApiError, file: SourceLineInfo, extra: Mapping[str, Any]):
-    metrics.incr("integrations.gitlab.get_blame_for_files.api_error", tags={"status": error.code})
-
+def _handle_file_blame_error(
+    error: ApiError, file: SourceLineInfo, extra: Mapping[str, Any]
+) -> None:
     # Ignore expected error codes
     if error.code in (401, 403, 404):
         logger.warning(
@@ -202,5 +194,5 @@ def _create_commit_from_blame(
             committedDate=datetime.fromisoformat(committed_date).replace(tzinfo=timezone.utc),
         )
     except Exception:
-        logger.exception("get_blame_for_files.invalid_commit_response", extra=extra)
+        logger.warning("get_blame_for_files.invalid_commit_response", extra=extra)
         return None

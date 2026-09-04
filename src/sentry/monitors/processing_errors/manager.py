@@ -6,11 +6,13 @@ import uuid
 from datetime import timedelta
 from itertools import chain
 
+import sentry_sdk
 from django.conf import settings
 from redis.client import StrictRedis
-from rediscluster import RedisCluster
+from sentry_redis_tools.clients import RedisCluster
 
 from sentry import analytics
+from sentry.analytics.events.checkin_processing_error_stored import CheckinProcessingErrorStored
 from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.monitors.models import Monitor
@@ -178,7 +180,36 @@ def get_errors_for_projects(projects: list[Project]) -> list[CheckinProcessingEr
     return _get_for_entities([build_project_identifier(project.id) for project in projects])
 
 
+# Fraction of each error type to store. Only `MAX_ERRORS_PER_SET` are retained, so a sample
+# carries the same signal as the full stream at a fraction of the cost.
+THROTTLED_SAMPLE_RATES = {
+    ProcessingErrorType.MONITOR_ENVIRONMENT_RATELIMITED: 0.01,
+    ProcessingErrorType.ORGANIZATION_KILLSWITCH_ENABLED: 0.0,
+}
+
+
+def _store_sample_rate(error: ProcessingErrorsException) -> float:
+    """
+    Anything bundled with a type we always store is always stored.
+    """
+    return max(
+        (
+            THROTTLED_SAMPLE_RATES.get(process_error["type"], 1.0)
+            for process_error in error.processing_errors
+        ),
+        default=0.0,
+    )
+
+
 def handle_processing_errors(item: CheckinItem, error: ProcessingErrorsException):
+    sample_rate = _store_sample_rate(error)
+    if not sample_rate or random.random() >= sample_rate:
+        metrics.incr(
+            "monitors.checkin.handle_processing_error",
+            tags={"source": "consumer", "stored": "false"},
+        )
+        return
+
     try:
         project = Project.objects.get_from_cache(id=item.message["project_id"])
         organization = Organization.objects.get_from_cache(id=project.organization_id)
@@ -188,17 +219,24 @@ def handle_processing_errors(item: CheckinItem, error: ProcessingErrorsException
             tags={
                 "source": "consumer",
                 "sdk_platform": item.message["sdk"],
+                "stored": "true",
             },
         )
 
         if random.random() < ANALYTICS_SAMPLING_RATE:
-            analytics.record(
-                "checkin_processing_error.stored",
-                organization_id=organization.id,
-                project_id=project.id,
-                monitor_slug=item.payload["monitor_slug"],
-                error_types=[process_error["type"] for process_error in error.processing_errors],
-            )
+            try:
+                analytics.record(
+                    CheckinProcessingErrorStored(
+                        organization_id=organization.id,
+                        project_id=project.id,
+                        monitor_slug=item.payload["monitor_slug"],
+                        error_types=[
+                            process_error["type"].value for process_error in error.processing_errors
+                        ],
+                    )
+                )
+            except Exception as e:
+                sentry_sdk.capture_exception(e)
 
         checkin_processing_error = CheckinProcessingError(error.processing_errors, item)
         store_error(checkin_processing_error, error.monitor)

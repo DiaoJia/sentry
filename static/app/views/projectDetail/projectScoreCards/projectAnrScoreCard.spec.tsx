@@ -1,19 +1,18 @@
+import {LocationFixture} from 'sentry-fixture/locationFixture';
+
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import type {PageFilters} from 'sentry/types/core';
 import {ProjectAnrScoreCard} from 'sentry/views/projectDetail/projectScoreCards/projectAnrScoreCard';
 
-describe('ProjectDetail > ProjectAnr', function () {
+describe('ProjectDetail > ProjectAnr', () => {
   let endpointMock: jest.Mock;
   let endpointMockPreviousPeriod: jest.Mock;
 
-  const {organization, router} = initializeOrg({
-    router: {
-      location: {
-        query: {project: '1', statsPeriod: '7d'},
-      },
-    },
+  const {organization} = initializeOrg();
+  const location = LocationFixture({
+    query: {project: '1', statsPeriod: '7d'},
   });
 
   const selection = {
@@ -27,7 +26,7 @@ describe('ProjectDetail > ProjectAnr', function () {
     },
   } as PageFilters;
 
-  beforeEach(function () {
+  beforeEach(() => {
     endpointMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/sessions/`,
       match: [MockApiClient.matchQuery({statsPeriod: '7d'})],
@@ -46,7 +45,7 @@ describe('ProjectDetail > ProjectAnr', function () {
 
     endpointMockPreviousPeriod = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/sessions/`,
-      match: [MockApiClient.matchQuery({start: '2017-10-03T02:41:20.000'})], // setup mocks a constant current date, so this works
+      match: [MockApiClient.matchQuery({statsPeriodStart: '14d'})],
       body: {
         groups: [
           {
@@ -61,18 +60,18 @@ describe('ProjectDetail > ProjectAnr', function () {
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('calls api with anr rate', async function () {
+  it('calls api with anr rate', async () => {
     render(
       <ProjectAnrScoreCard
         organization={{...organization}}
         selection={selection}
         isProjectStabilized
         query="release:abc"
-        location={router.location}
+        location={location}
       />
     );
 
@@ -96,7 +95,6 @@ describe('ProjectDetail > ProjectAnr', function () {
       `/organizations/${organization.slug}/sessions/`,
       expect.objectContaining({
         query: {
-          end: '2017-10-10T02:41:20.000',
           environment: [],
           field: ['anr_rate()'],
           includeSeries: '0',
@@ -104,7 +102,8 @@ describe('ProjectDetail > ProjectAnr', function () {
           interval: '1h',
           project: [1],
           query: 'release:abc',
-          start: '2017-10-03T02:41:20.000',
+          statsPeriodStart: '14d',
+          statsPeriodEnd: '7d',
         },
       })
     );
@@ -113,7 +112,7 @@ describe('ProjectDetail > ProjectAnr', function () {
     await screen.findByText('3%');
   });
 
-  it('renders open in issues CTA', async function () {
+  it('renders open in issues CTA', async () => {
     organization.features = ['discover-basic'];
     render(
       <ProjectAnrScoreCard
@@ -121,7 +120,7 @@ describe('ProjectDetail > ProjectAnr', function () {
         selection={selection}
         isProjectStabilized
         query="release:abc"
-        location={router.location}
+        location={location}
       />
     );
 

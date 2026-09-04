@@ -1,9 +1,10 @@
-import ExternalLink from 'sentry/components/links/externalLink';
-import PanelItem from 'sentry/components/panels/panelItem';
-import {tct} from 'sentry/locale';
-import {defined} from 'sentry/utils';
+import {ExternalLink} from '@sentry/scraps/link';
 
-import withSubscription from 'getsentry/components/withSubscription';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {tct} from 'sentry/locale';
+import {defined} from 'sentry/utils/defined';
+
+import {withSubscription} from 'getsentry/components/withSubscription';
 import type {Subscription} from 'getsentry/types';
 
 function DataConsentHeader({subscription}: {subscription: Subscription}) {

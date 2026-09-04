@@ -2,19 +2,17 @@ import type React from 'react';
 import {Fragment, useCallback, useLayoutEffect, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {InputGroup} from 'sentry/components/core/input/inputGroup';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {InputGroup} from '@sentry/scraps/input';
+
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {SearchBarTrailingButton} from 'sentry/components/searchBar';
 import {IconChevron, IconClose, IconSearch} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {DispatchingReducerMiddleware} from 'sentry/utils/useDispatchingReducer';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {traceAnalytics} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
-import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
-import type {TraceTreeNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode';
+import type {BaseNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/baseNode';
 import type {TraceReducer} from 'sentry/views/performance/newTraceDetails/traceState';
 import type {TraceSearchState} from 'sentry/views/performance/newTraceDetails/traceState/traceSearch';
 import {
@@ -26,10 +24,9 @@ import {
 interface TraceSearchInputProps {
   onTraceSearch: (
     query: string,
-    node: TraceTreeNode<TraceTree.NodeValue> | null,
+    node: BaseNode | null,
     behavior: 'track result' | 'persist'
   ) => void;
-  organization: Organization;
 }
 
 const MIN_LOADING_TIME = 300;
@@ -42,7 +39,7 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
   const [status, setStatus] = useState<TraceSearchState['status']>([0, 'success']);
 
   const timeoutRef = useRef<number | undefined>(undefined);
-  const statusRef = useRef<TraceSearchState['status']>(status);
+  const statusRef = useRef(status);
   statusRef.current = status;
 
   const traceStateRef = useRef(traceState);
@@ -59,7 +56,7 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
     // if previous status was loading, show loading icon for at least 500ms
     if (!statusRef.current && traceState.search.status) {
       setStatus([performance.now(), traceState.search.status[1]]);
-      return undefined;
+      return;
     }
 
     let cancel = false;
@@ -69,7 +66,7 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
       const elapsed = performance.now() - nextStatus[0];
       if (elapsed > MIN_LOADING_TIME || nextStatus[1] === 'loading') {
         setStatus(nextStatus);
-        return undefined;
+        return;
       }
 
       const schedule = nextStatus[0] + MIN_LOADING_TIME - performance.now();
@@ -87,75 +84,73 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
     };
   }, [traceState.search.status]);
 
-  const onSearchFocus = useCallback(() => {
+  const onSearchFocus = () => {
     traceAnalytics.trackSearchFocus(organization);
     if (traceStateRef.current.rovingTabIndex.node) {
       traceDispatch({type: 'clear roving index'});
     }
-  }, [traceDispatch, organization]);
+  };
 
-  const onChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      if (!event.target.value) {
-        traceDispatch({type: 'clear query'});
-        return;
-      }
+  const onChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!event.target.value) {
+      traceDispatch({type: 'clear query'});
+      return;
+    }
 
-      traceDispatch({type: 'set query', query: event.target.value});
-      onTraceSearch(
-        event.target.value,
-        traceStateRef.current.rovingTabIndex.node ?? traceStateRef.current.search.node,
-        'track result'
-      );
-    },
-    [traceDispatch, onTraceSearch]
-  );
+    traceDispatch({type: 'set query', query: event.target.value});
+    onTraceSearch(
+      event.target.value,
+      traceStateRef.current.rovingTabIndex.node ?? traceStateRef.current.search.node,
+      'track result'
+    );
+  };
 
   const onSearchClear = useCallback(() => {
     trackAnalytics('trace.trace_layout.search_clear', {
       organization,
     });
     traceDispatch({type: 'clear query'});
+
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
   }, [traceDispatch, organization]);
 
-  const onKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>) => {
-      switch (event.key) {
-        case 'ArrowDown':
-          trackAnalytics('trace.trace_layout.search_match_navigate', {
-            organization,
-            direction: 'next',
-            interaction: 'arrowKey',
-          });
-          traceDispatch({
-            type: event.shiftKey ? 'go to last match' : 'go to next match',
-          });
-          break;
-        case 'ArrowUp':
-          trackAnalytics('trace.trace_layout.search_match_navigate', {
-            organization,
-            direction: 'prev',
-            interaction: 'arrowKey',
-          });
-          traceDispatch({
-            type: event.shiftKey ? 'go to first match' : 'go to previous match',
-          });
-          break;
-        case 'Enter':
-          trackAnalytics('trace.trace_layout.search_match_navigate', {
-            organization,
-            direction: event.shiftKey ? 'prev' : 'next',
-            interaction: 'enterKey',
-          });
-          traceDispatch({
-            type: event.shiftKey ? 'go to previous match' : 'go to next match',
-          });
-          break;
-        default:
-      }
-    },
-    [traceDispatch, organization]
-  );
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    switch (event.key) {
+      case 'ArrowDown':
+        trackAnalytics('trace.trace_layout.search_match_navigate', {
+          organization,
+          direction: 'next',
+          interaction: 'arrowKey',
+        });
+        traceDispatch({
+          type: event.shiftKey ? 'go to last match' : 'go to next match',
+        });
+        break;
+      case 'ArrowUp':
+        trackAnalytics('trace.trace_layout.search_match_navigate', {
+          organization,
+          direction: 'prev',
+          interaction: 'arrowKey',
+        });
+        traceDispatch({
+          type: event.shiftKey ? 'go to first match' : 'go to previous match',
+        });
+        break;
+      case 'Enter':
+        trackAnalytics('trace.trace_layout.search_match_navigate', {
+          organization,
+          direction: event.shiftKey ? 'prev' : 'next',
+          interaction: 'enterKey',
+        });
+        traceDispatch({
+          type: event.shiftKey ? 'go to previous match' : 'go to next match',
+        });
+        break;
+      default:
+    }
+  };
 
   const onNextSearchClick = useCallback(() => {
     trackAnalytics('trace.trace_layout.search_match_navigate', {
@@ -215,8 +210,8 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
         ) : (
           <StyledSearchIcon
             data-test-id="trace-search-success"
-            color="subText"
-            size={'xs'}
+            variant="muted"
+            size="xs"
           />
         )}
       </InputGroup.LeadingItems>
@@ -227,29 +222,27 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
         name="query"
         autoComplete="off"
         placeholder={t('Search in trace')}
-        defaultValue={traceState.search.query}
         onChange={onChange}
         onKeyDown={onKeyDown}
+        defaultValue={traceState.search.query}
         onFocus={onSearchFocus}
       />
       <InputGroup.TrailingItems>
         <StyledTrailingText data-test-id="trace-search-result-iterator">
-          {`${
-            traceState.search.query && !traceState.search.results?.length
-              ? t('no results')
-              : traceState.search.query
-                ? (traceState.search.resultIteratorIndex === null
-                    ? '-'
-                    : traceState.search.resultIteratorIndex + 1) +
-                  `/${traceState.search.results?.length ?? 0}`
-                : ''
-          }`}
+          {traceState.search.query && !traceState.search.results?.length
+            ? t('no results')
+            : traceState.search.query
+              ? (traceState.search.resultIteratorIndex === null
+                  ? '-'
+                  : traceState.search.resultIteratorIndex + 1) +
+                `/${traceState.search.results?.length ?? 0}`
+              : ''}
         </StyledTrailingText>
         {traceState.search.query ? (
           <Fragment>
             <StyledSearchBarTrailingButton
               size="zero"
-              borderless
+              variant="transparent"
               icon={<IconChevron size="xs" />}
               aria-label={t('Next')}
               disabled={status?.[1] === 'loading'}
@@ -257,7 +250,7 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
             />
             <StyledSearchBarTrailingButton
               size="zero"
-              borderless
+              variant="transparent"
               icon={<IconChevron size="xs" direction="down" />}
               aria-label={t('Previous')}
               disabled={status?.[1] === 'loading'}
@@ -265,7 +258,7 @@ export function TraceSearchInput(props: TraceSearchInputProps) {
             />
             <StyledSearchBarTrailingButton
               size="zero"
-              borderless
+              variant="transparent"
               disabled={status?.[1] === 'loading'}
               onClick={onSearchClear}
               icon={<IconClose size="xs" />}
@@ -342,15 +335,15 @@ const StyledSearchBarTrailingButton = styled(SearchBarTrailingButton)`
 `;
 
 const StyledTrailingText = styled('span')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.sm};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const StyledSearchBar = styled(InputGroup)`
   flex: 1 1 100%;
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 
   > div > div:last-child {
-    gap: ${space(0.25)};
+    gap: ${p => p.theme.space['2xs']};
   }
 `;

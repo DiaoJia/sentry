@@ -1,24 +1,25 @@
 import {useEffect} from 'react';
 import * as qs from 'query-string';
 
-import NotFound from 'sentry/components/errors/notFound';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import PageFiltersContainer from 'sentry/components/organizations/pageFilters/container';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {DATE_TIME_KEYS, URL_PARAM} from 'sentry/constants/pageFilters';
+import {AnalyticsArea} from 'sentry/components/analyticsArea';
+import {NotFound} from 'sentry/components/errors/notFound';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {DATE_TIME_KEYS, URL_PARAM} from 'sentry/components/pageFilters/constants';
+import {PageFiltersContainer} from 'sentry/components/pageFilters/container';
+import {AiQueryProvider} from 'sentry/components/searchQueryBuilder/askSeerCombobox/aiQueryContext';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import useRouteAnalyticsHookSetup from 'sentry/utils/routeAnalytics/useRouteAnalyticsHookSetup';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {useRouteAnalyticsHookSetup} from 'sentry/utils/routeAnalytics/useRouteAnalyticsHookSetup';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
-import usePrevious from 'sentry/utils/usePrevious';
+import {usePrevious} from 'sentry/utils/usePrevious';
 import {getIssueViewQueryParams} from 'sentry/views/issueList/issueViews/getIssueViewQueryParams';
 import {useSelectedGroupSearchView} from 'sentry/views/issueList/issueViews/useSelectedGroupSeachView';
 import type {GroupSearchView} from 'sentry/views/issueList/types';
-import {useUpdateGroupSearchViewLastVisited} from 'sentry/views/nav/secondary/sections/issues/issueViews/useUpdateGroupSearchViewLastVisited';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
+import {useUpdateGroupSearchViewLastVisited} from 'sentry/views/navigation/secondary/sections/issues/issueViews/useUpdateGroupSearchViewLastVisited';
 
 type Props = {
   children: React.ReactNode;
@@ -70,17 +71,14 @@ function useHydrateIssueViewQueryParams({view}: {view: GroupSearchView | undefin
 function StreamWrapper({children}: Props) {
   const organization = useOrganization();
   useRouteAnalyticsHookSetup();
-  const prefersStackedNav = usePrefersStackedNav();
   const {viewId} = useParams<{orgId?: string; viewId?: string}>();
-
-  const onNewIssuesFeed = prefersStackedNav && !viewId;
-  const useGlobalPageFilters = !prefersStackedNav || onNewIssuesFeed;
+  const onIssuesFeed = !viewId;
 
   return (
     <PageFiltersContainer
-      skipLoadLastUsed={!useGlobalPageFilters}
-      disablePersistence={!useGlobalPageFilters}
-      skipInitializeUrlParams={!onNewIssuesFeed && prefersStackedNav}
+      skipLoadLastUsed={!onIssuesFeed}
+      disablePersistence={!onIssuesFeed}
+      skipInitializeUrlParams={!onIssuesFeed}
     >
       <NoProjectMessage organization={organization}>{children}</NoProjectMessage>
     </PageFiltersContainer>
@@ -112,19 +110,16 @@ function IssueViewWrapper({children}: Props) {
   return <StreamWrapper>{children}</StreamWrapper>;
 }
 
-function IssueListContainer({children, title = t('Issues')}: Props) {
+export function IssueListContainer({children, title = t('Issues')}: Props) {
   const organization = useOrganization();
-  const prefersStackedNav = usePrefersStackedNav();
 
   return (
     <SentryDocumentTitle title={title} orgSlug={organization.slug}>
-      {prefersStackedNav ? (
-        <IssueViewWrapper>{children}</IssueViewWrapper>
-      ) : (
-        <StreamWrapper>{children}</StreamWrapper>
-      )}
+      <AnalyticsArea name="issue_list">
+        <AiQueryProvider>
+          <IssueViewWrapper>{children}</IssueViewWrapper>
+        </AiQueryProvider>
+      </AnalyticsArea>
     </SentryDocumentTitle>
   );
 }
-
-export default IssueListContainer;

@@ -1,7 +1,9 @@
 import type {CloudResourceContext} from '@sentry/core';
 
+import type {AppContext} from 'sentry/components/events/contexts/knownContext/app';
 import type {CultureContext} from 'sentry/components/events/contexts/knownContext/culture';
 import type {MissingInstrumentationContext} from 'sentry/components/events/contexts/knownContext/missingInstrumentation';
+import type {WERContext} from 'sentry/components/events/contexts/knownContext/wer';
 import type {
   AggregateSpanType,
   RawSpanType,
@@ -11,8 +13,8 @@ import type {SymbolicatorStatus} from 'sentry/components/events/interfaces/types
 
 import type {RawCrumb} from './breadcrumbs';
 import type {Image} from './debugImage';
-import type {IssueAttachment, IssueCategory, IssueType} from './group';
-import type {PlatformKey} from './project';
+import type {IssueAttachment, IssueCategory, IssueType, UserReport} from './group';
+import type {PlatformKey} from './platform';
 import type {Release} from './release';
 import type {StackTraceMechanism, StacktraceType} from './stacktrace';
 
@@ -28,17 +30,6 @@ export type EventGroupComponent = {
   name: string | null;
   values: EventGroupComponent[] | string[];
 };
-export type EventGroupingConfig = {
-  base: string | null;
-  changelog: string;
-  delegates: string[];
-  hidden: boolean;
-  id: string;
-  latest: boolean;
-  risk: number;
-  strategies: string[];
-};
-
 type VariantEvidence = {
   desc: string;
   fingerprint: string;
@@ -54,17 +45,18 @@ type VariantEvidence = {
 export const enum EventGroupVariantType {
   CHECKSUM = 'checksum',
   FALLBACK = 'fallback',
-  CUSTOM_FINGERPRINT = 'custom-fingerprint',
-  BUILT_IN_FINGERPRINT = 'built-in-fingerprint',
+  CUSTOM_FINGERPRINT = 'custom_fingerprint',
   COMPONENT = 'component',
-  SALTED_COMPONENT = 'salted-component',
-  PERFORMANCE_PROBLEM = 'performance-problem',
+  SALTED_COMPONENT = 'salted_component',
+  PERFORMANCE_PROBLEM = 'performance_problem',
 }
 
 interface BaseVariant {
+  contributes: boolean;
   description: string | null;
   hash: string | null;
   hashMismatch: boolean;
+  hint: string | null;
   key: string;
   type: string;
 }
@@ -80,7 +72,6 @@ interface ChecksumVariant extends BaseVariant {
 interface HasComponentGrouping {
   client_values?: string[];
   component?: EventGroupComponent;
-  config?: EventGroupingConfig;
   matched_rule?: string;
   values?: string[];
 }
@@ -91,10 +82,6 @@ interface ComponentVariant extends BaseVariant, HasComponentGrouping {
 
 interface CustomFingerprintVariant extends BaseVariant, HasComponentGrouping {
   type: EventGroupVariantType.CUSTOM_FINGERPRINT;
-}
-
-interface BuiltInFingerprintVariant extends BaseVariant, HasComponentGrouping {
-  type: EventGroupVariantType.BUILT_IN_FINGERPRINT;
 }
 
 interface SaltedComponentVariant extends BaseVariant, HasComponentGrouping {
@@ -112,7 +99,6 @@ export type EventGroupVariant =
   | ComponentVariant
   | SaltedComponentVariant
   | CustomFingerprintVariant
-  | BuiltInFingerprintVariant
   | PerformanceProblemVariant;
 
 /**
@@ -198,6 +184,8 @@ export type Frame = {
   mapUrl?: string | null;
   minGroupingLevel?: number;
   origAbsPath?: string | null;
+  parentIndex?: number | null;
+  sampleCount?: number | null;
   sourceLink?: string | null;
   symbolicatorStatus?: SymbolicatorStatus;
 };
@@ -209,8 +197,11 @@ export type ExceptionValue = {
   stacktrace: StacktraceType | null;
   threadId: number | null;
   type: string;
-  value: string;
+  value: string | null;
   frames?: Frame[] | null;
+  rawModule?: string | null;
+  rawType?: string | null;
+  rawValue?: string | null;
 };
 
 export type ExceptionType = {
@@ -228,6 +219,11 @@ export type EventMetadata = {
   message?: string;
   origin?: string;
   stripped_crash?: boolean;
+  /**
+   * Set when the SDK fabricated the exception to carry a stacktrace. Its `type` is then a
+   * platform label (`SIGSEGV`, `AppHang`) rather than the identity of what went wrong.
+   */
+  synthetic?: boolean;
   title?: string;
   type?: string;
   uri?: string;
@@ -237,9 +233,6 @@ export type EventMetadata = {
 export enum EventOrGroupType {
   ERROR = 'error',
   CSP = 'csp',
-  HPKP = 'hpkp',
-  EXPECTCT = 'expectct',
-  EXPECTSTAPLE = 'expectstaple',
   NEL = 'nel',
   DEFAULT = 'default',
   TRANSACTION = 'transaction',
@@ -257,9 +250,6 @@ export enum EntryType {
   STACKTRACE = 'stacktrace',
   TEMPLATE = 'template',
   CSP = 'csp',
-  EXPECTCT = 'expectct',
-  EXPECTSTAPLE = 'expectstaple',
-  HPKP = 'hpkp',
   BREADCRUMBS = 'breadcrumbs',
   THREADS = 'threads',
   THREAD_STATE = 'thread-state',
@@ -341,8 +331,10 @@ interface EntryRequestDataDefault {
   query?: Array<[key: string, value: string] | null> | string;
 }
 
-export interface EntryRequestDataGraphQl
-  extends Omit<EntryRequestDataDefault, 'apiTarget' | 'data'> {
+export interface EntryRequestDataGraphQl extends Omit<
+  EntryRequestDataDefault,
+  'apiTarget' | 'data'
+> {
   apiTarget: 'graphql';
   data: {
     query: string;
@@ -366,11 +358,6 @@ type EntryCsp = {
   type: EntryType.CSP;
 };
 
-type EntryGeneric = {
-  data: Record<string, any>;
-  type: EntryType.EXPECTCT | EntryType.EXPECTSTAPLE | EntryType.HPKP;
-};
-
 type EntryResources = {
   data: any; // Data is unused here
   type: EntryType.RESOURCES;
@@ -387,8 +374,12 @@ export type Entry =
   | EntryRequest
   | EntryTemplate
   | EntryCsp
-  | EntryGeneric
   | EntryResources;
+
+/** Maps each EntryType to its corresponding Entry subtype. */
+export type EntryMap = {
+  [E in Entry as E['type']]: E;
+};
 
 // Contexts: https://develop.sentry.dev/sdk/event-payloads/contexts/
 
@@ -436,12 +427,18 @@ export enum DeviceContextKey {
   SUPPORTS_LOCATION_SERVICE = 'supports_location_service',
   SUPPORTS_VIBRATION = 'supports_vibration',
   USABLE_MEMORY = 'usable_memory',
+  TIMEZONE = 'timezone',
+  LOCALE = 'locale',
+  ARCHS = 'archs',
+  CHIPSET = 'chipset',
+  CONNECTION_TYPE = 'connection_type',
+  LOW_POWER_MODE = 'low_power_mode',
+  THERMAL_STATE = 'thermal_state',
 }
 
 // https://develop.sentry.dev/sdk/event-payloads/contexts/#device-context
 export interface DeviceContext
-  extends Partial<Record<DeviceContextKey, unknown>>,
-    BaseContext {
+  extends Partial<Record<DeviceContextKey, unknown>>, BaseContext {
   type: 'device';
   [DeviceContextKey.NAME]: string;
   [DeviceContextKey.ARCH]?: string;
@@ -482,10 +479,16 @@ export interface DeviceContext
   [DeviceContextKey.SUPPORTS_LOCATION_SERVICE]?: boolean;
   [DeviceContextKey.SUPPORTS_VIBRATION]?: boolean;
   [DeviceContextKey.USABLE_MEMORY]?: number;
+  [DeviceContextKey.LOCALE]?: string;
+  [DeviceContextKey.ARCHS]?: string[];
+  [DeviceContextKey.CHIPSET]?: string;
+  [DeviceContextKey.CONNECTION_TYPE]?: string;
+  [DeviceContextKey.LOW_POWER_MODE]?: boolean;
+  // This field is deprecated in favour of timezone field in culture context
+  [DeviceContextKey.TIMEZONE]?: string;
+  [DeviceContextKey.THERMAL_STATE]?: string;
   // This field is deprecated in favour of locale field in culture context
   language?: string;
-  // This field is deprecated in favour of timezone field in culture context
-  timezone?: string;
 }
 
 enum RuntimeContextKey {
@@ -497,8 +500,7 @@ enum RuntimeContextKey {
 
 // https://develop.sentry.dev/sdk/event-payloads/contexts/#runtime-context
 interface RuntimeContext
-  extends Partial<Record<RuntimeContextKey, unknown>>,
-    BaseContext {
+  extends Partial<Record<RuntimeContextKey, unknown>>, BaseContext {
   type: 'runtime';
   [RuntimeContextKey.BUILD]?: string;
   [RuntimeContextKey.NAME]?: string;
@@ -528,19 +530,21 @@ interface OtelContext extends Partial<Record<OtelContextKey, unknown>>, BaseCont
 }
 
 export enum UnityContextKey {
+  ACTIVE_SCENE_NAME = 'active_scene_name',
   COPY_TEXTURE_SUPPORT = 'copy_texture_support',
   EDITOR_VERSION = 'editor_version',
   INSTALL_MODE = 'install_mode',
+  IS_MAIN_THREAD = 'is_main_thread',
   RENDERING_THREADING_MODE = 'rendering_threading_mode',
   TARGET_FRAME_RATE = 'target_frame_rate',
 }
 
-// Unity Context
-// TODO(Priscila): Add this context to the docs
 export interface UnityContext {
+  [UnityContextKey.ACTIVE_SCENE_NAME]: string;
   [UnityContextKey.COPY_TEXTURE_SUPPORT]: string;
   [UnityContextKey.EDITOR_VERSION]: string;
   [UnityContextKey.INSTALL_MODE]: string;
+  [UnityContextKey.IS_MAIN_THREAD]: boolean;
   [UnityContextKey.RENDERING_THREADING_MODE]: string;
   [UnityContextKey.TARGET_FRAME_RATE]: string;
   type: 'unity';
@@ -565,8 +569,6 @@ export enum MemoryInfoContextKey {
   PAUSE_DURATIONS = 'pause_durations',
 }
 
-// MemoryInfo Context
-// TODO(Priscila): Add this context to the docs
 export interface MemoryInfoContext {
   type: 'Memory Info' | 'memory_info';
   [MemoryInfoContextKey.FINALIZATION_PENDING_COUNT]: number;
@@ -596,8 +598,6 @@ export enum ThreadPoolInfoContextKey {
   AVAILABLE_COMPLETION_PORT_THREADS = 'available_completion_port_threads',
 }
 
-// ThreadPoolInfo Context
-// TODO(Priscila): Add this context to the docs
 export interface ThreadPoolInfoContext {
   type: 'ThreadPool Info' | 'threadpool_info';
   [ThreadPoolInfoContextKey.MIN_WORKER_THREADS]: number;
@@ -642,12 +642,13 @@ interface ResponseContext {
 
 // event.contexts.flags can be overriden by the user so the type is not strict
 export type FeatureFlag = {flag?: string; result?: boolean};
-type Flags = {values?: FeatureFlag[]};
+type Flags = {values?: Array<FeatureFlag | null>};
 
 export type EventContexts = {
   'Current Culture'?: CultureContext;
   'Memory Info'?: MemoryInfoContext;
   'ThreadPool Info'?: ThreadPoolInfoContext;
+  app?: AppContext;
   browser?: BrowserContext;
   client_os?: OSContext;
   cloud_resource?: CloudResourceContext;
@@ -655,6 +656,7 @@ export type EventContexts = {
   device?: DeviceContext;
   feedback?: Record<string, any>;
   flags?: Flags;
+  gpu_crash?: Record<string, any>;
   memory_info?: MemoryInfoContext;
   metric_alert?: MetricAlertContextType;
   missing_instrumentation?: MissingInstrumentationContext;
@@ -670,6 +672,7 @@ export type EventContexts = {
   threadpool_info?: ThreadPoolInfoContext;
   trace?: TraceContextType;
   unity?: UnityContext;
+  wer?: WERContext;
 };
 
 export type Measurement = {value: number; type?: string; unit?: string};
@@ -705,7 +708,7 @@ export type EventEvidenceDisplay = {
   value: string;
 };
 
-type EventOccurrence = {
+export type EventOccurrence = {
   detectionTime: string;
   eventId: string;
   /**
@@ -762,18 +765,14 @@ interface EventBase {
   size: number;
   tags: EventTag[];
   title: string;
-  type:
-    | EventOrGroupType.CSP
-    | EventOrGroupType.DEFAULT
-    | EventOrGroupType.EXPECTCT
-    | EventOrGroupType.EXPECTSTAPLE
-    | EventOrGroupType.HPKP;
+  type: EventOrGroupType.CSP | EventOrGroupType.DEFAULT;
   user: EventUser | null;
   _meta?: Record<string, any>;
   context?: Record<string, any>;
   dateCreated?: string;
   device?: Record<string, any>;
   endTimestamp?: number;
+  formatted?: {content: string; format: string};
   groupID?: string;
   groupingConfig?: {
     enhancements: string;
@@ -795,7 +794,7 @@ interface EventBase {
     version: string | null;
   } | null;
   sdkUpdates?: SDKUpdatesSuggestion[];
-  userReport?: any;
+  userReport?: UserReport | null;
 }
 
 interface TraceEventContexts extends EventContexts {
@@ -803,8 +802,10 @@ interface TraceEventContexts extends EventContexts {
   profile?: ProfileContext;
 }
 
-export interface EventTransaction
-  extends Omit<EventBase, 'entries' | 'type' | 'contexts'> {
+export interface EventTransaction extends Omit<
+  EventBase,
+  'entries' | 'type' | 'contexts'
+> {
   contexts: TraceEventContexts;
   endTimestamp: number;
   // EntryDebugMeta is required for profiles to render in the span
@@ -817,28 +818,27 @@ export interface EventTransaction
   perfProblem?: PerformanceDetectorData;
 }
 
-export interface AggregateEventTransaction
-  extends Omit<
-    EventTransaction,
-    | 'crashFile'
-    | 'culprit'
-    | 'dist'
-    | 'dateReceived'
-    | 'errors'
-    | 'location'
-    | 'metadata'
-    | 'message'
-    | 'occurrence'
-    | 'type'
-    | 'size'
-    | 'user'
-    | 'eventID'
-    | 'fingerprints'
-    | 'id'
-    | 'projectID'
-    | 'tags'
-    | 'title'
-  > {
+export interface AggregateEventTransaction extends Omit<
+  EventTransaction,
+  | 'crashFile'
+  | 'culprit'
+  | 'dist'
+  | 'dateReceived'
+  | 'errors'
+  | 'location'
+  | 'metadata'
+  | 'message'
+  | 'occurrence'
+  | 'type'
+  | 'size'
+  | 'user'
+  | 'eventID'
+  | 'fingerprints'
+  | 'id'
+  | 'projectID'
+  | 'tags'
+  | 'title'
+> {
   count: number;
   frequency: number;
   total: number;

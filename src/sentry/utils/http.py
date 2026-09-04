@@ -1,16 +1,38 @@
 from __future__ import annotations
 
-from collections.abc import Collection
-from typing import TYPE_CHECKING, NamedTuple, TypeGuard, overload
+from collections.abc import Collection, Iterator
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeGuard, overload
 from urllib.parse import quote, urljoin, urlparse
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.http import HttpRequest
+from rest_framework.request import Request
 
 from sentry import options
 
 if TYPE_CHECKING:
     from sentry.models.project import Project
+
+from ipaddress import ip_address, ip_interface, ip_network
+
+# User-agent prefix set by the official Sentry MCP server (source of truth:
+# getsentry/sentry-mcp). Used to attribute requests originating from the MCP.
+MCP_USER_AGENT_PREFIX = "sentry-mcp/"
+
+MCP_CLIENT_FAMILY_HEADER = "HTTP_X_SENTRY_MCP_CLIENT_FAMILY"
+
+# Standardized client families the MCP buckets its callers into and forwards via
+# X-Sentry-MCP-Client-Family (source of truth: client-family.ts in getsentry/sentry-mcp).
+KNOWN_MCP_CLIENT_FAMILIES = frozenset(
+    {"claude-code", "cursor", "copilot", "opencode", "claude-desktop", "codex"}
+)
+MCP_CATCHALL_CLIENT_FAMILIES = frozenset({"other", "unknown"})
+
+# Header Seer sets on the API calls it makes on a user's behalf. Shared so that
+# every caller-attribution site keys off the same signal (see `sentry.api.client_kind`
+# and `sentry.issues.action_log`).
+SEER_REFERRER_HEADER = "HTTP_X_SEER_REFERRER"
 
 
 class ParsedUriMatch(NamedTuple):
@@ -211,6 +233,29 @@ def origin_from_request(request: HttpRequest) -> str | None:
     return rv
 
 
+def is_mcp_request(request: HttpRequest | Request) -> bool:
+    """
+    Whether the request originated from the official Sentry MCP server, identified
+    by its `sentry-mcp/` user-agent prefix.
+    """
+    return request.META.get("HTTP_USER_AGENT", "").startswith(MCP_USER_AGENT_PREFIX)
+
+
+def get_mcp_client_family(request: HttpRequest | Request) -> str | None:
+    """The client family (`claude-code`, `cursor`, ...) the MCP server declares for its caller.
+
+    Returns None when the header is absent or the MCP bucketed the caller into a catch-all.
+    A value outside `KNOWN_MCP_CLIENT_FAMILIES` is still returned: this set can lag
+    client-family.ts upstream, so callers decide whether to log the unrecognized value.
+
+    Declared by the client, so untrusted -- unlike `is_mcp_request`, which is derived.
+    """
+    family = request.META.get(MCP_CLIENT_FAMILY_HEADER, "").strip().lower()
+    if not family or family in MCP_CATCHALL_CLIENT_FAMILIES:
+        return None
+    return family
+
+
 def percent_encode(val: str) -> str:
     # see https://en.wikipedia.org/wiki/Percent-encoding
     return quote(val).replace("%7E", "~").replace("/", "%2F")
@@ -224,3 +269,81 @@ class _HttpRequestWithSubdomain(HttpRequest):
 
 def is_using_customer_domain(request: HttpRequest) -> TypeGuard[_HttpRequestWithSubdomain]:
     return bool(hasattr(request, "subdomain") and request.subdomain)
+
+
+def is_valid_ip(maybe_ip_str: str) -> bool:
+    # Validate the string by attempting to pass it to the three built-in factory functions for
+    # creating different types of ip address objects. If any of them succeeds, it's a valid IP. If
+    # all three raise an error, it's not.
+    for fn, kwargs in (
+        (ip_address, {}),
+        (ip_interface, {}),
+        (ip_network, {"strict": False}),  # `strict: False` allows host bits
+    ):
+        try:
+            fn(maybe_ip_str, **kwargs)
+        except ValueError:
+            pass
+        else:
+            return True
+
+    return False
+
+
+class BodyAsyncWrapper:
+    def __init__(self, body: Any):
+        self._bool = bool(body)
+        self.body = [body] if isinstance(body, bytes) else body
+
+    def __bool__(self) -> bool:
+        return self._bool
+
+    def __aiter__(self):
+        return BodyAsyncIter(self)
+
+
+class BodyAsyncIter:
+    def __init__(self, parent: BodyAsyncWrapper):
+        self.biter = iter(parent.body)
+
+    def _anext(self):
+        try:
+            return self.biter.__next__()
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def __anext__(self) -> bytes:
+        return await sync_to_async(self._anext)()
+
+
+class BodyWithLength:
+    """Wraps an HttpRequest with a __len__ so that the requests library does not assume length=0 in all cases"""
+
+    def __init__(self, request: HttpRequest):
+        self.request = request
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self.request)
+
+    def __aiter__(self) -> BodyWithLengthAiter:
+        return BodyWithLengthAiter(self)
+
+    def __len__(self) -> int:
+        return int(self.request.headers.get("Content-Length", "0"))
+
+    def read(self, size: int | None = None) -> bytes:
+        return self.request.read(size)
+
+
+class BodyWithLengthAiter:
+    def __init__(self, parent: BodyWithLength):
+        self.biter = iter(parent.request)
+
+    def _anext(self):
+        try:
+            return self.biter.__next__()
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def __anext__(self) -> bytes:
+        return await sync_to_async(self._anext)()

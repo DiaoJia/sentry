@@ -3,6 +3,7 @@ from __future__ import annotations
 import operator
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from datetime import datetime
 from enum import Enum
 from functools import reduce
 from typing import Any, TypedDict
@@ -12,21 +13,28 @@ from django.db.models import Q
 
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.commit import CommitSerializer, get_users_for_commits
-from sentry.api.serializers.models.release import Author, NonMappableUser
-from sentry.eventstore.models import Event, GroupEvent
+from sentry.api.serializers.release_details_types import Author, NonMappableUser
 from sentry.models.commit import Commit
 from sentry.models.commitfilechange import CommitFileChange
 from sentry.models.group import Group
-from sentry.models.groupowner import GroupOwner, GroupOwnerType
+from sentry.models.groupowner import GroupOwner, GroupOwnerType, SuspectCommitStrategy
 from sentry.models.project import Project
 from sentry.models.release import Release
 from sentry.models.releasecommit import ReleaseCommit
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.users.services.user.service import user_service
-from sentry.utils import metrics
-from sentry.utils.event_frames import find_stack_frames, get_sdk_name, munged_filename_and_frames
+from sentry.utils.event_frames import find_stack_frames, munged_filename_and_frames
 from sentry.utils.hashlib import hash_values
+from sentry.utils.iterators import chunked
+from sentry.utils.query import RangeQuerySetWrapper
 
 PATH_SEPARATORS = frozenset(["/", "\\"])
+# Limit the number of commits to batch in a single query to avoid query timeouts
+# from large IN clauses combined with complex LIKE conditions
+COMMIT_BATCH_SIZE = 50
+# Page size for keyset-paginating commit reads so a single release with a huge
+# commit history (e.g. a project's first release) doesn't load everything in one query.
+COMMIT_QUERY_PAGE_SIZE = 1000
 
 
 def tokenize_path(path: str) -> Iterator[str]:
@@ -48,7 +56,7 @@ def score_path_match_length(path_a: str, path_b: str) -> int:
     return score
 
 
-def get_frame_paths(event: Event | GroupEvent) -> Any | Sequence[Any]:
+def get_frame_paths(event: Event | GroupEvent) -> Sequence[Mapping[str, Any]]:
     return find_stack_frames(event.data)
 
 
@@ -72,8 +80,11 @@ def _get_commits(releases: Sequence[Release]) -> Sequence[Commit]:
         missed = list(releases)
 
     if missed:
-        release_commits = ReleaseCommit.objects.filter(release__in=missed).select_related(
-            "commit", "release", "commit__author"
+        release_commits = RangeQuerySetWrapper(
+            ReleaseCommit.objects.filter(release__in=missed).select_related(
+                "commit", "release", "commit__author"
+            ),
+            step=COMMIT_QUERY_PAGE_SIZE,
         )
         to_cache = defaultdict(list)
         for rc in release_commits:
@@ -97,31 +108,71 @@ def _get_commit_file_changes(
     # build a single query to get all of the commit file that might match the first n frames
     path_query = reduce(operator.or_, (Q(filename__iendswith=path) for path in filenames))
 
-    commit_file_change_matches = CommitFileChange.objects.filter(path_query, commit__in=commits)
+    # Batch commits to avoid query timeouts from large IN clauses
+    # combined with complex LIKE conditions
+    all_file_changes: list[CommitFileChange] = []
+    commit_ids = [c.id for c in commits]
 
-    return list(commit_file_change_matches)
+    for batch_commit_ids in chunked(commit_ids, COMMIT_BATCH_SIZE):
+        commit_file_change_matches = CommitFileChange.objects.filter(
+            path_query, commit_id__in=batch_commit_ids
+        )
+        all_file_changes.extend(list(commit_file_change_matches))
+
+    return all_file_changes
 
 
-def _match_commits_path(
-    commit_file_changes: Sequence[CommitFileChange], path: str
-) -> Sequence[tuple[Commit, int]]:
-    # find commits that match the run time path the best.
-    matching_commits: MutableMapping[int, tuple[Commit, int]] = {}
-    best_score = 1
-    for file_change in commit_file_changes:
-        score = score_path_match_length(file_change.filename, path)
-        if score > best_score:
-            # reset matches for better match.
-            best_score = score
-            matching_commits = {}
-        if score == best_score:
-            # skip 1-score matches when file change is longer than 1 token
-            if score == 1 and len(list(tokenize_path(file_change.filename))) > 1:
-                continue
-            #  we want a list of unique commits that tie for longest match
-            matching_commits[file_change.commit.id] = (file_change.commit, score)
+def _match_commits_paths(
+    commit_file_changes: Sequence[CommitFileChange], path_set: set[str]
+) -> Mapping[str, Sequence[tuple[Commit, int]]]:
+    """
+    Match commits to multiple paths at once, batching the commit fetch.
+    Returns a mapping of path -> list of (commit, score) tuples.
+    """
+    path_matches: MutableMapping[str, MutableMapping[int, int]] = {}
 
-    return list(matching_commits.values())
+    for path in path_set:
+        matching_commit_ids: MutableMapping[int, int] = {}
+        best_score = 1
+
+        for file_change in commit_file_changes:
+            score = score_path_match_length(file_change.filename, path)
+            if score > best_score:
+                # reset matches for better match.
+                best_score = score
+                matching_commit_ids = {}
+            if score == best_score:
+                # skip 1-score matches when file change is longer than 1 token
+                if score == 1 and len(list(tokenize_path(file_change.filename))) > 1:
+                    continue
+                #  we want a list of unique commits that tie for longest match
+                matching_commit_ids[file_change.commit_id] = score
+
+        if matching_commit_ids:
+            path_matches[path] = matching_commit_ids
+
+    all_commit_ids: set[int] = set()
+    for commit_ids in path_matches.values():
+        all_commit_ids.update(commit_ids.keys())
+
+    commits_by_id: Mapping[int, Commit] = {}
+    if all_commit_ids:
+        commits_by_id = {
+            c.id: c for c in Commit.objects.filter(id__in=all_commit_ids).select_related("author")
+        }
+
+    result: MutableMapping[str, Sequence[tuple[Commit, int]]] = {}
+    for path in path_set:
+        if path in path_matches:
+            result[path] = [
+                (commits_by_id[commit_id], score)
+                for commit_id, score in path_matches[path].items()
+                if commit_id in commits_by_id
+            ]
+        else:
+            result[path] = []
+
+    return result
 
 
 class AuthorCommits(TypedDict):
@@ -130,6 +181,7 @@ class AuthorCommits(TypedDict):
 
 
 class AuthorCommitsSerialized(TypedDict):
+    group_owner_id: int
     author: Author | None
     commits: Sequence[MutableMapping[str, Any]]
 
@@ -144,6 +196,73 @@ class SuspectCommitType(Enum):
 
     RELEASE_COMMIT = "via commit in release"
     INTEGRATION_COMMIT = "via SCM integration"
+
+
+def _get_serialized_committers_from_group_owners(
+    project: Project, group_id: int
+) -> Sequence[AuthorCommitsSerialized] | None:
+    """
+    Shared helper to fetch and serialize committers from GroupOwner commit context.
+
+    Returns:
+        - None if there are no GroupOwner rows (callers may choose to fallback)
+        - [] if there are GroupOwner rows but no valid commit/author mapping
+        - Non-empty Sequence when a valid owner/commit is found
+    """
+    group_owners = GroupOwner.objects.filter(
+        group_id=group_id,
+        project=project,
+        organization_id=project.organization_id,
+        type=GroupOwnerType.SUSPECT_COMMIT.value,
+        context__isnull=False,
+    ).order_by("-date_added")
+
+    if len(group_owners) == 0:
+        return None
+
+    owner = next(filter(lambda go: go.context.get("commitId"), group_owners), None)
+    if not owner:
+        return []
+
+    try:
+        commit = Commit.objects.get(id=owner.context["commitId"])
+    except Commit.DoesNotExist:
+        return []
+    commit_author = commit.author
+
+    if not commit_author:
+        return []
+
+    author: NonMappableUser = {"email": commit_author.email, "name": commit_author.name}
+    if owner.user_id is not None:
+        serialized_owners = user_service.serialize_many(filter={"user_ids": [owner.user_id]})
+        # No guarantee that just because the user_id is set that the value exists, so we still have to check
+        if serialized_owners:
+            author = serialized_owners[0]
+
+    # Map the suspect commit strategy to the appropriate type
+    strategy = owner.context.get("suspectCommitStrategy")
+    if strategy == SuspectCommitStrategy.RELEASE_BASED:
+        suspect_commit_type = SuspectCommitType.RELEASE_COMMIT.value
+    else:
+        # Default to SCM integration for SCM_BASED or any other/unknown strategy
+        suspect_commit_type = SuspectCommitType.INTEGRATION_COMMIT.value
+
+    return [
+        {
+            "group_owner_id": owner.id,
+            "author": author,
+            "commits": [
+                serialize(
+                    commit,
+                    serializer=CommitSerializer(
+                        exclude=["author"],
+                        type=suspect_commit_type,
+                    ),
+                )
+            ],
+        }
+    ]
 
 
 def _get_committers(
@@ -229,14 +348,12 @@ def get_previous_releases(
     return rv
 
 
-def get_event_file_committers(
-    project: Project,
-    group_id: int,
-    event_frames: Sequence[Mapping[str, Any]],
-    event_platform: str | None,
-    frame_limit: int = 25,
-    sdk_name: str | None = None,
-) -> Sequence[AuthorCommits]:
+def _get_group_releases(project: Project, group_id: int) -> Sequence[Release]:
+    """Return the group's first-seen release and the few releases before it.
+
+    Raises:
+        Release.DoesNotExist: when the group has no first release or no previous releases.
+    """
     group = Group.objects.get_from_cache(id=group_id)
 
     first_release_version = group.get_first_release()
@@ -247,9 +364,32 @@ def get_event_file_committers(
     if not releases:
         raise Release.DoesNotExist
 
-    commits = _get_commits(releases)
+    return releases
+
+
+def _get_group_release_commits(project: Project, group_id: int) -> Sequence[Commit]:
+    """Fetch commits from the group's first-seen release and the few releases before it.
+
+    Raises:
+        Release.DoesNotExist: when the group has no first release or no previous releases.
+        Commit.DoesNotExist: when the releases contain no commits.
+    """
+    commits = _get_commits(_get_group_releases(project, group_id))
     if not commits:
         raise Commit.DoesNotExist
+
+    return commits
+
+
+def get_event_file_committers(
+    project: Project,
+    group_id: int,
+    event_frames: Sequence[Mapping[str, Any]],
+    event_platform: str | None,
+    frame_limit: int = 25,
+    sdk_name: str | None = None,
+) -> Sequence[AuthorCommits]:
+    commits = _get_group_release_commits(project, group_id)
 
     frames = event_frames or []
     munged = munged_filename_and_frames(event_platform, frames, "munged_filename", sdk_name)
@@ -270,9 +410,9 @@ def get_event_file_committers(
         _get_commit_file_changes(commits, path_set) if path_set else []
     )
 
-    commit_path_matches: Mapping[str, Sequence[tuple[Commit, int]]] = {
-        path: _match_commits_path(file_changes, path) for path in path_set
-    }
+    commit_path_matches: Mapping[str, Sequence[tuple[Commit, int]]] = (
+        _match_commits_paths(file_changes, path_set) if file_changes else {}
+    )
 
     annotated_frames: Sequence[AnnotatedFrame] = [
         {
@@ -292,101 +432,64 @@ def get_event_file_committers(
     return _get_committers(annotated_frames, relevant_commits)
 
 
+def get_release_commit_candidates(
+    project: Project,
+    group_id: int,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 500,
+) -> Sequence[Commit]:
+    """Candidate commits shipped around when the group first appeared.
+
+    Returns the commits from the group's first-seen release and the few releases
+    before it (the same pool the release-based suspect-commit scoring runs over),
+    newest-first, optionally restricted to a ``[since, until]`` window. Unlike the
+    suspect commit, these are NOT filtered to the stacktrace frames, so they surface
+    regressions in code that does not appear in the trace.
+
+    The ``[since, until]`` window, ordering, and ``limit`` are all applied at the
+    query level so the database bounds the result set rather than materializing every
+    commit in the releases. ``limit`` defaults to a wide guardrail (500) so it acts as
+    a backstop against a pathological release blowing up the payload, not as a precision
+    filter that risks dropping the commit to blame. Returns ``[]`` when the group has
+    no associated releases.
+    """
+    try:
+        releases = _get_group_releases(project, group_id)
+    except Release.DoesNotExist:
+        return []
+
+    commit_qs = Commit.objects.filter(releasecommit__release__in=releases).select_related("author")
+    if since is not None:
+        commit_qs = commit_qs.filter(date_added__gte=since)
+    if until is not None:
+        commit_qs = commit_qs.filter(date_added__lte=until)
+
+    return list(commit_qs.distinct().order_by("-date_added")[:limit])
+
+
+def get_serialized_committers(project: Project, group_id: int) -> Sequence[AuthorCommitsSerialized]:
+    result = _get_serialized_committers_from_group_owners(project, group_id)
+    if result is None:
+        return []
+    return result
+
+
 def get_serialized_event_file_committers(
-    project: Project, event: Event | GroupEvent, frame_limit: int = 25
+    project: Project,
+    event: Event | GroupEvent,
 ) -> Sequence[AuthorCommitsSerialized]:
     if event.group_id is None:
         return []
-
-    group_owners = GroupOwner.objects.filter(
-        group_id=event.group_id,
-        project=project,
-        organization_id=project.organization_id,
-        type=GroupOwnerType.SUSPECT_COMMIT.value,
-        context__isnull=False,
-    ).order_by("-date_added")
-
-    if len(group_owners) > 0:
-        owner = next(filter(lambda go: go.context.get("commitId"), group_owners), None)
-        if not owner:
-            return []
-        commit = Commit.objects.get(id=owner.context.get("commitId"))
-        commit_author = commit.author
-
-        if not commit_author:
-            return []
-
-        author: NonMappableUser = {"email": commit_author.email, "name": commit_author.name}
-        if owner.user_id is not None:
-            serialized_owners = user_service.serialize_many(filter={"user_ids": [owner.user_id]})
-            # No guarantee that just because the user_id is set that the value exists, so we still have to check
-            if serialized_owners:
-                author = serialized_owners[0]
-
-        return [
-            {
-                "author": author,
-                "commits": [
-                    serialize(
-                        commit,
-                        serializer=CommitSerializer(
-                            exclude=["author"],
-                            type=SuspectCommitType.INTEGRATION_COMMIT.value,
-                        ),
-                    )
-                ],
-            }
-        ]
-
-    # TODO(nisanthan): We create GroupOwner records for
-    # legacy Suspect Commits in process_suspect_commits task.
-    # We should refactor to query GroupOwner rather than recalculate.
-    # But we need to store the commitId and a way to differentiate
-    # if the Suspect Commit came from ReleaseCommits or CommitContext.
+    result = _get_serialized_committers_from_group_owners(project, event.group_id)
+    if result is not None:
+        return result
     else:
-        event_frames = get_frame_paths(event)
-        sdk_name = get_sdk_name(event.data)
-        committers = get_event_file_committers(
-            project,
-            event.group_id,
-            event_frames,
-            event.platform,
-            frame_limit=frame_limit,
-            sdk_name=sdk_name,
-        )
-        commits = [commit for committer in committers for commit in committer["commits"]]
-        serialized_commits: Sequence[MutableMapping[str, Any]] = serialize(
-            [c for (c, score) in commits],
-            serializer=CommitSerializer(
-                exclude=["author"],
-                type=SuspectCommitType.RELEASE_COMMIT.value,
-            ),
-        )
-
-        serialized_commits_by_id = {}
-
-        for (commit, score), serialized_commit in zip(commits, serialized_commits):
-            serialized_commit["score"] = score
-            serialized_commits_by_id[commit.id] = serialized_commit
-
-        serialized_committers: list[AuthorCommitsSerialized] = []
-        for committer in committers:
-            commit_ids = [commit.id for (commit, _) in committer["commits"]]
-            commits_result = [serialized_commits_by_id[commit_id] for commit_id in commit_ids]
-            serialized_committers.append(
-                {"author": committer["author"], "commits": dedupe_commits(commits_result)}
-            )
-
-        metrics.incr(
-            "feature.owners.has-committers",
-            instance="hit" if committers else "miss",
-            skip_internal=False,
-        )
-        return serialized_committers
+        return []
 
 
 def dedupe_commits(
-    commits: Sequence[MutableMapping[str, Any]]
+    commits: Sequence[MutableMapping[str, Any]],
 ) -> Sequence[MutableMapping[str, Any]]:
     return list({c["id"]: c for c in commits}.values())
 

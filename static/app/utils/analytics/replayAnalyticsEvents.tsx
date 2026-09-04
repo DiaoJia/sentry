@@ -1,8 +1,19 @@
 import type {LayoutKey} from 'sentry/utils/replays/hooks/useReplayLayout';
-import type {Output} from 'sentry/views/replays/detail/network/details/getOutputType';
-import type {ReferrerTableType} from 'sentry/views/replays/replayTable/tableCell';
+import type {Output} from 'sentry/views/explore/replays/detail/network/details/output';
 
 export type ReplayEventParameters = {
+  'replay.ai-summary.chapter-clicked': {
+    chapter_type?: 'error' | 'feedback';
+  };
+  'replay.ai-summary.regenerate-requested': {
+    area: string;
+  };
+  'replay.ai_tab_shown': Record<string, unknown>;
+  'replay.bulk_mark_viewed': {
+    failed: number;
+    multiProject: boolean;
+    succeeded: number;
+  };
   'replay.canvas-detected-banner-clicked': {
     sdk_needs_update?: boolean;
   };
@@ -41,6 +52,10 @@ export type ReplayEventParameters = {
     resource_type: string;
     tab: string;
   };
+  'replay.details-playlist-clicked': {
+    direction: 'previous' | 'next';
+  };
+  'replay.details-refresh-clicked': Record<string, unknown>;
   'replay.details-resized-panel': {
     layout: LayoutKey;
     slide_motion: 'toTop' | 'toBottom' | 'toLeft' | 'toRight';
@@ -56,10 +71,13 @@ export type ReplayEventParameters = {
     seconds: number;
     user_email: string;
   };
+  'replay.details-timestamp-button-clicked': {
+    area: string;
+  };
+
   'replay.frame-after-background': {
     frame: string;
   };
-
   'replay.gaps_detected': {
     gaps: number;
     max_gap: number;
@@ -67,17 +85,17 @@ export type ReplayEventParameters = {
   };
   'replay.hydration-error.issue-details-opened': Record<string, unknown>;
   'replay.hydration-modal.slider-interaction': Record<string, unknown>;
+
   'replay.hydration-modal.tab-change': {
     tabKey: string;
   };
-
   // similar purpose as "replay.details-viewed", however we're capturing the navigation action
   // in order to also include a project platform
   'replay.list-navigate-to-details': {
     platform: string | undefined;
     project_id: string | undefined;
     referrer: string;
-    referrer_table?: ReferrerTableType;
+    referrer_table?: 'main' | 'selector-widget';
   };
   'replay.list-paginated': {
     direction: 'next' | 'prev';
@@ -108,6 +126,7 @@ export type ReplayEventParameters = {
     project_id: string | undefined;
   };
   'replay.render-missing-replay-alert': {
+    is_404: boolean;
     surface: string;
   };
   'replay.search': {
@@ -128,7 +147,12 @@ export type ReplayEventParameters = {
 type ReplayEventKey = keyof ReplayEventParameters;
 
 export const replayEventMap: Record<ReplayEventKey, string | null> = {
+  'replay.ai_tab_shown': 'Replay AI Tab Shown',
+  'replay.ai-summary.chapter-clicked': 'Clicked Replay AI Summary Chapter',
+  'replay.ai-summary.regenerate-requested': 'Requested to Regenerate Replay AI Summary',
   'replay.canvas-detected-banner-clicked': 'Clicked Canvas Detected in Replay Banner',
+  'replay.details-refresh-clicked': 'Clicked Refresh Button in Replay Details',
+  'replay.details-playlist-clicked': 'Clicked Replay Playlist Button in Replay Details',
   'replay.details-data-loaded': 'Replay Details Data Loaded',
   'replay.details-has-hydration-error': 'Replay Details Has Hydration Error',
   'replay.details-layout-changed': 'Changed Replay Details Layout',
@@ -139,6 +163,7 @@ export const replayEventMap: Record<ReplayEventKey, string | null> = {
   'replay.details-resource-docs-clicked': 'Replay Details Resource Docs Clicked',
   'replay.details-tab-changed': 'Changed Replay Details Tab',
   'replay.details-time-spent': 'Time Spent Viewing Replay Details',
+  'replay.details-timestamp-button-clicked': 'Clicked Timestamp in Replay Details',
   'replay.frame-after-background': 'Replay Frame Following Background Frame',
   'replay.hydration-error.issue-details-opened': 'Hydration Issue Details Opened',
   'replay.hydration-modal.slider-interaction': 'Hydration Modal Slider Clicked',
@@ -147,6 +172,7 @@ export const replayEventMap: Record<ReplayEventKey, string | null> = {
   'replay.list-paginated': 'Paginated Replay List',
   'replay.list-sorted': 'Sorted Replay List',
   'replay.list-time-spent': 'Time Spent Viewing Replay List',
+  'replay.bulk_mark_viewed': 'Replay List Mark Selected as Viewed',
   'replay.list-view-setup-sidebar': 'Views Set Up Replays Sidebar',
   'replay.gaps_detected': 'Number of Gaps in Replay Timeline',
   'replay.play-pause': 'Played/Paused Replay',

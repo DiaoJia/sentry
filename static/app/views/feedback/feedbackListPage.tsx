@@ -1,191 +1,290 @@
-import {Fragment} from 'react';
+import type {ReactNode} from 'react';
+import {Fragment, useEffect, useLayoutEffect, useState} from 'react';
 import styled from '@emotion/styled';
 
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import FeedbackFilters from 'sentry/components/feedback/feedbackFilters';
-import FeedbackItemLoader from 'sentry/components/feedback/feedbackItem/feedbackItemLoader';
-import FeedbackWidgetBanner from 'sentry/components/feedback/feedbackOnboarding/feedbackWidgetBanner';
-import FeedbackSearch from 'sentry/components/feedback/feedbackSearch';
-import FeedbackSetupPanel from 'sentry/components/feedback/feedbackSetupPanel';
-import FeedbackSummary from 'sentry/components/feedback/feedbackSummary';
-import FeedbackWhatsNewBanner from 'sentry/components/feedback/feedbackWhatsNewBanner';
-import FeedbackList from 'sentry/components/feedback/list/feedbackList';
-import useCurrentFeedbackId from 'sentry/components/feedback/useCurrentFeedbackId';
-import useHaveSelectedProjectsSetupFeedback, {
-  useHaveSelectedProjectsSetupNewFeedback,
-} from 'sentry/components/feedback/useFeedbackOnboarding';
-import {FeedbackQueryKeys} from 'sentry/components/feedback/useFeedbackQueryKeys';
-import useRedirectToFeedbackFromEvent from 'sentry/components/feedback/useRedirectToFeedbackFromEvent';
-import FullViewport from 'sentry/components/layouts/fullViewport';
-import * as Layout from 'sentry/components/layouts/thirds';
-import PageFiltersContainer from 'sentry/components/organizations/pageFilters/container';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Container, Grid, Stack, useResponsivePropValue} from '@sentry/scraps/layout';
+
+import {AnalyticsArea} from 'sentry/components/analyticsArea';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {FeedbackFilters} from 'sentry/components/feedback/feedbackFilters';
+import {FeedbackItemLoader} from 'sentry/components/feedback/feedbackItem/feedbackItemLoader';
+import {FeedbackSearch} from 'sentry/components/feedback/feedbackSearch';
+import {FeedbackSetupPanel} from 'sentry/components/feedback/feedbackSetupPanel';
+import {FeedbackList} from 'sentry/components/feedback/list/feedbackList';
+import {FeedbackSummaryCategories} from 'sentry/components/feedback/summaryCategories/feedbackSummaryCategories';
+import {FeedbackApiOptions} from 'sentry/components/feedback/useFeedbackApiOptions';
+import {useHaveSelectedProjectsSetupFeedback} from 'sentry/components/feedback/useFeedbackOnboarding';
+import {useFeedbackSlug} from 'sentry/components/feedback/useFeedbackSlug';
+import {useRedirectToFeedbackFromEvent} from 'sentry/components/feedback/useRedirectToFeedbackFromEvent';
+import {FeedbackButton} from 'sentry/components/feedbackButton/feedbackButton';
+import {PageFiltersContainer} from 'sentry/components/pageFilters/container';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {PageHeadingQuestionTooltip} from 'sentry/components/pageHeadingQuestionTooltip';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {feedbackWidgetPlatforms} from 'sentry/data/platformCategories';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {IconSiren} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import useProjects from 'sentry/utils/useProjects';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
-import FluidHeight from 'sentry/views/replays/detail/layout/fluidHeight';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeAlertsPathname} from 'sentry/views/alerts/pathnames';
+import {TopBar} from 'sentry/views/navigation/topBar';
+
+const userFeedbackFeedbackOptions = {
+  messagePlaceholder: t('How can we improve the User Feedback experience?'),
+  tags: {
+    'feedback.source': 'feedback-list',
+  },
+};
+
+function PageContent({
+  feedbackProjectSlug,
+  hasFeedbackContent,
+  hideTop,
+  content,
+}: {
+  content: ReactNode;
+  feedbackProjectSlug: string;
+  hasFeedbackContent: boolean;
+  hideTop: boolean;
+}) {
+  const organization = useOrganization();
+  const createAlertAction = {
+    icon: <IconSiren />,
+    to: {
+      pathname: makeAlertsPathname({
+        path: '/new/issue/',
+        organization,
+      }),
+      query: {
+        alert_option: 'issues',
+        referrer: 'feedback-list-page',
+        detectorType: 'metric_issue',
+        ...(feedbackProjectSlug ? {project: feedbackProjectSlug} : {}),
+      },
+    },
+  };
+
+  return (
+    <PageFiltersContainer>
+      <ErrorBoundary>
+        <Stack flex={1} align="stretch" gap="xl" background="primary" overflow="hidden">
+          <Grid
+            columns={{
+              zero: '1fr',
+              '3xl': 'minmax(195px, 1fr) 1.5fr',
+              '4xl': 'minmax(390px, 1fr) 2fr',
+            }}
+            areas={{
+              zero: hideTop ? '"list"' : '"top" "list"',
+              '3xl': '"top top" "list details"',
+            }}
+            rows={{
+              zero: hideTop ? 'minmax(0, 1fr)' : 'max-content minmax(0, 1fr)',
+              '3xl': 'max-content minmax(0, 1fr)',
+            }}
+            flex={1}
+            minHeight={0}
+            gap="xl"
+            overflow="hidden"
+            padding="lg xl"
+          >
+            <Grid
+              gap="md"
+              area="top"
+              display={{zero: hideTop ? 'none' : 'grid', '3xl': 'grid'}}
+              areas={{
+                zero: `
+                    "filters"
+                    "search"
+                    "actions"
+                  `,
+                xl: `
+                    "filters actions"
+                    "search search"
+                  `,
+                '3xl': '"filters search actions"',
+              }}
+              columns={{
+                zero: '100%',
+                xl: '1fr auto',
+                '3xl': 'minmax(300px, auto) 1fr min-content',
+              }}
+              width="100%"
+            >
+              <Container area="filters" justifySelf={{zero: 'stretch', sm: 'start'}}>
+                <FeedbackFilters />
+              </Container>
+              <Container area="search" minWidth={0}>
+                <FeedbackSearch />
+              </Container>
+              <Container
+                area="actions"
+                alignSelf="start"
+                justifySelf={{zero: 'stretch', sm: 'end'}}
+                width={{zero: '100%', sm: 'auto'}}
+              >
+                {buttonProps => (
+                  <LinkButton {...buttonProps} {...createAlertAction} variant="primary">
+                    {t('Create Alert')}
+                  </LinkButton>
+                )}
+              </Container>
+            </Grid>
+            {hasFeedbackContent ? (
+              content
+            ) : (
+              <Container overflow="hidden" column="1 / -1">
+                <FeedbackSetupPanel />
+              </Container>
+            )}
+          </Grid>
+        </Stack>
+      </ErrorBoundary>
+    </PageFiltersContainer>
+  );
+}
 
 export default function FeedbackListPage() {
   const organization = useOrganization();
   const {hasSetupOneFeedback} = useHaveSelectedProjectsSetupFeedback();
-  const {hasSetupNewFeedback} = useHaveSelectedProjectsSetupNewFeedback();
+  const pageFilters = usePageFilters();
 
-  const showWhatsNewBanner = hasSetupOneFeedback && !hasSetupNewFeedback;
+  const [feedbackSlug] = useFeedbackSlug();
+  const feedbackId = feedbackSlug?.feedbackId ?? '';
+  const feedbackProjectSlug = feedbackSlug?.projectSlug ?? '';
+  const hasSlug = Boolean(feedbackId);
+
+  const {query: locationQuery} = useLocation();
+  const searchQuery = locationQuery.query ?? '';
 
   useRedirectToFeedbackFromEvent();
 
-  const feedbackId = useCurrentFeedbackId();
-  const hasSlug = Boolean(feedbackId);
+  const isCompact = useResponsivePropValue({zero: true, '3xl': false});
+  const [showItemPreview, setShowItemPreview] = useState(false);
+  const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
 
-  const pageFilters = usePageFilters();
-  const projects = useProjects();
-  const prefersStackedNav = usePrefersStackedNav();
+  // Keep the selected feedback in sync with the route. CSS decides whether it replaces
+  // the list or appears beside it based on the available container width.
+  useLayoutEffect(() => {
+    setShowItemPreview(Boolean(feedbackId));
+    if (feedbackId && isCompact) {
+      window.scrollTo(0, 0);
+    }
+  }, [feedbackId, isCompact]);
 
-  const selectedProjects = projects.projects.filter(p =>
-    pageFilters.selection.projects.includes(Number(p.id))
+  useEffect(() => {
+    setSelectedItemIndex(null);
+  }, [pageFilters, searchQuery]);
+
+  const handleJumpToSelectedItem = () => {
+    const scrollContainer = document.querySelector('[data-scrollable]');
+    if (selectedItemIndex === null || !scrollContainer) {
+      return;
+    }
+
+    const estimatedItemHeight = 80;
+    const scrollPosition = selectedItemIndex * estimatedItemHeight;
+
+    scrollContainer.scrollTo({
+      top: scrollPosition,
+      behavior: 'auto',
+    });
+  };
+
+  const handleBackToList = () => {
+    setShowItemPreview(false);
+  };
+
+  const handleItemSelect = (itemIndex?: number) => {
+    setSelectedItemIndex(itemIndex ?? null);
+    setShowItemPreview(true);
+  };
+
+  const pageContent = (
+    <Fragment>
+      <Stack
+        area="list"
+        gap="md"
+        display={{zero: showItemPreview ? 'none' : 'flex', '3xl': 'flex'}}
+      >
+        <FeedbackSummaryCategories />
+        <FeedbackPanel>
+          <FeedbackList onItemSelect={handleItemSelect} />
+          {selectedItemIndex !== null && (
+            <Container display={{zero: 'block', '3xl': 'none'}}>
+              <JumpToSelectedButton size="xs" onClick={handleJumpToSelectedItem}>
+                {t('Jump to selected item')}
+              </JumpToSelectedButton>
+            </Container>
+          )}
+        </FeedbackPanel>
+      </Stack>
+
+      <Container
+        area={{zero: 'list', '3xl': 'details'}}
+        display={{zero: showItemPreview ? 'flex' : 'none', '3xl': 'flex'}}
+        minHeight={0}
+      >
+        <FeedbackPanel>
+          <AnalyticsArea name="details">
+            <FeedbackItemLoader onBackToList={handleBackToList} />
+          </AnalyticsArea>
+        </FeedbackPanel>
+      </Container>
+    </Fragment>
   );
 
-  // one selected project is widget eligible
-  const oneIsWidgetEligible = selectedProjects.some(p =>
-    feedbackWidgetPlatforms.includes(p.platform!)
+  const hasFeedbackContent = hasSetupOneFeedback || hasSlug;
+  const titleContent = (
+    <Fragment>
+      {t('User Feedback')}
+      <PageHeadingQuestionTooltip
+        title={t(
+          'The User Feedback Widget allows users to submit feedback quickly and easily any time they encounter something that isn’t working as expected.'
+        )}
+        docsUrl="https://docs.sentry.io/product/user-feedback/"
+      />
+    </Fragment>
   );
 
-  const showWidgetBanner = showWhatsNewBanner && oneIsWidgetEligible;
   return (
     <SentryDocumentTitle title={t('User Feedback')} orgSlug={organization.slug}>
-      <FullViewport>
-        <FeedbackQueryKeys organization={organization}>
-          <Layout.Header unified={prefersStackedNav}>
-            <Layout.HeaderContent unified={prefersStackedNav}>
-              <Layout.Title>
-                {t('User Feedback')}
-                <PageHeadingQuestionTooltip
-                  title={t(
-                    'The User Feedback Widget allows users to submit feedback quickly and easily any time they encounter something that isn’t working as expected.'
-                  )}
-                  docsUrl="https://docs.sentry.io/product/user-feedback/"
-                />
-              </Layout.Title>
-            </Layout.HeaderContent>
-          </Layout.Header>
-          <PageFiltersContainer>
-            <ErrorBoundary>
-              <Background>
-                {showWidgetBanner ? (
-                  <FeedbackWidgetBanner />
-                ) : showWhatsNewBanner ? (
-                  <FeedbackWhatsNewBanner />
-                ) : null}
-                <LayoutGrid>
-                  <FeedbackFilters style={{gridArea: 'filters'}} />
-                  {hasSetupOneFeedback || hasSlug ? (
-                    <Fragment>
-                      <SummaryListContainer style={{gridArea: 'list'}}>
-                        <FeedbackSummary />
-                        <Container>
-                          <FeedbackList />
-                        </Container>
-                      </SummaryListContainer>
-                      <SearchContainer>
-                        <FeedbackSearch />
-                      </SearchContainer>
-                      <Container style={{gridArea: 'details'}}>
-                        <FeedbackItemLoader />
-                      </Container>
-                    </Fragment>
-                  ) : (
-                    <SetupContainer>
-                      <FeedbackSetupPanel />
-                    </SetupContainer>
-                  )}
-                </LayoutGrid>
-              </Background>
-            </ErrorBoundary>
-          </PageFiltersContainer>
-        </FeedbackQueryKeys>
-      </FullViewport>
+      <Stack flex={1} minHeight={0} contain="size" overflow="hidden">
+        <FeedbackApiOptions organization={organization}>
+          <TopBar.Slot name="title">{titleContent}</TopBar.Slot>
+          <TopBar.Slot name="feedback">
+            <FeedbackButton
+              size="sm"
+              feedbackOptions={userFeedbackFeedbackOptions}
+              aria-label={t('Give Feedback')}
+              tooltipProps={{title: t('Give Feedback')}}
+            >
+              {null}
+            </FeedbackButton>
+          </TopBar.Slot>
+          <PageContent
+            feedbackProjectSlug={feedbackProjectSlug}
+            hasFeedbackContent={hasFeedbackContent}
+            hideTop={showItemPreview}
+            content={pageContent}
+          />
+        </FeedbackApiOptions>
+      </Stack>
     </SentryDocumentTitle>
   );
 }
 
-const Background = styled('div')`
-  background: ${p => p.theme.background};
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: ${space(2)};
-`;
+function FeedbackPanel({children}: {children: ReactNode}) {
+  return (
+    <Stack border="primary" radius="md" flex={1} minHeight={0} overflow="hidden">
+      {children}
+    </Stack>
+  );
+}
 
-const SummaryListContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(1)};
-`;
-
-const LayoutGrid = styled('div')`
-  overflow: hidden;
-  flex-grow: 1;
-
-  display: grid;
-  gap: ${space(2)};
-  place-items: stretch;
-
-  @media (max-width: ${p => p.theme.breakpoints.medium}) {
-    padding: ${space(2)};
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    padding: ${space(2)};
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    padding: ${space(2)} ${space(4)};
-  }
-
-  grid-template-rows: max-content 1fr;
-  grid-template-areas:
-    'filters search'
-    'list details';
-
-  @media (max-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      'filters'
-      'search'
-      'list'
-      'details';
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: minmax(195px, 1fr) 1.5fr;
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: 390px 1fr;
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: minmax(390px, 1fr) 2fr;
-  }
-`;
-
-const Container = styled(FluidHeight)`
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
-`;
-
-const SetupContainer = styled('div')`
-  overflow: hidden;
-  grid-column: 1 / -1;
-`;
-
-const SearchContainer = styled('div')`
-  flex-grow: 1;
-  min-width: 0;
+const JumpToSelectedButton = styled(Button)`
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 4%;
 `;

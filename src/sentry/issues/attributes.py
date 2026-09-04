@@ -6,7 +6,7 @@ from enum import Enum
 
 import urllib3
 from arroyo import Topic as ArroyoTopic
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer, build_kafka_configuration
+from arroyo.backends.kafka import KafkaPayload, KafkaProducer
 from django.conf import settings
 from django.db.models import F, Window
 from django.db.models.functions import Rank
@@ -20,8 +20,11 @@ from sentry.models.groupassignee import GroupAssignee
 from sentry.models.groupowner import GroupOwner, GroupOwnerType
 from sentry.signals import issue_assigned, issue_deleted, issue_unassigned, post_update
 from sentry.utils import json, metrics, snuba
-from sentry.utils.arroyo_producer import SingletonProducer
-from sentry.utils.kafka_config import get_kafka_producer_cluster_options, get_topic_definition
+from sentry.utils.arroyo_producer import (
+    get_arroyo_producer,
+    get_future_tracking_producer,
+)
+from sentry.utils.kafka_config import get_topic_definition
 from sentry.utils.snuba import _snuba_pool
 
 logger = logging.getLogger(__name__)
@@ -45,16 +48,17 @@ class GroupValues:
     first_release_id: int | None
 
 
-def _get_attribute_snapshot_producer() -> KafkaProducer:
-    cluster_name = get_topic_definition(Topic.GROUP_ATTRIBUTES)["cluster"]
-    producer_config = get_kafka_producer_cluster_options(cluster_name)
-    producer_config.pop("compression.type", None)
-    producer_config.pop("message.max.bytes", None)
-    return KafkaProducer(build_kafka_configuration(default_config=producer_config))
+def _get_attribute_snapshot_producer(name: str = "sentry.issues.attributes") -> KafkaProducer:
+    return get_arroyo_producer(
+        name,
+        Topic.GROUP_ATTRIBUTES,
+        exclude_config_keys=["compression.type", "message.max.bytes"],
+    )
 
 
-_attribute_snapshot_producer = SingletonProducer(
-    _get_attribute_snapshot_producer, max_futures=settings.SENTRY_GROUP_ATTRIBUTES_FUTURES_MAX_LIMIT
+_attribute_snapshot_producer = get_future_tracking_producer(
+    producer_name="sentry.issues.attributes",
+    producer_factory=_get_attribute_snapshot_producer,
 )
 
 
@@ -124,7 +128,8 @@ def produce_snapshot_to_kafka(snapshot: GroupAttributesSnapshot) -> None:
     else:
         payload = KafkaPayload(None, json.dumps(snapshot).encode("utf-8"), [])
         _attribute_snapshot_producer.produce(
-            ArroyoTopic(get_topic_definition(Topic.GROUP_ATTRIBUTES)["real_topic_name"]), payload
+            ArroyoTopic(get_topic_definition(Topic.GROUP_ATTRIBUTES)["real_topic_name"]),
+            payload,
         )
 
 

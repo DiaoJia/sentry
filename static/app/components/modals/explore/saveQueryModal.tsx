@@ -1,6 +1,11 @@
-import {Fragment, useCallback, useState} from 'react';
+import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
+
+import {Button} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
+import {Container, Flex} from '@sentry/scraps/layout';
+import {Switch} from '@sentry/scraps/switch';
 
 import {
   addErrorMessage,
@@ -8,23 +13,20 @@ import {
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {Input} from 'sentry/components/core/input';
-import {Switch} from 'sentry/components/core/switch';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Organization, SavedQuery} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
-import {useSetExplorePageParams} from 'sentry/views/explore/contexts/pageParamsContext';
+import {defined} from 'sentry/utils/defined';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useSetQueryParamsSavedQuery} from 'sentry/views/explore/queryParams/context';
+import {TraceItemDataset} from 'sentry/views/explore/types';
 
 export type SaveQueryModalProps = {
   organization: Organization;
-  saveQuery: (name: string, starred?: boolean) => Promise<SavedQuery>;
+  saveQuery: (variables: {name: string; starred?: boolean}) => Promise<{id: string}>;
+  traceItemDataset: TraceItemDataset;
   name?: string;
-  source?: 'toolbar' | 'table';
+  source?: 'toolbar' | 'table' | 'conversations';
 };
 
 type Props = ModalRenderProps & SaveQueryModalProps;
@@ -37,6 +39,7 @@ function SaveQueryModal({
   saveQuery,
   name: initialName,
   source,
+  traceItemDataset,
 }: Props) {
   const organization = useOrganization();
 
@@ -44,31 +47,43 @@ function SaveQueryModal({
   const [isSaving, setIsSaving] = useState(false);
   const [starred, setStarred] = useState(true);
 
-  const setExplorePageParams = useSetExplorePageParams();
+  const setQueryParamsSavedQuery = useSetQueryParamsSavedQuery();
 
-  const updatePageIdAndTitle = useCallback(
-    (id: string, title: string) => {
-      setExplorePageParams({id, title});
-    },
-    [setExplorePageParams]
-  );
-
-  const onSave = useCallback(async () => {
+  const onSave = async () => {
     try {
       setIsSaving(true);
       addLoadingMessage(t('Saving query...'));
-      const {id} = await saveQuery(name, initialName === undefined ? starred : undefined);
+      const {id} = await saveQuery({
+        name,
+        starred: initialName === undefined ? starred : undefined,
+      });
       if (initialName === undefined) {
-        updatePageIdAndTitle(id, name);
+        setQueryParamsSavedQuery(id, name);
       }
       addSuccessMessage(t('Query saved successfully'));
       if (defined(source)) {
-        trackAnalytics('trace_explorer.save_query_modal', {
-          action: 'submit',
-          save_type: initialName === undefined ? 'save_new_query' : 'rename_query',
-          ui_source: source,
-          organization,
-        });
+        if (source === 'conversations') {
+          trackAnalytics('conversations.save_query_modal', {
+            action: 'submit',
+            save_type: initialName === undefined ? 'save_new_query' : 'rename_query',
+            ui_source: 'table',
+            organization,
+          });
+        } else if (traceItemDataset === TraceItemDataset.LOGS) {
+          trackAnalytics('logs.save_query_modal', {
+            action: 'submit',
+            save_type: initialName === undefined ? 'save_new_query' : 'rename_query',
+            ui_source: source,
+            organization,
+          });
+        } else if (traceItemDataset === TraceItemDataset.SPANS) {
+          trackAnalytics('trace_explorer.save_query_modal', {
+            action: 'submit',
+            save_type: initialName === undefined ? 'save_new_query' : 'rename_query',
+            ui_source: source,
+            organization,
+          });
+        }
       }
       closeModal();
     } catch (error) {
@@ -77,16 +92,7 @@ function SaveQueryModal({
     } finally {
       setIsSaving(false);
     }
-  }, [
-    saveQuery,
-    name,
-    starred,
-    updatePageIdAndTitle,
-    closeModal,
-    organization,
-    initialName,
-    source,
-  ]);
+  };
 
   return (
     <Fragment>
@@ -94,9 +100,10 @@ function SaveQueryModal({
         <h4>{defined(initialName) ? t('Rename Query') : t('New Query')}</h4>
       </Header>
       <Body>
-        <Wrapper>
+        <Container marginBottom="xl">
           <SectionHeader>{t('Name')}</SectionHeader>
           <Input
+            autoFocus
             placeholder={
               defined(initialName)
                 ? t('Enter a name for your query')
@@ -110,7 +117,7 @@ function SaveQueryModal({
                 : t('Enter a name for your new query')
             }
           />
-        </Wrapper>
+        </Container>
         {initialName === undefined && (
           <StarredWrapper>
             <Switch
@@ -126,14 +133,14 @@ function SaveQueryModal({
       </Body>
 
       <Footer>
-        <StyledButtonBar gap={1.5}>
+        <Flex gap="lg" justify="end">
           <Button onClick={closeModal} disabled={isSaving}>
             {t('Cancel')}
           </Button>
-          <Button onClick={onSave} disabled={!name || isSaving} priority="primary">
+          <Button onClick={onSave} disabled={!name || isSaving} variant="primary">
             {defined(initialName) ? t('Save Changes') : t('Create a New Query')}
           </Button>
-        </StyledButtonBar>
+        </Flex>
       </Footer>
     </Fragment>
   );
@@ -141,14 +148,10 @@ function SaveQueryModal({
 
 export default SaveQueryModal;
 
-const Wrapper = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
 const StarredWrapper = styled('div')`
   display: flex;
   flex-direction: row;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
 
   > h6 {
@@ -156,19 +159,7 @@ const StarredWrapper = styled('div')`
   }
 `;
 
-const StyledButtonBar = styled(ButtonBar)`
-  @media (max-width: ${props => props.theme.breakpoints.small}) {
-    grid-template-rows: repeat(2, 1fr);
-    gap: ${space(1.5)};
-    width: 100%;
-
-    > button {
-      width: 100%;
-    }
-  }
-`;
-
 const SectionHeader = styled('h6')`
   font-size: ${p => p.theme.form.md.fontSize};
-  margin-bottom: ${space(0.5)};
+  margin-bottom: ${p => p.theme.space.xs};
 `;

@@ -1,33 +1,48 @@
 import logging
+import time
 
 import requests
 import sentry_sdk
 from django.conf import settings
 from requests import Response
+from requests.exceptions import ConnectionError, Timeout
 
 from sentry import options
+from sentry.locks import locks
 from sentry.models.projectkey import ProjectKey, UseCase
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
 from sentry.tasks.relay import schedule_invalidate_project_config
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import tempest_tasks
 from sentry.tempest.models import MessageType, TempestCredentials
+from sentry.tempest.utils import has_tempest_access
+from sentry.utils import metrics
+from sentry.utils.locking import UnableToAcquireLock
+from sentry.utils.tracing import set_span_data, start_span
 
 logger = logging.getLogger(__name__)
 
 
 @instrumented_task(
     name="sentry.tempest.tasks.poll_tempest",
-    queue="tempest",
-    silo_mode=SiloMode.REGION,
-    soft_time_limit=55,
-    time_limit=60,
-    taskworker_config=TaskworkerConfig(namespace=tempest_tasks, processing_deadline_duration=60),
+    namespace=tempest_tasks,
+    processing_deadline_duration=60,
+    silo_mode=SiloMode.CELL,
 )
 def poll_tempest(**kwargs):
-    # FIXME: Once we have more traffic this needs to be done smarter.
-    for credentials in TempestCredentials.objects.all():
+    for credentials in TempestCredentials.objects.select_related("project__organization").all():
+        # Note: We are caching credentials in the database even if users don't have access to them.
+        # However the latest_fetched_item_id is unique per credentials, and we do not allow PUT/PATCH
+        # calls on credentials resources, so if users want to switch to a different credentials pair
+        # they need to delete the existing credentials and create a new one.
+        if not has_tempest_access(credentials.project.organization):
+            # If users don't have access to Tempest we reset the latest_fetched_item_id to None
+            # so that in the next iteration of the job we first fetch the latest ID again.
+            if credentials.latest_fetched_item_id is not None:
+                credentials.latest_fetched_item_id = None
+                credentials.save(update_fields=["latest_fetched_item_id"])
+            continue
+
         if credentials.latest_fetched_item_id is None:
             fetch_latest_item_id.apply_async(
                 kwargs={"credentials_id": credentials.id},
@@ -42,18 +57,50 @@ def poll_tempest(**kwargs):
 
 @instrumented_task(
     name="sentry.tempest.tasks.fetch_latest_item_id",
-    queue="tempest",
-    silo_mode=SiloMode.REGION,
-    soft_time_limit=55,
-    time_limit=60,
-    taskworker_config=TaskworkerConfig(namespace=tempest_tasks, processing_deadline_duration=60),
+    namespace=tempest_tasks,
+    processing_deadline_duration=60,
+    silo_mode=SiloMode.CELL,
 )
 def fetch_latest_item_id(credentials_id: int, **kwargs) -> None:
-    # FIXME: Try catch this later
-    credentials = TempestCredentials.objects.select_related("project").get(id=credentials_id)
+    # Lock duration should be slightly longer than the task deadline to prevent
+    # overlapping tasks for the same credential. If a task is still running when
+    # the next poll_tempest fires, the new task will skip this credential.
+    lock_duration = options.get("tempest.task-deadline-seconds") + options.get(
+        "tempest.lock-buffer-seconds"
+    )
+    lock = locks.get(
+        f"tempest:fetch_latest_id:{credentials_id}",
+        duration=lock_duration,
+        name="tempest_fetch_latest_id",
+    )
+    try:
+        with lock.acquire():
+            _fetch_latest_item_id_impl(credentials_id)
+    except UnableToAcquireLock:
+        # Another task is already processing this credential, skip silently.
+        # This is expected when tasks take longer than the polling interval.
+        metrics.incr("tempest.latest_id.skipped", tags={"reason": "lock_held"})
+
+
+def _fetch_latest_item_id_impl(credentials_id: int) -> None:
+    """Implementation of fetch_latest_item_id, separated for locking."""
+    credentials = (
+        TempestCredentials.objects.select_related("project").filter(id=credentials_id).first()
+    )
+    if credentials is None:
+        # Credentials deleted between task scheduling and execution - skip silently
+        metrics.incr("tempest.latest_id.skipped", tags={"reason": "credentials_deleted"})
+        return
     project_id = credentials.project.id
     org_id = credentials.project.organization_id
     client_id = credentials.client_id
+
+    sentry_sdk.set_user({"id": f"{org_id}-{project_id}"})
+    tags = {"org_id": str(org_id), "project_id": str(project_id)}
+
+    start_time = time.time()
+    error_type = None
+    timing_recorded = False
 
     try:
         response = fetch_latest_id_from_tempest(
@@ -62,28 +109,86 @@ def fetch_latest_item_id(credentials_id: int, **kwargs) -> None:
             client_id=client_id,
             client_secret=credentials.client_secret,
         )
+
+        # Record timing and response metrics
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.latest_id.duration", duration_ms, tags=tags)
+        timing_recorded = True
+        metrics.distribution(
+            "tempest.latest_id.response_size_bytes",
+            len(response.content),
+            tags=tags,
+        )
+
         result = response.json()
 
         if "latest_id" in result:
-            credentials.latest_fetched_item_id = result["latest_id"]
-            credentials.message = ""
-            credentials.message_type = MessageType.SUCCESS
-            credentials.save(update_fields=["message", "latest_fetched_item_id", "message_type"])
-            return
+            if result["latest_id"] is None:
+                # If there are no crashes in the CRS we want to communicate that back to the
+                # customer so that they are not surprised about no crashes arriving.
+                credentials.message = "Connection successful. No crashes found in the crash report system yet. New crashes will appear here automatically when they occur."
+                credentials.message_type = MessageType.WARNING
+                credentials.save(update_fields=["message", "message_type"])
+                metrics.incr("tempest.latest_id.success", tags={**tags, "result": "no_crashes"})
+                return
+            else:
+                credentials.latest_fetched_item_id = result["latest_id"]
+                credentials.message = ""
+                credentials.message_type = MessageType.SUCCESS
+                credentials.save(
+                    update_fields=["message", "latest_fetched_item_id", "message_type"]
+                )
+                metrics.incr("tempest.latest_id.success", tags={**tags, "result": "found"})
+                return
         elif "error" in result:
-            if result["error"]["type"] == "invalid_credentials":
+            error_obj = result["error"]
+            error_type = (
+                error_obj.get("type", "unknown") if isinstance(error_obj, dict) else "unknown"
+            )
+            metrics.incr(
+                "tempest.latest_id.error",
+                tags={**tags, "error_type": error_type, "status_code": str(response.status_code)},
+            )
+
+            if error_type == "invalid_credentials":
                 credentials.message = "Seems like the provided credentials are invalid"
                 credentials.message_type = MessageType.ERROR
                 credentials.save(update_fields=["message", "message_type"])
                 return
-
-            elif result["error"]["type"] == "ip_not_allowlisted":
+            elif error_type == "ip_not_allowlisted":
                 credentials.message = "Seems like our IP is not allow-listed"
                 credentials.message_type = MessageType.ERROR
                 credentials.save(update_fields=["message", "message_type"])
                 return
 
+            elif error_type == "invalid_scope":
+                credentials.message = "Seems like the provided credentials have the wrong scope."
+                credentials.message_type = MessageType.ERROR
+                credentials.save(update_fields=["message", "message_type"])
+                return
+            else:
+                # Unhandled Tempest API error type - record detailed context for debugging.
+                logger.error(
+                    "Fetching the latest item id failed with Tempest error.",
+                    extra={
+                        "org_id": org_id,
+                        "project_id": project_id,
+                        "client_id": client_id,
+                        "status_code": response.status_code,
+                        "error_type": error_type,
+                        "response_text": result,
+                    },
+                )
+                return
         # Default in case things go wrong
+        metrics.incr(
+            "tempest.latest_id.error",
+            tags={
+                **tags,
+                "error_type": "unexpected_response",
+                "status_code": str(response.status_code),
+            },
+        )
         logger.error(
             "Fetching the latest item id failed.",
             extra={
@@ -95,13 +200,48 @@ def fetch_latest_item_id(credentials_id: int, **kwargs) -> None:
             },
         )
 
+    except Timeout as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.latest_id.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.latest_id.error", tags={**tags, "error_type": "timeout"})
+        logger.exception(
+            "Fetching the latest item id timed out.",
+            extra={
+                "org_id": org_id,
+                "project_id": project_id,
+                "client_id": client_id,
+                "duration_ms": duration_ms,
+                "error": str(e),
+            },
+        )
+
+    except ConnectionError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.latest_id.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.latest_id.error", tags={**tags, "error_type": "connection_error"})
+        logger.exception(
+            "Fetching the latest item id failed due to connection error.",
+            extra={
+                "org_id": org_id,
+                "project_id": project_id,
+                "client_id": client_id,
+                "duration_ms": duration_ms,
+                "error": str(e),
+            },
+        )
+
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        if not timing_recorded:
+            metrics.timing("tempest.latest_id.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.latest_id.error", tags={**tags, "error_type": "exception"})
         logger.exception(
             "Fetching the latest item id failed.",
             extra={
                 "org_id": org_id,
                 "project_id": project_id,
                 "client_id": client_id,
+                "duration_ms": duration_ms,
                 "error": str(e),
             },
         )
@@ -109,17 +249,50 @@ def fetch_latest_item_id(credentials_id: int, **kwargs) -> None:
 
 @instrumented_task(
     name="sentry.tempest.tasks.poll_tempest_crashes",
-    queue="tempest",
-    silo_mode=SiloMode.REGION,
-    soft_time_limit=55,
-    time_limit=60,
-    taskworker_config=TaskworkerConfig(namespace=tempest_tasks, processing_deadline_duration=60),
+    namespace=tempest_tasks,
+    processing_deadline_duration=60,
+    silo_mode=SiloMode.CELL,
 )
 def poll_tempest_crashes(credentials_id: int, **kwargs) -> None:
-    credentials = TempestCredentials.objects.select_related("project").get(id=credentials_id)
+    # Lock duration should be slightly longer than the task deadline to prevent
+    # overlapping tasks for the same credential. If a task is still running when
+    # the next poll_tempest fires, the new task will skip this credential.
+    lock_duration = options.get("tempest.task-deadline-seconds") + options.get(
+        "tempest.lock-buffer-seconds"
+    )
+    lock = locks.get(
+        f"tempest:poll_crashes:{credentials_id}",
+        duration=lock_duration,
+        name="tempest_poll_crashes",
+    )
+    try:
+        with lock.acquire():
+            _poll_tempest_crashes_impl(credentials_id)
+    except UnableToAcquireLock:
+        # Another task is already processing this credential, skip silently.
+        # This is expected when tasks take longer than the polling interval.
+        metrics.incr("tempest.crashes.skipped", tags={"reason": "lock_held"})
+
+
+def _poll_tempest_crashes_impl(credentials_id: int) -> None:
+    """Implementation of poll_tempest_crashes, separated for locking."""
+    credentials = (
+        TempestCredentials.objects.select_related("project").filter(id=credentials_id).first()
+    )
+    if credentials is None:
+        # Credentials deleted between task scheduling and execution - skip silently
+        metrics.incr("tempest.poll_crashes.skipped", tags={"reason": "credentials_deleted"})
+        return
     project_id = credentials.project.id
     org_id = credentials.project.organization_id
     client_id = credentials.client_id
+
+    sentry_sdk.set_user({"id": f"{org_id}-{project_id}"})
+    tags = {"org_id": str(org_id), "project_id": str(project_id)}
+
+    start_time = time.time()
+    batch_limit = options.get("tempest.poll-limit")
+    timing_recorded = False
 
     try:
         if credentials.latest_fetched_item_id is not None:
@@ -133,9 +306,8 @@ def poll_tempest_crashes(credentials_id: int, **kwargs) -> None:
                     project_id=project_id, trigger="tempest:poll_tempest_crashes"
                 )
 
-            # Check if we should attach screenshots  and or dumps (opt-in features)
+            # Check if we should attach screenshots (opt-in feature)
             attach_screenshot = credentials.project.get_option("sentry:tempest_fetch_screenshots")
-            attach_dump = credentials.project.get_option("sentry:tempest_fetch_dumps")
 
             response = fetch_items_from_tempest(
                 org_id=org_id,
@@ -144,9 +316,9 @@ def poll_tempest_crashes(credentials_id: int, **kwargs) -> None:
                 client_secret=credentials.client_secret,
                 dsn=dsn,
                 offset=int(credentials.latest_fetched_item_id),
-                limit=options.get("tempest.poll-limit"),
+                limit=batch_limit,
                 attach_screenshot=attach_screenshot,
-                attach_dump=attach_dump,
+                attach_dump=True,  # Always fetch for symbolication
             )
         else:
             raise ValueError(
@@ -155,14 +327,84 @@ def poll_tempest_crashes(credentials_id: int, **kwargs) -> None:
                 "when latest_fetched_item_id is set."
             )
 
+        # Record timing and response metrics
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.crashes.duration", duration_ms, tags=tags)
+        timing_recorded = True
+        metrics.distribution(
+            "tempest.crashes.response_size_bytes",
+            len(response.content),
+            tags=tags,
+        )
+
         result = response.json()
+
+        # Update state FIRST before any non-critical operations (like metrics)
+        # This ensures we don't lose track of processed crashes if metrics fail
         credentials.latest_fetched_item_id = result["latest_id"]
         # Make sure that once existing customers pull crashes the message is set to SUCCESS,
         # since due to legacy reasons they might still have an empty ERROR message.
         credentials.message = ""
         credentials.message_type = MessageType.SUCCESS
         credentials.save(update_fields=["latest_fetched_item_id", "message", "message_type"])
+
+        # Record metrics AFTER state is saved (defensive: use 'or 0' to handle None values)
+        crash_count = result.get("crash_count") or 0
+        crash_fails = result.get("crash_fails") or 0
+        metrics.distribution("tempest.crashes.batch_size", crash_count, tags=tags)
+        if crash_fails > 0:
+            metrics.incr("tempest.crashes.batch_failures", amount=crash_fails, tags=tags)
+        metrics.incr("tempest.crashes.success", tags=tags)
+
+    except Timeout as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.crashes.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.crashes.error", tags={**tags, "error_type": "timeout"})
+        logger.exception(
+            "Fetching the crashes timed out.",
+            extra={
+                "org_id": org_id,
+                "project_id": project_id,
+                "client_id": client_id,
+                "latest_id": credentials.latest_fetched_item_id,
+                "duration_ms": duration_ms,
+                "batch_limit": batch_limit,
+                "error": str(e),
+            },
+        )
+        # Reset latest_fetched_item_id to avoid getting stuck on large crashes that always timeout
+        # Note: We might re-think this in the future and start tracking failures on specific IDs,
+        # then only reset after multiple consecutive failures.
+        credentials.latest_fetched_item_id = None
+        credentials.save(update_fields=["latest_fetched_item_id"])
+
+    except ConnectionError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.timing("tempest.crashes.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.crashes.error", tags={**tags, "error_type": "connection_error"})
+        logger.exception(
+            "Fetching the crashes failed due to connection error.",
+            extra={
+                "org_id": org_id,
+                "project_id": project_id,
+                "client_id": client_id,
+                "latest_id": credentials.latest_fetched_item_id,
+                "duration_ms": duration_ms,
+                "batch_limit": batch_limit,
+                "error": str(e),
+            },
+        )
+        # Reset latest_fetched_item_id to avoid getting stuck on crashes that cause connection errors
+        # Note: We might re-think this in the future and start tracking failures on specific IDs,
+        # then only reset after multiple consecutive failures.
+        credentials.latest_fetched_item_id = None
+        credentials.save(update_fields=["latest_fetched_item_id"])
+
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        if not timing_recorded:
+            metrics.timing("tempest.crashes.duration", duration_ms, tags=tags)
+        metrics.incr("tempest.crashes.error", tags={**tags, "error_type": "exception"})
         logger.exception(
             "Fetching the crashes failed.",
             extra={
@@ -170,9 +412,18 @@ def poll_tempest_crashes(credentials_id: int, **kwargs) -> None:
                 "project_id": project_id,
                 "client_id": client_id,
                 "latest_id": credentials.latest_fetched_item_id,
+                "duration_ms": duration_ms,
+                "batch_limit": batch_limit,
                 "error": str(e),
             },
         )
+
+        # Fetching crashes can fail if the CRS returns unexpected data.
+        # In this case retrying does not help since we will just keep failing.
+        # To avoid this we skip over the bad crash by setting the latest fetched id to
+        # `None` such that in the next iteration of the job we first fetch the latest ID again.
+        credentials.latest_fetched_item_id = None
+        credentials.save(update_fields=["latest_fetched_item_id"])
 
 
 def fetch_latest_id_from_tempest(
@@ -185,15 +436,23 @@ def fetch_latest_id_from_tempest(
         "client_secret": client_secret,
     }
 
-    response = requests.post(
-        url=settings.SENTRY_TEMPEST_URL + "/latest-id",
-        headers={"Content-Type": "application/json"},
-        json=payload,
-    )
+    timeout = options.get("tempest.latest-id-timeout")
 
-    span = sentry_sdk.get_current_span()
-    if span is not None:
-        span.set_data("response_text", response.text)
+    with start_span(op="http.client", name="POST /latest-id") as span:
+        set_span_data(span, "tempest.org_id", org_id)
+        set_span_data(span, "tempest.project_id", project_id)
+        set_span_data(span, "tempest.timeout", timeout)
+
+        response = requests.post(
+            url=settings.SENTRY_TEMPEST_URL + "/latest-id",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+
+        set_span_data(span, "http.status_code", response.status_code)
+        set_span_data(span, "http.response_content_length", len(response.content))
+        set_span_data(span, "tempest.response_text", response.text[:1000])  # Truncate for safety
 
     return response
 
@@ -207,8 +466,7 @@ def fetch_items_from_tempest(
     offset: int,
     limit: int = 10,
     attach_screenshot: bool = False,
-    attach_dump: bool = False,
-    time_out: int = 50,  # Since there is a timeout of 45s in the middleware anyways
+    attach_dump: bool = True,
 ) -> Response:
     payload = {
         "org_id": org_id,
@@ -222,15 +480,26 @@ def fetch_items_from_tempest(
         "attach_dump": attach_dump,
     }
 
-    response = requests.post(
-        url=settings.SENTRY_TEMPEST_URL + "/crashes",
-        headers={"Content-Type": "application/json"},
-        json=payload,
-        timeout=time_out,
-    )
+    timeout = options.get("tempest.crashes-timeout")
 
-    span = sentry_sdk.get_current_span()
-    if span is not None:
-        span.set_data("response_text", response.text)
+    with start_span(op="http.client", name="POST /crashes") as span:
+        set_span_data(span, "tempest.org_id", org_id)
+        set_span_data(span, "tempest.project_id", project_id)
+        set_span_data(span, "tempest.offset", offset)
+        set_span_data(span, "tempest.limit", limit)
+        set_span_data(span, "tempest.attach_screenshot", attach_screenshot)
+        set_span_data(span, "tempest.timeout", timeout)
+
+        response = requests.post(
+            url=settings.SENTRY_TEMPEST_URL + "/crashes",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+
+        set_span_data(span, "http.status_code", response.status_code)
+        set_span_data(span, "http.response_content_length", len(response.content))
+        # Don't log full response for crashes - it can be huge
+        set_span_data(span, "tempest.response_preview", response.text[:500])
 
     return response

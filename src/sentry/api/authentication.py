@@ -4,14 +4,17 @@ import hashlib
 import hmac
 import logging
 from collections.abc import Callable, Iterable
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NoReturn
 
 import sentry_sdk
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
+from django.http import HttpHeaders
 from django.urls import resolve
 from django.utils.crypto import constant_time_compare
 from django.utils.encoding import force_str
+from jwt import PyJWTError
 from rest_framework.authentication import (
     BaseAuthentication,
     BasicAuthentication,
@@ -22,7 +25,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.request import Request
 from sentry_relay.exceptions import UnpackError
 
-from sentry import options
+from sentry import features, options
 from sentry.auth.services.auth import AuthenticatedToken
 from sentry.auth.system import SystemToken, is_internal_ip
 from sentry.hybridcloud.models import ApiKeyReplica, ApiTokenReplica, OrgAuthTokenReplica
@@ -39,11 +42,16 @@ from sentry.models.projectkey import ProjectKey
 from sentry.models.relay import Relay
 from sentry.organizations.services.organization import organization_service
 from sentry.relay.utils import get_header_relay_id, get_header_relay_signature
+from sentry.seer import agent_token
 from sentry.sentry_apps.models.sentry_app import SentryApp
+from sentry.sentry_apps.models.sentry_app_installation import SentryAppInstallation
+from sentry.sentry_apps.token_exchange.util import GrantTypes
 from sentry.silo.base import SiloLimit, SiloMode
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
 from sentry.users.services.user.service import user_service
+from sentry.utils import jwt, metrics
+from sentry.utils.auth import record_suspended_user_rejection
 from sentry.utils.linksign import process_signature
 from sentry.utils.security.orgauthtoken_token import SENTRY_ORG_AUTH_TOKEN_PREFIX, hash_token
 
@@ -94,10 +102,26 @@ def is_internal_relay(request, public_key):
 
     # check legacy whitelisted public_key settings
     # (we can't check specific relays but we can check public keys)
-    if settings.DEBUG or public_key in settings.SENTRY_RELAY_WHITELIST_PK:
+    if settings.DEBUG:
         return True
 
-    return is_internal_ip(request)
+    if public_key in settings.SENTRY_RELAY_WHITELIST_PK:
+        metrics.incr(
+            "relay.is_internal_relay",
+            tags={"reason": "whitelist_pk"},
+            sample_rate=1.0,
+        )
+        return True
+
+    if is_internal_ip(request) and options.get("relay.allow_internal_ip_auth"):
+        metrics.incr(
+            "relay.is_internal_relay",
+            tags={"reason": "internal_ip"},
+            sample_rate=1.0,
+        )
+        return True
+
+    return False
 
 
 def is_static_relay(request):
@@ -107,9 +131,18 @@ def is_static_relay(request):
     Note: Only checks the relay_id (no public key validation is done).
     """
     relay_id = get_header_relay_id(request)
-    static_relays = options.get("relay.static_auth")
+    static_relays = settings.SENTRY_RELAY_STATIC_AUTH
     relay_info = static_relays.get(relay_id)
-    return relay_info is not None
+
+    if relay_info is not None:
+        metrics.incr(
+            "relay.is_internal_relay",
+            tags={"reason": "static_relay"},
+            sample_rate=1.0,
+        )
+        return True
+
+    return False
 
 
 def relay_from_id(request: Request, relay_id: str) -> tuple[Relay | None, bool]:
@@ -123,7 +156,7 @@ def relay_from_id(request: Request, relay_id: str) -> tuple[Relay | None, bool]:
 
     # first see if we have a statically configured relay and therefore we don't
     # need to go to the database for it
-    static_relays = options.get("relay.static_auth")
+    static_relays = settings.SENTRY_RELAY_STATIC_AUTH
     relay_info = static_relays.get(relay_id)
 
     if relay_info is not None:
@@ -172,8 +205,11 @@ class QuietBasicAuthentication(BasicAuthentication):
         if auth_token and entity_id_tag:
             scope = sentry_sdk.get_isolation_scope()
             scope.set_tag(entity_id_tag, auth_token.entity_id)
+            if auth_token.entity_id is not None:
+                scope.set_attribute(entity_id_tag, auth_token.entity_id)
             for k, v in tags.items():
                 scope.set_tag(k, v)
+                scope.set_attribute(k, v.decode() if isinstance(v, bytes) else v)
 
         return (user, auth_token)
 
@@ -183,6 +219,10 @@ class StandardAuthentication(QuietBasicAuthentication):
 
     def accepts_auth(self, auth: list[bytes]) -> bool:
         return bool(auth) and auth[0].lower() == self.token_name
+
+    def authenticate_header(self, request: Request) -> str:
+        """Return WWW-Authenticate header value for 401 responses per RFC 6750 Section 3."""
+        return f'{self.token_name.decode().title()} realm="api"'
 
     def authenticate_token(self, request: Request, token_str: str) -> tuple[Any, Any]:
         raise NotImplementedError
@@ -203,7 +243,7 @@ class StandardAuthentication(QuietBasicAuthentication):
         return self.authenticate_token(request, force_str(auth[1]))
 
 
-@AuthenticationSiloLimit(SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CELL)
 class RelayAuthentication(BasicAuthentication):
     def authenticate(self, request: Request):
         relay_id = get_header_relay_id(request)
@@ -218,6 +258,7 @@ class RelayAuthentication(BasicAuthentication):
         self, relay_id: str, relay_sig: str, request=None
     ) -> tuple[AnonymousUser, None]:
         sentry_sdk.get_isolation_scope().set_tag("relay_id", relay_id)
+        sentry_sdk.get_isolation_scope().set_attribute("relay_id", relay_id)
 
         if request is None:
             raise AuthenticationFailed("missing request")
@@ -242,7 +283,7 @@ class RelayAuthentication(BasicAuthentication):
         return (AnonymousUser(), None)
 
 
-@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.CELL)
 class ApiKeyAuthentication(QuietBasicAuthentication):
     token_name = b"basic"
 
@@ -255,7 +296,7 @@ class ApiKeyAuthentication(QuietBasicAuthentication):
             return None
 
         key: ApiKeyReplica | ApiKey
-        if SiloMode.get_current_mode() == SiloMode.REGION:
+        if SiloMode.get_current_mode() == SiloMode.CELL:
             key_replica = ApiKeyReplica.objects.filter(key=userid).last()
             if key_replica is None:
                 raise AuthenticationFailed("API key is not valid")
@@ -273,12 +314,20 @@ class ApiKeyAuthentication(QuietBasicAuthentication):
         return self.transform_auth(None, key, "api_key")
 
 
-@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.CELL)
 class SessionNoAuthTokenAuthentication(SessionAuthentication):
+    """
+    Authentication that only allows session-based authentication.
+    Rejects any token-based authentication (Bearer, Basic, etc.).
+    """
+
     def authenticate(self, request: Request):
+        # Check if there's any authorization header - if so, reject it
         auth = get_authorization_header(request)
         if auth:
             return None
+
+        # Use session authentication
         return super().authenticate(request)
 
 
@@ -310,7 +359,9 @@ class ClientIdSecretAuthentication(QuietBasicAuthentication):
         except ApiApplication.DoesNotExist:
             raise invalid_pair_error
 
-        if not constant_time_compare(application.client_secret, client_secret):
+        if application.client_secret is None or not constant_time_compare(
+            application.client_secret, client_secret
+        ):
             raise invalid_pair_error
 
         try:
@@ -322,7 +373,92 @@ class ClientIdSecretAuthentication(QuietBasicAuthentication):
         return self.transform_auth(user_id, None)
 
 
-@AuthenticationSiloLimit(SiloMode.REGION, SiloMode.CONTROL)
+def get_payload_from_client_secret_jwt(
+    headers: HttpHeaders, installation: SentryAppInstallation
+) -> dict[str, Any]:
+    auth_header = headers.get("Authorization")
+    if auth_header is None:
+        raise AuthenticationFailed("Header is in invalid form")
+
+    tokens = auth_header.split(" ")  # Should be Bearer <token>
+    if tokens[0].lower() != "bearer":
+        raise AuthenticationFailed("Bearer not present in token")
+
+    application = installation.sentry_app.application
+    if application is None:
+        raise AuthenticationFailed("Application not found")
+
+    client_secret = application.client_secret
+    if client_secret is None:
+        raise AuthenticationFailed("Application does not have a client secret")
+
+    try:
+        encoded_jwt = tokens[1]
+    except IndexError:
+        raise AuthenticationFailed("Invalid Authorization header, should be Bearer <token>")
+
+    try:
+        payload = jwt.decode(encoded_jwt, client_secret, algorithms=["HS256"])
+    except Exception as e:
+        raise AuthenticationFailed("Could not validate JWT") from e
+
+    return payload
+
+
+class JWTClientSecretAuthentication(QuietBasicAuthentication):
+    """
+    Authenticates a Sentry App by validating given JWT was issued by the Sentry App
+
+    Currently used for authenticating requests to manually refresh an installation's API token.
+    Expects the URL to contain a `uuid` in the path
+    """
+
+    def _create_cache_key(self, installation_uuid: str, jti: str) -> str:
+        return f"jwt_client_secret:{installation_uuid}:{jti}"
+
+    def authenticate(self, request: Request):
+        if not request.data:
+            raise AuthenticationFailed("Invalid request")
+
+        if request.data.get("grant_type") != GrantTypes.CLIENT_SECRET_JWT:
+            return None
+
+        path_params = request.resolver_match
+        installation_uuid = path_params.kwargs.get("uuid") if path_params else None
+        if not installation_uuid:
+            raise AuthenticationFailed("Installation UUID not found")
+
+        try:
+            installation = SentryAppInstallation.objects.get(uuid=installation_uuid)
+        except SentryAppInstallation.DoesNotExist:
+            raise AuthenticationFailed("Installation not found")
+
+        application = installation.sentry_app.application
+        if application is None:
+            raise AuthenticationFailed("Application not found")
+        payload = get_payload_from_client_secret_jwt(request.headers, installation)
+        # Store the JWT payload on the request object for later use
+        setattr(request, "jwt_payload", payload)
+
+        valid_client_id = payload.get("iss") is not None and constant_time_compare(
+            payload["iss"], application.client_id
+        )
+        if not valid_client_id:
+            raise AuthenticationFailed("JWT is not valid for this application")
+
+        jti = payload.get("jti")
+        if not jti:
+            raise AuthenticationFailed("JWT is missing a jti claim")
+
+        cache_key = self._create_cache_key(installation.uuid, jti)
+        if cache.get(cache_key):
+            raise AuthenticationFailed("JWT has already been used")
+        cache.set(cache_key, True, timeout=60)  # 1 minute
+
+        return self.transform_auth(installation.sentry_app.proxy_user_id, None)
+
+
+@AuthenticationSiloLimit(SiloMode.CELL, SiloMode.CONTROL)
 class UserAuthTokenAuthentication(StandardAuthentication):
     token_name = b"bearer"
 
@@ -337,13 +473,13 @@ class UserAuthTokenAuthentication(StandardAuthentication):
         5. If found, update the token's hashed value and return the token.
         6. If not found via hash or plaintext value, raise AuthenticationFailed
 
-        Returns `ApiTokenReplica` if running in REGION silo or
+        Returns `ApiTokenReplica` if running in CELL silo or
         `ApiToken` if running in CONTROL silo.
         """
 
         hashed_token = hashlib.sha256(token_str.encode()).hexdigest()
 
-        if SiloMode.get_current_mode() == SiloMode.REGION:
+        if SiloMode.get_current_mode() == SiloMode.CELL:
             try:
                 # Try to find the token by its hashed value first
                 return ApiTokenReplica.objects.get(hashed_token=hashed_token)
@@ -386,7 +522,10 @@ class UserAuthTokenAuthentication(StandardAuthentication):
             return True
 
         token_str = force_str(auth[1])
-        return not token_str.startswith(SENTRY_ORG_AUTH_TOKEN_PREFIX)
+        if token_str.startswith(SENTRY_ORG_AUTH_TOKEN_PREFIX):
+            return False
+
+        return not agent_token.is_agent_token_string(token_str)
 
     def authenticate_token(self, request: Request, token_str: str) -> tuple[Any, Any]:
         user: AnonymousUser | User | RpcUser | None = AnonymousUser()
@@ -399,7 +538,7 @@ class UserAuthTokenAuthentication(StandardAuthentication):
 
         if not token:
             token = self._find_or_update_token_by_hash(token_str)
-            if isinstance(token, ApiTokenReplica):  # we're running as a REGION silo
+            if isinstance(token, ApiTokenReplica):  # we're running as a CELL silo
                 user = user_service.get_user(user_id=token.user_id)
                 application_is_inactive = not token.application_is_active
             else:  # the token returned is an ApiToken from the CONTROL silo
@@ -419,6 +558,18 @@ class UserAuthTokenAuthentication(StandardAuthentication):
 
         if not isinstance(token, SystemToken) and user and not user.is_active:
             raise AuthenticationFailed("User inactive or deleted")
+
+        if not isinstance(token, SystemToken) and user and getattr(user, "is_suspended", False):
+            logger.info(
+                "api.token.suspended-user",
+                extra={
+                    "user_id": user.id,
+                    "token_id": getattr(token, "id", None),
+                    "ip_address": request.META.get("REMOTE_ADDR"),
+                },
+            )
+            record_suspended_user_rejection("token_auth")
+            raise AuthenticationFailed("User account is suspended")
 
         if application_is_inactive:
             raise AuthenticationFailed("UserApplication inactive or deleted")
@@ -459,7 +610,94 @@ class UserAuthTokenAuthentication(StandardAuthentication):
         )
 
 
-@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CELL, SiloMode.CONTROL)
+class AgentTokenAuthentication(StandardAuthentication):
+    """Authenticates the Seer agent's typed capability JWT.
+
+    The agent credential remains the authorization authority. A non-authoritative,
+    ephemeral copy of the delegating user is returned only for compatibility with
+    callsites that still require ``request.user``; API access is derived from the
+    delegating member and capped by the token in ``access.from_agent_auth``."""
+
+    token_name = b"bearer"
+
+    def accepts_auth(self, auth: list[bytes]) -> bool:
+        if not super().accepts_auth(auth) or len(auth) != 2:
+            return False
+        return agent_token.is_agent_token_string(force_str(auth[1]))
+
+    def authenticate_token(self, request: Request, token_str: str) -> tuple[Any, Any]:
+        def fail(reason: str, **extra: Any) -> NoReturn:
+            # TODO(jstanley): Temporary logging to disambiguate agent-token 401s. Every
+            # rejection below returns the same opaque message, so a rejected credential
+            # is indistinguishable from no credential at all -- and because the scope
+            # challenge (403 insufficient_scope) lives downstream of authentication, a
+            # failure here silently forecloses the write-approval flow rather than
+            # prompting for it. Mirrors viewer_context_auth.failed below.
+            # Remove once the auth issue is resolved.
+            #
+            # Deliberately free of request-derived strings. `request.path` carries the
+            # org and project slugs, and a JWT library's message can quote the token it
+            # failed on -- neither belongs in a production log. Numeric ids and the
+            # exception's class name say which of the seven rejections fired, which is
+            # the whole diagnostic need.
+            logger.warning(
+                "agent_token_auth.failed",
+                extra={"reason": reason, **extra},
+            )
+            raise AuthenticationFailed("Invalid agent token")
+
+        try:
+            claims = agent_token.decode_agent_token(token_str)
+            # Building the token casts org and scopes too, so any missing/mis-typed claim
+            # in a signed token is a clean 401 here, not a 500 downstream.
+            auth_token = agent_token.build_authenticated_token(claims)
+            user_id = auth_token.user_id
+        except (PyJWTError, KeyError, ValueError, TypeError) as exc:
+            fail("decode_failed", error_type=type(exc).__name__)
+
+        if user_id is None:
+            fail("no_user_principal", org_id=auth_token.organization_id)
+
+        # The delegating user must still be valid even though they are not the request user.
+        user = user_service.get_user(user_id=user_id)
+        if user is None:
+            fail("user_not_found", user_id=user_id)
+        if not user.is_active:
+            fail("user_inactive", user_id=user_id)
+        if getattr(user, "is_suspended", False):
+            fail("user_suspended", user_id=user_id)
+
+        org_context = organization_service.get_organization_by_id(
+            id=auth_token.organization_id,
+            user_id=user_id,
+            include_projects=False,
+            include_teams=False,
+        )
+        if org_context is None:
+            fail("org_context_missing", user_id=user_id, org_id=auth_token.organization_id)
+        if org_context.member is None:
+            fail("org_membership_missing", user_id=user_id, org_id=auth_token.organization_id)
+        if not features.has(
+            agent_token.FEATURE_FLAG,
+            org_context.organization,
+            actor=user,
+            skip_experiment_exposure=True,
+        ):
+            fail("feature_flag_off", user_id=user_id, org_id=auth_token.organization_id)
+
+        compatibility_user = user.copy(
+            update={
+                "is_staff": False,
+                "is_superuser": False,
+                "permissions": frozenset(),
+                "roles": frozenset(),
+            }
+        )
+        return self.transform_auth(compatibility_user, auth_token)
+
+
+@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.CELL)
 class OrgAuthTokenAuthentication(StandardAuthentication):
     token_name = b"bearer"
 
@@ -474,7 +712,7 @@ class OrgAuthTokenAuthentication(StandardAuthentication):
         token_hashed = hash_token(token_str)
 
         token: OrgAuthTokenReplica | OrgAuthToken
-        if SiloMode.get_current_mode() == SiloMode.REGION:
+        if SiloMode.get_current_mode() == SiloMode.CELL:
             try:
                 token = OrgAuthTokenReplica.objects.get(
                     token_hashed=token_hashed,
@@ -499,7 +737,7 @@ class OrgAuthTokenAuthentication(StandardAuthentication):
         )
 
 
-@AuthenticationSiloLimit(SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CELL)
 class DSNAuthentication(StandardAuthentication):
     token_name = b"dsn"
 
@@ -514,12 +752,14 @@ class DSNAuthentication(StandardAuthentication):
 
         scope = sentry_sdk.get_isolation_scope()
         scope.set_tag("api_token_type", self.token_name)
+        scope.set_attribute("api_token_type", self.token_name.decode())
         scope.set_tag("api_project_key", key.id)
+        scope.set_attribute("api_project_key", key.id)
 
         return (AnonymousUser(), AuthenticatedToken.from_token(key))
 
 
-@AuthenticationSiloLimit(SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CELL)
 class SignedRequestAuthentication(BaseAuthentication):
     def authenticate(self, request: Request) -> tuple[Any, Any]:
         user = process_signature(request)
@@ -530,7 +770,7 @@ class SignedRequestAuthentication(BaseAuthentication):
         return (user, None)
 
 
-@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.REGION)
+@AuthenticationSiloLimit(SiloMode.CONTROL, SiloMode.CELL)
 class RpcSignatureAuthentication(StandardAuthentication):
     """
     Authentication for cross-region RPC requests.
@@ -549,6 +789,7 @@ class RpcSignatureAuthentication(StandardAuthentication):
             raise AuthenticationFailed("Invalid signature")
 
         sentry_sdk.get_isolation_scope().set_tag("rpc_auth", True)
+        sentry_sdk.get_isolation_scope().set_attribute("rpc_auth", True)
 
         return (AnonymousUser(), token)
 
@@ -559,6 +800,8 @@ def compare_service_signature(
     signature: str,
     shared_secret_setting: list[str],
     service_name: str,
+    signature_prefix: str = "rpc0",
+    include_url_in_signature: bool = False,
 ) -> bool:
     """
     Generic function to compare request data + signature signed by one of the shared secrets.
@@ -572,28 +815,40 @@ def compare_service_signature(
         signature: The signature to validate
         shared_secret_setting: List of shared secrets from settings
         service_name: Name of the service for logging (e.g., "Seer", "Launchpad")
+        signature_prefix: Expected prefix for the signature (e.g., "rpc0", "service0"). The colon will be added automatically. Defaults to "rpc0" for backward compatibility.
+        include_url_in_signature: If True, signs "url:body". If False, signs only "body". Defaults to False for backward compatibility.
     """
 
     if not shared_secret_setting:
         raise RpcAuthenticationSetupException(
-            f"Cannot validate {service_name} RPC request signatures without shared secret"
+            f"Cannot validate {service_name} request signatures without shared secret"
         )
 
     # Ensure no empty secrets
     if any(not secret.strip() for secret in shared_secret_setting):
         raise RpcAuthenticationSetupException(
-            f"Cannot validate {service_name} RPC request signatures with empty shared secret"
+            f"Cannot validate {service_name} request signatures with empty shared secret"
         )
 
-    if not signature.startswith("rpc0:"):
-        logger.error("%s RPC signature validation failed: invalid signature prefix", service_name)
+    if not signature.startswith(f"{signature_prefix}:"):
+        logger.error(
+            "%s signature validation failed: invalid signature prefix (expected %s)",
+            service_name,
+            signature_prefix,
+        )
         return False
 
     try:
         # We aren't using the version bits currently.
         _, signature_data = signature.split(":", 2)
 
-        signature_input = body
+        if include_url_in_signature:
+            signature_input = b"%s:%s" % (
+                url.encode("utf8"),
+                body,
+            )
+        else:
+            signature_input = body
 
         for key in shared_secret_setting:
             computed = hmac.new(key.encode(), signature_input, hashlib.sha256).hexdigest()
@@ -601,29 +856,33 @@ def compare_service_signature(
             if is_valid:
                 return True
     except Exception:
-        logger.exception("%s RPC signature validation failed", service_name)
+        logger.exception("%s signature validation failed", service_name)
         return False
 
-    logger.error("%s RPC signature validation failed", service_name)
+    logger.error("%s signature validation failed", service_name)
 
     return False
 
 
-class ServiceRpcSignatureAuthentication(StandardAuthentication):
+class HmacSignatureAuthentication(StandardAuthentication):
     """
-    Generic authentication for service RPC requests.
+    HMAC authentication for service-to-service requests.
     Requests are sent with an HMAC signed by a shared private key.
 
     Subclasses should define:
     - shared_secret_setting_name: str - name of the settings attribute (e.g., "SEER_RPC_SHARED_SECRET")
     - service_name: str - name of the service for logging (e.g., "Seer", "Launchpad")
     - sdk_tag_name: str - name for the SDK tag (e.g., "seer_rpc_auth", "launchpad_rpc_auth")
+    - signature_prefix: str - prefix for the signature format (e.g., "rpc0", "service0"). The colon will be added automatically. Defaults to "rpc0" for backward compatibility.
+    - include_url_in_signature: bool - If True, signs "url:body". If False, signs only "body". Defaults to False for backward compatibility.
     """
 
     token_name = b"rpcsignature"
     shared_secret_setting_name: str
     service_name: str
     sdk_tag_name: str
+    signature_prefix: str = "rpc0"
+    include_url_in_signature: bool = False
 
     def accepts_auth(self, auth: list[bytes]) -> bool:
         if not auth or len(auth) < 2:
@@ -635,14 +894,92 @@ class ServiceRpcSignatureAuthentication(StandardAuthentication):
 
         if shared_secret_setting is None:
             raise RpcAuthenticationSetupException(
-                f"Cannot validate {self.service_name} RPC request signatures without shared secret"
+                f"Cannot validate {self.service_name} request signatures without shared secret"
             )
 
         if not compare_service_signature(
-            request.path_info, request.body, token, shared_secret_setting, self.service_name
+            request.path_info,
+            request.body,
+            token,
+            shared_secret_setting,
+            self.service_name,
+            self.signature_prefix,
+            self.include_url_in_signature,
         ):
             raise AuthenticationFailed("Invalid signature")
 
         sentry_sdk.get_isolation_scope().set_tag(self.sdk_tag_name, True)
+        sentry_sdk.get_isolation_scope().set_attribute(self.sdk_tag_name, True)
 
         return (AnonymousUser(), token)
+
+
+class ViewerContextAuthentication(BaseAuthentication):
+    """Authenticate requests using X-Viewer-Context headers.
+
+    Accepts JWT (HS256) ``X-Viewer-Context`` headers.
+    Used by trusted services (e.g., Seer) that echo back the viewer context
+    originally signed by Sentry.
+
+    The user is resolved via user_service.get_user() (RPC-backed, cached).
+    Sets request.auth = None so that determine_access derives permissions
+    from the user's OrganizationMember role — identical to session auth.
+    """
+
+    def authenticate(self, request: Request) -> tuple[Any, Any] | None:
+        from sentry.viewer_context import _get_verification_keys, viewer_context_from_header
+
+        header = request.META.get("HTTP_X_VIEWER_CONTEXT")
+        if not header:
+            return None
+
+        verification_keys = _get_verification_keys()
+        vc = viewer_context_from_header(header)
+
+        if vc is None or vc.user_id is None:
+            # TODO(jstanley): Temporary logging for debugging non-public prod 401s
+            # during X-Viewer-Context propagation (Seer code mode callbacks).
+            # Remove once the auth issue is resolved.
+            logger.warning(
+                "viewer_context_auth.failed",
+                extra={
+                    "reason": "vc_not_resolved" if vc is None else "no_user_id",
+                    "header_length": len(header),
+                    "header_is_jwt": "." in header and header.count(".") == 2,
+                    "verification_key_count": len(verification_keys),
+                    "path": request.path,
+                },
+            )
+            return None
+
+        user = user_service.get_user(user_id=vc.user_id)
+        if user is None or not user.is_active or getattr(user, "is_suspended", False):
+            # TODO(jstanley): Temporary logging for debugging non-public prod 401s
+            # during X-Viewer-Context propagation (Seer code mode callbacks).
+            # Remove once the auth issue is resolved.
+            logger.warning(
+                "viewer_context_auth.failed",
+                extra={
+                    "reason": "user_not_found"
+                    if user is None
+                    else "user_suspended"
+                    if getattr(user, "is_suspended", False)
+                    else "user_inactive",
+                    "vc_user_id": vc.user_id,
+                    "path": request.path,
+                },
+            )
+            if user is not None and getattr(user, "is_suspended", False):
+                record_suspended_user_rejection("viewer_context_auth")
+            return None
+
+        sentry_sdk.get_isolation_scope().set_tag("viewer_context_auth", True)
+        sentry_sdk.get_isolation_scope().set_attribute("viewer_context_auth", True)
+        # Viewer context comes from a trusted first-party service. Keep auth
+        # session-like for permission derivation, but mark it so org access can
+        # avoid requiring browser-session SSO state on service callbacks.
+        setattr(request, "user_from_viewer_context", True)
+
+        # Return None for auth to match session behavior —
+        # determine_access will derive scopes from org membership role.
+        return (user, None)

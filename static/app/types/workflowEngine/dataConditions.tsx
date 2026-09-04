@@ -1,3 +1,9 @@
+import {PriorityLevel} from 'sentry/types/group';
+import type {
+  Attribute,
+  MatchType,
+} from 'sentry/views/automations/components/actionFilters/constants';
+
 import type {Action} from './actions';
 
 export enum DataConditionType {
@@ -18,16 +24,20 @@ export enum DataConditionType {
   EXISTING_HIGH_PRIORITY_ISSUE = 'existing_high_priority_issue',
   FIRST_SEEN_EVENT = 'first_seen_event',
   ISSUE_CATEGORY = 'issue_category',
+  ISSUE_TYPE = 'issue_type',
   ISSUE_OCCURRENCES = 'issue_occurrences',
   LATEST_ADOPTED_RELEASE = 'latest_adopted_release',
   LATEST_RELEASE = 'latest_release',
   LEVEL = 'level',
   NEW_HIGH_PRIORITY_ISSUE = 'new_high_priority_issue',
+  EVERY_EVENT = 'every_event',
   REGRESSION_EVENT = 'regression_event',
   REAPPEARED_EVENT = 'reappeared_event',
+  ISSUE_RESOLVED_TRIGGER = 'issue_resolved_trigger',
   TAGGED_EVENT = 'tagged_event',
   ISSUE_PRIORITY_EQUALS = 'issue_priority_equals',
   ISSUE_PRIORITY_GREATER_OR_EQUAL = 'issue_priority_greater_or_equal',
+  ISSUE_PRIORITY_DEESCALATING = 'issue_priority_deescalating',
 
   // frequency
   EVENT_FREQUENCY_COUNT = 'event_frequency_count',
@@ -43,6 +53,10 @@ export enum DataConditionType {
   EVENT_FREQUENCY = 'event_frequency',
   EVENT_UNIQUE_USER_FREQUENCY = 'event_unique_user_frequency',
   PERCENT_SESSIONS = 'percent_sessions',
+  ANOMALY_DETECTION = 'anomaly_detection',
+
+  // activity trigger conditions
+  SEER_ACTIVITY_TRIGGER = 'seer_activity_trigger',
 }
 
 export enum DataConditionGroupLogicType {
@@ -58,6 +72,15 @@ export enum DetectorPriorityLevel {
   MEDIUM = 50,
   HIGH = 75,
 }
+
+export const DETECTOR_PRIORITY_LEVEL_TO_PRIORITY_LEVEL: Record<
+  Exclude<DetectorPriorityLevel, DetectorPriorityLevel.OK>,
+  PriorityLevel
+> = {
+  [DetectorPriorityLevel.LOW]: PriorityLevel.LOW,
+  [DetectorPriorityLevel.MEDIUM]: PriorityLevel.MEDIUM,
+  [DetectorPriorityLevel.HIGH]: PriorityLevel.HIGH,
+};
 
 /**
  * See DataConditionSerializer
@@ -91,6 +114,24 @@ export enum DataConditionHandlerSubgroupType {
 export interface DataConditionHandler {
   comparisonJsonSchema: Record<string, any>;
   handlerGroup: DataConditionHandlerGroupType;
-  handlerSubgroup: DataConditionHandlerSubgroupType;
   type: DataConditionType;
+  handlerSubgroup?: DataConditionHandlerSubgroupType;
 }
+
+interface BaseSubfilter {
+  id: string;
+  match: MatchType;
+  value: string;
+}
+
+export interface AttributeSubfilter extends BaseSubfilter {
+  attribute: Attribute;
+  key: never;
+}
+
+export interface TagSubfilter extends BaseSubfilter {
+  attribute: never;
+  key: string;
+}
+
+export type Subfilter = AttributeSubfilter | TagSubfilter | BaseSubfilter;

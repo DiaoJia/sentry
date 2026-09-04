@@ -1,14 +1,12 @@
 import {useCallback} from 'react';
+import {useQueryClient} from '@tanstack/react-query';
 
 import type {Group} from 'sentry/types/group';
 import type {PlatformExternalIssue} from 'sentry/types/integrations';
 import type {OrganizationSummary} from 'sentry/types/organization';
-import {
-  type ApiQueryKey,
-  setApiQueryData,
-  useApiQuery,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
 
 interface UseExternalIssuesOptions {
   group: Group;
@@ -19,7 +17,14 @@ function getExternalIssuesQueryKey({
   group,
   organization,
 }: UseExternalIssuesOptions): ApiQueryKey {
-  return [`/organizations/${organization.slug}/issues/${group.id}/external-issues/`];
+  return [
+    getApiUrl('/organizations/$organizationIdOrSlug/issues/$issueId/external-issues/', {
+      path: {
+        organizationIdOrSlug: organization.slug,
+        issueId: group.id,
+      },
+    }),
+  ];
 }
 
 export function useExternalIssues({group, organization}: UseExternalIssuesOptions) {

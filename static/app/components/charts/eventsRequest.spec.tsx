@@ -4,7 +4,8 @@ import {render, waitFor} from 'sentry-test/reactTestingLibrary';
 
 import {doEventsRequest} from 'sentry/actionCreators/events';
 import type {EventsRequestProps} from 'sentry/components/charts/eventsRequest';
-import EventsRequest from 'sentry/components/charts/eventsRequest';
+import {EventsRequest} from 'sentry/components/charts/eventsRequest';
+import type {EventsStats, MultiSeriesEventsStats} from 'sentry/types/organization';
 
 const COUNT_OBJ = {
   count: 123,
@@ -14,7 +15,7 @@ jest.mock('sentry/actionCreators/events', () => ({
   doEventsRequest: jest.fn(),
 }));
 
-describe('EventsRequest', function () {
+describe('EventsRequest', () => {
   const organization = OrganizationFixture();
   const mock = jest.fn(() => null);
 
@@ -32,16 +33,16 @@ describe('EventsRequest', function () {
     includeTransformedData: true,
   };
 
-  describe('with props changes', function () {
-    beforeAll(function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+  describe('with props changes', () => {
+    beforeAll(() => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
-          data: [[new Date(), [COUNT_OBJ]]],
-        })
+          data: [[0, [COUNT_OBJ]]],
+        } as EventsStats)
       );
     });
 
-    it('makes requests', async function () {
+    it.isKnownFlake('makes requests', async () => {
       render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
       expect(mock).toHaveBeenNthCalledWith(
         1,
@@ -73,9 +74,9 @@ describe('EventsRequest', function () {
       expect(doEventsRequest).toHaveBeenCalled();
     });
 
-    it('makes a new request if projects prop changes', async function () {
+    it('makes a new request if projects prop changes', async () => {
       const {rerender} = render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
-      (doEventsRequest as jest.Mock).mockClear();
+      jest.mocked(doEventsRequest).mockClear();
 
       rerender(
         <EventsRequest {...DEFAULTS} project={[123]}>
@@ -91,9 +92,9 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('makes a new request if environments prop changes', async function () {
+    it('makes a new request if environments prop changes', async () => {
       const {rerender} = render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
-      (doEventsRequest as jest.Mock).mockClear();
+      jest.mocked(doEventsRequest).mockClear();
 
       rerender(
         <EventsRequest {...DEFAULTS} environment={['dev']}>
@@ -109,9 +110,9 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('makes a new request if period prop changes', async function () {
+    it('makes a new request if period prop changes', async () => {
       const {rerender} = render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
-      (doEventsRequest as jest.Mock).mockClear();
+      jest.mocked(doEventsRequest).mockClear();
 
       rerender(
         <EventsRequest {...DEFAULTS} period="7d">
@@ -129,25 +130,25 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('transforms', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('transforms', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('expands period in query if `includePrevious`', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('expands period in query if `includePrevious`', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           data: [
             [
-              new Date(),
+              0,
               [
                 {...COUNT_OBJ, count: 321},
                 {...COUNT_OBJ, count: 79},
               ],
             ],
-            [new Date(), [COUNT_OBJ]],
+            [0, [COUNT_OBJ]],
           ],
-        })
+        } as EventsStats)
       );
       render(
         <EventsRequest {...DEFAULTS} includePrevious>
@@ -218,34 +219,34 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('expands multiple periods in query if `includePrevious`', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('expands multiple periods in query if `includePrevious`', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           'count()': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 321},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
           'failure_count()': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 421},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
-        })
+        } as MultiSeriesEventsStats)
       );
       const multiYOptions = {
         yAxis: ['count()', 'failure_count()'],
@@ -298,11 +299,11 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('aggregates counts per timestamp only when `includeTimeAggregation` prop is true', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('aggregates counts per timestamp only when `includeTimeAggregation` prop is true', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
-          data: [[new Date(), [COUNT_OBJ, {...COUNT_OBJ, count: 100}]]],
-        })
+          data: [[0, [COUNT_OBJ, {...COUNT_OBJ, count: 100}]]],
+        } as EventsStats)
       );
 
       const {rerender} = render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
@@ -337,11 +338,11 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('aggregates all counts per timestamp when category name identical', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('aggregates all counts per timestamp when category name identical', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
-          data: [[new Date(), [COUNT_OBJ, {...COUNT_OBJ, count: 100}]]],
-        })
+          data: [[0, [COUNT_OBJ, {...COUNT_OBJ, count: 100}]]],
+        } as EventsStats)
       );
 
       const {rerender} = render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
@@ -377,25 +378,25 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('yAxis', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('yAxis', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('supports yAxis', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('supports yAxis', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           data: [
             [
-              new Date(),
+              0,
               [
                 {...COUNT_OBJ, count: 321},
                 {...COUNT_OBJ, count: 79},
               ],
             ],
-            [new Date(), [COUNT_OBJ]],
+            [0, [COUNT_OBJ]],
           ],
-        })
+        } as EventsStats)
       );
 
       render(
@@ -459,34 +460,34 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('supports multiple yAxis', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('supports multiple yAxis', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           'epm()': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 321},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
           'apdex()': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 321},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
-        })
+        } as MultiSeriesEventsStats)
       );
 
       render(
@@ -517,39 +518,39 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('topEvents', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('topEvents', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('supports topEvents parameter', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('supports topEvents parameter', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           'project1,error': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 321},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
           'project1,warning': {
             data: [
               [
-                new Date(),
+                0,
                 [
                   {...COUNT_OBJ, count: 321},
                   {...COUNT_OBJ, count: 79},
                 ],
               ],
-              [new Date(), [COUNT_OBJ]],
+              [0, [COUNT_OBJ]],
             ],
           },
-        })
+        } as MultiSeriesEventsStats)
       );
 
       render(
@@ -583,12 +584,12 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('out of retention', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('out of retention', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('does not make request', function () {
+    it('does not make request', () => {
       render(
         <EventsRequest {...DEFAULTS} expired>
           {mock}
@@ -597,7 +598,7 @@ describe('EventsRequest', function () {
       expect(doEventsRequest).not.toHaveBeenCalled();
     });
 
-    it('errors', function () {
+    it('errors', () => {
       render(
         <EventsRequest {...DEFAULTS} expired>
           {mock}
@@ -612,20 +613,20 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('timeframe', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('timeframe', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('passes query timeframe start and end to the child if supplied by timeseriesData', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('passes query timeframe start and end to the child if supplied by timeseriesData', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
           p95: {
-            data: [[new Date(), [COUNT_OBJ]]],
+            data: [[0, [COUNT_OBJ]]],
             start: 1627402280,
             end: 1627402398,
           },
-        })
+        } as MultiSeriesEventsStats)
       );
       render(<EventsRequest {...DEFAULTS}>{mock}</EventsRequest>);
 
@@ -642,15 +643,15 @@ describe('EventsRequest', function () {
     });
   });
 
-  describe('custom performance metrics', function () {
-    beforeEach(function () {
-      (doEventsRequest as jest.Mock).mockClear();
+  describe('custom performance metrics', () => {
+    beforeEach(() => {
+      jest.mocked(doEventsRequest).mockClear();
     });
 
-    it('passes timeseriesResultTypes to child', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('passes timeseriesResultTypes to child', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
-          data: [[new Date(), [COUNT_OBJ]]],
+          data: [[0, [COUNT_OBJ]]],
           start: 1627402280,
           end: 1627402398,
           meta: {
@@ -661,7 +662,7 @@ describe('EventsRequest', function () {
               p95_measurements_custom: 'kibibyte',
             },
           },
-        })
+        } as unknown as EventsStats)
       );
       render(
         <EventsRequest {...DEFAULTS} yAxis="p95(measurements.custom)">
@@ -678,10 +679,127 @@ describe('EventsRequest', function () {
       );
     });
 
-    it('scales timeseries values according to unit meta', async function () {
-      (doEventsRequest as jest.Mock).mockImplementation(() =>
+    it('passes timeseriesResultsUnits to child for single yAxis', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
         Promise.resolve({
-          data: [[new Date(), [COUNT_OBJ]]],
+          data: [[0, [COUNT_OBJ]]],
+          start: 1627402280,
+          end: 1627402398,
+          meta: {
+            fields: {
+              p95_measurements_custom: 'size',
+            },
+            units: {
+              p95_measurements_custom: 'kibibyte',
+            },
+          },
+        } as unknown as EventsStats)
+      );
+      render(
+        <EventsRequest {...DEFAULTS} yAxis="p95(measurements.custom)">
+          {mock}
+        </EventsRequest>
+      );
+
+      await waitFor(() =>
+        expect(mock).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            timeseriesResultsTypes: {'p95(measurements.custom)': 'size'},
+            timeseriesResultsUnits: {'p95(measurements.custom)': 'kibibyte'},
+          })
+        )
+      );
+    });
+
+    it('passes timeseriesResultsUnits to child for multiple yAxis', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
+        Promise.resolve({
+          'p95(measurements.custom)': {
+            data: [[0, [COUNT_OBJ]]],
+            start: 1627402280,
+            end: 1627402398,
+            meta: {
+              fields: {
+                p95_measurements_custom: 'size',
+              },
+              units: {
+                p95_measurements_custom: 'kibibyte',
+              },
+            },
+          },
+          'p50(measurements.lcp)': {
+            data: [[0, [COUNT_OBJ]]],
+            start: 1627402280,
+            end: 1627402398,
+            meta: {
+              fields: {
+                p50_measurements_lcp: 'duration',
+              },
+              units: {
+                p50_measurements_lcp: 'millisecond',
+              },
+            },
+          },
+        } as unknown as MultiSeriesEventsStats)
+      );
+      render(
+        <EventsRequest
+          {...DEFAULTS}
+          yAxis={['p95(measurements.custom)', 'p50(measurements.lcp)']}
+        >
+          {mock}
+        </EventsRequest>
+      );
+
+      await waitFor(() =>
+        expect(mock).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            timeseriesResultsTypes: {
+              'p95(measurements.custom)': 'size',
+              'p50(measurements.lcp)': 'duration',
+            },
+            timeseriesResultsUnits: {
+              'p95(measurements.custom)': 'kibibyte',
+              'p50(measurements.lcp)': 'millisecond',
+            },
+          })
+        )
+      );
+    });
+
+    it('does not include timeseriesResultsUnits when meta has no units', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
+        Promise.resolve({
+          data: [[0, [COUNT_OBJ]]],
+          start: 1627402280,
+          end: 1627402398,
+          meta: {
+            fields: {
+              'count()': 'integer',
+            },
+          },
+        } as unknown as EventsStats)
+      );
+      render(
+        <EventsRequest {...DEFAULTS} yAxis="count()">
+          {mock}
+        </EventsRequest>
+      );
+
+      await waitFor(() =>
+        expect(mock).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            timeseriesResultsTypes: {'count()': 'integer'},
+            timeseriesResultsUnits: undefined,
+          })
+        )
+      );
+    });
+
+    it('scales timeseries values according to unit meta', async () => {
+      jest.mocked(doEventsRequest).mockImplementation(() =>
+        Promise.resolve({
+          data: [[1508208080000, [COUNT_OBJ]]],
           start: 1627402280,
           end: 1627402398,
           meta: {
@@ -692,7 +810,7 @@ describe('EventsRequest', function () {
               p95_measurements_custom: 'mebibyte',
             },
           },
-        })
+        } as unknown as EventsStats)
       );
       render(
         <EventsRequest

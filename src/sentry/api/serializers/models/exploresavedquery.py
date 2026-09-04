@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import DefaultDict, TypedDict
+from datetime import datetime
+from typing import Literal, TypedDict
 
 from sentry.api.serializers import Serializer, register
 from sentry.constants import ALL_ACCESS_PROJECTS
@@ -13,36 +14,97 @@ from sentry.users.api.serializers.user import UserSerializerResponse
 from sentry.users.services.user.service import user_service
 from sentry.utils.dates import outside_retention_with_modified_start, parse_timestamp
 
+ExploreSavedQueryDatasetType = Literal[
+    "spans", "logs", "segment_spans", "metrics", "replays", "ai_conversations"
+]
+ExploreSavedQueryMode = Literal["samples", "aggregate"]
+
+
+class MetricResponseTypeOptional(TypedDict, total=False):
+    unit: str | None
+
+
+class MetricResponseType(MetricResponseTypeOptional):
+    name: str
+    type: Literal["counter", "gauge", "distribution"]
+
+
+class VisualizeResponseTypeOptional(TypedDict, total=False):
+    chartType: int
+
+
+class VisualizeResponseType(VisualizeResponseTypeOptional):
+    yAxes: list[str]
+
+
+class AggregateFieldResponseType(TypedDict, total=False):
+    chartType: int
+    yAxes: list[str]
+    groupBy: str
+
+
+class QueryResponseTypeOptional(TypedDict, total=False):
+    fields: list[str] | None
+    orderby: str | None
+    groupby: list[str] | None
+    query: str | None
+    visualize: list[VisualizeResponseType] | None
+    aggregateField: list[AggregateFieldResponseType] | None
+    aggregateOrderby: str | None
+    metric: MetricResponseType | None
+    caseInsensitive: bool
+
+
+class QueryResponseType(QueryResponseTypeOptional):
+    mode: ExploreSavedQueryMode
+
+
+class CrossEventResponseTypeOptional(TypedDict, total=False):
+    metric: MetricResponseType | None
+
+
+class CrossEventResponseType(CrossEventResponseTypeOptional):
+    query: str
+    type: Literal["spans", "logs", "metrics"]
+
 
 class ExploreSavedQueryResponseOptional(TypedDict, total=False):
     environment: list[str]
-    query: str
+    query: list[QueryResponseType]
     range: str
     start: str
     end: str
     interval: str
-    mode: str
+    crossEvents: list[CrossEventResponseType]
+    agent: list[str]
+
+
+class ExploreSavedQueryChangedReasonType(TypedDict):
+    orderby: list[dict[str, str]] | None
+    equations: list[dict[str, str | list[str]]] | None
+    columns: list[str]
 
 
 class ExploreSavedQueryResponse(ExploreSavedQueryResponseOptional):
     id: str
     name: str
     projects: list[int]
-    dataset: str
+    dataset: ExploreSavedQueryDatasetType
     expired: bool
-    dateAdded: str
-    dateUpdated: str
-    lastVisited: str
-    createdBy: UserSerializerResponse
+    dateAdded: datetime
+    dateUpdated: datetime
+    lastVisited: datetime | None
+    createdBy: UserSerializerResponse | None
     starred: bool
     position: int | None
     isPrebuilt: bool
+    changedReason: ExploreSavedQueryChangedReasonType | None
 
 
 @register(ExploreSavedQuery)
-class ExploreSavedQueryModelSerializer(Serializer):
+class ExploreSavedQueryModelSerializer(Serializer[ExploreSavedQueryResponse]):
     def get_attrs(self, item_list, user, **kwargs):
-        result: DefaultDict[str, dict] = defaultdict(lambda: {"created_by": {}})
+        result: defaultdict[str, dict] = defaultdict(lambda: {"created_by": {}})
 
         starred_queries = dict(
             ExploreSavedQueryStarred.objects.filter(
@@ -97,6 +159,8 @@ class ExploreSavedQueryModelSerializer(Serializer):
             "start",
             "end",
             "interval",
+            "crossEvents",
+            "agent",
         ]
         data: ExploreSavedQueryResponse = {
             "id": str(obj.id),
@@ -111,6 +175,7 @@ class ExploreSavedQueryModelSerializer(Serializer):
             "starred": attrs.get("starred"),
             "position": attrs.get("position"),
             "isPrebuilt": obj.prebuilt_id is not None,
+            "changedReason": obj.changed_reason,
         }
 
         for key in query_keys:

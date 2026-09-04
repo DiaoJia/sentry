@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+from django.utils.translation import gettext_lazy as _
+from django.utils.translation import ngettext
+
+from sentry.integrations.source_code_management.status_check import StatusCheckStatus
+from sentry.models.project import Project
+from sentry.preprod.models import PreprodArtifact, PreprodComparisonApproval
+from sentry.preprod.snapshots.models import PreprodSnapshotComparison, PreprodSnapshotMetrics
+from sentry.preprod.url_utils import get_preprod_artifact_url
+from sentry.preprod.vcs.markdown_utils import format_commit_sha_markdown
+from sentry.preprod.vcs.pr_comments.snapshot_templates import (
+    COMPARISON_TABLE_HEADER,
+    PROCESSING_STATUS,
+    _app_display_info,
+    _format_name_cell,
+    _name_cell,
+    format_errored_note,
+)
+
+_SNAPSHOT_TITLE_BASE = _("Snapshot Testing")
+
+
+def format_snapshot_status_check_messages(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    comparisons_map: dict[int, PreprodSnapshotComparison],
+    overall_status: StatusCheckStatus,
+    base_artifact_map: dict[int, PreprodArtifact],
+    changes_map: dict[int, bool],
+    project: Project,
+    approvals_map: dict[int, PreprodComparisonApproval] | None = None,
+) -> tuple[str, str, str]:
+    if not artifacts:
+        raise ValueError("Cannot format messages for empty artifact list")
+
+    title = _SNAPSHOT_TITLE_BASE
+
+    total_changed = 0
+    total_added = 0
+    total_removed = 0
+    total_renamed = 0
+    total_unchanged = 0
+    total_skipped = 0
+    total_errored = 0
+
+    for artifact in artifacts:
+        metrics = snapshot_metrics_map.get(artifact.id)
+        if not metrics:
+            continue
+
+        comparison = comparisons_map.get(metrics.id)
+        if not comparison:
+            continue
+
+        if comparison.state == PreprodSnapshotComparison.State.FAILED:
+            subtitle = str(_("We had trouble comparing snapshots, our team is investigating."))
+            return str(title), str(subtitle), ""
+
+        if comparison.state == PreprodSnapshotComparison.State.SUCCESS:
+            total_changed += comparison.images_changed
+            total_added += comparison.images_added
+            total_removed += comparison.images_removed
+            total_renamed += comparison.images_renamed
+            total_unchanged += comparison.images_unchanged
+            total_skipped += comparison.images_skipped
+            total_errored += comparison.images_errored
+
+    if overall_status == StatusCheckStatus.IN_PROGRESS:
+        subtitle = str(_("Comparing snapshots..."))
+    elif total_changed == 0 and total_added == 0 and total_removed == 0 and total_renamed == 0:
+        subtitle = str(_("No changes detected"))
+    else:
+        parts = []
+        if total_changed > 0:
+            parts.append(
+                ngettext(
+                    "%(count)d changed",
+                    "%(count)d changed",
+                    total_changed,
+                )
+                % {"count": total_changed}
+            )
+        if total_added > 0:
+            parts.append(
+                ngettext(
+                    "%(count)d added",
+                    "%(count)d added",
+                    total_added,
+                )
+                % {"count": total_added}
+            )
+        if total_removed > 0:
+            parts.append(
+                ngettext(
+                    "%(count)d removed",
+                    "%(count)d removed",
+                    total_removed,
+                )
+                % {"count": total_removed}
+            )
+        if total_renamed > 0:
+            parts.append(
+                ngettext(
+                    "%(count)d renamed",
+                    "%(count)d renamed",
+                    total_renamed,
+                )
+                % {"count": total_renamed}
+            )
+        if total_unchanged > 0:
+            parts.append(
+                ngettext(
+                    "%(count)d unchanged",
+                    "%(count)d unchanged",
+                    total_unchanged,
+                )
+                % {"count": total_unchanged}
+            )
+        subtitle = ", ".join(str(p) for p in parts)
+
+    if total_skipped > 0 and overall_status != StatusCheckStatus.IN_PROGRESS:
+        skipped_text = str(
+            ngettext(
+                "%(count)d skipped",
+                "%(count)d skipped",
+                total_skipped,
+            )
+            % {"count": total_skipped}
+        )
+        subtitle = f"{subtitle}, {skipped_text}"
+
+    summary = _format_snapshot_summary(
+        artifacts,
+        snapshot_metrics_map,
+        comparisons_map,
+        base_artifact_map,
+        changes_map,
+        approvals_map=approvals_map,
+    )
+
+    errored_note = format_errored_note(total_errored)
+    if errored_note:
+        summary += "\n\n" + errored_note
+
+    settings_url = _get_settings_url(project)
+    summary += "\n\n" + _format_configure_link(project, settings_url)
+
+    return str(title), str(subtitle), str(summary)
+
+
+def format_skipped_snapshot_status_check_messages(project: Project) -> tuple[str, str, str]:
+    """Format status check messages when snapshot testing was skipped for a commit."""
+    title = _SNAPSHOT_TITLE_BASE
+    subtitle = _("Snapshot testing skipped")
+    settings_url = _get_settings_url(project)
+    summary = str(_format_configure_link(project, settings_url))
+    return str(title), str(subtitle), str(summary)
+
+
+def format_first_snapshot_status_check_messages(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    project: Project,
+) -> tuple[str, str, str]:
+    if not artifacts:
+        raise ValueError("Cannot format messages for empty artifact list")
+
+    title = _SNAPSHOT_TITLE_BASE
+
+    total_images = 0
+    for artifact in artifacts:
+        metrics = snapshot_metrics_map.get(artifact.id)
+        if metrics:
+            total_images += metrics.image_count
+
+    subtitle = ngettext(
+        "%(count)d snapshot uploaded",
+        "%(count)d snapshots uploaded",
+        total_images,
+    ) % {"count": total_images}
+
+    summary = _format_solo_snapshot_summary(artifacts, snapshot_metrics_map)
+    summary += "\n\nThis looks like your first snapshot upload. Snapshot diffs will appear when we have a base upload to compare against. Make sure to upload snapshots from your main branch."
+
+    settings_url = _get_settings_url(project)
+    summary += "\n\n" + _format_configure_link(project, settings_url)
+
+    return str(title), str(subtitle), str(summary)
+
+
+def format_generated_snapshot_status_check_messages(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    project: Project,
+) -> tuple[str, str, str]:
+    if not artifacts:
+        raise ValueError("Cannot format messages for empty artifact list")
+
+    title = _SNAPSHOT_TITLE_BASE
+
+    total_images = 0
+    for artifact in artifacts:
+        metrics = snapshot_metrics_map.get(artifact.id)
+        if metrics:
+            total_images += metrics.image_count
+
+    subtitle = ngettext(
+        "Generated %(count)d snapshot",
+        "Generated %(count)d snapshots",
+        total_images,
+    ) % {"count": total_images}
+
+    summary = _format_solo_snapshot_summary(artifacts, snapshot_metrics_map)
+
+    settings_url = _get_settings_url(project)
+    summary += "\n\n" + _format_configure_link(project, settings_url)
+
+    return str(title), str(subtitle), str(summary)
+
+
+def format_missing_base_snapshot_status_check_messages(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    project: Project,
+    *,
+    base_sha: str,
+    base_repo_url: str | None = None,
+) -> tuple[str, str, str]:
+    if not artifacts:
+        raise ValueError("Cannot format messages for empty artifact list")
+
+    title = _SNAPSHOT_TITLE_BASE
+    # Check-run output.title is plain text; keep the SHA unlinked here.
+    subtitle = str(_("No base snapshot found for %(base_sha)s")) % {"base_sha": base_sha}
+
+    base_sha_markdown = format_commit_sha_markdown(base_sha, repo_url=base_repo_url)
+    summary = _format_solo_snapshot_summary(artifacts, snapshot_metrics_map)
+    summary += (
+        f"\n\nNo base snapshot found for {base_sha_markdown}. "
+        "Make sure snapshots are uploaded from your main branch."
+    )
+
+    settings_url = _get_settings_url(project)
+    summary += "\n\n" + _format_configure_link(project, settings_url)
+
+    return str(title), str(subtitle), str(summary)
+
+
+def format_waiting_for_base_snapshot_status_check_messages(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    project: Project,
+) -> tuple[str, str, str]:
+    if not artifacts:
+        raise ValueError("Cannot format messages for empty artifact list")
+
+    title = _SNAPSHOT_TITLE_BASE
+    subtitle = str(_("Waiting for base snapshots..."))
+
+    summary = _format_solo_snapshot_summary(artifacts, snapshot_metrics_map)
+    summary += "\n\nWaiting for base snapshots to finish uploading. This check will update automatically within ~10 minutes or fail."
+
+    settings_url = _get_settings_url(project)
+    summary += "\n\n" + _format_configure_link(project, settings_url)
+
+    return str(title), str(subtitle), str(summary)
+
+
+def _format_solo_snapshot_summary(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+) -> str:
+    table_rows = []
+
+    for artifact in artifacts:
+        app_display, app_id = _app_display_info(artifact)
+        artifact_url = get_preprod_artifact_url(artifact, view_type="snapshots")
+        name = _format_name_cell(app_display, app_id, artifact_url)
+
+        metrics = snapshot_metrics_map.get(artifact.id)
+        if not metrics:
+            table_rows.append(f"| {name} | - | {PROCESSING_STATUS} |")
+            continue
+
+        table_rows.append(f"| {name} | {metrics.image_count} | ✅ Uploaded |")
+
+    table_header = "| Name | Snapshots | Status |\n| :--- | :---: | :---: |\n"
+
+    return table_header + "\n".join(table_rows)
+
+
+def _format_snapshot_summary(
+    artifacts: list[PreprodArtifact],
+    snapshot_metrics_map: dict[int, PreprodSnapshotMetrics],
+    comparisons_map: dict[int, PreprodSnapshotComparison],
+    base_artifact_map: dict[int, PreprodArtifact],
+    changes_map: dict[int, bool],
+    approvals_map: dict[int, PreprodComparisonApproval] | None = None,
+) -> str:
+    table_rows = []
+
+    for artifact in artifacts:
+        metrics = snapshot_metrics_map.get(artifact.id)
+        comparison = comparisons_map.get(metrics.id) if metrics else None
+        include_selected_types = comparison is not None and comparison.state not in (
+            PreprodSnapshotComparison.State.PENDING,
+            PreprodSnapshotComparison.State.PROCESSING,
+        )
+        name = _name_cell(
+            artifact,
+            snapshot_metrics_map,
+            base_artifact_map,
+            comparison=comparison if include_selected_types else None,
+        )
+
+        if not metrics:
+            table_rows.append(f"| {name} | - | - | - | - | - | - | {PROCESSING_STATUS} |")
+            continue
+
+        if not comparison:
+            table_rows.append(f"| {name} | - | - | - | - | - | - | {PROCESSING_STATUS} |")
+            continue
+
+        if comparison.state in (
+            PreprodSnapshotComparison.State.PENDING,
+            PreprodSnapshotComparison.State.PROCESSING,
+        ):
+            table_rows.append(f"| {name} | - | - | - | - | - | - | {PROCESSING_STATUS} |")
+        else:
+            has_changes = changes_map.get(artifact.id, False)
+            is_approved = approvals_map is not None and artifact.id in approvals_map
+            if has_changes and is_approved:
+                status = "✅ Approved"
+            elif has_changes:
+                status = "⏳ Needs approval"
+            else:
+                status = "✅ Unchanged"
+
+            table_rows.append(
+                f"| {name}"
+                f" | {comparison.images_added}"
+                f" | {comparison.images_removed}"
+                f" | {comparison.images_changed}"
+                f" | {comparison.images_renamed}"
+                f" | {comparison.images_unchanged}"
+                f" | {comparison.images_skipped}"
+                f" | {status} |"
+            )
+
+    return COMPARISON_TABLE_HEADER + "\n".join(table_rows)
+
+
+def _get_settings_url(project: Project) -> str:
+    base_url = f"/settings/projects/{project.slug}/snapshots/"
+    return project.organization.absolute_url(base_url)
+
+
+def _format_configure_link(project: Project, settings_url: str) -> str:
+    return str(
+        _("[Configure {project_name} snapshot settings]({settings_url})").format(
+            project_name=project.name,
+            settings_url=settings_url,
+        )
+    )

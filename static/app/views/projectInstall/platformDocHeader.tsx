@@ -1,34 +1,45 @@
 import {useCallback} from 'react';
 import {useBlocker} from 'react-router-dom';
-import styled from '@emotion/styled';
+
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Flex, Grid} from '@sentry/scraps/layout';
+import {Heading} from '@sentry/scraps/text';
 
 import {removeProject} from 'sentry/actionCreators/projects';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
 import {useRecentCreatedProject} from 'sentry/components/onboarding/useRecentCreatedProject';
-import type {Platform} from 'sentry/data/platformPickerCategories';
 import {IconChevron} from 'sentry/icons/iconChevron';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Project} from 'sentry/types/project';
+import type {PlatformIntegration, Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import type {ProjectCreationVariant} from 'sentry/utils/analytics/projectCreationAnalyticsEvents';
 import {handleXhrErrorResponse} from 'sentry/utils/handleXhrErrorResponse';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import useRouter from 'sentry/utils/useRouter';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
 type Props = {
-  platform: Platform;
+  platform: PlatformIntegration;
   projectSlug: Project['slug'];
-  title?: string;
+  /**
+   * When this getting-started page was reached from project creation, the
+   * create form stamps `?projectCreationVariant=scm|legacy`. Stamp that onto
+   * the three header events so abandonment can be segmented. Unmarked entry
+   * points (older projects, peripheral links) keep firing the same
+   * `project_creation.*` names without a variant guess.
+   */
+  projectCreationVariant?: ProjectCreationVariant;
 };
 
-export function PlatformDocHeader({platform, projectSlug, title}: Props) {
+export function PlatformDocHeader({
+  platform,
+  projectSlug,
+  projectCreationVariant,
+}: Props) {
   const organization = useOrganization();
   const api = useApi({persistInFlight: true});
-  const router = useRouter();
+  const navigate = useNavigate();
 
   const {project: recentCreatedProject, isProjectActive} = useRecentCreatedProject({
     orgSlug: organization.slug,
@@ -40,15 +51,19 @@ export function PlatformDocHeader({platform, projectSlug, title}: Props) {
       return;
     }
 
+    const variantParams = projectCreationVariant ? {variant: projectCreationVariant} : {};
+
     trackAnalytics('project_creation.back_button_clicked', {
       organization,
+      ...variantParams,
     });
 
     if (!isProjectActive) {
       trackAnalytics('project_creation.data_removal_modal_confirm_button_clicked', {
         organization,
-        platform: recentCreatedProject.slug,
+        platform: platform.id,
         project_id: recentCreatedProject.id,
+        ...variantParams,
       });
 
       try {
@@ -62,22 +77,35 @@ export function PlatformDocHeader({platform, projectSlug, title}: Props) {
         trackAnalytics('project_creation.data_removed', {
           organization,
           date_created: recentCreatedProject.dateCreated,
-          platform: recentCreatedProject.slug,
+          platform: platform.id,
           project_id: recentCreatedProject.id,
+          ...variantParams,
         });
       } catch (error) {
-        handleXhrErrorResponse('Unable to delete project in project creation', error);
+        handleXhrErrorResponse(
+          'Unable to delete project in project creation',
+          error as RequestError
+        );
         // we don't give the user any feedback regarding this error as this shall be silent
       }
     }
 
-    router.replace(
+    navigate(
       makeProjectsPathname({
         path: '/new/',
         organization,
-      }) + `?referrer=getting-started&project=${recentCreatedProject.id}`
+      }) + `?referrer=getting-started&project=${recentCreatedProject.id}`,
+      {replace: true}
     );
-  }, [api, recentCreatedProject, organization, isProjectActive, router]);
+  }, [
+    api,
+    recentCreatedProject,
+    organization,
+    isProjectActive,
+    navigate,
+    projectCreationVariant,
+    platform.id,
+  ]);
 
   useBlocker(({historyAction}) => {
     if (historyAction === 'POP') {
@@ -87,11 +115,17 @@ export function PlatformDocHeader({platform, projectSlug, title}: Props) {
   });
 
   return (
-    <StyledPageHeader>
-      <h2>
-        {title ?? t('Configure %(platform)s SDK', {platform: platform.name ?? 'other'})}
-      </h2>
-      <ButtonBar gap={1}>
+    <Flex
+      direction={{zero: 'column', xl: 'row'}}
+      align="start"
+      justify="between"
+      gap={{zero: 'xl', xl: '0'}}
+      marginBottom="2xl"
+    >
+      <Heading as="h2">
+        {t('Configure %(platform)s SDK', {platform: platform.name ?? 'other'})}
+      </Heading>
+      <Grid flow="column" align="center" gap="md">
         <Button
           size="sm"
           icon={<IconChevron direction="left" size="xs" />}
@@ -99,31 +133,12 @@ export function PlatformDocHeader({platform, projectSlug, title}: Props) {
         >
           {t('Back to Platform Selection')}
         </Button>
-        {platform.key !== 'other' && (
+        {platform.id !== 'other' && (
           <LinkButton size="sm" href={platform.link ?? ''} external>
             {t('Full Documentation')}
           </LinkButton>
         )}
-      </ButtonBar>
-    </StyledPageHeader>
+      </Grid>
+    </Flex>
   );
 }
-
-const StyledPageHeader = styled('div')`
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: ${space(3)};
-
-  h2 {
-    margin: 0;
-  }
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    flex-direction: column;
-    align-items: flex-start;
-
-    h2 {
-      margin-bottom: ${space(2)};
-    }
-  }
-`;

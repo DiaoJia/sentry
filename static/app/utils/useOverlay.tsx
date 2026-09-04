@@ -1,4 +1,4 @@
-import {useMemo, useRef, useState} from 'react';
+import {useLayoutEffect, useMemo, useRef, useState} from 'react';
 import type {PopperProps} from 'react-popper';
 import {usePopper} from 'react-popper';
 import type {Modifier} from '@popperjs/core';
@@ -67,6 +67,9 @@ const applyMaxSize: Modifier<'applyMaxSize', Record<string, unknown>> = {
   requires: ['maxSize'],
   enabled: false, // will be enabled when overlay is open
   fn({state}) {
+    if (!state.modifiersData.maxSize) {
+      return;
+    }
     const {width, height} = state.modifiersData.maxSize;
     state.styles.popper!.maxHeight = height;
     state.styles.popper!.maxWidth = width;
@@ -84,7 +87,8 @@ const applyMinWidth: Modifier<'applyMinWidth', Record<string, unknown>> = {
 };
 
 export interface UseOverlayProps
-  extends Partial<AriaOverlayProps>,
+  extends
+    Partial<AriaOverlayProps>,
     Partial<OverlayTriggerProps>,
     Partial<OverlayTriggerStateProps> {
   /**
@@ -127,7 +131,7 @@ export interface UseOverlayProps
   strategy?: PopperProps<any>['strategy'];
 }
 
-function useOverlay({
+export function useOverlay({
   isOpen,
   onClose,
   defaultOpen,
@@ -254,6 +258,15 @@ function useOverlay({
     strategy,
   });
 
+  useLayoutEffect(() => {
+    // Controlled overlays, such as submenus, can open without calling
+    // useOverlayTriggerState's onOpenChange callback. Update after the overlay
+    // has been mounted so Popper accounts for its measured size on first open.
+    if (openState.isOpen) {
+      popperUpdate?.();
+    }
+  }, [openState.isOpen, popperUpdate]);
+
   // Get props for trigger button
   const {triggerProps, overlayProps: overlayTriggerAriaProps} = useOverlayTriggerAria(
     {type},
@@ -268,9 +281,12 @@ function useOverlay({
   // Get props for overlay element
   const interactedOutside = useRef(false);
   const interactOutsideTrigger = useRef<HTMLElement | null>(null);
+  const isClosing = useRef(false);
   const {overlayProps: overlayAriaProps} = useOverlayAria(
     {
       onClose: () => {
+        // Prevent onClose from triggering multiple times when clicking outside
+        isClosing.current = true;
         onClose?.();
 
         if (interactedOutside.current) {
@@ -279,11 +295,13 @@ function useOverlay({
           const trigger = interactOutsideTrigger.current;
           interactOutsideTrigger.current = null;
 
+          // When changing this, check that you can switch between dropdowns with a single click
           trigger?.focus();
           trigger?.click();
         }
 
         openState.close();
+        isClosing.current = false;
       },
       isOpen: openState.isOpen,
       isDismissable,
@@ -294,7 +312,8 @@ function useOverlay({
           target &&
           triggerRef.current !== target &&
           !triggerRef.current?.contains(target) &&
-          (shouldCloseOnInteractOutside?.(target) ?? true)
+          (shouldCloseOnInteractOutside?.(target) ?? true) &&
+          !isClosing.current
         ) {
           // Check if the target is inside a different overlay trigger. If yes, then we
           // should activate that trigger after this overlay has closed (see the onClose
@@ -339,5 +358,3 @@ function useOverlay({
     },
   };
 }
-
-export default useOverlay;

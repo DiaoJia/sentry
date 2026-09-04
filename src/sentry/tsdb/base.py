@@ -133,9 +133,6 @@ class BaseTSDB(Service):
             "record_multi",
             "merge_distinct_counts",
             "delete_distinct_counts",
-            "record_frequency_multi",
-            "merge_frequencies",
-            "delete_frequencies",
             "flush",
         ]
     )
@@ -188,7 +185,7 @@ class BaseTSDB(Service):
         self.__legacy_rollups = legacy_rollups
 
     def validate_arguments(
-        self, models: list[TSDBModel], environment_ids: Iterable[int | None]
+        self, models: Sequence[TSDBModel], environment_ids: Iterable[int | None]
     ) -> None:
         if any(e is not None for e in environment_ids):
             unsupported_models = set(models) - self.models_with_environment_support
@@ -424,6 +421,8 @@ class BaseTSDB(Service):
         tenant_ids: dict[str, str | int] | None = None,
         referrer_suffix: str | None = None,
         group_on_time: bool = True,
+        aggregation_override: str | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[TSDBKey, list[tuple[int, int]]]:
         """
         To get a range of data for group ID=[1, 2, 3]:
@@ -451,6 +450,7 @@ class BaseTSDB(Service):
         referrer_suffix: str | None = None,
         conditions: list[SnubaCondition] | None = None,
         group_on_time: bool = True,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[TSDBKey, int]:
         range_set = self.get_range(
             model,
@@ -464,6 +464,7 @@ class BaseTSDB(Service):
             tenant_ids=tenant_ids,
             referrer_suffix=referrer_suffix,
             conditions=conditions,
+            project_ids=project_ids,
         )
         sum_set = {key: sum(p for _, p in points) for (key, points) in range_set.items()}
         return sum_set
@@ -482,8 +483,8 @@ class BaseTSDB(Service):
         tenant_ids: dict[str, str | int] | None = None,
         referrer_suffix: str | None = None,
         group_on_time: bool = True,
+        project_ids: Sequence[int] | None = None,
     ) -> Mapping[TSDBKey, int]:
-
         raise NotImplementedError
 
     def get_sums(
@@ -500,6 +501,7 @@ class BaseTSDB(Service):
         referrer_suffix: str | None = None,
         conditions: list[SnubaCondition] | None = None,
         group_on_time: bool = False,
+        project_ids: Sequence[int] | None = None,
     ) -> Mapping[TSDBKey, int]:
         result: Mapping[TSDBKey, int] = self.get_sums_data(
             model,
@@ -514,6 +516,7 @@ class BaseTSDB(Service):
             jitter_value=jitter_value,
             tenant_ids=tenant_ids,
             referrer_suffix=referrer_suffix,
+            project_ids=project_ids,
         )
         return result
 
@@ -581,6 +584,7 @@ class BaseTSDB(Service):
         rollup: int | None = None,
         environment_id: int | None = None,
         tenant_ids: dict[str, str | int] | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[int, list[tuple[int, Any]]]:
         """
         Fetch counts of distinct items for each rollup interval within the range.
@@ -601,6 +605,7 @@ class BaseTSDB(Service):
         referrer_suffix: str | None = None,
         conditions: list[SnubaCondition] | None = None,
         group_on_time: bool = False,
+        project_ids: Sequence[int] | None = None,
     ) -> Mapping[TSDBKey, int]:
         """
         Count distinct items during a time range with optional conditions
@@ -635,20 +640,6 @@ class BaseTSDB(Service):
         """
         raise NotImplementedError
 
-    def record_frequency_multi(
-        self,
-        requests: Sequence[tuple[TSDBModel, Mapping[str, Mapping[str, int | float]]]],
-        timestamp: datetime | None = None,
-        environment_id: int | None = None,
-    ) -> None:
-        """
-        Record items in a frequency table.
-
-        Metrics to increment should be passed as sequence pairs, using this
-        structure: ``(model, {key: {item: score, ...}, ...})``
-        """
-        raise NotImplementedError
-
     def get_frequency_series(
         self,
         model: TSDBModel,
@@ -658,6 +649,7 @@ class BaseTSDB(Service):
         rollup: int | None = None,
         environment_id: int | None = None,
         tenant_ids: dict[str, str | int] | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[TSDBKey, list[tuple[float, dict[TSDBItem, float]]]]:
         """
         Retrieve the frequency of known items in a table over time.
@@ -669,34 +661,6 @@ class BaseTSDB(Service):
         Results are returned as a mapping, where the key is the key requested
         and the value is a list of ``(timestamp, {item: score, ...})`` pairs
         over the series.
-        """
-        raise NotImplementedError
-
-    def merge_frequencies(
-        self,
-        model: TSDBModel,
-        destination: str,
-        sources: Sequence[TSDBKey],
-        timestamp: datetime | None = None,
-        environment_ids: Iterable[int] | None = None,
-    ) -> None:
-        """
-        Transfer all frequency tables from the source keys to the destination
-        key.
-        """
-        raise NotImplementedError
-
-    def delete_frequencies(
-        self,
-        models: list[TSDBModel],
-        keys: Iterable[str],
-        start: datetime | None = None,
-        end: datetime | None = None,
-        timestamp: datetime | None = None,
-        environment_ids: Iterable[int] | None = None,
-    ) -> None:
-        """
-        Delete all frequency tables.
         """
         raise NotImplementedError
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from abc import abstractmethod
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple, NotRequired, Protocol, TypedDict
@@ -11,78 +12,47 @@ from django.utils import timezone
 
 from sentry import features, release_health, tsdb
 from sentry.api.serializers import serialize
+from sentry.api.serializers.models.actor import ActorSerializerResponse
 from sentry.api.serializers.models.group import (
     BaseGroupSerializerResponse,
     GroupAnnotation,
+    GroupLevelStr,
     GroupProjectResponse,
     GroupSerializer,
     GroupSerializerSnuba,
     GroupStatusDetailsResponseOptional,
+    GroupStatusStr,
     SeenStats,
     is_seen_stats,
     snuba_tsdb,
 )
-from sentry.api.serializers.models.plugin import is_plugin_deprecated
 from sentry.constants import StatsPeriod
+from sentry.eventtypes import EventTypeStr
 from sentry.integrations.api.serializers.models.external_issue import ExternalIssueSerializer
 from sentry.integrations.models.external_issue import ExternalIssue
+from sentry.issues.derived.serialization import GroupDerivedDataResponse
 from sentry.issues.grouptype import GroupCategory
 from sentry.models.environment import Environment
 from sentry.models.eventattachment import EventAttachment
-from sentry.models.group import Group
+from sentry.models.group import Group, bulk_get_latest_event_ids
 from sentry.models.groupinbox import InboxDetails, get_inbox_details
 from sentry.models.grouplink import GroupLink
 from sentry.models.groupowner import OwnersSerialized, get_owner_details
 from sentry.notifications.helpers import SubscriptionDetails
 from sentry.sentry_apps.api.serializers.platform_external_issue import (
     PlatformExternalIssueSerializer,
+    PlatformExternalIssueSerializerResponse,
 )
 from sentry.sentry_apps.models.platformexternalissue import PlatformExternalIssue
 from sentry.snuba.dataset import Dataset
 from sentry.tsdb.base import TSDBModel
-from sentry.users.api.serializers.user import UserSerializerResponse
+from sentry.types.group import GroupPriorityStr, GroupSubStatusStr
 from sentry.users.models.user import User
 from sentry.users.services.user.model import RpcUser
 from sentry.utils import metrics
 from sentry.utils.cache import cache
 from sentry.utils.hashlib import hash_values
-from sentry.utils.safe import safe_execute
-from sentry.utils.snuba import resolve_column, resolve_conditions
-
-
-def get_actions(group: Group) -> list[tuple[str, str]]:
-    from sentry.plugins.base import plugins
-
-    project = group.project
-
-    action_list: list[tuple[str, str]] = []
-    for plugin in plugins.for_project(project, version=1):
-        if is_plugin_deprecated(plugin, project):
-            continue
-
-        results = safe_execute(plugin.actions, group, action_list)
-
-        if not results:
-            continue
-
-        action_list = results
-
-    return action_list
-
-
-def get_available_issue_plugins(group) -> list[dict[str, Any]]:
-    from sentry.plugins.base import plugins
-    from sentry.plugins.bases.issue2 import IssueTrackingPlugin2
-
-    project = group.project
-
-    plugin_issues: list[dict[str, Any]] = []
-    for plugin in plugins.for_project(project, version=1):
-        if isinstance(plugin, IssueTrackingPlugin2):
-            if is_plugin_deprecated(plugin, project):
-                continue
-            safe_execute(plugin.plugin_issues, group, plugin_issues)
-    return plugin_issues
+from sentry.utils.snuba import get_snuba_column_name, resolve_column, resolve_conditions
 
 
 class GroupStatsQueryArgs(NamedTuple):
@@ -122,7 +92,11 @@ class GroupStatsMixin:
         pass
 
     def get_stats(
-        self, item_list: Sequence[Group], user, stats_query_args: GroupStatsQueryArgs, **kwargs
+        self,
+        item_list: Sequence[Group],
+        user,
+        stats_query_args: GroupStatsQueryArgs,
+        **kwargs,
     ):
         if stats_query_args and stats_query_args.stats_period:
             # we need to compute stats at 1d (1h resolution), and 14d or a custom given period
@@ -166,7 +140,12 @@ class GroupStatsMixin:
                     "rollup": int(interval.total_seconds()),
                 }
 
-            return self.query_tsdb(item_list, query_params, user=user, **kwargs)
+            return self.query_tsdb(
+                item_list,
+                query_params,
+                user=user,
+                **kwargs,
+            )
 
 
 class _MaybeStats(TypedDict, total=False):
@@ -261,32 +240,41 @@ class _SeenStatsFunc(Protocol):
     ) -> Mapping[str, Any]: ...
 
 
+class _Filtered(TypedDict):
+    count: str
+    userCount: int
+    firstSeen: datetime | None
+    lastSeen: datetime | None
+    stats: NotRequired[dict[str, Any]]
+
+
 class StreamGroupSerializerSnubaResponse(TypedDict):
     id: str
     # from base response
-    shareId: NotRequired[str]
+    shareId: NotRequired[str | None]
     shortId: NotRequired[str]
     title: NotRequired[str]
     culprit: NotRequired[str | None]
     permalink: NotRequired[str]
     logger: NotRequired[str | None]
-    level: NotRequired[str]
-    status: NotRequired[str]
+    level: NotRequired[GroupLevelStr]
+    status: NotRequired[GroupStatusStr]
     statusDetails: NotRequired[GroupStatusDetailsResponseOptional]
-    substatus: NotRequired[str | None]
+    substatus: NotRequired[GroupSubStatusStr | None]
     isPublic: NotRequired[bool]
     platform: NotRequired[str | None]
-    priority: NotRequired[str | None]
+    priority: NotRequired[GroupPriorityStr | None]
     priorityLockedAt: NotRequired[datetime | None]
     seerFixabilityScore: NotRequired[float | None]
     seerAutofixLastTriggered: NotRequired[datetime | None]
+    seerExplorerAutofixLastTriggered: NotRequired[datetime | None]
     project: NotRequired[GroupProjectResponse]
-    type: NotRequired[str]
+    type: NotRequired[EventTypeStr]
     issueType: NotRequired[str]
     issueCategory: NotRequired[str]
     metadata: NotRequired[dict[str, Any]]
     numComments: NotRequired[int]
-    assignedTo: NotRequired[UserSerializerResponse]
+    assignedTo: NotRequired[ActorSerializerResponse | None]
     isBookmarked: NotRequired[bool]
     isSubscribed: NotRequired[bool]
     subscriptionDetails: NotRequired[SubscriptionDetails | None]
@@ -294,23 +282,26 @@ class StreamGroupSerializerSnubaResponse(TypedDict):
     annotations: NotRequired[list[GroupAnnotation]]
     # from base response optional
     isUnhandled: NotRequired[bool]
-    count: NotRequired[int]
+    count: NotRequired[str]
     userCount: NotRequired[int]
-    firstSeen: NotRequired[datetime]
-    lastSeen: NotRequired[datetime]
+    firstSeen: NotRequired[datetime | None]
+    lastSeen: NotRequired[datetime | None]
+    derivedData: NotRequired[GroupDerivedDataResponse]
 
     # from the serializer itself
     stats: NotRequired[dict[str, Any]]
     lifetime: NotRequired[dict[str, Any]]
-    filtered: NotRequired[dict[str, Any] | None]
+    filtered: NotRequired[_Filtered | None]
     sessionCount: NotRequired[int]
     inbox: NotRequired[InboxDetails]
     owners: NotRequired[OwnersSerialized]
-    pluginActions: NotRequired[list[tuple[str, str]]]
-    pluginIssues: NotRequired[list[dict[str, Any]]]
     integrationIssues: NotRequired[list[dict[str, Any]]]
     sentryAppIssues: NotRequired[list[dict[str, Any]]]
     latestEventHasAttachments: NotRequired[bool]
+    # Added post-serialize at the direct-hit path in OrganizationGroupIndexEndpoint /
+    # ProjectGroupIndexEndpoint when a query resolves to a specific event.
+    matchingEventId: NotRequired[str | None]
+    matchingEventEnvironment: NotRequired[str | None]
 
 
 class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
@@ -347,6 +338,7 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
         self.stats_period = stats_period
         self.stats_period_start = stats_period_start
         self.stats_period_end = stats_period_end
+        self.project_ids = project_ids
 
     def get_attrs(
         self,
@@ -441,46 +433,73 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
             for item in item_list:
                 attrs[item]["owners"] = owner_details.get(item.id)
 
-        if self._expand("pluginActions"):
-            for item in item_list:
-                action_list = get_actions(item)
-                attrs[item]["pluginActions"] = action_list
-
-        if self._expand("pluginIssues"):
-            for item in item_list:
-                plugin_issue_list = get_available_issue_plugins(item)
-                attrs[item]["pluginIssues"] = plugin_issue_list
-
         if self._expand("integrationIssues"):
+            group_ids_by_external_issue_id: dict[int, list[int]] = defaultdict(list)
+            for group_id, linked_id in GroupLink.objects.filter(
+                group_id__in=[item.id for item in item_list],
+                linked_type=GroupLink.LinkedType.issue,
+            ).values_list("group_id", "linked_id"):
+                group_ids_by_external_issue_id[linked_id].append(group_id)
+
+            external_issues = list(
+                ExternalIssue.objects.filter(id__in=group_ids_by_external_issue_id)
+            )
+            serialized_external_issues = serialize(
+                external_issues, serializer=ExternalIssueSerializer()
+            )
+            integration_issues_by_group_id: dict[int, list[dict[str, Any]]] = defaultdict(list)
+            for external_issue, serialized_external_issue in zip(
+                external_issues, serialized_external_issues
+            ):
+                for group_id in group_ids_by_external_issue_id[external_issue.id]:
+                    integration_issues_by_group_id[group_id].append(serialized_external_issue)
+
             for item in item_list:
-                external_issues = ExternalIssue.objects.filter(
-                    id__in=GroupLink.objects.filter(group_id__in=[item.id]).values_list(
-                        "linked_id", flat=True
-                    ),
-                )
-                integration_issues = serialize(
-                    list(external_issues), serializer=ExternalIssueSerializer()
-                )
-                attrs[item]["integrationIssues"] = integration_issues
+                attrs[item]["integrationIssues"] = integration_issues_by_group_id[item.id]
 
         if self._expand("sentryAppIssues"):
-            for item in item_list:
-                platform_external_issues = PlatformExternalIssue.objects.filter(group_id=item.id)
-                sentry_app_issues = serialize(
-                    list(platform_external_issues), serializer=PlatformExternalIssueSerializer()
+            platform_external_issues = list(
+                PlatformExternalIssue.objects.filter(group_id__in=[item.id for item in item_list])
+            )
+            serialized_sentry_app_issues = serialize(
+                platform_external_issues, serializer=PlatformExternalIssueSerializer()
+            )
+            sentry_app_issues_by_group_id: dict[
+                int, list[PlatformExternalIssueSerializerResponse]
+            ] = defaultdict(list)
+            for platform_external_issue, serialized_sentry_app_issue in zip(
+                platform_external_issues, serialized_sentry_app_issues
+            ):
+                sentry_app_issues_by_group_id[platform_external_issue.group_id].append(
+                    serialized_sentry_app_issue
                 )
-                attrs[item]["sentryAppIssues"] = sentry_app_issues
 
-        if self._expand("latestEventHasAttachments") and features.has(
-            "organizations:event-attachments", item.project.organization
-        ):
             for item in item_list:
-                latest_event = item.get_latest_event()
-                if latest_event is not None:
-                    num_attachments = EventAttachment.objects.filter(
-                        project_id=latest_event.project_id, event_id=latest_event.event_id
-                    ).count()
-                    attrs[item]["latestEventHasAttachments"] = num_attachments > 0
+                attrs[item]["sentryAppIssues"] = sentry_app_issues_by_group_id[item.id]
+
+        if (
+            self._expand("latestEventHasAttachments")
+            and item_list
+            and features.has("organizations:event-attachments", item_list[0].project.organization)
+        ):
+            with metrics.timer(
+                "group_stream.get_attrs.latest_event_attachments.duration",
+                tags={"strategy": "bulk"},
+            ):
+                latest_events = bulk_get_latest_event_ids(item_list)
+                latest_event_keys = set(latest_events.values())
+                attachment_event_keys = set(
+                    EventAttachment.objects.filter(
+                        project_id__in={project_id for project_id, _ in latest_event_keys},
+                        event_id__in={event_id for _, event_id in latest_event_keys},
+                    ).values_list("project_id", "event_id")
+                )
+                for item in item_list:
+                    latest_event_key = latest_events.get(item.id)
+                    if latest_event_key is not None:
+                        attrs[item]["latestEventHasAttachments"] = (
+                            latest_event_key in attachment_event_keys
+                        )
 
         return attrs
 
@@ -505,14 +524,26 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
                 result["stats"] = {self.stats_period: attrs["stats"]}
 
             if not self._collapse("lifetime"):
-                result["lifetime"] = self._convert_seen_stats(attrs["lifetime"])
+                seen_stats = self._convert_seen_stats(attrs["lifetime"])
+                result["lifetime"] = {
+                    "count": seen_stats["count"],
+                    "userCount": seen_stats["userCount"],
+                    "firstSeen": seen_stats["firstSeen"],
+                    "lastSeen": seen_stats["lastSeen"],
+                }
                 if self.stats_period:
                     # Not needed in current implementation
                     result["lifetime"]["stats"] = None
 
             if not self._collapse("filtered"):
                 if self.conditions:
-                    filtered = self._convert_seen_stats(attrs["filtered"])
+                    seen_stats = self._convert_seen_stats(attrs["filtered"])
+                    filtered: _Filtered = {
+                        "count": seen_stats["count"],
+                        "userCount": seen_stats["userCount"],
+                        "firstSeen": seen_stats["firstSeen"],
+                        "lastSeen": seen_stats["lastSeen"],
+                    }
                     if self.stats_period:
                         filtered["stats"] = {self.stats_period: attrs["filtered_stats"]}
                     result["filtered"] = filtered
@@ -527,12 +558,6 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
 
         if self._expand("owners"):
             result["owners"] = attrs["owners"]
-
-        if self._expand("pluginActions"):
-            result["pluginActions"] = attrs["pluginActions"]
-
-        if self._expand("pluginIssues"):
-            result["pluginIssues"] = attrs["pluginIssues"]
 
         if self._expand("integrationIssues"):
             result["integrationIssues"] = attrs["integrationIssues"]
@@ -552,6 +577,7 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
         conditions=None,
         environment_ids=None,
         user=None,
+        aggregation_override: str | None = None,
         **kwargs,
     ):
         if not groups:
@@ -565,12 +591,16 @@ class StreamGroupSerializerSnuba(GroupSerializerSnuba, GroupStatsMixin):
                 generic_issue_ids.append(group.id)
 
         error_conditions = resolve_conditions(conditions, resolve_column(Dataset.Discover))
-        issue_conditions = resolve_conditions(conditions, resolve_column(Dataset.IssuePlatform))
+        issue_conditions = resolve_conditions(
+            conditions,
+            functools.partial(get_snuba_column_name, dataset=Dataset.IssuePlatform),
+        )
 
         get_range = functools.partial(
             snuba_tsdb.get_range,
             environment_ids=environment_ids,
             tenant_ids={"organization_id": self.organization_id},
+            project_ids=self.project_ids,
             **query_params,
         )
 

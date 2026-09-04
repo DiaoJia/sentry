@@ -34,11 +34,6 @@ export function ActivityFeedFixture(params: Partial<Activity> = {}): Activity {
         stacktraceOrder: -1,
         timezone: 'America/Los_Angeles',
         prefersIssueDetailsStreamlinedUI: false,
-        prefersNextjsInsightsOverview: false,
-        prefersAgentsInsightsModule: false,
-        prefersStackedNavigation: false,
-        prefersChonkUI: false,
-        quickStartDisplay: {},
       },
       flags: {newsletter_consent_prompt: false},
       avatar: {avatarUuid: null, avatarType: 'letter_avatar'},
@@ -64,11 +59,8 @@ export function ActivityFeedFixture(params: Partial<Activity> = {}): Activity {
       participants: [],
       latestEvent: EventFixture(),
       isUnhandled: true,
-      pluginActions: [],
-      pluginContexts: [],
       seenBy: [],
       filtered: null,
-      pluginIssues: [],
       // there is a nasty type issue here where "reprocessing" cannot be assigned to
       // resolution status | "reprocessing" and "reprocessing" cannot be assigned to resolution
       // status (fails even if I as const it).

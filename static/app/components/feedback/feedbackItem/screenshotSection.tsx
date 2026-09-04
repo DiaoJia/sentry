@@ -1,17 +1,18 @@
 import styled from '@emotion/styled';
 
+import {Button} from '@sentry/scraps/button';
+import {useModal} from '@sentry/scraps/modal';
+
 import {useDeleteEventAttachmentOptimistic} from 'sentry/actionCreators/events';
-import {openModal} from 'sentry/actionCreators/modal';
 import {openConfirmModal} from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import FeedbackScreenshot from 'sentry/components/feedback/feedbackItem/feedbackScreenshot';
-import ScreenshotsModal, {
+import {FeedbackScreenshot} from 'sentry/components/feedback/feedbackItem/feedbackScreenshot';
+import {
   modalCss,
+  ScreenshotsModal,
 } from 'sentry/components/feedback/feedbackItem/screenshotsModal';
-import useFeedbackScreenshot from 'sentry/components/feedback/feedbackItem/useFeedbackHasScreenshot';
+import {useFeedbackScreenshot} from 'sentry/components/feedback/feedbackItem/useFeedbackHasScreenshot';
 import {IconDelete} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
 
@@ -22,6 +23,8 @@ type Props = {
 };
 
 export function ScreenshotSection({event, organization, projectSlug}: Props) {
+  const {openModal} = useModal();
+
   const {screenshots} = useFeedbackScreenshot({projectSlug, event});
   const {mutate: deleteAttachment} = useDeleteEventAttachmentOptimistic();
 
@@ -50,7 +53,7 @@ export function ScreenshotSection({event, organization, projectSlug}: Props) {
           />
           <Button
             icon={<IconDelete />}
-            borderless
+            variant="transparent"
             size="xs"
             onClick={() => {
               openConfirmModal({
@@ -78,14 +81,14 @@ export function ScreenshotSection({event, organization, projectSlug}: Props) {
 const ScreenshotWrapper = styled('ul')`
   display: flex;
   flex-wrap: wrap;
-  gap: ${space(1.5)};
+  gap: ${p => p.theme.space.lg};
   margin: 0;
   padding: 0;
   list-style: none;
 
   & > li {
     display: flex;
-    gap: ${space(1)};
+    gap: ${p => p.theme.space.md};
   }
 `;
 

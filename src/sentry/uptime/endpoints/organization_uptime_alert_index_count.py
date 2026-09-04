@@ -3,16 +3,17 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
+from sentry.constants import ObjectStatus
 from sentry.models.organization import Organization
 from sentry.uptime.types import GROUP_TYPE_UPTIME_DOMAIN_CHECK_FAILURE
 from sentry.utils.auth import AuthenticatedHttpRequest
 from sentry.workflow_engine.models import Detector
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Uptime Monitors"])
 class OrganizationUptimeAlertIndexCountEndpoint(OrganizationEndpoint):
     publish_status = {
@@ -38,7 +39,8 @@ class OrganizationUptimeAlertIndexCountEndpoint(OrganizationEndpoint):
                 }
             )
 
-        queryset = Detector.objects.filter(
+        queryset = Detector.objects.with_type_filters().filter(
+            status=ObjectStatus.ACTIVE,
             type=GROUP_TYPE_UPTIME_DOMAIN_CHECK_FAILURE,
             project__organization_id=organization.id,
             project_id__in=filter_params["project_id"],

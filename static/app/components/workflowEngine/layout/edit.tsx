@@ -1,99 +1,162 @@
 import styled from '@emotion/styled';
 
-import EditableText from 'sentry/components/editableText';
-import FormField from 'sentry/components/forms/formField';
-import * as Layout from 'sentry/components/layouts/thirds';
-import {ActionsFromContext} from 'sentry/components/workflowEngine/layout/actions';
-import {BreadcrumbsFromContext} from 'sentry/components/workflowEngine/layout/breadcrumbs';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import type {CSS} from '@sentry/scraps/cssTypes';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
 
-interface WorkflowEngineEditLayoutProps {
+import ProjectBadge from 'sentry/components/idBadge/projectBadge';
+import * as Layout from 'sentry/components/layouts/thirds';
+import {HeaderActions} from 'sentry/components/layouts/thirds';
+import {
+  FullHeightForm,
+  FullHeightFormDeprecated,
+} from 'sentry/components/workflowEngine/form/fullHeightForm';
+import {StickyFooter} from 'sentry/components/workflowEngine/ui/footer';
+import type {AvatarProject} from 'sentry/types/project';
+
+interface EditLayoutProps {
   /**
    * The main content for this page
-   * Expected to include `<EditLayout.Chart>` and `<EditLayout.Panel>` components.
+   * Expected to include `<EditLayout.Body>`, `<EditLayout.Header>`, and `<EditLayout.Footer>` components.
    */
   children: React.ReactNode;
-  onTitleChange?: (title: string) => void;
 }
 
-/**
- * Precomposed full-width layout for Automations / Monitors edit pages.
- */
-function EditLayout({children, onTitleChange}: WorkflowEngineEditLayoutProps) {
+function EditLayoutComponent({children}: EditLayoutProps) {
   return (
-    <Layout.Page>
-      <Layout.Header unified>
-        <Layout.HeaderContent>
-          <BreadcrumbsFromContext />
-          <Layout.Title>
-            <FormField
-              name="title"
-              inline={false}
-              flexibleControlStateSize
-              stacked
-              onChange={onTitleChange}
-            >
-              {({onChange, value}) => (
-                <EditableText
-                  isDisabled={false}
-                  value={value || ''}
-                  onChange={newValue => {
-                    onChange(newValue, {
-                      target: {
-                        value: newValue,
-                      },
-                    });
-                  }}
-                  errorMessage={t('Please set a title')}
-                  placeholder={t('New Monitor')}
-                />
-              )}
-            </FormField>
-          </Layout.Title>
-        </Layout.HeaderContent>
-        <ActionsFromContext />
-      </Layout.Header>
-      <Body>{children}</Body>
-    </Layout.Page>
+    <FullHeightForm>
+      <Stack flex="unset">{children}</Stack>
+    </FullHeightForm>
   );
 }
 
-const Body = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(3)};
-  flex-grow: 1;
-`;
-
-const ChartContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  background-color: ${p => p.theme.background};
-  gap: ${space(3)};
-  width: 100%;
-  flex-grow: 1;
-  padding: ${space(1)} ${space(4)};
-  border-bottom: 1px solid ${p => p.theme.border};
-`;
-
-const PanelsContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  padding: ${space(3)} ${space(4)};
-  gap: ${space(2)};
-  width: 100%;
-  flex-grow: 1;
-`;
-
-function Chart({children}: any) {
-  return <ChartContainer>{children}</ChartContainer>;
+interface EditLayoutDeprecatedProps {
+  children: React.ReactNode;
+  formProps: React.ComponentProps<typeof FullHeightFormDeprecated>;
 }
 
-function Panels({children}: any) {
-  return <PanelsContainer>{children}</PanelsContainer>;
+// Wraps the children in the legacy form component.
+// Remove once all detector forms have migrated to the new form system.
+function EditLayoutDeprecatedComponent({children, formProps}: EditLayoutDeprecatedProps) {
+  return (
+    <FullHeightFormDeprecated hideFooter {...formProps}>
+      <Stack flex="unset">{children}</Stack>
+    </FullHeightFormDeprecated>
+  );
 }
 
-const WorkflowEngineEditLayout = Object.assign(EditLayout, {Chart, Panels});
+const StyledLayoutHeader = styled(Layout.Header)`
+  background-color: ${p => p.theme.tokens.background.primary};
+`;
 
-export default WorkflowEngineEditLayout;
+const HeaderInner = styled('div')<{maxWidth?: string}>`
+  display: contents;
+
+  @container (min-width: ${p => p.theme.container['3xl']}) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    max-width: ${p => p.maxWidth};
+    width: 100%;
+  }
+`;
+
+interface RequiredChildren {
+  children: React.ReactNode;
+}
+
+interface HeaderProps extends RequiredChildren {
+  noActionWrap?: boolean;
+}
+
+function Header({children, noActionWrap, maxWidth}: HeaderProps & {maxWidth?: string}) {
+  return (
+    <StyledLayoutHeader noActionWrap={noActionWrap}>
+      <HeaderInner maxWidth={maxWidth}>{children}</HeaderInner>
+    </StyledLayoutHeader>
+  );
+}
+
+function HeaderContent({children}: RequiredChildren) {
+  return <Layout.HeaderContent>{children}</Layout.HeaderContent>;
+}
+
+function Title({title, project}: {title: string; project?: AvatarProject}) {
+  return (
+    <Stack gap="md">
+      <Layout.Title>{title}</Layout.Title>
+      {project && <ProjectBadge project={project} disableLink avatarSize={16} />}
+    </Stack>
+  );
+}
+
+function Actions({children}: RequiredChildren) {
+  return (
+    <HeaderActions>
+      <Flex gap="sm">{children}</Flex>
+    </HeaderActions>
+  );
+}
+
+function HeaderFields({children}: RequiredChildren) {
+  return (
+    <Stack gap="md" column="1 / -1">
+      {children}
+    </Stack>
+  );
+}
+
+function Body({children, maxWidth}: RequiredChildren & {maxWidth?: CSS['maxWidth']}) {
+  return (
+    <Stack
+      flexGrow={1}
+      gap="2xl"
+      background="primary"
+      padding="0"
+      margin={{zero: 'xl', '3xl': '2xl 3xl'}}
+      maxWidth={maxWidth}
+    >
+      <Layout.Main width="full">{children}</Layout.Main>
+    </Stack>
+  );
+}
+
+interface FooterProps extends RequiredChildren {
+  label?: string;
+  maxWidth?: CSS['maxWidth'];
+}
+
+function Footer({children, label, maxWidth}: FooterProps) {
+  return (
+    <StickyFooter>
+      <Flex maxWidth={maxWidth} align="center" gap="md" justify="end">
+        {label && (
+          <Text variant="muted" size="md">
+            {label}
+          </Text>
+        )}
+        <Flex gap="md" flex={label ? undefined : 1} justify="end">
+          {children}
+        </Flex>
+      </Flex>
+    </StickyFooter>
+  );
+}
+
+export const EditLayout = Object.assign(EditLayoutComponent, {
+  Body,
+  Footer,
+});
+
+/**
+ * This component is for forms still using the legacy `FormModel` system.
+ * Remove once all detector forms have migrated to the new form system.
+ */
+export const EditLayoutDeprecated = Object.assign(EditLayoutDeprecatedComponent, {
+  Header,
+  HeaderContent,
+  Actions,
+  HeaderFields,
+  Body,
+  Footer,
+  Title,
+});

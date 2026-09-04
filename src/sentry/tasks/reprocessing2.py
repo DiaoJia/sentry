@@ -4,46 +4,53 @@ from typing import TYPE_CHECKING
 import sentry_sdk
 from django.conf import settings
 from django.db import router, transaction
+from taskbroker_client.retry import Retry
+from taskbroker_client.state import current_task
 
-from sentry import eventstore, eventstream, nodestore
-from sentry.eventstore.models import Event
+from sentry import eventstream, nodestore
+from sentry.issues.action_log import (
+    SYSTEM_ACTOR,
+    ActionSource,
+    GroupActionActor,
+    GroupActorType,
+    action_context_scope,
+)
 from sentry.models.project import Project
 from sentry.reprocessing2 import buffered_delete_old_primary_hash
+from sentry.search.eap.occurrences.query_utils import build_group_id_in_filter
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event
 from sentry.silo.base import SiloMode
-from sentry.tasks.base import instrumented_task, retry
+from sentry.tasks.base import instrumented_task
 from sentry.tasks.process_buffer import buffer_incr
-from sentry.taskworker.config import TaskworkerConfig
-from sentry.taskworker.namespaces import issues_tasks
-from sentry.taskworker.retry import Retry
+from sentry.taskworker.namespaces import issues_reprocessing_tasks, issues_tasks
+from sentry.taskworker.selfchain_idempotency import already_spawned, mark_spawned
 from sentry.types.activity import ActivityType
 from sentry.utils import metrics
-from sentry.utils.query import celery_run_batch_query
+from sentry.utils.query import TaskBulkQueryState, task_run_batch_query
+from sentry.utils.tracing import start_span
+
+# Identifies this task in the self-chain idempotency guard.
+REPROCESS_GROUP_TASK_NAME = "reprocessing2.reprocess_group"
 
 
 @instrumented_task(
     name="sentry.tasks.reprocessing2.reprocess_group",
-    queue="events.reprocessing.process_event",
-    time_limit=120,
-    soft_time_limit=110,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=issues_tasks,
-        processing_deadline_duration=120,
-    ),
+    namespace=issues_reprocessing_tasks,
+    alias_namespace=issues_tasks,
+    processing_deadline_duration=120,
+    silo_mode=SiloMode.CELL,
 )
 def reprocess_group(
     project_id: int,
     group_id: int,
     remaining_events: str = "delete",
     new_group_id: int | None = None,
-    query_state: str | None = None,
+    query_state: TaskBulkQueryState | None = None,
     start_time: float | None = None,
     max_events: int | None = None,
     acting_user_id: int | None = None,
 ) -> None:
-    sentry_sdk.set_tag("project", project_id)
-    sentry_sdk.set_tag("group_id", group_id)
-
     from sentry.reprocessing2 import (
         CannotReprocess,
         buffered_handle_remaining_events,
@@ -52,7 +59,32 @@ def reprocess_group(
         start_group_reprocessing,
     )
 
+    sentry_sdk.set_tag("project", project_id)
+    sentry_sdk.set_attribute("project", project_id)
+    sentry_sdk.set_tag("group_id", group_id)
+    sentry_sdk.set_attribute("group_id", group_id)
     sentry_sdk.set_tag("is_start", "false")
+    sentry_sdk.set_attribute("is_start", "false")
+
+    # Self-chain idempotency guard. If this activation already produced its continuation in a
+    # prior delivery, this execution is a broker re-pend: no-op so we don't fork the chain.
+    # Only effective inside a worker (current_task() set). Best-effort de-amplification, not
+    # exactly-once: concurrent overlap before mark_spawned can still double-spawn.
+    task_state = current_task()
+    activation_id = task_state.id if task_state else None
+    if activation_id and already_spawned(REPROCESS_GROUP_TASK_NAME, activation_id):
+        logger.info(
+            "reprocessing.reprocess_group.duplicate_redelivery.skipped",
+            extra={
+                "project_id": project_id,
+                "group_id": group_id,
+                "activation_id": activation_id,
+            },
+        )
+        metrics.incr(
+            "taskworker.selfchain.duplicate_skipped", tags={"task": REPROCESS_GROUP_TASK_NAME}
+        )
+        return
 
     # Only executed once during reprocessing
     if start_time is None:
@@ -60,17 +92,24 @@ def reprocess_group(
         start_time = time.time()
         metrics.incr("events.reprocessing.start_group_reprocessing", sample_rate=1.0)
         sentry_sdk.set_tag("is_start", "true")
-        new_group_id = start_group_reprocessing(
-            project_id,
-            group_id,
-            max_events=max_events,
-            acting_user_id=acting_user_id,
-            remaining_events=remaining_events,
+        sentry_sdk.set_attribute("is_start", "true")
+        group_action_actor = (
+            GroupActionActor(GroupActorType.USER, acting_user_id)
+            if acting_user_id is not None
+            else SYSTEM_ACTOR
         )
+        with action_context_scope(ActionSource.SYSTEM, group_action_actor):
+            new_group_id = start_group_reprocessing(
+                project_id,
+                group_id,
+                max_events=max_events,
+                acting_user_id=acting_user_id,
+                remaining_events=remaining_events,
+            )
 
     assert new_group_id is not None
 
-    query_state, events = celery_run_batch_query(
+    query_state, events = task_run_batch_query(
         filter=eventstore.Filter(project_ids=[project_id], group_ids=[group_id]),
         batch_size=settings.SENTRY_REPROCESSING_PAGE_SIZE,
         state=query_state,
@@ -78,6 +117,7 @@ def reprocess_group(
         tenant_ids={
             "organization_id": Project.objects.get_from_cache(id=project_id).organization_id
         },
+        eap_conditions=build_group_id_in_filter([group_id]),
     )
 
     if not events:
@@ -97,7 +137,7 @@ def reprocess_group(
 
     for event in events:
         if max_events is None or max_events > 0:
-            with sentry_sdk.start_span(op="reprocess_event"):
+            with start_span(op="reprocess_event", name="reprocess_event"):
                 try:
                     reprocess_event(
                         project_id=project_id,
@@ -105,7 +145,7 @@ def reprocess_group(
                         start_time=start_time,
                     )
                 except CannotReprocess as e:
-                    logger.error("reprocessing2.%s", str(e))
+                    logger.warning("reprocessing2.%s", str(e))
                 except Exception:
                     sentry_sdk.capture_exception()
                 else:
@@ -138,23 +178,20 @@ def reprocess_group(
         max_events=max_events,
         remaining_events=remaining_events,
     )
+    # Record that this activation has spawned its continuation. A subsequent re-pend of this same
+    # activation will short-circuit at the guard above instead of spawning again.
+    if activation_id:
+        mark_spawned(REPROCESS_GROUP_TASK_NAME, activation_id)
 
 
 @instrumented_task(
     name="sentry.tasks.reprocessing2.handle_remaining_events",
-    queue="events.reprocessing.process_event",
-    time_limit=60 * 5,
-    max_retries=5,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=issues_tasks,
-        processing_deadline_duration=60 * 5,
-        retry=Retry(
-            times=5,
-        ),
-    ),
+    namespace=issues_reprocessing_tasks,
+    alias_namespace=issues_tasks,
+    processing_deadline_duration=60 * 5,
+    retry=Retry(times=5, on=(Exception,)),
+    silo_mode=SiloMode.CELL,
 )
-@retry
 def handle_remaining_events(
     project_id: int,
     new_group_id: int,
@@ -174,8 +211,11 @@ def handle_remaining_events(
     See doc comment in sentry.reprocessing2.
     """
     sentry_sdk.set_tag("project", project_id)
+    sentry_sdk.set_attribute("project", project_id)
     sentry_sdk.set_tag("old_group_id", old_group_id)
+    sentry_sdk.set_attribute("old_group_id", old_group_id)
     sentry_sdk.set_tag("new_group_id", new_group_id)
+    sentry_sdk.set_attribute("new_group_id", new_group_id)
 
     from sentry.models.group import Group
     from sentry.reprocessing2 import EVENT_MODELS_TO_MIGRATE, pop_batched_events_from_redis
@@ -234,13 +274,9 @@ def handle_remaining_events(
 
 @instrumented_task(
     name="sentry.tasks.reprocessing2.finish_reprocessing",
-    queue="events.reprocessing.process_event",
-    time_limit=(60 * 5) + 5,
-    soft_time_limit=60 * 5,
-    taskworker_config=TaskworkerConfig(
-        namespace=issues_tasks,
-        processing_deadline_duration=(60 * 5) + 5,
-    ),
+    namespace=issues_reprocessing_tasks,
+    alias_namespace=issues_tasks,
+    processing_deadline_duration=(60 * 5) + 5,
 )
 def finish_reprocessing(project_id: int, group_id: int) -> None:
     from sentry.models.activity import Activity
@@ -248,19 +284,30 @@ def finish_reprocessing(project_id: int, group_id: int) -> None:
     from sentry.models.groupredirect import GroupRedirect
 
     with transaction.atomic(router.db_for_write(Group)):
-        group = Group.objects.get(id=group_id)
+        group = Group.objects.select_for_update().get(id=group_id)
 
         # While we migrated all associated models at the beginning of
         # reprocessing, there is still the "reprocessing" activity that we need
         # to transfer manually.
         # Any activities created during reprocessing (e.g. user clicks "assign" in an old browser tab)
         # are ignored.
-        activities = Activity.objects.filter(group_id=group_id, type=ActivityType.REPROCESS.value)
+        activities = Activity.objects.filter(
+            group_id=group_id, type=ActivityType.REPROCESS.value
+        ).order_by("-datetime")
         activity = activities[0]
         new_group_id = activity.group_id = activity.data["newGroupId"]
         activity.save()
 
-        new_group = Group.objects.get(id=new_group_id)
+        new_group = Group.objects.select_for_update().get(id=new_group_id)
+
+        # Remove the marker that indicates that the new group is currently being reprocessed to.
+        # Thus making it re-processable.
+        try:
+            del new_group.data["_reprocessing_old_group_id"]
+        except Exception as e:
+            from sentry.reprocessing2 import logger
+
+            logger.exception(str(e))
 
         # Any sort of success message will be shown at the *new* group ID's URL
         GroupRedirect.objects.create(
@@ -272,6 +319,7 @@ def finish_reprocessing(project_id: int, group_id: int) -> None:
         # All the associated models (groupassignee and eventattachments) should
         # have moved to a successor group that may be deleted independently.
         group.delete()
+        new_group.save()
 
     # Tombstone unwanted events that should be dropped after new group
     # is generated after reprocessing
@@ -283,6 +331,8 @@ def finish_reprocessing(project_id: int, group_id: int) -> None:
 
     eventstream.backend.exclude_groups(project_id, [group_id])
 
-    from sentry import similarity
+    # Don't do MinHash work if we use embeddings-based similarity.
+    if not group.project.get_option("sentry:similarity_backfill_completed"):
+        from sentry import similarity
 
-    similarity.delete(None, group)
+        similarity.delete(None, group)

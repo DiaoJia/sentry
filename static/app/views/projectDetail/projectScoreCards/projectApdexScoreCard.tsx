@@ -1,18 +1,22 @@
+import {Button} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+
 import {shouldFetchPreviousPeriod} from 'sentry/components/charts/utils';
-import {Button} from 'sentry/components/core/button';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
-import {parseStatsPeriod} from 'sentry/components/timeRangeSelector/utils';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
 import {t} from 'sentry/locale';
 import type {PageFilters} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
 import type {TableData} from 'sentry/utils/discover/discoverQuery';
+import {DiscoverDatasets} from 'sentry/utils/discover/types';
 import {getPeriod} from 'sentry/utils/duration/getPeriod';
 import {useApiQuery} from 'sentry/utils/queryClient';
 import {BigNumberWidgetVisualization} from 'sentry/views/dashboards/widgets/bigNumberWidget/bigNumberWidgetVisualization';
 import {Widget} from 'sentry/views/dashboards/widgets/widget/widget';
 import {getTermHelp, PerformanceTerm} from 'sentry/views/performance/data';
-import MissingPerformanceButtons from 'sentry/views/projectDetail/missingFeatureButtons/missingPerformanceButtons';
+import {MissingPerformanceButtons} from 'sentry/views/projectDetail/missingFeatureButtons/missingPerformanceButtons';
 
 import {ActionWrapper} from './actionWrapper';
 
@@ -32,29 +36,27 @@ const useApdex = (props: Props) => {
     isProjectStabilized &&
     hasTransactions
   );
-  const {projects, environments: environments, datetime} = selection;
+  const {projects, environments, datetime} = selection;
   const {period} = datetime;
 
-  const {start: previousStart} = parseStatsPeriod(
-    getPeriod({period, start: undefined, end: undefined}, {shouldDoublePeriod: true})
-      .statsPeriod!
-  );
-
-  const {start: previousEnd} = parseStatsPeriod(
-    getPeriod({period, start: undefined, end: undefined}, {shouldDoublePeriod: false})
-      .statsPeriod!
-  );
+  const doubledPeriod = getPeriod(
+    {period, start: undefined, end: undefined},
+    {shouldDoublePeriod: true}
+  ).statsPeriod;
 
   const commonQuery = {
     environment: environments,
-    project: projects.map(proj => String(proj)),
-    field: ['apdex()'],
-    query: ['event.type:transaction count():>0', query].join(' ').trim(),
+    project: projects.map(String),
+    field: ['apdex(span.duration,300)'],
+    query: ['is_transaction:true count():>0', query].join(' ').trim(),
+    dataset: DiscoverDatasets.SPANS,
   };
 
   const currentQuery = useApiQuery<TableData>(
     [
-      `/organizations/${organization.slug}/events/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/events/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           ...commonQuery,
@@ -73,12 +75,14 @@ const useApdex = (props: Props) => {
 
   const previousQuery = useApiQuery<TableData>(
     [
-      `/organizations/${organization.slug}/events/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/events/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           ...commonQuery,
-          start: previousStart,
-          end: previousEnd,
+          statsPeriodStart: doubledPeriod,
+          statsPeriodEnd: period ?? DEFAULT_STATS_PERIOD,
         },
       },
     ],
@@ -101,14 +105,15 @@ const useApdex = (props: Props) => {
   };
 };
 
-function ProjectApdexScoreCard(props: Props) {
+export function ProjectApdexScoreCard(props: Props) {
   const {organization, hasTransactions} = props;
 
   const {data, previousData, isLoading, error, refetch} = useApdex(props);
 
-  const apdex = Number(data?.data?.[0]?.['apdex()']) || undefined;
+  const apdex = Number(data?.data?.[0]?.['apdex(span.duration,300)']) || undefined;
 
-  const previousApdex = Number(previousData?.data?.[0]?.['apdex()']) || undefined;
+  const previousApdex =
+    Number(previousData?.data?.[0]?.['apdex(span.duration,300)']) || undefined;
 
   const cardTitle = t('Apdex');
 
@@ -149,7 +154,11 @@ function ProjectApdexScoreCard(props: Props) {
             </Button>
           </Widget.WidgetToolbar>
         }
-        Visualization={<Widget.WidgetError error={error} />}
+        Visualization={
+          <Container position="absolute" inset={0}>
+            <Widget.WidgetError error={error} />
+          </Container>
+        }
       />
     );
   }
@@ -166,7 +175,7 @@ function ProjectApdexScoreCard(props: Props) {
         <BigNumberWidgetVisualization
           value={apdex}
           previousPeriodValue={previousApdex}
-          field="apdex()"
+          field="apdex(span.duration,300)"
           type="number"
           unit={null}
           preferredPolarity="+"
@@ -175,5 +184,3 @@ function ProjectApdexScoreCard(props: Props) {
     />
   );
 }
-
-export default ProjectApdexScoreCard;

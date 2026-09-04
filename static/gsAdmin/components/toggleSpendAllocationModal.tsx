@@ -3,8 +3,9 @@ import {Fragment} from 'react';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import {openModal} from 'sentry/actionCreators/modal';
 import type {Client} from 'sentry/api';
-import Form from 'sentry/components/forms/form';
-import withApi from 'sentry/utils/withApi';
+import {Form} from 'sentry/components/forms/form';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {withApi} from 'sentry/utils/withApi';
 
 type Props = {
   api: Client;
@@ -28,13 +29,23 @@ function SpendAllocationModal({
     const shouldEnableAllocations = !isCurrentlyEnabled;
     const method = shouldEnableAllocations ? 'POST' : 'DELETE';
     try {
-      await api.requestPromise(`/organizations/${orgId}/spend-allocations/toggle/`, {
-        method,
-      });
+      await api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/spend-allocations/toggle/', {
+          path: {organizationIdOrSlug: orgId},
+        }),
+        {
+          method,
+        }
+      );
       // Create root allocations
-      await api.requestPromise(`/organizations/${orgId}/spend-allocations/index/`, {
-        method,
-      });
+      await api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/spend-allocations/index/', {
+          path: {organizationIdOrSlug: orgId},
+        }),
+        {
+          method,
+        }
+      );
       onUpdated({spendAllocationEnabled: shouldEnableAllocations});
     } catch (error) {
       onUpdated({error});
@@ -68,7 +79,5 @@ const Modal = withApi(SpendAllocationModal);
 
 type Options = Pick<Props, 'orgId' | 'spendAllocationEnabled' | 'onUpdated'>;
 
-const toggleSpendAllocationModal = (opts: Options) =>
+export const toggleSpendAllocationModal = (opts: Options) =>
   openModal(deps => <Modal {...deps} {...opts} />);
-
-export default toggleSpendAllocationModal;

@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from collections.abc import MutableMapping
 from typing import Any, cast
+from uuid import uuid4
 
 from arroyo import Topic as ArroyoTopic
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer, build_kafka_configuration
+from arroyo.backends.kafka import KafkaPayload, KafkaProducer
 from arroyo.types import Message, Value
 from confluent_kafka import KafkaException
 from django.conf import settings
@@ -16,8 +17,9 @@ from sentry.issues.issue_occurrence import IssueOccurrence
 from sentry.issues.run import process_message
 from sentry.issues.status_change_message import StatusChangeMessage
 from sentry.utils import json
-from sentry.utils.arroyo_producer import SingletonProducer
-from sentry.utils.kafka_config import get_kafka_producer_cluster_options, get_topic_definition
+from sentry.utils.arroyo_producer import get_arroyo_producer, get_future_tracking_producer
+from sentry.utils.kafka_config import get_topic_definition
+from sentry.utils.safe import get_path, set_path
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +37,16 @@ class PayloadType(ValueEqualityEnum):
 
 
 def _get_occurrence_producer() -> KafkaProducer:
-    cluster_name = get_topic_definition(Topic.INGEST_OCCURRENCES)["cluster"]
-    producer_config = get_kafka_producer_cluster_options(cluster_name)
-    producer_config.pop("compression.type", None)
-    producer_config.pop("message.max.bytes", None)
-    return KafkaProducer(build_kafka_configuration(default_config=producer_config))
+    return get_arroyo_producer(
+        "sentry.issues.producer",
+        Topic.INGEST_OCCURRENCES,
+        exclude_config_keys=["compression.type", "message.max.bytes"],
+    )
 
 
-_occurrence_producer = SingletonProducer(
-    _get_occurrence_producer, max_futures=settings.SENTRY_ISSUE_PLATFORM_FUTURES_MAX_LIMIT
+_occurrence_producer = get_future_tracking_producer(
+    producer_name="sentry.issues.producer",
+    producer_factory=_get_occurrence_producer,
 )
 
 
@@ -52,10 +55,9 @@ def produce_occurrence_to_kafka(
     occurrence: IssueOccurrence | None = None,
     status_change: StatusChangeMessage | None = None,
     event_data: dict[str, Any] | None = None,
-    is_buffered_spans: bool | None = False,
 ) -> None:
     if payload_type == PayloadType.OCCURRENCE:
-        payload_data = _prepare_occurrence_message(occurrence, event_data, is_buffered_spans)
+        payload_data = _prepare_occurrence_message(occurrence, event_data)
     elif payload_type == PayloadType.STATUS_CHANGE:
         payload_data = _prepare_status_change_message(status_change)
     else:
@@ -93,7 +95,6 @@ def produce_occurrence_to_kafka(
 def _prepare_occurrence_message(
     occurrence: IssueOccurrence | None,
     event_data: dict[str, Any] | None,
-    is_buffered_spans: bool | None = False,
 ) -> MutableMapping[str, Any] | None:
     if not occurrence:
         raise ValueError("occurrence must be provided")
@@ -103,10 +104,30 @@ def _prepare_occurrence_message(
     payload_data = cast(MutableMapping[str, Any], occurrence.to_dict())
     payload_data["payload_type"] = PayloadType.OCCURRENCE.value
     if event_data:
-        payload_data["event"] = event_data
+        # All errors need a trace ID.
+        if get_path(event_data, "contexts", "trace", "trace_id") is None:
+            set_path(
+                event_data,
+                "contexts",
+                "trace",
+                value={
+                    "trace_id": uuid4().hex,
+                    "span_id": None,
+                },
+            )
 
-    if is_buffered_spans:
-        payload_data["is_buffered_spans"] = True
+            set_path(
+                event_data,
+                "_meta",
+                "contexts",
+                "trace",
+                "trace_id",
+                "",
+                "err",
+                value=["trace_id.missing"],
+            )
+
+        payload_data["event"] = event_data
 
     return payload_data
 

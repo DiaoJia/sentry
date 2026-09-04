@@ -37,6 +37,11 @@ function renderReleaseBundlesMockRequests({
         ],
   });
 
+  MockApiClient.addMockResponse({
+    url: `/organizations/${orgSlug}/releases/`,
+    body: [],
+  });
+
   return {sourceMaps};
 }
 
@@ -62,9 +67,9 @@ function renderDebugIdBundlesMockRequests({
   return {artifactBundles, artifactBundlesDeletion};
 }
 
-describe('ProjectSourceMaps', function () {
-  describe('Artifact Bundles', function () {
-    it('renders default state', async function () {
+describe('ProjectSourceMaps', () => {
+  describe('Artifact Bundles', () => {
+    it('renders default state', async () => {
       const {organization, project, routerProps} = initializeOrg({
         router: {
           location: {
@@ -91,11 +96,6 @@ describe('ProjectSourceMaps', function () {
         organization,
       });
       expect(mockRequests.artifactBundles).toHaveBeenCalledTimes(1);
-
-      // Title
-      expect(
-        screen.getByRole('heading', {name: 'Source Map Uploads'})
-      ).toBeInTheDocument();
 
       // Search bar
       expect(
@@ -141,7 +141,33 @@ describe('ProjectSourceMaps', function () {
       });
     });
 
-    it('renders empty state', async function () {
+    it('links unsupported project platforms to the JavaScript source maps docs', async () => {
+      const {organization, project, routerProps} = initializeOrg({
+        project: {platform: 'python'},
+      });
+
+      renderReleaseBundlesMockRequests({
+        orgSlug: organization.slug,
+        projectSlug: project.slug,
+        empty: true,
+      });
+      renderDebugIdBundlesMockRequests({
+        orgSlug: organization.slug,
+        projectSlug: project.slug,
+        empty: true,
+      });
+
+      render(<SourceMapsList project={project} {...routerProps} />, {
+        organization,
+      });
+
+      expect(await screen.findByRole('link', {name: /read the docs/i})).toHaveAttribute(
+        'href',
+        'https://docs.sentry.io/platforms/javascript/sourcemaps/'
+      );
+    });
+
+    it('renders empty state', async () => {
       const {organization, project, routerProps} = initializeOrg({
         router: {
           location: {

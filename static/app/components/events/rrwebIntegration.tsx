@@ -1,18 +1,17 @@
 import {lazy} from 'react';
-import styled from '@emotion/styled';
 
-import LazyLoad from 'sentry/components/lazyLoad';
-import LoadingError from 'sentry/components/loadingError';
+import {LazyLoad} from 'sentry/components/lazyLoad';
+import {LoadingError} from 'sentry/components/loadingError';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {IssueAttachment} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 type Props = {
   event: Event;
@@ -36,7 +35,16 @@ function EventRRWebIntegrationContent({
     refetch,
   } = useApiQuery<IssueAttachment[]>(
     [
-      `/projects/${orgId}/${projectSlug}/events/${event.id}/attachments/`,
+      getApiUrl(
+        '/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/attachments/',
+        {
+          path: {
+            organizationIdOrSlug: orgId,
+            projectIdOrSlug: projectSlug,
+            eventId: event.id,
+          },
+        }
+      ),
       // This was changed from `rrweb.json`, so that we can instead
       // support incremental rrweb events as attachments. This is to avoid
       // having clients uploading a single, large sized replay.
@@ -69,8 +77,8 @@ function EventRRWebIntegrationContent({
     `/api/0/projects/${orgId}/${projectSlug}/events/${event.id}/attachments/${attachment.id}/?download`;
 
   return (
-    <StyledReplayEventDataSection
-      type={SectionKey.RRWEB}
+    <FoldSection
+      sectionKey={SectionKey.RRWEB}
       title={t('Replay')}
       disableCollapsePersistence={disableCollapsePersistence}
     >
@@ -78,7 +86,7 @@ function EventRRWebIntegrationContent({
         LazyComponent={LazyReplayer}
         urls={attachmentList.map(createAttachmentUrl)}
       />
-    </StyledReplayEventDataSection>
+    </FoldSection>
   );
 }
 
@@ -95,8 +103,3 @@ export function EventRRWebIntegration(props: Props) {
 
   return <EventRRWebIntegrationContent {...props} />;
 }
-
-const StyledReplayEventDataSection = styled(InterimSection)`
-  overflow: hidden;
-  margin-bottom: ${space(3)};
-`;

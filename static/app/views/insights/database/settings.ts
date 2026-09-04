@@ -3,17 +3,11 @@ import {
   GranularityLadder,
   ONE_HOUR,
   SIX_HOURS,
-  SIXTY_DAYS,
   THIRTY_DAYS,
   TWENTY_FOUR_HOURS,
   TWO_WEEKS,
 } from 'sentry/components/charts/utils';
 import {t} from 'sentry/locale';
-import {
-  type Aggregate,
-  ModuleName,
-  type SpanMetricsProperty,
-} from 'sentry/views/insights/types';
 
 export const MODULE_TITLE = t('Queries');
 export const DATA_TYPE = t('Query');
@@ -21,12 +15,6 @@ export const DATA_TYPE_PLURAL = t('Queries');
 export const BASE_URL = 'database';
 
 export const EXCLUDED_DB_OPS = ['db.sql.room', 'db.redis'];
-
-export const BASE_FILTERS = {
-  'span.category': ModuleName.DB,
-  '!span.op': `[${EXCLUDED_DB_OPS.join(',')}]`,
-  has: 'sentry.normalized_description',
-};
 
 export const MIN_SDK_VERSION_BY_PLATFORM: Record<string, string> = {
   'sentry.python': '1.29.2',
@@ -40,14 +28,10 @@ export const MIN_SDK_VERSION_BY_PLATFORM: Record<string, string> = {
   'sentry.android': '6.30.0',
 };
 
-export const DEFAULT_DURATION_AGGREGATE: Aggregate = 'avg';
-
-export const CHART_HEIGHT = 160;
-
+// Note: all these options should come from static/app/views/explore/hooks/useChartInterval.tsx ALL_INTERVAL_OPTIONS
 export const COUNTER_GRANULARITIES = new GranularityLadder([
-  [SIXTY_DAYS, '1d'],
   [THIRTY_DAYS, '12h'],
-  [TWO_WEEKS, '4h'],
+  [TWO_WEEKS, '3h'],
   [TWENTY_FOUR_HOURS, '30m'],
   [SIX_HOURS, '5m'],
   [ONE_HOUR, '1m'],
@@ -55,7 +39,7 @@ export const COUNTER_GRANULARITIES = new GranularityLadder([
 ]);
 
 export const DISTRIBUTION_GRANULARITIES = new GranularityLadder([
-  [TWO_WEEKS, '1d'],
+  [TWO_WEEKS, '12h'],
   [FORTY_EIGHT_HOURS, '1h'],
   [TWENTY_FOUR_HOURS, '30m'],
   [SIX_HOURS, '5m'],
@@ -65,8 +49,4 @@ export const DISTRIBUTION_GRANULARITIES = new GranularityLadder([
 
 export const MODULE_DOC_LINK = 'https://docs.sentry.io/product/insights/backend/queries/';
 
-export const MODULE_FEATURES = ['insights-initial-modules'];
-
-export const FIELD_ALIASES = {
-  'epm()': t('Queries Per Minute'),
-} satisfies Partial<Record<SpanMetricsProperty, string>>;
+export const MODULE_FEATURES = ['insight-modules'];

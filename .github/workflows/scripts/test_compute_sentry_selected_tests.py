@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""Tests for compute-sentry-selected-tests.py."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+# Import the dash-named script as a module
+_script_path = Path(__file__).parent / "compute-sentry-selected-tests.py"
+_spec = importlib.util.spec_from_file_location("compute_sentry_selected_tests", _script_path)
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["compute_sentry_selected_tests"] = _mod
+_spec.loader.exec_module(_mod)
+
+from compute_sentry_selected_tests import (
+    ALWAYS_RUN_TESTS,
+    EXTRA_DIR_TO_TEST_MAPPING,
+    EXTRA_FILE_TO_TEST_MAPPING,
+    FULL_SUITE_TRIGGERS,
+    PUBLIC_API_MATRIX_TEST,
+    _changed_files_match_public_api_matrix_paths,
+    _query_coverage,
+    main,
+)
+
+# Repo root — used to resolve config paths, which are all repo-relative.
+_REPO_ROOT = Path(__file__).parents[3]
+
+
+def _stale_msg(path: str, kind: str = "file") -> str:
+    return (
+        f"{path!r} no longer exists on disk.\n"
+        f"  If this {kind} was renamed, update this path in the selective testing config.\n"
+        f"  If it was deleted, remove this entry from the config too."
+    )
+
+
+def _create_coverage_db(path: str, file_to_contexts: dict[str, list[str]]) -> None:
+    """Create a minimal coverage DB mapping source files to test contexts."""
+    conn = sqlite3.connect(path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT)")
+    cur.execute("CREATE TABLE context (id INTEGER PRIMARY KEY, context TEXT)")
+    cur.execute("CREATE TABLE line_bits (file_id INTEGER, context_id INTEGER, numbits BLOB)")
+
+    file_id = 0
+    ctx_id = 0
+    for file_path, contexts in file_to_contexts.items():
+        file_id += 1
+        cur.execute("INSERT INTO file VALUES (?, ?)", (file_id, file_path))
+        for ctx in contexts:
+            ctx_id += 1
+            cur.execute("INSERT INTO context VALUES (?, ?)", (ctx_id, ctx))
+            cur.execute("INSERT INTO line_bits VALUES (?, ?, ?)", (file_id, ctx_id, b"\x01"))
+
+    conn.commit()
+    conn.close()
+
+
+def _run(args: list[str], env: dict[str, str] | None = None):
+    with mock.patch("sys.argv", ["compute-sentry-selected-tests"] + args):
+        if env:
+            with mock.patch.dict(os.environ, env):
+                return main()
+        return main()
+
+
+class TestQueryCoverage:
+    def test_sentry_source_maps_to_sentry_tests(self, tmp_path):
+        db = str(tmp_path / "coverage.db")
+        _create_coverage_db(
+            db,
+            {
+                "../sentry/src/sentry/models/organization.py": [
+                    "../sentry/tests/sentry/api/test_organization.py::TestOrg::test_get|run",
+                ],
+            },
+        )
+        assert _query_coverage(db, ["../sentry/src/sentry/models/organization.py"]) == {
+            "tests/sentry/api/test_organization.py"
+        }
+
+    def test_getsentry_tests_excluded(self, tmp_path):
+        """Coverage contexts pointing to getsentry tests should be dropped."""
+        db = str(tmp_path / "coverage.db")
+        _create_coverage_db(
+            db,
+            {
+                "../sentry/src/sentry/models/organization.py": [
+                    "tests/getsentry/test_features.py::TestFeatures::test_org|run",
+                ],
+            },
+        )
+        assert _query_coverage(db, ["../sentry/src/sentry/models/organization.py"]) == set()
+
+    def test_missing_tables_raises(self, tmp_path):
+        db = str(tmp_path / "coverage.db")
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE dummy (id INTEGER)")
+        conn.close()
+        with pytest.raises(ValueError, match="missing line_bits/context"):
+            _query_coverage(db, ["foo.py"])
+
+    def test_zero_bits_excluded(self, tmp_path):
+        db = str(tmp_path / "coverage.db")
+        conn = sqlite3.connect(db)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT)")
+        cur.execute("CREATE TABLE context (id INTEGER PRIMARY KEY, context TEXT)")
+        cur.execute("CREATE TABLE line_bits (file_id INTEGER, context_id INTEGER, numbits BLOB)")
+        cur.execute("INSERT INTO file VALUES (1, '../sentry/src/sentry/foo.py')")
+        cur.execute(
+            "INSERT INTO context VALUES (1, '../sentry/tests/sentry/test_foo.py::T::test|run')"
+        )
+        cur.execute("INSERT INTO line_bits VALUES (1, 1, ?)", (b"\x00\x00",))
+        conn.commit()
+        conn.close()
+        assert _query_coverage(db, ["../sentry/src/sentry/foo.py"]) == set()
+
+
+class TestMain:
+    @pytest.fixture(autouse=True)
+    def _patch_find_test_imports(self):
+        with mock.patch("compute_sentry_selected_tests.find_test_imports", return_value=set()):
+            yield
+
+    def test_no_changed_files_falls_back_to_full_suite(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        _run(
+            ["--coverage-db", str(db_path), "--changed-files", "", "--github-output"],
+            {"GITHUB_OUTPUT": str(gh_output)},
+        )
+        assert "has-selected-tests=false" in gh_output.read_text()
+
+    def test_full_suite_trigger(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        _run(
+            ["--coverage-db", str(db_path), "--changed-files", "pyproject.toml", "--github-output"],
+            {"GITHUB_OUTPUT": str(gh_output)},
+        )
+        assert "has-selected-tests=false" in gh_output.read_text()
+
+    def test_migration_triggers_full_suite(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        _run(
+            [
+                "--coverage-db",
+                str(db_path),
+                "--changed-files",
+                "src/sentry/migrations/0042_add_field.py",
+                "--github-output",
+            ],
+            {"GITHUB_OUTPUT": str(gh_output)},
+        )
+        assert "has-selected-tests=false" in gh_output.read_text()
+
+    def test_selective_returns_matched_tests(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(
+            str(db_path),
+            {
+                "../sentry/src/sentry/models/org.py": [
+                    "../sentry/tests/sentry/test_org.py::T::test|run",
+                ],
+            },
+        )
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "src/sentry/models/org.py",
+                    "--output",
+                    str(output),
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={1 + len(ALWAYS_RUN_TESTS)}" in gh
+        expected_output = sorted({"tests/sentry/test_org.py"} | ALWAYS_RUN_TESTS)
+        assert output.read_text().splitlines() == expected_output
+
+    def test_getsentry_tests_filtered_out(self, tmp_path):
+        """Coverage may return getsentry tests — they should be filtered."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(
+            str(db_path),
+            {
+                "../sentry/src/sentry/models/org.py": [
+                    "../sentry/tests/sentry/test_org.py::T::test|run",
+                    "tests/getsentry/test_features.py::T::test|run",
+                ],
+            },
+        )
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "src/sentry/models/org.py",
+                    "--output",
+                    str(output),
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        assert f"test-count={1 + len(ALWAYS_RUN_TESTS)}" in gh_output.read_text()
+        expected_output = sorted({"tests/sentry/test_org.py"} | ALWAYS_RUN_TESTS)
+        assert output.read_text().splitlines() == expected_output
+
+    def test_changed_test_file_included(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "tests/sentry/test_new.py",
+                    "--output",
+                    f"{tmp_path}/output.txt",
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={1 + len(ALWAYS_RUN_TESTS)}" in gh
+
+    def test_excluded_test_dirs_skipped(self, tmp_path):
+        """Tests in acceptance/apidocs/js/tools should not be selected."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "tests/acceptance/test_foo.py tests/js/test_bar.py",
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        assert f"test-count={len(ALWAYS_RUN_TESTS)}" in gh_output.read_text()
+
+    def test_zero_coverage_matches_still_runs_always_run_tests(self, tmp_path):
+        """No coverage matches should still run ALWAYS_RUN_TESTS, not the full suite."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        _run(
+            [
+                "--coverage-db",
+                str(db_path),
+                "--changed-files",
+                "src/sentry/some_new_file.py",
+                "--output",
+                str(output),
+                "--github-output",
+            ],
+            {"GITHUB_OUTPUT": str(gh_output)},
+        )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={len(ALWAYS_RUN_TESTS)}" in gh
+        assert set(output.read_text().splitlines()) == ALWAYS_RUN_TESTS
+
+    def test_renamed_file_queries_old_path(self, tmp_path):
+        """When a file is renamed, the old path should be queried against the coverage DB."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(
+            str(db_path),
+            {
+                # Coverage DB still has the old filename
+                "../sentry/src/sentry/models/old_name.py": [
+                    "../sentry/tests/sentry/test_old_name.py::T::test|run",
+                ],
+            },
+        )
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "src/sentry/models/new_name.py",
+                    "--previous-filenames",
+                    "src/sentry/models/old_name.py",
+                    "--output",
+                    str(output),
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={1 + len(ALWAYS_RUN_TESTS)}" in gh
+        expected_output = sorted({"tests/sentry/test_old_name.py"} | ALWAYS_RUN_TESTS)
+        assert output.read_text().splitlines() == expected_output
+
+    def test_renamed_file_without_previous_misses_coverage(self, tmp_path):
+        """Without --previous-filenames, a renamed file gets no coverage hits."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(
+            str(db_path),
+            {
+                "../sentry/src/sentry/models/old_name.py": [
+                    "../sentry/tests/sentry/test_old_name.py::T::test|run",
+                ],
+            },
+        )
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        _run(
+            [
+                "--coverage-db",
+                str(db_path),
+                "--changed-files",
+                "src/sentry/models/new_name.py",
+                "--github-output",
+            ],
+            {"GITHUB_OUTPUT": str(gh_output)},
+        )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={len(ALWAYS_RUN_TESTS)}" in gh
+
+    def test_static_import_results_unioned_with_coverage(self, tmp_path):
+        """Static import results are unioned with coverage regardless of whether coverage found anything."""
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(
+            str(db_path),
+            {
+                "../sentry/src/sentry/seer/explorer/client_models.py": [
+                    "../sentry/tests/sentry/seer/explorer/test_explorer_client.py::T::test|run",
+                ],
+            },
+        )
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        static_result = {"tests/sentry/seer/endpoints/test_group_ai_autofix.py"}
+
+        with mock.patch(
+            "compute_sentry_selected_tests.find_test_imports", return_value=static_result
+        ):
+            with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+                _run(
+                    [
+                        "--coverage-db",
+                        str(db_path),
+                        "--changed-files",
+                        "src/sentry/seer/explorer/client_models.py",
+                        "--output",
+                        str(output),
+                        "--github-output",
+                    ],
+                    {"GITHUB_OUTPUT": str(gh_output)},
+                )
+
+        gh = gh_output.read_text()
+        assert "has-selected-tests=true" in gh
+        assert f"test-count={2 + len(ALWAYS_RUN_TESTS)}" in gh
+        expected = sorted(
+            {
+                "tests/sentry/seer/explorer/test_explorer_client.py",
+                "tests/sentry/seer/endpoints/test_group_ai_autofix.py",
+            }
+            | ALWAYS_RUN_TESTS
+        )
+        assert output.read_text().splitlines() == expected
+
+    def test_missing_db_returns_error(self):
+        ret = _run(["--coverage-db", "/nonexistent/coverage.db", "--changed-files", "foo.py"])
+        assert ret == 1
+
+    def test_endpoint_path_force_includes_public_api_matrix(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "src/sentry/api/endpoints/views.py",
+                    "--output",
+                    str(output),
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        selected = set(output.read_text().splitlines())
+        assert PUBLIC_API_MATRIX_TEST in selected
+        assert selected == ALWAYS_RUN_TESTS | {PUBLIC_API_MATRIX_TEST}
+        assert "has-selected-tests=true" in gh_output.read_text()
+
+    def test_non_endpoint_source_does_not_force_public_api_matrix(self, tmp_path):
+        db_path = tmp_path / "coverage.db"
+        _create_coverage_db(str(db_path), {})
+        output = tmp_path / "output.txt"
+        gh_output = tmp_path / "gh_output"
+        gh_output.write_text("")
+
+        with mock.patch("compute_sentry_selected_tests.Path.exists", return_value=True):
+            _run(
+                [
+                    "--coverage-db",
+                    str(db_path),
+                    "--changed-files",
+                    "src/sentry/utils/thing.py",
+                    "--output",
+                    str(output),
+                    "--github-output",
+                ],
+                {"GITHUB_OUTPUT": str(gh_output)},
+            )
+
+        assert set(output.read_text().splitlines()) == ALWAYS_RUN_TESTS
+        assert PUBLIC_API_MATRIX_TEST not in output.read_text()
+
+
+class TestPublicApiMatrixPathTriggers:
+    def test_matches_endpoint_paths(self):
+        assert _changed_files_match_public_api_matrix_paths(
+            [
+                "src/sentry/api/endpoints/views.py",
+                "src/sentry/issues/endpoints/organization_group_search_views.py",
+                "src/sentry/utils/thing.py",
+                "tests/sentry/api/endpoints/test_views.py",
+            ]
+        ) == [
+            "src/sentry/api/endpoints/views.py",
+            "src/sentry/issues/endpoints/organization_group_search_views.py",
+        ]
+
+
+class TestConfigPaths:
+    """Assert every literal path in the selective testing config still exists on disk.
+
+    Catches renames and deletions that would silently make a trigger or mapping
+    entry dead — a renamed trigger file stops triggering the full suite; a renamed
+    mapping source stops selecting its associated tests.
+    """
+
+    @pytest.mark.parametrize("trigger", [t for t in FULL_SUITE_TRIGGERS if isinstance(t, str)])
+    def test_full_suite_triggers_exist(self, trigger: str) -> None:
+        assert (_REPO_ROOT / trigger).exists(), _stale_msg(trigger)
+
+    @pytest.mark.parametrize("path", sorted(ALWAYS_RUN_TESTS | {PUBLIC_API_MATRIX_TEST}))
+    def test_always_run_tests_exist(self, path: str) -> None:
+        assert (_REPO_ROOT / path).exists(), _stale_msg(path, "test file")
+
+    @pytest.mark.parametrize("path", sorted(EXTRA_FILE_TO_TEST_MAPPING))
+    def test_extra_file_mapping_sources_exist(self, path: str) -> None:
+        assert (_REPO_ROOT / path).exists(), _stale_msg(path)
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted({p for paths in EXTRA_FILE_TO_TEST_MAPPING.values() for p in paths}),
+    )
+    def test_extra_file_mapping_targets_exist(self, path: str) -> None:
+        assert (_REPO_ROOT / path).exists(), _stale_msg(path, "test file")
+
+    @pytest.mark.parametrize("prefix", sorted(EXTRA_DIR_TO_TEST_MAPPING))
+    def test_extra_dir_mapping_prefixes_exist(self, prefix: str) -> None:
+        assert (_REPO_ROOT / prefix).is_dir(), (
+            f"Directory {prefix!r} no longer exists on disk.\n"
+            f"  If this directory was renamed, update this prefix in the selective testing config.\n"
+            f"  If it was deleted, remove this entry from the config too."
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted({p for paths in EXTRA_DIR_TO_TEST_MAPPING.values() for p in paths}),
+    )
+    def test_extra_dir_mapping_targets_exist(self, path: str) -> None:
+        assert (_REPO_ROOT / path).exists(), _stale_msg(path, "test file")

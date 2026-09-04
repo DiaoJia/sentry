@@ -1,4 +1,4 @@
-import {Alert} from 'sentry/components/core/alert';
+import {Alert} from '@sentry/scraps/alert';
 
 import type {Subscription} from 'getsentry/types';
 
@@ -6,7 +6,7 @@ type Props = {
   orgStatus: Subscription['orgStatus'];
 };
 
-function OrganizationStatus({orgStatus}: Props) {
+export function OrganizationStatus({orgStatus}: Props) {
   if (!orgStatus) {
     return null;
   }
@@ -15,7 +15,7 @@ function OrganizationStatus({orgStatus}: Props) {
     return null;
   }
 
-  let message: string | undefined = undefined;
+  let message: string | undefined;
 
   switch (orgStatus.id) {
     case 'pending_deletion':
@@ -23,8 +23,6 @@ function OrganizationStatus({orgStatus}: Props) {
       break;
     case 'deletion_in_progress':
       message = 'This organization in the process of being deleted.';
-      break;
-    default:
       break;
   }
 
@@ -34,11 +32,9 @@ function OrganizationStatus({orgStatus}: Props) {
 
   return (
     <Alert.Container>
-      <Alert data-test-id="deletion-status" type="error" showIcon>
+      <Alert data-test-id="deletion-status" variant="danger">
         {message}
       </Alert>
     </Alert.Container>
   );
 }
-
-export default OrganizationStatus;

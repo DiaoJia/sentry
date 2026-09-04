@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping, Sequence
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from django.contrib.auth.models import AnonymousUser
 
@@ -14,8 +14,27 @@ from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
 
 
+class SentryAppInstallationAppResult(TypedDict):
+    uuid: str
+    slug: str
+    sentryAppId: int
+
+
+class SentryAppInstallationOrganizationResult(TypedDict):
+    slug: str
+    id: int
+
+
+class SentryAppInstallationResult(TypedDict):
+    app: SentryAppInstallationAppResult
+    organization: SentryAppInstallationOrganizationResult
+    uuid: str
+    status: str
+    code: NotRequired[str]
+
+
 @register(SentryAppInstallation)
-class SentryAppInstallationSerializer(Serializer):
+class SentryAppInstallationSerializer(Serializer[SentryAppInstallationResult]):
     def get_attrs(
         self,
         item_list: Sequence[SentryAppInstallation],
@@ -41,10 +60,16 @@ class SentryAppInstallationSerializer(Serializer):
             }
         return result
 
-    def serialize(self, obj, attrs, user: User | RpcUser | AnonymousUser, **kwargs):
+    def serialize(
+        self, obj, attrs, user: User | RpcUser | AnonymousUser, **kwargs
+    ) -> SentryAppInstallationResult:
         access = kwargs.get("access")
-        data = {
-            "app": {"uuid": attrs["sentry_app"].uuid, "slug": attrs["sentry_app"].slug},
+        data: SentryAppInstallationResult = {
+            "app": {
+                "uuid": attrs["sentry_app"].uuid,
+                "slug": attrs["sentry_app"].slug,
+                "sentryAppId": attrs["sentry_app"].id,
+            },
             "organization": {"slug": attrs["organization"].slug, "id": attrs["organization"].id},
             "uuid": obj.uuid,
             "status": SentryAppInstallationStatus.as_str(obj.status),

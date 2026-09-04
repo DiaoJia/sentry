@@ -1,20 +1,22 @@
 import {useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import OnboardingAdditionalFeatures from 'sentry/components/events/featureFlags/onboarding/onboardingAdditionalFeatures';
+import {LinkButton} from '@sentry/scraps/button';
+
+import {OnboardingAdditionalFeatures} from 'sentry/components/events/featureFlags/onboarding/onboardingAdditionalFeatures';
 import {AuthTokenGeneratorProvider} from 'sentry/components/onboarding/gettingStartedDoc/authTokenGenerator';
+import {OnboardingCopyMarkdownButton} from 'sentry/components/onboarding/gettingStartedDoc/onboardingCopyMarkdownButton';
 import type {OnboardingLayoutProps} from 'sentry/components/onboarding/gettingStartedDoc/onboardingLayout';
+import {TabSelectionScope} from 'sentry/components/onboarding/gettingStartedDoc/selectedCodeTabContext';
 import {Step} from 'sentry/components/onboarding/gettingStartedDoc/step';
 import type {DocsParams} from 'sentry/components/onboarding/gettingStartedDoc/types';
 import {useSourcePackageRegistries} from 'sentry/components/onboarding/gettingStartedDoc/useSourcePackageRegistries';
 import {useUrlPlatformOptions} from 'sentry/components/onboarding/platformOptionsControl';
 import {t} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import {space} from 'sentry/styles/space';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 interface FeatureFlagOnboardingLayoutProps extends OnboardingLayoutProps {
   integration: string;
@@ -24,8 +26,7 @@ export function FeatureFlagOnboardingLayout({
   docsConfig,
   dsn,
   platformKey,
-  projectId,
-  projectSlug,
+  project,
   projectKeyId,
   configType = 'onboarding',
   integration,
@@ -46,8 +47,9 @@ export function FeatureFlagOnboardingLayout({
       dsn,
       organization,
       platformKey,
-      projectId,
-      projectSlug,
+      project,
+      isLogsSelected: false,
+      isMetricsSelected: false,
       isFeedbackSelected: false,
       isPerformanceSelected: false,
       isProfilingSelected: false,
@@ -73,8 +75,7 @@ export function FeatureFlagOnboardingLayout({
     isLoadingRegistry,
     organization,
     platformKey,
-    projectId,
-    projectSlug,
+    project,
     registryData,
     selectedOptions,
     configType,
@@ -86,19 +87,37 @@ export function FeatureFlagOnboardingLayout({
   ]);
 
   return (
-    <AuthTokenGeneratorProvider projectSlug={projectSlug}>
-      <Wrapper>
-        <Steps>
-          {steps.map(step => (
-            <Step key={step.title ?? step.type} {...step} />
-          ))}
-          <StyledLinkButton to="/issues/" priority="primary">
-            {t('Take me to Issues')}
-          </StyledLinkButton>
-        </Steps>
-        <Divider />
-        <OnboardingAdditionalFeatures organization={organization} />
-      </Wrapper>
+    <AuthTokenGeneratorProvider projectSlug={project.slug}>
+      <TabSelectionScope>
+        <Wrapper>
+          <Steps>
+            {steps.map((step, index) => (
+              <Step
+                key={step.title ?? step.type}
+                stepIndex={index}
+                {...step}
+                trailingItems={
+                  index === 0 ? (
+                    <OnboardingCopyMarkdownButton
+                      borderless
+                      steps={steps}
+                      source="feature_flag_onboarding"
+                    />
+                  ) : undefined
+                }
+              />
+            ))}
+            <StyledLinkButton
+              to={`/organizations/${organization.slug}/issues/`}
+              variant="primary"
+            >
+              {t('Take me to Issues')}
+            </StyledLinkButton>
+          </Steps>
+          <Divider />
+          <OnboardingAdditionalFeatures organization={organization} />
+        </Wrapper>
+      </TabSelectionScope>
     </AuthTokenGeneratorProvider>
   );
 }
@@ -129,7 +148,7 @@ const Wrapper = styled('div')`
 
 const Divider = styled('div')`
   position: relative;
-  margin-top: ${space(3)};
+  margin-top: ${p => p.theme.space['2xl']};
   &:before {
     display: block;
     position: absolute;
@@ -137,6 +156,7 @@ const Divider = styled('div')`
     height: 1px;
     left: 0;
     right: 0;
-    background: ${p => p.theme.border};
+    /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+    background: ${p => p.theme.tokens.border.primary};
   }
 `;

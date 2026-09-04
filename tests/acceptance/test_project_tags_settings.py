@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions
+from selenium.webdriver.support.wait import WebDriverWait
 
 from sentry.testutils.cases import AcceptanceTestCase, SnubaTestCase
 from sentry.testutils.helpers.datetime import before_now
@@ -11,7 +15,7 @@ current_time = datetime.now(timezone.utc)
 
 @no_silo_test
 class ProjectTagsSettingsTest(AcceptanceTestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user("foo@example.com")
         self.org = self.create_organization(name="Rowdy Tiger", owner=None)
@@ -23,7 +27,7 @@ class ProjectTagsSettingsTest(AcceptanceTestCase, SnubaTestCase):
         self.path = f"/settings/{self.org.slug}/projects/{self.project.slug}/tags/"
 
     @patch("django.utils.timezone.now", return_value=current_time)
-    def test_tags_list(self, mock_timezone):
+    def test_tags_list(self, mock_timezone: MagicMock) -> None:
         self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -39,8 +43,13 @@ class ProjectTagsSettingsTest(AcceptanceTestCase, SnubaTestCase):
         self.browser.wait_until_not('[data-test-id="loading-indicator"]')
 
         self.browser.wait_until_test_id("tag-row")
-        self.browser.click('[data-test-id="tag-row"] [data-test-id="delete"]')
-        self.browser.wait_until("[role='dialog'] [data-test-id='confirm-button']")
+        # This event derives an `interface_type` tag in addition to `level`.
+        rows = self.browser.elements('[data-test-id="tag-row"]')
+        assert {row.text.strip() for row in rows} == {"interface_type", "level"}
 
+        # Deleting a tag removes its row from the list.
+        row = rows[0]
+        row.find_element(By.CSS_SELECTOR, '[data-test-id="delete"]').click()
+        self.browser.wait_until("[role='dialog'] [data-test-id='confirm-button']")
         self.browser.click("[role='dialog'] [data-test-id='confirm-button']")
-        self.browser.wait_until_not('[data-test-id="tag-row"]')
+        WebDriverWait(self.browser.driver, 10).until(expected_conditions.staleness_of(row))

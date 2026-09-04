@@ -1,48 +1,45 @@
-import moment from 'moment-timezone';
+import {useQueryClient} from '@tanstack/react-query';
+
+import {Tag, type TagProps} from '@sentry/scraps/badge';
+import {Link} from '@sentry/scraps/link';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {Tag} from 'sentry/components/core/badge/tag';
 import {DateTime} from 'sentry/components/dateTime';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import ConfigStore from 'sentry/stores/configStore';
-import {
-  type ApiQueryKey,
-  setApiQueryData,
-  useApiQuery,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {getCells} from 'sentry/utils/cells';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import {useApi} from 'sentry/utils/useApi';
 import {useParams} from 'sentry/utils/useParams';
 
-import openChangeEffectiveAtModal from 'admin/components/changeEffectiveAtAction';
-import DetailLabel from 'admin/components/detailLabel';
-import DetailList from 'admin/components/detailList';
-import DetailsContainer from 'admin/components/detailsContainer';
-import DetailsPage from 'admin/components/detailsPage';
-import ResultTable from 'admin/components/resultTable';
+import {DetailLabel} from 'admin/components/detailLabel';
+import {DetailList} from 'admin/components/detailList';
+import {DetailsContainer} from 'admin/components/detailsContainer';
+import {DetailsPage} from 'admin/components/detailsPage';
+import {ResultTable} from 'admin/components/resultTable';
 import {isBillingAdmin, prettyDate} from 'admin/utils';
 import type {Invoice, InvoiceItem} from 'getsentry/types';
 import {InvoiceStatus} from 'getsentry/types';
 
 const ERR_MESSAGE = 'There was an internal error updating this invoice';
 
-function InvoiceDetails() {
+export function InvoiceDetails() {
   const {invoiceId, orgId, region} = useParams<{
     invoiceId: string;
     orgId: string;
     region: string;
   }>();
-  const regionInfo = ConfigStore.get('regions').find(
-    (r: any) => r.name.toLowerCase() === region.toLowerCase()
-  );
+  const cellInfo = getCells().find(c => c.name.toLowerCase() === region.toLowerCase());
   const api = useApi({persistInFlight: true});
   const queryClient = useQueryClient();
   const QUERY_KEY: ApiQueryKey = [
-    `/_admin/invoices/${invoiceId}/`,
+    getApiUrl('/_admin/cells/$region/admin-invoices/$invoiceId/', {
+      path: {region, invoiceId},
+    }),
     {
-      host: regionInfo ? regionInfo.url : '',
+      host: cellInfo ? cellInfo.locality_url : '',
     },
   ];
 
@@ -73,9 +70,10 @@ function InvoiceDetails() {
   const handleClose = async () => {
     try {
       const updatedInvoice = await api.requestPromise(
-        `/customers/${orgId}/invoices/${invoiceId}/close/`,
+        `/_admin/cells/${region}/invoices/${invoiceId}/close/`,
         {
           method: 'PUT',
+          host: cellInfo ? cellInfo.locality_url : '',
         }
       );
       updateCache(updatedInvoice);
@@ -100,42 +98,28 @@ function InvoiceDetails() {
     }
   };
 
-  const handleEffectiveAt = async (effectiveAt: string) => {
-    try {
-      const updatedInvoice = await api.requestPromise(
-        `/customers/${orgId}/invoices/${invoiceId}/effective-at/`,
-        {
-          method: 'PUT',
-          data: {effectiveAt},
-        }
-      );
-      updateCache(updatedInvoice);
-      addSuccessMessage('Invoice effective at date updated');
-    } catch {
-      addErrorMessage(ERR_MESSAGE);
-    }
-  };
-
   const getItemDescription = (item: InvoiceItem) => {
     if (item.description) {
       return item.description;
     }
 
-    const {plan, period} = item.data;
+    const {plan, period} = item.data ?? {};
 
     if (item.type === 'subscription') {
+      if (!plan) {
+        return 'Unlabeled item';
+      }
+      if (!period) {
+        return `${plan.name} subscription`;
+      }
       const from = prettyDate(period.start * 1000);
       const until = prettyDate(period.end * 1000);
 
-      return period
-        ? `${plan.name} subscription from ${from} until ${until}`
-        : `${plan.name} subscription`;
+      return `${plan.name} subscription from ${from} until ${until}`;
     }
 
     return 'Unlabeled item';
   };
-
-  type TagType = React.ComponentProps<typeof Tag>['type'];
 
   const invoiceStatus = invoice.isPaid
     ? InvoiceStatus.PAID
@@ -143,9 +127,9 @@ function InvoiceDetails() {
       ? InvoiceStatus.CLOSED
       : InvoiceStatus.AWAITING_PAYMENT;
 
-  const invoiceStatusTagType: Record<InvoiceStatus, TagType> = {
+  const invoiceStatusTagType: Record<InvoiceStatus, TagProps['variant']> = {
     [InvoiceStatus.PAID]: 'success',
-    [InvoiceStatus.CLOSED]: 'error',
+    [InvoiceStatus.CLOSED]: 'danger',
     [InvoiceStatus.AWAITING_PAYMENT]: 'warning',
   };
 
@@ -162,7 +146,7 @@ function InvoiceDetails() {
           )}
         </DetailLabel>
         <DetailLabel title="Status">
-          <Tag type={invoiceStatusTagType[invoiceStatus]}>{invoiceStatus}</Tag>
+          <Tag variant={invoiceStatusTagType[invoiceStatus]}>{invoiceStatus}</Tag>
         </DetailLabel>
         <DetailLabel title="Date Created">{prettyDate(invoice.dateCreated)}</DetailLabel>
         <DetailLabel title="Amount">
@@ -181,17 +165,6 @@ function InvoiceDetails() {
       </DetailList>
       <DetailList>
         <DetailLabel title="ID">{invoice.id}</DetailLabel>
-        <DetailLabel title="Type">{invoice.type || 'n/a'}</DetailLabel>
-        <DetailLabel title="Channel">{invoice.channel || 'n/a'}</DetailLabel>
-        <DetailLabel title="Stripe ID">
-          {invoice.stripeInvoiceID ? (
-            <a href={`https://dashboard.stripe.com/invoices/${invoice.stripeInvoiceID}`}>
-              {invoice.stripeInvoiceID}
-            </a>
-          ) : (
-            'n/a'
-          )}
-        </DetailLabel>
         <DetailLabel title="Effective At">
           {invoice.effectiveAt ? prettyDate(invoice.effectiveAt) : 'n/a'}
         </DetailLabel>
@@ -210,16 +183,10 @@ function InvoiceDetails() {
       <tbody>
         {invoice.items.map((item, num) => (
           <tr key={num}>
-            <td>
-              {getItemDescription(item)}
-              <br />
-              {item.periodStart && item.periodEnd && (
-                <small>{`${moment(item.periodStart).format('ll')} › ${moment(
-                  item.periodEnd
-                ).format('ll')}`}</small>
-              )}
+            <td>{getItemDescription(item)}</td>
+            <td data-label="Amount" style={{textAlign: 'right'}}>
+              ${(item.amount / 100).toLocaleString()}
             </td>
-            <td style={{textAlign: 'right'}}>${(item.amount / 100).toLocaleString()}</td>
           </tr>
         ))}
       </tbody>
@@ -243,7 +210,7 @@ function InvoiceDetails() {
             <td>
               <DateTime date={row.dateCreated} />
             </td>
-            <td style={{textAlign: 'center'}}>
+            <td data-label="Stripe ID" style={{textAlign: 'center'}}>
               {row.stripeID ? (
                 <a href={`https://dashboard.stripe.com/charges/${row.stripeID}`}>
                   {row.stripeID}
@@ -252,17 +219,17 @@ function InvoiceDetails() {
                 'n/a'
               )}
             </td>
-            <td style={{textAlign: 'center'}}>
+            <td data-label="Status" style={{textAlign: 'center'}}>
               {row.isPaid ? (
-                <Tag type="success">Paid</Tag>
+                <Tag variant="success">Paid</Tag>
               ) : (
-                <Tag type="error">{row.failureCode}</Tag>
+                <Tag variant="danger">{row.failureCode}</Tag>
               )}
             </td>
-            <td style={{textAlign: 'center'}}>
+            <td data-label="Card" style={{textAlign: 'center'}}>
               {row.cardLast4 ? `··· ${row.cardLast4}` : 'n/a'}
             </td>
-            <td style={{textAlign: 'right'}}>
+            <td data-label="Amount" style={{textAlign: 'right'}}>
               ${(row.amount / 100).toLocaleString()}
               <br />
               {row.isRefunded && (
@@ -305,17 +272,6 @@ function InvoiceDetails() {
               : 'Requires billing admin permission',
           onAction: handleRetry,
         },
-        {
-          key: 'changeEffectiveAt',
-          name: 'Change Effective At Date',
-          help: 'Change date used for ARR calculations.',
-          disabled: isDeleted || !isBillingAdmin(),
-          disabledReason: isDeleted
-            ? 'Organization is deleted'
-            : 'Requires billing admin permission',
-          skipConfirmModal: true,
-          onAction: () => openChangeEffectiveAtModal({onAction: handleEffectiveAt}),
-        },
       ]}
       sections={[
         {
@@ -334,5 +290,3 @@ function InvoiceDetails() {
     />
   );
 }
-
-export default InvoiceDetails;

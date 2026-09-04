@@ -1,7 +1,6 @@
-import {OrganizationFixture} from 'sentry-fixture/organization';
 import {TeamFixture} from 'sentry-fixture/team';
 
-import type {Project} from 'sentry/types/project';
+import type {DetailedProject, Project} from 'sentry/types/project';
 
 export function ProjectFixture(params: Partial<Project> = {}): Project {
   const team = TeamFixture();
@@ -10,33 +9,27 @@ export function ProjectFixture(params: Partial<Project> = {}): Project {
     slug: 'project-slug',
     name: 'Project Name',
     access: ['project:read'],
-    allowedDomains: ['*'],
     hasAccess: true,
     isMember: true,
     isBookmarked: false,
+    platforms: [],
     team,
     teams: [],
     environments: [],
     features: [],
-    eventProcessing: {
-      symbolicationDegraded: false,
-    },
     dateCreated: new Date().toISOString(),
-    digestsMaxDelay: 0,
-    digestsMinDelay: 0,
-    dynamicSamplingBiases: null,
     firstEvent: null,
     firstTransactionEvent: false,
-    groupingConfig: '',
-    hasCustomMetrics: false,
     hasFeedbacks: false,
     hasNewFeedbacks: false,
     hasMinifiedStackTrace: false,
     hasProfiles: false,
     hasReplays: false,
     hasFlags: false,
+    hasTraceMetrics: false,
     hasSessions: false,
     hasMonitors: false,
+    hasLogs: false,
     hasInsightsHttp: false,
     hasInsightsDb: false,
     hasInsightsAssets: false,
@@ -45,14 +38,32 @@ export function ProjectFixture(params: Partial<Project> = {}): Project {
     hasInsightsVitals: false,
     hasInsightsCaches: false,
     hasInsightsQueues: false,
-    hasInsightsLlmMonitoring: false,
     hasInsightsAgentMonitoring: false,
-    isInternal: false,
-    organization: OrganizationFixture(),
-    plugins: [],
+    hasInsightsMCP: false,
+    ...params,
+  };
+}
+
+export function DetailedProjectFixture(
+  params: Partial<DetailedProject> = {}
+): DetailedProject {
+  return {
+    ...ProjectFixture(params),
+    organization: {id: '3', slug: 'org-slug'},
     processingIssues: 0,
+    allowedDomains: ['*'],
+    dataScrubber: false,
+    dataScrubberDefaults: false,
+    derivedGroupingEnhancements: '',
+    digestsMaxDelay: 0,
+    digestsMinDelay: 0,
+    dynamicSamplingBiases: null,
+    enableAutoReleaseCreation: true,
+    fingerprintingRules: '',
+    groupingConfig: '',
+    groupingEnhancements: '',
+    isInternal: false,
     relayPiiConfig: '',
-    relayCustomMetricCardinalityLimit: null,
     resolveAge: 0,
     safeFields: [],
     scrapeJavaScript: true,

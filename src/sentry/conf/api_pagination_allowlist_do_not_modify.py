@@ -1,7 +1,7 @@
 """
-    This list is tracking old api endpoints that don't correctly implement pagination.
-    The goal is to eventually add pagination for all and shrink this list.
-    DO NOT ADD ANY NEW APIS
+This list is tracking old api endpoints that don't correctly implement pagination.
+The goal is to eventually add pagination for all and shrink this list.
+DO NOT ADD ANY NEW APIS
 """
 
 SENTRY_API_PAGINATION_ALLOWLIST_DO_NOT_MODIFY = {
@@ -21,7 +21,6 @@ SENTRY_API_PAGINATION_ALLOWLIST_DO_NOT_MODIFY = {
     "GroupSimilarIssuesEmbeddingsEndpoint",
     "GroupStatsEndpoint",
     "GroupTagsEndpoint",
-    "GroupingConfigsEndpoint",
     "IntegrationFeaturesEndpoint",
     "InternalQueueTasksEndpoint",
     "InternalStatsEndpoint",
@@ -39,7 +38,6 @@ SENTRY_API_PAGINATION_ALLOWLIST_DO_NOT_MODIFY = {
     "OrganizationEventsNewTrendsStatsEndpoint",
     "OrganizationEventsRelatedIssuesEndpoint",
     "OrganizationEventsRootCauseAnalysisEndpoint",
-    "OrganizationEventsSpansHistogramEndpoint",
     "OrganizationEventsVitalsEndpoint",
     "OrganizationGroupIndexEndpoint",
     "OrganizationGroupIndexStatsEndpoint",
@@ -52,9 +50,9 @@ SENTRY_API_PAGINATION_ALLOWLIST_DO_NOT_MODIFY = {
     "OrganizationMetricsTagsEndpoint",
     "OrganizationMissingMembersEndpoint",
     "OrganizationMonitorScheduleSampleDataEndpoint",
+    "OrganizationMonitorScheduleSampleBucketsEndpoint",
+    "OrganizationMonitorScheduleSampleWindowEndpoint",
     "OrganizationMonitorStatsEndpoint",
-    "OrganizationPluginsConfigsEndpoint",
-    "OrganizationPluginsEndpoint",
     "OrganizationProcessingIssuesEndpoint",
     "OrganizationProfilingFiltersEndpoint",
     "OrganizationProjectsEndpoint",
@@ -77,20 +75,18 @@ SENTRY_API_PAGINATION_ALLOWLIST_DO_NOT_MODIFY = {
     "ProjectEnvironmentsEndpoint",
     "ProjectFiltersEndpoint",
     "ProjectGroupIndexEndpoint",
-    "ProjectGroupingConfigsEndpoint",
     "ProjectIssuesResolvedInReleaseEndpoint",
     "ProjectMemberIndexEndpoint",
     "ProjectMonitorStatsEndpoint",
-    "ProjectPluginsEndpoint",
     "ProjectReleaseSetupCompletionEndpoint",
     "ProjectRuleStatsIndexEndpoint",
     "ProjectServiceHookStatsEndpoint",
     "ProjectStatsEndpoint",
     "ProjectSymbolSourcesEndpoint",
     "ProjectTagsEndpoint",
-    "ProjectUserStatsEndpoint",
     "ProjectUsersEndpoint",
     "ReleaseThresholdEndpoint",
+    "SentryAppInstallationServiceHookProjectsEndpoint",
     "SentryAppRequestsEndpoint",
     "SentryAppWebhookRequestsEndpoint",
     "SentryAppsStatsEndpoint",

@@ -1,8 +1,9 @@
 import {useMemo} from 'react';
 
 import type {Group} from 'sentry/types/group';
-import useReplayData from 'sentry/utils/replays/hooks/useReplayData';
-import ReplayReader from 'sentry/utils/replays/replayReader';
+import {parseEventTimestampMs} from 'sentry/utils/date/eventTimestampMs';
+import {useReplayData} from 'sentry/utils/replays/hooks/useReplayData';
+import {ReplayReader} from 'sentry/utils/replays/replayReader';
 
 type Props = {
   orgSlug: string;
@@ -20,7 +21,7 @@ interface ReplayReaderResult extends ReturnType<typeof useReplayData> {
   replayId: string;
 }
 
-export default function useLoadReplayReader({
+export function useLoadReplayReader({
   orgSlug,
   replaySlug,
   clipWindow,
@@ -29,11 +30,19 @@ export default function useLoadReplayReader({
 }: Props): ReplayReaderResult {
   const replayId = parseReplayId(replaySlug);
 
-  const {attachments, errors, replayRecord, status, isError, isPending, ...replayData} =
-    useReplayData({
-      orgSlug,
-      replayId,
-    });
+  const {
+    attachments,
+    errors,
+    feedbackEvents,
+    replayRecord,
+    status,
+    isError,
+    isPending,
+    ...replayData
+  } = useReplayData({
+    orgSlug,
+    replayId,
+  });
 
   // get first error matching our group
   const firstMatchingError = useMemo(
@@ -44,7 +53,7 @@ export default function useLoadReplayReader({
   // if we don't have a clip window, we'll use the error time to create a clip window
   const memoizedClipWindow = useMemo(() => {
     const errorTime = firstMatchingError
-      ? new Date(firstMatchingError.timestamp)
+      ? parseEventTimestampMs(firstMatchingError.timestamp_ms)
       : undefined;
 
     return (
@@ -63,6 +72,7 @@ export default function useLoadReplayReader({
           attachments,
           clipWindow: memoizedClipWindow,
           errors,
+          feedbackEvents,
           fetching: isPending,
           replayRecord,
           eventTimestampMs,
@@ -71,6 +81,7 @@ export default function useLoadReplayReader({
     attachments,
     memoizedClipWindow,
     errors,
+    feedbackEvents,
     isPending,
     replayRecord,
     eventTimestampMs,
@@ -80,6 +91,7 @@ export default function useLoadReplayReader({
     ...replayData,
     attachments,
     errors,
+    feedbackEvents,
     isError,
     isPending,
     replay,

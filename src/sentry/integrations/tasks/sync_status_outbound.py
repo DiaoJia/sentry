@@ -1,6 +1,9 @@
-from sentry import analytics, features
+from taskbroker_client.retry import Retry
+
+from sentry import analytics, features, options
 from sentry.constants import ObjectStatus
 from sentry.exceptions import InvalidIdentity
+from sentry.integrations.analytics import IntegrationIssueStatusSyncedEvent
 from sentry.integrations.base import IntegrationInstallation
 from sentry.integrations.errors import OrganizationIntegrationNotFound
 from sentry.integrations.models.external_issue import ExternalIssue
@@ -13,27 +16,17 @@ from sentry.integrations.services.integration import integration_service
 from sentry.models.group import Group, GroupStatus
 from sentry.shared_integrations.exceptions import ApiUnauthorized, IntegrationFormError
 from sentry.silo.base import SiloMode
-from sentry.tasks.base import instrumented_task, retry, track_group_async_operation
-from sentry.taskworker.config import TaskworkerConfig
+from sentry.tasks.base import instrumented_task, track_group_async_operation
 from sentry.taskworker.namespaces import integrations_tasks
-from sentry.taskworker.retry import Retry
 
 
 @instrumented_task(
     name="sentry.integrations.tasks.sync_status_outbound",
-    queue="integrations",
-    default_retry_delay=60 * 5,
-    max_retries=5,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=integrations_tasks,
-        retry=Retry(
-            times=5,
-            delay=60 * 5,
-        ),
-    ),
+    namespace=integrations_tasks,
+    retry=Retry(times=5, delay=60 * 5, on=(Exception,), ignore=(Integration.DoesNotExist,)),
+    silo_mode=SiloMode.CELL,
+    silenced_exceptions=(Integration.DoesNotExist,),
 )
-@retry(exclude=(Integration.DoesNotExist,))
 @track_group_async_operation
 def sync_status_outbound(group_id: int, external_issue_id: int) -> bool | None:
     groups = Group.objects.filter(
@@ -54,7 +47,9 @@ def sync_status_outbound(group_id: int, external_issue_id: int) -> bool | None:
         return None
 
     integration = integration_service.get_integration(
-        integration_id=external_issue.integration_id, status=ObjectStatus.ACTIVE
+        integration_id=external_issue.integration_id,
+        status=ObjectStatus.ACTIVE,
+        using_replica=options.get("integration_service.get_integration.using_replica"),
     )
     if not integration:
         return None
@@ -84,10 +79,11 @@ def sync_status_outbound(group_id: int, external_issue_id: int) -> bool | None:
                 )
 
                 analytics.record(
-                    "integration.issue.status.synced",
-                    provider=integration.provider,
-                    id=integration.id,
-                    organization_id=external_issue.organization_id,
+                    IntegrationIssueStatusSyncedEvent(
+                        provider=integration.provider,
+                        id=integration.id,
+                        organization_id=external_issue.organization_id,
+                    )
                 )
         except (
             IntegrationFormError,

@@ -4,49 +4,60 @@ import {WidgetFixture} from 'sentry-fixture/widget';
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
 import {DisplayType} from 'sentry/views/dashboards/types';
 
-import SpansWidgetQueries from './spansWidgetQueries';
+import {SpansWidgetQueries} from './spansWidgetQueries';
 
 describe('spansWidgetQueries', () => {
   const {organization} = initializeOrg();
-  const api = new MockApiClient();
   let widget = WidgetFixture();
   const selection = PageFiltersFixture();
 
   beforeEach(() => {
     MockApiClient.clearMockResponses();
     widget = WidgetFixture();
+    PageFiltersStore.init();
+    PageFiltersStore.onInitializeUrlState(selection);
   });
 
   it('calculates the confidence for a single series', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/events-stats/',
       body: {
-        confidence: [
-          [1, [{count: 'low'}]],
-          [2, [{count: 'low'}]],
-          [3, [{count: 'low'}]],
+        data: [
+          [1, [{count: 1}]],
+          [2, [{count: 2}]],
+          [3, [{count: 3}]],
         ],
-        data: [],
+        meta: {
+          dataScanned: 'partial',
+          accuracy: {
+            confidence: [
+              {timestamp: 1, value: 'low'},
+              {timestamp: 2, value: 'low'},
+              {timestamp: 3, value: 'low'},
+            ],
+          },
+        },
       },
     });
 
     render(
-      <SpansWidgetQueries
-        api={api}
-        widget={widget}
-        selection={selection}
-        dashboardFilters={{}}
-      >
-        {({confidence}) => <div>{confidence}</div>}
-      </SpansWidgetQueries>
+      <SpansWidgetQueries widget={widget} dashboardFilters={{}}>
+        {({confidence, dataScanned}) => (
+          <div>
+            {confidence}:{dataScanned}
+          </div>
+        )}
+      </SpansWidgetQueries>,
+      {organization}
     );
 
-    expect(await screen.findByText('low')).toBeInTheDocument();
+    expect(await screen.findByText('low:partial')).toBeInTheDocument();
   });
 
-  it('calculates the confidence for a multi series', async () => {
+  it.isKnownFlake('calculates the confidence for a multi series', async () => {
     widget = WidgetFixture({
       queries: [
         {
@@ -63,33 +74,45 @@ describe('spansWidgetQueries', () => {
       url: '/organizations/org-slug/events-stats/',
       body: {
         a: {
-          confidence: [
-            [1, [{count: 'high'}]],
-            [2, [{count: 'high'}]],
-            [3, [{count: 'high'}]],
+          meta: {
+            accuracy: {
+              confidence: [
+                {timestamp: 1, value: 'high'},
+                {timestamp: 2, value: 'high'},
+                {timestamp: 3, value: 'high'},
+              ],
+            },
+          },
+          data: [
+            [1, [{count: 1}]],
+            [2, [{count: 2}]],
+            [3, [{count: 3}]],
           ],
-          data: [],
         },
         b: {
-          confidence: [
-            [1, [{count: 'high'}]],
-            [2, [{count: 'high'}]],
-            [3, [{count: 'high'}]],
+          meta: {
+            accuracy: {
+              confidence: [
+                {timestamp: 1, value: 'high'},
+                {timestamp: 2, value: 'high'},
+                {timestamp: 3, value: 'high'},
+              ],
+            },
+          },
+          data: [
+            [1, [{count: 1}]],
+            [2, [{count: 2}]],
+            [3, [{count: 3}]],
           ],
-          data: [],
         },
       },
     });
 
     render(
-      <SpansWidgetQueries
-        api={api}
-        widget={widget}
-        selection={selection}
-        dashboardFilters={{}}
-      >
+      <SpansWidgetQueries widget={widget} dashboardFilters={{}}>
         {({confidence}) => <div>{confidence}</div>}
-      </SpansWidgetQueries>
+      </SpansWidgetQueries>,
+      {organization}
     );
 
     expect(await screen.findByText('high')).toBeInTheDocument();
@@ -111,7 +134,7 @@ describe('spansWidgetQueries', () => {
     });
 
     const normalModeMock = MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/events-stats/`,
+      url: '/organizations/org-slug/events-stats/',
       body: {
         data: [
           [1, [{count: 1}]],
@@ -126,16 +149,13 @@ describe('spansWidgetQueries', () => {
       ],
     });
 
+    PageFiltersStore.onInitializeUrlState({
+      ...selection,
+      datetime: {period: '24hr', end: null, start: null, utc: null},
+    });
+
     render(
-      <SpansWidgetQueries
-        api={api}
-        widget={widget}
-        selection={{
-          ...selection,
-          datetime: {period: '24hr', end: null, start: null, utc: null},
-        }}
-        dashboardFilters={{}}
-      >
+      <SpansWidgetQueries widget={widget} dashboardFilters={{}}>
         {({timeseriesResults}) => <div>{timeseriesResults?.[0]?.data?.[0]?.value}</div>}
       </SpansWidgetQueries>,
       {organization}
@@ -169,7 +189,7 @@ describe('spansWidgetQueries', () => {
     });
 
     const normalModeMock = MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/events/`,
+      url: '/organizations/org-slug/events/',
       body: {
         data: [{a: 'normal mode'}],
       },
@@ -180,16 +200,13 @@ describe('spansWidgetQueries', () => {
       ],
     });
 
+    PageFiltersStore.onInitializeUrlState({
+      ...selection,
+      datetime: {period: '24hr', end: null, start: null, utc: null},
+    });
+
     render(
-      <SpansWidgetQueries
-        api={api}
-        widget={widget}
-        selection={{
-          ...selection,
-          datetime: {period: '24hr', end: null, start: null, utc: null},
-        }}
-        dashboardFilters={{}}
-      >
+      <SpansWidgetQueries widget={widget} dashboardFilters={{}}>
         {({tableResults}) => <div>{tableResults?.[0]?.data?.[0]?.a}</div>}
       </SpansWidgetQueries>,
       {organization}

@@ -7,7 +7,7 @@ import {Profile} from './profile';
 import type {createFrameIndex} from './utils';
 
 function sortJSSelfProfileSamples(samples: Readonly<JSSelfProfiling.Trace['samples']>) {
-  return [...samples].sort((a, b) => {
+  return samples.toSorted((a, b) => {
     return a.stackId - b.stackId;
   });
 }
@@ -157,10 +157,7 @@ export class JSSelfProfile extends Profile {
       child.lock();
     }
 
-    node.frame.selfWeight += weight;
-
     for (const stackNode of framesInStack) {
-      stackNode.frame.totalWeight += weight;
       stackNode.count++;
     }
 
@@ -173,7 +170,7 @@ export class JSSelfProfile extends Profile {
     }
   }
 
-  build(): JSSelfProfile {
+  build(): this {
     this.duration = Math.max(
       this.duration,
       this.weights.reduce((a, b) => a + b, 0)

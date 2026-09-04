@@ -1,44 +1,45 @@
-import {initializeOrg} from 'sentry-test/initializeOrg';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+import {DetailedProjectFixture} from 'sentry-fixture/project';
+
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import ProjectToolbarSettings from 'sentry/views/settings/project/projectToolbar';
 
-describe('ProjectToolbarSettings', function () {
-  const {routerProps, organization, project} = initializeOrg({
-    organization: {
-      features: ['sentry-toolbar-ui'],
+describe('ProjectToolbarSettings', () => {
+  const organization = OrganizationFixture();
+  const project = DetailedProjectFixture();
+  const initialRouterConfig = {
+    location: {
+      pathname: `/settings/projects/${project.slug}/toolbar/`,
     },
-  });
-  const url = `/projects/${organization.slug}/${project.slug}/`;
+    route: '/settings/projects/:projectId/toolbar/',
+  };
+  const getProjectEndpoint = `/projects/${organization.slug}/${project.slug}/`;
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('displays previously saved setting', function () {
+  it('displays previously saved setting', () => {
     const initialOptionValue = 'sentry.io';
     project.options = {'sentry:toolbar_allowed_origins': initialOptionValue};
-    render(
-      <ProjectToolbarSettings
-        {...routerProps}
-        organization={organization}
-        project={project}
-      />
-    );
+    render(<ProjectToolbarSettings />, {
+      initialRouterConfig,
+      organization,
+      outletContext: {project},
+    });
     expect(screen.getByRole('textbox')).toHaveValue(initialOptionValue);
   });
 
-  it('can submit new allowed origins', async function () {
-    render(
-      <ProjectToolbarSettings
-        {...routerProps}
-        organization={organization}
-        project={project}
-      />
-    );
+  it('can submit new allowed origins', async () => {
+    render(<ProjectToolbarSettings />, {
+      initialRouterConfig,
+      organization,
+      outletContext: {project},
+    });
 
     const mockPut = MockApiClient.addMockResponse({
-      url,
+      url: getProjectEndpoint,
       method: 'PUT',
     });
 
@@ -51,7 +52,7 @@ describe('ProjectToolbarSettings', function () {
     await userEvent.tab(); // unfocus ("blur") the input
 
     expect(mockPut).toHaveBeenCalledWith(
-      url,
+      getProjectEndpoint,
       expect.objectContaining({
         method: 'PUT',
         data: {
@@ -61,27 +62,23 @@ describe('ProjectToolbarSettings', function () {
     );
   });
 
-  it('displays nothing when project options are undefined', function () {
+  it('displays nothing when project options are undefined', () => {
     project.options = undefined;
-    render(
-      <ProjectToolbarSettings
-        {...routerProps}
-        organization={organization}
-        project={project}
-      />
-    );
+    render(<ProjectToolbarSettings />, {
+      initialRouterConfig,
+      organization,
+      outletContext: {project},
+    });
     expect(screen.getByRole('textbox')).toHaveValue('');
   });
 
-  it('displays nothing when project options are empty', function () {
+  it('displays nothing when project options are empty', () => {
     project.options = {};
-    render(
-      <ProjectToolbarSettings
-        {...routerProps}
-        organization={organization}
-        project={project}
-      />
-    );
+    render(<ProjectToolbarSettings />, {
+      initialRouterConfig,
+      organization,
+      outletContext: {project},
+    });
     expect(screen.getByRole('textbox')).toHaveValue('');
   });
 });

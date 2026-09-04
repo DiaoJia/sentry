@@ -6,7 +6,7 @@ from django.db import models, router, transaction
 from django.db.models import UniqueConstraint
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, region_silo_model
+from sentry.db.models import FlexibleForeignKey, cell_silo_model
 from sentry.db.models.base import DefaultFieldsModel
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 from sentry.db.models.manager.base import BaseManager
@@ -33,7 +33,7 @@ class GroupSearchViewStarredManager(BaseManager["GroupSearchViewStarred"]):
 
     def reorder_starred_views(
         self, organization: Organization, user_id: int, new_view_positions: list[int]
-    ):
+    ) -> None:
         """
         Reorders the positions of starred views for a user in an organization.
         Does NOT add or remove starred views.
@@ -142,12 +142,14 @@ class GroupSearchViewStarredManager(BaseManager["GroupSearchViewStarred"]):
             ).update(position=models.F("position") - 1)
             return True
 
-    def clear_starred_view_for_all_members(self, organization: Organization, view: GroupSearchView):
+    def clear_starred_view_for_all_members(
+        self, organization: Organization, view: GroupSearchView
+    ) -> None:
         for starred_view in self.filter(organization=organization, group_search_view=view):
             self.delete_starred_view(organization, starred_view.user_id, view)
 
 
-@region_silo_model
+@cell_silo_model
 class GroupSearchViewStarred(DefaultFieldsModel):
     __relocation_scope__ = RelocationScope.Organization
 

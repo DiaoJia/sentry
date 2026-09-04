@@ -1,24 +1,21 @@
 import moment from 'moment-timezone';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import Link from 'sentry/components/links/link';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
 
-import PageHeader from 'admin/components/pageHeader';
-import PromoCodeModal from 'admin/components/promoCodes/promoCodeModal';
-import ResultGrid from 'admin/components/resultGrid';
-import titleCase from 'getsentry/utils/titleCase';
-
-type Props = RouteComponentProps<unknown, unknown>;
+import {PageHeader} from 'admin/components/pageHeader';
+import {AddPromoCodeModal as PromoCodeModal} from 'admin/components/promoCodes/promoCodeModal';
+import {ResultGrid} from 'admin/components/resultGrid';
+import {titleCase} from 'getsentry/utils/titleCase';
 
 const getRow = (row: any) => [
   <td key="code">
     <strong>
       <Link to={`/_admin/promocodes/${row.code}/`}>{row.code}</Link>
     </strong>
-    {row.status === 'active' ? null : <Tag type="error">{titleCase(row.status)}</Tag>}
+    {row.status === 'active' ? null : <Tag variant="danger">{titleCase(row.status)}</Tag>}
     <br />
     {row.campaign ? <small>{row.campaign}</small> : null}
   </td>,
@@ -45,13 +42,15 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function PromoCodes(props: Props) {
+export function PromoCodes() {
+  const {openModal} = useModal();
+
   return (
     <div>
       <PageHeader title="Promo Codes">
         <Button
           onClick={() => openModal(deps => <PromoCodeModal {...deps} />)}
-          priority="primary"
+          variant="primary"
           size="sm"
         >
           Create Promo Code
@@ -88,10 +87,7 @@ function PromoCodes(props: Props) {
           ['claims', 'Claims'],
         ]}
         defaultSort="date"
-        {...props}
       />
     </div>
   );
 }
-
-export default PromoCodes;

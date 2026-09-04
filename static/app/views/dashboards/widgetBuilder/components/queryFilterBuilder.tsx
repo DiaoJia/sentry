@@ -2,11 +2,12 @@ import {Fragment, useCallback, useState} from 'react';
 import styled from '@emotion/styled';
 import cloneDeep from 'lodash/cloneDeep';
 
-import {Button} from 'sentry/components/core/button';
-import {Input} from 'sentry/components/core/input';
+import {Button} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
+
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {IconDelete} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {WidgetBuilderVersion} from 'sentry/utils/analytics/dashboardsAnalyticsEvents';
 import {
@@ -14,20 +15,20 @@ import {
   shouldDisplayOnDemandWidgetWarning,
 } from 'sentry/utils/onDemandMetrics';
 import type {UseApiQueryResult} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {getDatasetConfig} from 'sentry/views/dashboards/datasetConfig/base';
 import {
   DisplayType,
-  type ValidateWidgetResponse,
   WidgetType,
+  type ValidateWidgetResponse,
 } from 'sentry/views/dashboards/types';
-import {WidgetOnDemandQueryWarning} from 'sentry/views/dashboards/widgetBuilder/buildSteps/filterResultsStep';
 import {SectionHeader} from 'sentry/views/dashboards/widgetBuilder/components/common/sectionHeader';
+import {WidgetOnDemandQueryWarning} from 'sentry/views/dashboards/widgetBuilder/components/widgetOnDemandQueryWarning';
 import {useWidgetBuilderContext} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
-import useDashboardWidgetSource from 'sentry/views/dashboards/widgetBuilder/hooks/useDashboardWidgetSource';
-import useIsEditingWidget from 'sentry/views/dashboards/widgetBuilder/hooks/useIsEditingWidget';
+import {useDashboardWidgetSource} from 'sentry/views/dashboards/widgetBuilder/hooks/useDashboardWidgetSource';
+import {useDisableTransactionWidget} from 'sentry/views/dashboards/widgetBuilder/hooks/useDisableTransactionWidget';
+import {useIsEditingWidget} from 'sentry/views/dashboards/widgetBuilder/hooks/useIsEditingWidget';
 import {BuilderStateAction} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
 import {getDiscoverDatasetFromWidgetType} from 'sentry/views/dashboards/widgetBuilder/utils';
 import {convertBuilderStateToWidget} from 'sentry/views/dashboards/widgetBuilder/utils/convertBuilderStateToWidget';
@@ -37,7 +38,7 @@ interface WidgetBuilderQueryFilterBuilderProps {
   validatedWidgetResponse: UseApiQueryResult<ValidateWidgetResponse, RequestError>;
 }
 
-function WidgetBuilderQueryFilterBuilder({
+export function WidgetBuilderQueryFilterBuilder({
   onQueryConditionChange,
   validatedWidgetResponse,
 }: WidgetBuilderQueryFilterBuilderProps) {
@@ -50,21 +51,43 @@ function WidgetBuilderQueryFilterBuilder({
   });
   const source = useDashboardWidgetSource();
   const isEditing = useIsEditingWidget();
+  const disableTransactionWidget = useDisableTransactionWidget();
 
   const widgetType = state.dataset ?? WidgetType.ERRORS;
   const datasetConfig = getDatasetConfig(state.dataset);
 
   const widget = convertBuilderStateToWidget(state);
 
+  // Multiple filter conditions allow comparing different data slices as overlays.
+  // - Line, Area, Bar (Time Series): can have up to 3 filters to compare series
+  // - Tables: only one filter (no overlay concept)
+  // - Big Numbers: only one filter (single value display)
+  // - Bar (Categorical): only one filter allowed, to simplify product for now
+  // - Heat Map: only one filter (single distribution)
+  // - Details: only one filter (single query, key-value display)
   const canAddSearchConditions =
     state.displayType !== DisplayType.TABLE &&
     state.displayType !== DisplayType.BIG_NUMBER &&
+    state.displayType !== DisplayType.CATEGORICAL_BAR &&
+    state.displayType !== DisplayType.HEATMAP &&
+    state.displayType !== DisplayType.DETAILS &&
     state.query &&
     state.query.length < 3;
 
+  // Legend aliases let users customize the label for each filter's series in the legend.
+  // Only valueable when multiple filters create multiple overlaid series.
+  // - Line, Area, Bar (Time Series): can have aliases for each filter series
+  // - Tables: no legend (data shown in rows)
+  // - Big Numbers: no legend (single value)
+  // - Bar (Categorical): no aliases (only one filter allowed, no point aliasing it)
+  // - Heat Map: no aliases (only one filter allowed, no point aliasing it)
+  // - Details: no legend (single query, data shown in key-value pairs)
   const canHaveAlias =
     state.displayType !== DisplayType.TABLE &&
-    state.displayType !== DisplayType.BIG_NUMBER;
+    state.displayType !== DisplayType.BIG_NUMBER &&
+    state.displayType !== DisplayType.CATEGORICAL_BAR &&
+    state.displayType !== DisplayType.HEATMAP &&
+    state.displayType !== DisplayType.DETAILS;
 
   const onAddSearchConditions = () => {
     // TODO: after hook gets updated with different dispatch types, change this part
@@ -95,7 +118,7 @@ function WidgetBuilderQueryFilterBuilder({
         const nextQueryConditionValidity = cloneDeep(queryConditionValidity);
         nextQueryConditionValidity[queryIndex] = validSearch;
         setQueryConditionValidity(nextQueryConditionValidity);
-        onQueryConditionChange(nextQueryConditionValidity.every(validity => validity));
+        onQueryConditionChange(nextQueryConditionValidity.every(Boolean));
         dispatch({
           type: BuilderStateAction.SET_QUERY,
           payload: state.query?.map((q, i) => (i === queryIndex ? field : q)) ?? [],
@@ -109,7 +132,7 @@ function WidgetBuilderQueryFilterBuilder({
     (queryIndex: number) => () => {
       queryConditionValidity.splice(queryIndex, 1);
       setQueryConditionValidity(queryConditionValidity);
-      onQueryConditionChange(queryConditionValidity.every(validity => validity));
+      onQueryConditionChange(queryConditionValidity.every(Boolean));
       dispatch({
         type: BuilderStateAction.SET_QUERY,
         payload: state.query?.filter((_, i) => i !== queryIndex) ?? [],
@@ -175,6 +198,7 @@ function WidgetBuilderQueryFilterBuilder({
                 ? getOnDemandFilterWarning
                 : undefined
             }
+            disabled={disableTransactionWidget}
             pageFilters={selection}
             onClose={handleClose(index)}
             onSearch={queryString => {
@@ -200,18 +224,34 @@ function WidgetBuilderQueryFilterBuilder({
           {canHaveAlias && (
             <LegendAliasInput
               type="text"
-              name="name"
+              name="alias"
               placeholder={t('Legend Alias')}
               value={state.legendAlias?.[index] || ''}
               onChange={e => {
-                dispatch({
-                  type: BuilderStateAction.SET_LEGEND_ALIAS,
-                  payload: state.legendAlias?.length
-                    ? state.legendAlias?.map((q, i) => (i === index ? e.target.value : q))
-                    : [e.target.value],
-                });
+                dispatch(
+                  {
+                    type: BuilderStateAction.SET_LEGEND_ALIAS,
+                    payload: state.legendAlias?.length
+                      ? state.legendAlias?.map((q, i) =>
+                          i === index ? e.target.value : q
+                        )
+                      : [e.target.value],
+                  },
+                  {updateUrl: false}
+                );
               }}
-              onBlur={() => {
+              onBlur={e => {
+                dispatch(
+                  {
+                    type: BuilderStateAction.SET_LEGEND_ALIAS,
+                    payload: state.legendAlias?.length
+                      ? state.legendAlias?.map((q, i) =>
+                          i === index ? e.target.value : q
+                        )
+                      : [e.target.value],
+                  },
+                  {updateUrl: true}
+                );
                 trackAnalytics('dashboards_views.widget_builder.change', {
                   builder_version: WidgetBuilderVersion.SLIDEOUT,
                   field: 'filter.alias',
@@ -243,9 +283,10 @@ function WidgetBuilderQueryFilterBuilder({
       {canAddSearchConditions && (
         <Button
           size="sm"
-          priority="link"
+          variant="link"
           onClick={onAddSearchConditions}
           aria-label={t('Add Filter')}
+          disabled={disableTransactionWidget}
         >
           {t('+ Add Filter')}
         </Button>
@@ -254,17 +295,15 @@ function WidgetBuilderQueryFilterBuilder({
   );
 }
 
-export default WidgetBuilderQueryFilterBuilder;
-
 function DeleteButton({onDelete}: {onDelete: () => void}) {
   return (
     <Button
       size="zero"
       style={{height: 'fit-content'}}
-      borderless
+      variant="transparent"
       onClick={onDelete}
       icon={<IconDelete />}
-      title={t('Remove this filter')}
+      tooltipProps={{title: t('Remove this filter')}}
       aria-label={t('Remove this filter')}
       name="filter-delete-button"
     />
@@ -274,8 +313,8 @@ function DeleteButton({onDelete}: {onDelete: () => void}) {
 const QueryFieldRowWrapper = styled('div')`
   display: flex;
   flex-direction: row;
-  gap: ${space(1)};
-  margin-bottom: ${space(1)};
+  gap: ${p => p.theme.space.md};
+  margin-bottom: ${p => p.theme.space.md};
   align-items: center;
 `;
 

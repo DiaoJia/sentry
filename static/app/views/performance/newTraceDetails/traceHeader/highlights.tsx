@@ -2,34 +2,30 @@ import {Fragment} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Flex} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {getContextIcon} from 'sentry/components/events/contexts/utils';
 import {HighlightsIconSummary as TransactionEventHighlights} from 'sentry/components/events/highlights/highlightsIconSummary';
 import {ScrollCarousel} from 'sentry/components/scrollCarousel';
-import Version from 'sentry/components/version';
-import VersionHoverCard from 'sentry/components/versionHoverCard';
+import {Version} from 'sentry/components/version';
+import {VersionHoverCard} from 'sentry/components/versionHoverCard';
+import {IconGlobe} from 'sentry/icons';
 import {IconReleases} from 'sentry/icons/iconReleases';
 import {IconWindow} from 'sentry/icons/iconWindow';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {getAttributeValue} from 'sentry/utils/fields/getAttributeValue';
+import {prettifyAttributeName} from 'sentry/views/explore/components/traceItemAttributes/utils';
 import type {TraceItemDetailsResponse} from 'sentry/views/explore/hooks/useTraceItemDetails';
 import type {TraceRootEventQueryResults} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceRootEvent';
 import {isTraceItemDetailsResponse} from 'sentry/views/performance/newTraceDetails/traceApi/utils';
-import {findSpanAttributeValue} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 
 type HighlightDefinition = {
   getSummary: () => {description: React.ReactNode; icon: React.ReactNode} | null;
   key: string;
 };
-
-function getParsedAttributeValue(value: string | undefined) {
-  const parts = value?.split(' ') ?? [];
-  const version = parts.pop();
-  const name = parts.join(' ');
-  return {name, version};
-}
 
 function AttributesHighlights({
   traceItemDetail,
@@ -47,13 +43,21 @@ function AttributesHighlights({
     {
       key: 'runtime',
       getSummary: () => {
-        const runtime = findSpanAttributeValue(attributes, 'runtime');
-
-        if (!runtime) {
-          return null;
-        }
-
-        const {name, version} = getParsedAttributeValue(runtime);
+        // Resolve the name and version as a pair so a span that has only part of
+        // each family can't report a version belonging to a different runtime.
+        const isOtelRuntime = attributes.some(
+          ({name}) => prettifyAttributeName(name) === 'process.runtime.name'
+        );
+        const nameKey = isOtelRuntime ? 'process.runtime.name' : 'runtime.name';
+        const versionKey = isOtelRuntime ? 'process.runtime.version' : 'runtime.version';
+        const name = getAttributeValue(attributes, nameKey, 'string');
+        const version = getAttributeValue(
+          attributes.filter(
+            attribute => prettifyAttributeName(attribute.name) === versionKey
+          ),
+          versionKey,
+          'string'
+        );
 
         if (!name) {
           return null;
@@ -88,9 +92,9 @@ function AttributesHighlights({
     {
       key: 'user',
       getSummary: () => {
-        const email = findSpanAttributeValue(attributes, 'user.email');
-        const ip_address = findSpanAttributeValue(attributes, 'user.ip');
-        const id = findSpanAttributeValue(attributes, 'user.id');
+        const email = getAttributeValue(attributes, 'user.email', 'string');
+        const ip_address = getAttributeValue(attributes, 'user.ip', 'string');
+        const id = getAttributeValue(attributes, 'user.id', 'string');
 
         if (!email && !ip_address) {
           return null;
@@ -122,13 +126,8 @@ function AttributesHighlights({
     {
       key: 'browser',
       getSummary: () => {
-        const browser = findSpanAttributeValue(attributes, 'browser');
-
-        if (!browser) {
-          return null;
-        }
-
-        const {name, version} = getParsedAttributeValue(browser);
+        const name = getAttributeValue(attributes, 'browser.name', 'string');
+        const version = getAttributeValue(attributes, 'browser.version', 'string');
 
         if (!name) {
           return null;
@@ -163,13 +162,8 @@ function AttributesHighlights({
     {
       key: 'os',
       getSummary: () => {
-        const os = findSpanAttributeValue(attributes, 'os');
-
-        if (!os) {
-          return null;
-        }
-
-        const {name, version} = getParsedAttributeValue(os);
+        const name = getAttributeValue(attributes, 'os.name', 'string');
+        const version = getAttributeValue(attributes, 'os.version', 'string');
 
         if (!name) {
           return null;
@@ -206,16 +200,14 @@ function AttributesHighlights({
           return null;
         }
 
-        const version =
-          findSpanAttributeValue(attributes, 'sentry.release') ??
-          findSpanAttributeValue(attributes, 'release');
+        const version = getAttributeValue(attributes, 'release', 'string');
 
         if (!version) {
           return null;
         }
 
         return {
-          icon: <IconReleases size="sm" color="subText" />,
+          icon: <IconReleases size="sm" variant="muted" />,
           description: (
             <VersionHoverCard
               organization={organization}
@@ -229,14 +221,29 @@ function AttributesHighlights({
       },
     },
     {
+      key: 'uptime-check-region',
+      getSummary: () => {
+        const region = getAttributeValue(attributes, 'region', 'string');
+
+        if (!region) {
+          return null;
+        }
+
+        return {
+          icon: <IconGlobe size="sm" variant="muted" />,
+          description: t('Check from %s', region),
+        };
+      },
+    },
+    {
       key: 'environment',
       getSummary: () => {
-        const environment = findSpanAttributeValue(attributes, 'environment');
+        const environment = getAttributeValue(attributes, 'environment', 'string');
         if (!environment) {
           return null;
         }
         return {
-          icon: <IconWindow size="sm" color="subText" />,
+          icon: <IconWindow size="sm" variant="muted" />,
           description: <Tooltip title={t('Environment')}>{environment}</Tooltip>,
         };
       },
@@ -244,7 +251,7 @@ function AttributesHighlights({
   ];
 
   return (
-    <ScrollCarousel gap={2} aria-label={t('Attributes Highlights')}>
+    <ScrollCarousel gap="xl" aria-label={t('Attributes Highlights')}>
       {highlights.map(highlight => {
         const summary = highlight.getSummary();
 
@@ -253,43 +260,39 @@ function AttributesHighlights({
         }
 
         return (
-          <HighlightsContainer key={highlight.key}>
+          <Flex align="center" gap="md" flex="0 0 auto" key={highlight.key}>
             <HighlightsIconWrapper>{summary.icon}</HighlightsIconWrapper>
             <HighlightsDescription>{summary.description}</HighlightsDescription>
-          </HighlightsContainer>
+          </Flex>
         );
       })}
     </ScrollCarousel>
   );
 }
 
-const HighlightsContainer = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-  align-items: center;
-`;
-
 const HighlightsDescription = styled('div')`
   display: flex;
-  gap: ${space(0.75)};
-  font-size: ${p => p.theme.fontSize.md};
+  gap: ${p => p.theme.space.sm};
+  font-size: ${p => p.theme.font.size.md};
 `;
 
 const HighlightsIconWrapper = styled('div')`
+  display: flex;
+  align-items: center;
   flex: none;
   line-height: 1;
 `;
 
 const HighlightsSubtitle = styled(Tooltip)`
   display: block;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledVersion = styled(Version)`
-  font-size: ${p => p.theme.fontSize.md};
-  color: ${p => p.theme.textColor};
+  font-size: ${p => p.theme.font.size.md};
+  color: ${p => p.theme.tokens.content.primary};
   &:hover {
-    color: ${p => p.theme.textColor};
+    color: ${p => p.theme.tokens.content.primary};
   }
 `;
 
@@ -299,7 +302,7 @@ type HighlightsProps = {
   rootEventResults: TraceRootEventQueryResults;
 };
 
-function Highlights({rootEventResults, organization, project}: HighlightsProps) {
+export function Highlights({rootEventResults, organization, project}: HighlightsProps) {
   if (!rootEventResults.data) {
     return null;
   }
@@ -328,5 +331,3 @@ const TransactionEventHighlightsWrapper = styled('span')`
     padding: 0;
   }
 `;
-
-export default Highlights;

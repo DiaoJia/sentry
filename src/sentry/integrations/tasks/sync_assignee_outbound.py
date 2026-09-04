@@ -1,8 +1,10 @@
 from typing import Any
 
-from sentry import analytics, features
+from taskbroker_client.retry import Retry
+
+from sentry import analytics, features, options
 from sentry.constants import ObjectStatus
-from sentry.exceptions import InvalidConfiguration
+from sentry.integrations.analytics import IntegrationIssueAssigneeSyncedEvent
 from sentry.integrations.errors import OrganizationIntegrationNotFound
 from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.models.integration import Integration
@@ -13,39 +15,42 @@ from sentry.integrations.project_management.metrics import (
 from sentry.integrations.services.assignment_source import AssignmentSource
 from sentry.integrations.services.integration import integration_service
 from sentry.models.organization import Organization
-from sentry.shared_integrations.exceptions import ApiUnauthorized, IntegrationError
+from sentry.shared_integrations.exceptions import (
+    ApiUnauthorized,
+    IntegrationConfigurationError,
+    IntegrationError,
+)
 from sentry.silo.base import SiloMode
-from sentry.tasks.base import instrumented_task, retry
-from sentry.taskworker.config import TaskworkerConfig
+from sentry.tasks.base import instrumented_task
 from sentry.taskworker.namespaces import integrations_tasks
-from sentry.taskworker.retry import Retry
 from sentry.users.models.user import User
 from sentry.users.services.user.service import user_service
 
 
 @instrumented_task(
     name="sentry.integrations.tasks.sync_assignee_outbound",
-    queue="integrations",
-    default_retry_delay=60 * 5,
-    max_retries=5,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=integrations_tasks,
-        processing_deadline_duration=30,
-        retry=Retry(
-            times=5,
-            delay=60 * 5,
+    namespace=integrations_tasks,
+    processing_deadline_duration=30,
+    retry=Retry(
+        times=5,
+        delay=60 * 5,
+        on=(Exception,),
+        ignore=(
+            ExternalIssue.DoesNotExist,
+            Integration.DoesNotExist,
+            User.DoesNotExist,
+            Organization.DoesNotExist,
+            IntegrationError,
         ),
     ),
-)
-@retry(
-    exclude=(
+    silo_mode=SiloMode.CELL,
+    silenced_exceptions=(
         ExternalIssue.DoesNotExist,
         Integration.DoesNotExist,
         User.DoesNotExist,
         Organization.DoesNotExist,
         IntegrationError,
-    )
+    ),
 )
 def sync_assignee_outbound(
     external_issue_id: int,
@@ -53,6 +58,8 @@ def sync_assignee_outbound(
     assign: bool,
     assignment_source_dict: dict[str, Any] | None = None,
 ) -> None:
+    from sentry.integrations.mixins.issues import IntegrationSyncTargetNotFound
+
     # Sync Sentry assignee to an external issue.
     external_issue = ExternalIssue.objects.get(id=external_issue_id)
 
@@ -61,7 +68,9 @@ def sync_assignee_outbound(
     if not has_issue_sync:
         return
     integration = integration_service.get_integration(
-        integration_id=external_issue.integration_id, status=ObjectStatus.ACTIVE
+        integration_id=external_issue.integration_id,
+        status=ObjectStatus.ACTIVE,
+        using_replica=options.get("integration_service.get_integration.using_replica"),
     )
     if not integration:
         return
@@ -90,13 +99,23 @@ def sync_assignee_outbound(
                 # Assume unassign if None.
                 user = user_service.get_user(user_id) if user_id else None
                 installation.sync_assignee_outbound(
-                    external_issue, user, assign=assign, assignment_source=parsed_assignment_source
+                    external_issue,
+                    user,
+                    assign=assign,
+                    assignment_source=parsed_assignment_source,
+                    lifecycle=lifecycle,
                 )
                 analytics.record(
-                    "integration.issue.assignee.synced",
-                    provider=integration.provider,
-                    id=integration.id,
-                    organization_id=external_issue.organization_id,
+                    IntegrationIssueAssigneeSyncedEvent(
+                        provider=integration.provider,
+                        id=integration.id,
+                        organization_id=external_issue.organization_id,
+                    )
                 )
-        except (OrganizationIntegrationNotFound, ApiUnauthorized, InvalidConfiguration) as e:
+        except (
+            OrganizationIntegrationNotFound,
+            ApiUnauthorized,
+            IntegrationSyncTargetNotFound,
+            IntegrationConfigurationError,
+        ) as e:
             lifecycle.record_halt(halt_reason=e)

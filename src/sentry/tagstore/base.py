@@ -11,7 +11,7 @@ from sentry.utils.services import Service
 
 if TYPE_CHECKING:
     from sentry.models.group import Group
-    from sentry.tagstore.types import GroupTagValue
+    from sentry.tagstore.types import GroupTagKey, GroupTagValue, TagKey
 
 # Valid pattern for tag key names
 TAG_KEY_RE = re.compile(r"^[a-zA-Z0-9_\.:-]+$")
@@ -104,7 +104,7 @@ class TagStorage(Service):
 
     def get_tag_key(
         self, project_id, environment_id, key: str, status=TagKeyStatus.ACTIVE, tenant_ids=None
-    ):
+    ) -> GroupTagKey | TagKey:
         """
         >>> get_tag_key(1, 2, "key1")
         """
@@ -116,7 +116,6 @@ class TagStorage(Service):
         environment_id,
         status=TagKeyStatus.ACTIVE,
         include_values_seen=False,
-        denylist=None,
         tenant_ids=None,
     ):
         """
@@ -146,7 +145,13 @@ class TagStorage(Service):
         """
         raise NotImplementedError
 
-    def get_group_tag_key(self, group, environment_id, key: str, tenant_ids=None):
+    def get_group_tag_key(
+        self,
+        group,
+        environment_id,
+        key: str,
+        tenant_ids=None,
+    ) -> GroupTagKey | TagKey:
         """
         >>> get_group_tag_key(group, 3, "key1")
         """
@@ -214,20 +219,25 @@ class TagStorage(Service):
     def get_group_tag_value_iter(
         self,
         group: Group,
-        environment_ids: list[int | None],
+        environment_ids: Sequence[int | None],
         key: str,
         orderby: str = "-first_seen",
         limit: int = 1000,
         offset: int = 0,
         tenant_ids: dict[str, int | str] | None = None,
-    ) -> list[GroupTagValue]:
+    ) -> Sequence[GroupTagValue]:
         """
         >>> get_group_tag_value_iter(group, 2, 3, 'environment')
         """
         raise NotImplementedError
 
     def get_group_tag_value_paginator(
-        self, group, environment_ids, key: str, order_by="-id", tenant_ids=None
+        self,
+        group,
+        environment_ids,
+        key: str,
+        order_by="-id",
+        tenant_ids=None,
     ):
         """
         >>> get_group_tag_value_paginator(group, 3, 'environment')
@@ -262,14 +272,25 @@ class TagStorage(Service):
     ) -> dict[int, int]:
         raise NotImplementedError
 
-    def get_group_tag_value_count(self, group, environment_id, key: str, tenant_ids=None):
+    def get_group_tag_value_count(
+        self,
+        group,
+        environment_id,
+        key: str,
+        tenant_ids=None,
+    ):
         """
         >>> get_group_tag_value_count(group, 3, 'key1')
         """
         raise NotImplementedError
 
     def get_top_group_tag_values(
-        self, group, environment_id, key: str, limit=TOP_VALUES_DEFAULT_LIMIT, tenant_ids=None
+        self,
+        group,
+        environment_id,
+        key: str,
+        limit=TOP_VALUES_DEFAULT_LIMIT,
+        tenant_ids=None,
     ):
         """
         >>> get_top_group_tag_values(group, 3, 'key1')
@@ -303,7 +324,6 @@ class TagStorage(Service):
         tenant_ids=None,
         **kwargs,
     ):
-
         # only the snuba backend supports multi env, and that overrides this method
         if environment_ids and len(environment_ids) > 1:
             environment_ids = environment_ids[:1]

@@ -7,23 +7,24 @@ import mmap
 import os
 import tempfile
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-import sentry_sdk
 from django.core.files.base import ContentFile
 from django.core.files.base import File as FileObj
 from django.db import IntegrityError, models, router, transaction
 from django.utils import timezone
+from taskbroker_client.task import Task
 
 from sentry.backup.scopes import RelocationScope
-from sentry.celery import SentryTask
-from sentry.db.models import JSONField, Model, WrappingU32IntegerField
+from sentry.db.models import Model, WrappingU32IntegerField
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.models.files.abstractfileblob import AbstractFileBlob
 from sentry.models.files.abstractfileblobindex import AbstractFileBlobIndex
 from sentry.models.files.utils import DEFAULT_BLOB_SIZE, AssembleChecksumMismatch, nooplogger
 from sentry.utils import metrics
+from sentry.utils.concurrent import ContextPropagatingThreadPoolExecutor
+from sentry.utils.tracing import trace
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class ChunkedFileBlobIndexWrapper:
                     mem[offset : offset + len(chunk)] = chunk
                     offset += len(chunk)
 
-        with ThreadPoolExecutor(max_workers=4) as exe:
+        with ContextPropagatingThreadPoolExecutor(max_workers=4) as exe:
             for idx in self._indexes:
                 exe.submit(fetch_file, idx.offset, idx.blob.getfile)
 
@@ -219,7 +220,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
     name = models.TextField()
     type = models.CharField(max_length=64)
     timestamp = models.DateTimeField(default=timezone.now, db_index=True)
-    headers: models.Field[dict[str, Any], dict[str, Any]] = JSONField()
+    headers = LegacyTextJSONField(default=dict)
     size = WrappingU32IntegerField(null=True)
     checksum = models.CharField(max_length=40, null=True, db_index=True)
 
@@ -241,7 +242,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
     def _get_blobs_by_id(self, blob_ids: Sequence[int]) -> models.QuerySet[BlobType]: ...
 
     @abc.abstractmethod
-    def _delete_unreferenced_blob_task(self) -> SentryTask: ...
+    def _delete_unreferenced_blob_task(self) -> Task[Any, Any]: ...
 
     def _get_chunked_blob(self, mode=None, prefetch=False, prefetch_to=None, delete=True):
         return ChunkedFileBlobIndexWrapper(
@@ -252,7 +253,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
             delete=delete,
         )
 
-    @sentry_sdk.tracing.trace
+    @trace
     def getfile(self, mode=None, prefetch=False):
         """Returns a file object.  By default the file is fetched on
         demand but if prefetch is enabled the file is fully prefetched
@@ -261,7 +262,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
         impl = self._get_chunked_blob(mode, prefetch)
         return FileObj(impl, self.name)
 
-    @sentry_sdk.tracing.trace
+    @trace
     def save_to(self, path) -> None:
         """Fetches the file and emplaces it at a certain location.  The
         write is done atomically to a tempfile first and then moved over.
@@ -297,7 +298,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
                 except Exception:
                     pass
 
-    @sentry_sdk.tracing.trace
+    @trace
     def putfile(self, fileobj, blob_size=DEFAULT_BLOB_SIZE, commit=True, logger=nooplogger):
         """
         Save a fileobj into a number of chunks.
@@ -327,7 +328,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
             self.save()
         return results
 
-    @sentry_sdk.tracing.trace
+    @trace
     def assemble_from_file_blob_ids(self, file_blob_ids, checksum):
         """
         This creates a file, from file blobs and returns a temp file with the
@@ -381,7 +382,7 @@ class AbstractFile(Model, _Parent[BlobIndexType, BlobType]):
         tf.seek(0)
         return tf
 
-    @sentry_sdk.tracing.trace
+    @trace
     def delete(self, *args, **kwargs):
         blob_ids = [blob.id for blob in self.blobs.all()]
         ret = super().delete(*args, **kwargs)

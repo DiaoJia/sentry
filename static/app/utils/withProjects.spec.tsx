@@ -2,10 +2,10 @@ import {ProjectFixture} from 'sentry-fixture/project';
 
 import {act, render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
-import withProjects from 'sentry/utils/withProjects';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {withProjects} from 'sentry/utils/withProjects';
 
-describe('withProjects HoC', function () {
+describe('withProjects HoC', () => {
   beforeEach(() => {
     act(() => ProjectsStore.reset());
   });
@@ -23,7 +23,7 @@ describe('withProjects HoC', function () {
     );
   }
 
-  it('works', async function () {
+  it('works', async () => {
     const Container = withProjects(Output);
     render(<Container />);
     expect(await screen.findByText('Loading')).toBeInTheDocument();

@@ -1,36 +1,41 @@
 import styled from '@emotion/styled';
 
+import {Stack} from '@sentry/scraps/layout';
+
 import ReplayClipPreview from 'sentry/components/events/eventReplay/replayClipPreview';
+import {ReplayAccess} from 'sentry/components/replays/replayAccess';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {EventTransaction} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
-import {getAnalyticsDataForEvent} from 'sentry/utils/events';
-import {getReplayIdFromEvent} from 'sentry/utils/replays/getReplayIdFromEvent';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 const REPLAY_CLIP_OFFSETS = {
   durationAfterMs: 5_000,
   durationBeforeMs: 5_000,
 };
 
+export function getEventTimestampMs(event: EventTransaction): number {
+  const startTimestampMS =
+    'startTimestamp' in event ? event.startTimestamp * 1000 : undefined;
+  const timeOfEvent = event.dateCreated ?? startTimestampMS ?? event.dateReceived;
+  return timeOfEvent ? Math.floor(new Date(timeOfEvent).getTime()) : 0;
+}
+
 function ReplaySection({
-  event,
+  replayId,
+  eventTimestampMs,
   organization,
+  analyticsParams,
   showTitle = false,
 }: {
-  event: EventTransaction;
+  eventTimestampMs: number;
   organization: Organization;
+  replayId: string;
+  analyticsParams?: Record<string, unknown>;
   showTitle?: boolean;
 }) {
-  const replayId = getReplayIdFromEvent(event);
-  const startTimestampMS =
-    event && 'startTimestamp' in event ? event.startTimestamp * 1000 : undefined;
-  const timeOfEvent = event.dateCreated ?? startTimestampMS ?? event.dateReceived;
-  const eventTimestampMs = timeOfEvent ? Math.floor(new Date(timeOfEvent).getTime()) : 0;
-
-  return replayId ? (
-    <ReplaySectionContainer>
+  return (
+    <Stack>
       {showTitle ? <ReplaySectionTitle>{t('Session Replay')}</ReplaySectionTitle> : null}
       <ReplayClipPreview
         analyticsContext="trace-view"
@@ -41,47 +46,50 @@ function ReplaySection({
         fullReplayButtonProps={{
           analyticsEventKey: 'trace-view.drawer-open-replay-details-clicked',
           analyticsEventName: 'Trace View: Open Replay Details Clicked',
-          analyticsParams: {
-            ...getAnalyticsDataForEvent(event),
-            organization,
-          },
+          ...(analyticsParams
+            ? {analyticsParams: {...analyticsParams, organization}}
+            : {}),
         }}
       />
-    </ReplaySectionContainer>
-  ) : null;
+    </Stack>
+  );
 }
 
-export default function ReplayPreview({
-  event,
+export function ReplayPreview({
+  replayId,
+  eventTimestampMs,
   organization,
+  analyticsParams,
 }: {
-  event: EventTransaction;
+  eventTimestampMs: number;
   organization: Organization;
+  replayId: string | undefined;
+  analyticsParams?: Record<string, unknown>;
 }) {
-  const replayId = getReplayIdFromEvent(event);
-
   if (!replayId) {
     return null;
   }
 
   return (
-    <InterimSection
-      title={t('Session Replay')}
-      type="trace_session_replay"
-      disableCollapsePersistence
-    >
-      <ReplaySection event={event} organization={organization} />
-    </InterimSection>
+    <ReplayAccess>
+      <FoldSection
+        title={t('Session Replay')}
+        sectionKey="trace_session_replay"
+        disableCollapsePersistence
+      >
+        <ReplaySection
+          replayId={replayId}
+          eventTimestampMs={eventTimestampMs}
+          organization={organization}
+          analyticsParams={analyticsParams}
+        />
+      </FoldSection>
+    </ReplayAccess>
   );
 }
 
-const ReplaySectionContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-`;
-
 const ReplaySectionTitle = styled('div')`
-  font-size: ${p => p.theme.fontSize.md};
-  font-weight: ${p => p.theme.fontWeightBold};
-  margin-bottom: ${space(2)};
+  font-size: ${p => p.theme.font.size.md};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin-bottom: ${p => p.theme.space.xl};
 `;

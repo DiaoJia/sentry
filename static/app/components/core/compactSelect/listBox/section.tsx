@@ -1,5 +1,4 @@
 import {Fragment, useMemo} from 'react';
-import type {AriaListBoxSectionProps} from '@react-aria/listbox';
 import {useListBoxSection} from '@react-aria/listbox';
 import {useSeparator} from '@react-aria/separator';
 import type {ListState} from '@react-stately/list';
@@ -10,21 +9,22 @@ import {
   SectionHeader,
   SectionSeparator,
   SectionTitle,
+  SectionToggle,
   SectionWrap,
-} from 'sentry/components/core/compactSelect/styles';
-import type {SelectKey, SelectSection} from 'sentry/components/core/compactSelect/types';
-import {SectionToggle} from 'sentry/components/core/compactSelect/utils';
-import type {FormSize} from 'sentry/utils/theme';
+} from '@sentry/scraps/compactSelect';
+import type {SelectKey} from '@sentry/scraps/compactSelect';
+import type {ListItemBase} from '@sentry/scraps/compactSelect/types';
 
-import {ListBoxOption} from './option';
+import {ListBoxOption, type ListBoxOptionProps} from './option';
 
-interface ListBoxSectionProps extends AriaListBoxSectionProps {
+interface ListBoxSectionProps<T extends ListItemBase> {
   hiddenOptions: Set<SelectKey>;
-  item: Node<any>;
-  listState: ListState<any>;
+  item: Node<T>;
+  listState: ListState<T>;
   showSectionHeaders: boolean;
-  size: FormSize;
-  onToggle?: (section: SelectSection<SelectKey>, type: 'select' | 'unselect') => void;
+  size: ListBoxOptionProps['size'];
+  'data-index'?: number;
+  ref?: React.Ref<HTMLLIElement>;
   showDetails?: boolean;
 }
 
@@ -32,15 +32,16 @@ interface ListBoxSectionProps extends AriaListBoxSectionProps {
  * A <li /> element that functions as a list box section (renders a nested <ul />
  * inside). https://react-spectrum.adobe.com/react-aria/useListBox.html
  */
-export function ListBoxSection({
+export function ListBoxSection<T extends ListItemBase>({
   item,
   listState,
-  onToggle,
   size,
   hiddenOptions,
   showSectionHeaders,
   showDetails = true,
-}: ListBoxSectionProps) {
+  ref,
+  'data-index': dataIndex,
+}: ListBoxSectionProps<T>) {
   const {itemProps, headingProps, groupProps} = useListBoxSection({
     heading: item.rendered,
     'aria-label': item['aria-label'],
@@ -50,7 +51,7 @@ export function ListBoxSection({
 
   const showToggleAllButton =
     listState.selectionManager.selectionMode === 'multiple' &&
-    item.value.showToggleAllButton;
+    item.value?.showToggleAllButton;
 
   const childItems = useMemo(
     () => [...item.childNodes].filter(child => !hiddenOptions.has(child.key)),
@@ -60,15 +61,13 @@ export function ListBoxSection({
   return (
     <Fragment>
       {showSectionHeaders && <SectionSeparator {...separatorProps} />}
-      <SectionWrap {...itemProps}>
+      <SectionWrap {...itemProps} data-index={dataIndex} ref={ref}>
         {(item.rendered || showToggleAllButton) && showSectionHeaders && (
           <SectionHeader>
             {item.rendered && (
               <SectionTitle {...headingProps}>{item.rendered}</SectionTitle>
             )}
-            {showToggleAllButton && (
-              <SectionToggle item={item} listState={listState} onToggle={onToggle} />
-            )}
+            {showToggleAllButton && <SectionToggle item={item} listState={listState} />}
           </SectionHeader>
         )}
         <SectionGroup {...groupProps}>

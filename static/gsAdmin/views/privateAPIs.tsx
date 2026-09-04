@@ -1,11 +1,13 @@
 import {Fragment, useState} from 'react';
 
-import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {Button} from 'sentry/components/core/button';
-import {Input} from 'sentry/components/core/input';
-import useApi from 'sentry/utils/useApi';
+import {Button} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
 
-import PageHeader from 'admin/components/pageHeader';
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApi} from 'sentry/utils/useApi';
+
+import {PageHeader} from 'admin/components/pageHeader';
 
 import {SearchContainer} from './debuggingTools';
 
@@ -25,7 +27,9 @@ function ForceAutoAssignment() {
     });
 
     const response = await api.requestPromise(
-      `/organizations/${organizationSlug}/issues/force-auto-assignment/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/issues/force-auto-assignment/', {
+        path: {organizationIdOrSlug: organizationSlug},
+      }),
       {
         method: 'PUT',
         data: {group_ids: groupIdsArray},
@@ -65,7 +69,7 @@ function ForceAutoAssignment() {
             minLength={1}
             placeholder="1, 2, 3"
           />
-          <Button priority="primary" type="submit">
+          <Button variant="primary" type="submit">
             Submit
           </Button>
         </SearchContainer>
@@ -74,7 +78,7 @@ function ForceAutoAssignment() {
   );
 }
 
-function PrivateAPIs() {
+export function PrivateAPIs() {
   return (
     <div>
       <PageHeader title="Private APIs" />
@@ -83,5 +87,3 @@ function PrivateAPIs() {
     </div>
   );
 }
-
-export default PrivateAPIs;

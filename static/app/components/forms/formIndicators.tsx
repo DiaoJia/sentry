@@ -1,15 +1,15 @@
 import styled from '@emotion/styled';
 
+import {Flex} from '@sentry/scraps/layout';
+
 import {
   addErrorMessage,
   addMessage,
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
-import type FormModel from 'sentry/components/forms/model';
-import type {FieldValue} from 'sentry/components/forms/model';
+import type {FieldValue, FormModel} from 'sentry/components/forms/model';
 import {DEFAULT_TOAST_DURATION} from 'sentry/constants';
 import {tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 /**
  * This will call an action creator to generate a "Toast" message that
@@ -40,9 +40,10 @@ export function addUndoableFormChangeMessage(
 
   // Hide the change text when formatMessageValue is explicitly set to false
   const showChangeText = model.getDescriptor(fieldName, 'formatMessageValue') !== false;
+  const root = <Flex align="center" />;
 
   const tctArgsSuccess = {
-    root: <MessageContainer />,
+    root,
     fieldName: <FieldName>{label}</FieldName>,
     oldValue: <FormValue>{prettifyValue(change.old)}</FormValue>,
     newValue: <FormValue>{prettifyValue(change.new)}</FormValue>,
@@ -73,7 +74,7 @@ export function addUndoableFormChangeMessage(
 
         if (!maybeSaveResultPromise) {
           const tctArgsFail = {
-            root: <MessageContainer />,
+            root,
             fieldName: <FieldName>{label}</FieldName>,
             oldValue: <FormValue>{prettifyValue(oldValue)}</FormValue>,
             newValue: <FormValue>{prettifyValue(newValue)}</FormValue>,
@@ -91,7 +92,7 @@ export function addUndoableFormChangeMessage(
         }
 
         const tctArgsRestored = {
-          root: <MessageContainer />,
+          root,
           fieldName: <FieldName>{label}</FieldName>,
           oldValue: <FormValue>{prettifyValue(oldValue)}</FormValue>,
           newValue: <FormValue>{prettifyValue(newValue)}</FormValue>,
@@ -102,7 +103,7 @@ export function addUndoableFormChangeMessage(
             showChangeText
               ? tct('Restored [fieldName] from [oldValue] to [newValue]', tctArgsRestored)
               : tct('Restored [fieldName]', tctArgsRestored),
-            'undo',
+            'success',
             {
               duration: DEFAULT_TOAST_DURATION,
             }
@@ -113,13 +114,13 @@ export function addUndoableFormChangeMessage(
   );
 }
 
-const PRETTY_VALUES: Map<unknown, string> = new Map([
+const PRETTY_VALUES = new Map<unknown, string>([
   ['', '<empty>'],
   [null, '<none>'],
   [undefined, '<unset>'],
   // if we don't cast as any, then typescript complains because booleans are not valid keys
-  [true as any, 'enabled'],
-  [false as any, 'disabled'],
+  [true, 'enabled'],
+  [false, 'disabled'],
 ]);
 
 // Transform form values into a string
@@ -149,13 +150,9 @@ const prettyFormString = (
 };
 
 const FormValue = styled('em')`
-  margin: 0 ${space(0.5)};
+  margin: 0 ${p => p.theme.space.xs};
 `;
 const FieldName = styled('span')`
-  font-weight: ${p => p.theme.fontWeightBold};
-  margin: 0 ${space(0.5)};
-`;
-const MessageContainer = styled('div')`
-  display: flex;
-  align-items: center;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin: 0 ${p => p.theme.space.xs};
 `;

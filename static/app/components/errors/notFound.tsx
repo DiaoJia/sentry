@@ -1,15 +1,14 @@
 import styled from '@emotion/styled';
 
-import {Alert} from 'sentry/components/core/alert';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {Alert} from '@sentry/scraps/alert';
+import {ExternalLink, Link} from '@sentry/scraps/link';
 
-function NotFound() {
+import {t, tct} from 'sentry/locale';
+
+export function NotFound() {
   return (
     <Alert.Container>
-      <Alert type="error" showIcon>
+      <Alert variant="danger">
         <Heading>{t('Page Not Found')}</Heading>
         <p>{t('The page you are looking for was not found.')}</p>
         <p>{t('You may wish to try the following:')}</p>
@@ -45,9 +44,7 @@ function NotFound() {
 }
 
 const Heading = styled('h1')`
-  font-size: ${p => p.theme.fontSize.lg};
+  font-size: ${p => p.theme.font.size.lg};
   line-height: 1.4;
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;
-
-export default NotFound;

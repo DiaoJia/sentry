@@ -1,11 +1,8 @@
-import {OrganizationFixture} from 'sentry-fixture/organization';
-
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import {SELF_NOTIFICATION_SETTINGS_TYPES} from 'sentry/views/settings/account/notifications/constants';
-import {NOTIFICATION_SETTING_FIELDS} from 'sentry/views/settings/account/notifications/fields2';
-import NotificationSettings from 'sentry/views/settings/account/notifications/notificationSettings';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {NOTIFICATION_SETTING_FIELDS} from 'sentry/views/settings/account/notifications/fields';
+import {NotificationSettings} from 'sentry/views/settings/account/notifications/notificationSettings';
 
 function renderMockRequests() {
   MockApiClient.addMockResponse({
@@ -18,43 +15,11 @@ function renderMockRequests() {
   });
 }
 
-describe('NotificationSettings', function () {
-  it('should render', async function () {
-    const {organization} = initializeOrg();
-
+describe('NotificationSettings', () => {
+  it('should render', async () => {
     renderMockRequests();
 
-    render(<NotificationSettings organizations={[organization]} />);
-
-    // There are 8 notification setting Selects/Toggles.
-    for (const field of [
-      'alerts',
-      'workflow',
-      'deploy',
-      'approval',
-      'reports',
-      'email',
-      ...SELF_NOTIFICATION_SETTINGS_TYPES,
-    ] as const) {
-      expect(
-        await screen.findByText(String(NOTIFICATION_SETTING_FIELDS[field].label))
-      ).toBeInTheDocument();
-    }
-    expect(screen.getByText('Issue Alerts')).toBeInTheDocument();
-  });
-
-  it('renders quota section with feature flag', async function () {
-    const {organization} = initializeOrg({
-      organization: {
-        features: ['user-spend-notifications-settings'],
-      },
-    });
-
-    renderMockRequests();
-
-    render(<NotificationSettings organizations={[organization]} />);
-
-    // There are 9 notification setting Selects/Toggles.
+    render(<NotificationSettings />);
 
     for (const field of [
       'alerts',
@@ -63,8 +28,10 @@ describe('NotificationSettings', function () {
       'approval',
       'reports',
       'email',
+      'personalActivityNotifications',
+      'selfAssignOnResolve',
       'quota',
-      ...SELF_NOTIFICATION_SETTINGS_TYPES,
+      'spikeProtection',
     ] as const) {
       expect(
         await screen.findByText(String(NOTIFICATION_SETTING_FIELDS[field].label))
@@ -73,22 +40,17 @@ describe('NotificationSettings', function () {
     expect(screen.getByText('Issue Alerts')).toBeInTheDocument();
   });
 
-  it('renders spend section instead of quota section with feature flag', async function () {
-    const {organization} = initializeOrg({
-      organization: {
-        features: ['user-spend-notifications-settings', 'spend-visibility-notifications'],
-      },
-    });
-
-    const organizationNoFlag = OrganizationFixture();
-    organizationNoFlag.features.push('user-spend-notifications-settings');
-
+  it('hides quota notifications on self-hosted', async () => {
+    ConfigStore.set('isSelfHosted', true);
     renderMockRequests();
 
-    render(<NotificationSettings organizations={[organization, organizationNoFlag]} />);
+    render(<NotificationSettings />);
 
-    expect(await screen.findByText('Spend')).toBeInTheDocument();
-
-    expect(screen.queryByText('Quota')).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(String(NOTIFICATION_SETTING_FIELDS.alerts.label))
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(String(NOTIFICATION_SETTING_FIELDS.quota.label))
+    ).not.toBeInTheDocument();
   });
 });

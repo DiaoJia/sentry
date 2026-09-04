@@ -1,32 +1,28 @@
 import type {LocationDescriptor} from 'history';
 
-import {
-  addErrorMessage,
-  addLoadingMessage,
-  addSuccessMessage,
-} from 'sentry/actionCreators/indicator';
+import type {LinkButtonProps} from '@sentry/scraps/button';
+import {LinkButton} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+
 import {navigateTo} from 'sentry/actionCreators/navigation';
 import {hasEveryAccess} from 'sentry/components/acl/access';
-import GuideAnchor from 'sentry/components/assistant/guideAnchor';
-import type {LinkButtonProps} from 'sentry/components/core/button/linkButton';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Link from 'sentry/components/links/link';
 import {IconSiren} from 'sentry/icons';
-import type {SVGIconProps} from 'sentry/icons/svgIcon';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {isDemoModeActive} from 'sentry/utils/demoMode';
-import type EventView from 'sentry/utils/discover/eventView';
-import useApi from 'sentry/utils/useApi';
-import useProjects from 'sentry/utils/useProjects';
-import useRouter from 'sentry/utils/useRouter';
-import {makeAlertsPathname} from 'sentry/views/alerts/pathnames';
-import type {AlertType, AlertWizardAlertNames} from 'sentry/views/alerts/wizard/options';
+import type {EventView} from 'sentry/utils/discover/eventView';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useProjects} from 'sentry/utils/useProjects';
+import type {AlertType} from 'sentry/views/alerts/wizard/options';
 import {
   AlertWizardRuleTemplates,
   DEFAULT_WIZARD_TEMPLATE,
 } from 'sentry/views/alerts/wizard/options';
+import {makeMonitorCreatePathname} from 'sentry/views/detectors/pathnames';
+import {getMetricMonitorUrl} from 'sentry/views/insights/common/utils/getMetricMonitorUrl';
 
 type CreateAlertFromViewButtonProps = Omit<LinkButtonProps, 'aria-label' | 'to'> & {
   /**
@@ -37,11 +33,6 @@ type CreateAlertFromViewButtonProps = Omit<LinkButtonProps, 'aria-label' | 'to'>
   projects: Project[];
   alertType?: AlertType;
   className?: string;
-  /**
-   * Passed in value to override any metrics decision and switch back to transactions dataset.
-   * We currently do a few checks on metrics data on performance pages and this passes the decision onward to alerts.
-   */
-  disableMetricDataset?: boolean;
 
   /**
    * Called when the user is redirected to the alert builder
@@ -61,7 +52,6 @@ export function CreateAlertFromViewButton({
   referrer,
   onClick,
   alertType,
-  disableMetricDataset,
   ...buttonProps
 }: CreateAlertFromViewButtonProps) {
   const project = projects.find(p => p.id === `${eventView.project[0]}`);
@@ -78,21 +68,16 @@ export function CreateAlertFromViewButton({
       AlertWizardRuleTemplates[alertType]
     : DEFAULT_WIZARD_TEMPLATE;
 
-  const to = {
-    pathname: makeAlertsPathname({
-      path: '/new/metric/',
-      organization,
-    }),
-    query: {
-      ...queryParams,
-      createFromDiscover: true,
-      disableMetricDataset,
-      referrer,
-      ...alertTemplate,
-      project: project?.slug,
-      aggregate: queryParams.yAxis ?? alertTemplate.aggregate,
-    },
-  };
+  const to = getMetricMonitorUrl({
+    project,
+    environment: queryParams.environment,
+    aggregate: queryParams.yAxis ?? alertTemplate.aggregate,
+    dataset: alertTemplate.dataset,
+    organization,
+    query: decodeScalar(queryParams.query),
+    referrer,
+    eventTypes: alertTemplate.eventTypes,
+  });
 
   const handleClick = () => {
     onClick?.();
@@ -103,7 +88,7 @@ export function CreateAlertFromViewButton({
       organization={organization}
       onClick={handleClick}
       to={to}
-      aria-label={t('Create Alert')}
+      aria-label={t('Create Monitor')}
       {...buttonProps}
     />
   );
@@ -111,76 +96,33 @@ export function CreateAlertFromViewButton({
 
 type CreateAlertButtonProps = {
   organization: Organization;
-  alertOption?: keyof typeof AlertWizardAlertNames;
-  hideIcon?: boolean;
-  iconProps?: SVGIconProps;
-  /**
-   * Callback when the button is clicked.
-   * This is different from `onClick` which always overrides the default
-   * behavior when the button was clicked.
-   */
-  onEnter?: () => void;
   projectSlug?: string;
-  referrer?: string;
-  showPermissionGuide?: boolean;
   to?: string | LocationDescriptor;
 } & Omit<LinkButtonProps, 'to'>;
 
-export default function CreateAlertButton({
+export function CreateAlertButton({
   organization,
   projectSlug,
-  iconProps,
-  referrer,
-  hideIcon,
-  showPermissionGuide,
-  alertOption,
-  onEnter,
   to,
   ...buttonProps
 }: CreateAlertButtonProps) {
-  const router = useRouter();
-  const api = useApi();
+  const navigate = useNavigate();
+  const location = useLocation();
   const {projects} = useProjects();
   const createAlertUrl = (providedProj: string): string => {
     const params = new URLSearchParams();
-    if (referrer) {
-      params.append('referrer', referrer);
-    }
     if (providedProj !== ':projectId') {
       params.append('project', providedProj);
     }
-    if (alertOption) {
-      params.append('alert_option', alertOption);
-    }
-    return (
-      makeAlertsPathname({
-        path: '/wizard/',
-        organization,
-      }) + `?${params.toString()}`
-    );
+    const queryString = params.toString();
+    const basePath = makeMonitorCreatePathname(organization.slug);
+    return queryString ? `${basePath}?${queryString}` : basePath;
   };
 
   function handleClickWithoutProject(event: React.MouseEvent) {
     event.preventDefault();
-    onEnter?.();
 
-    navigateTo(createAlertUrl(':projectId'), router);
-  }
-
-  async function enableAlertsMemberWrite() {
-    const settingsEndpoint = `/organizations/${organization.slug}/`;
-    addLoadingMessage();
-    try {
-      await api.requestPromise(settingsEndpoint, {
-        method: 'PUT',
-        data: {
-          alertsMemberWrite: true,
-        },
-      });
-      addSuccessMessage(t('Successfully updated organization settings'));
-    } catch (err) {
-      addErrorMessage(t('Unable to update organization settings'));
-    }
+    navigateTo(createAlertUrl(':projectId'), navigate, location);
   }
 
   const permissionTooltipText = tct(
@@ -188,41 +130,28 @@ export default function CreateAlertButton({
     {settingsLink: <Link to={`/settings/${organization.slug}/`} />}
   );
 
-  const renderButton = (hasAccess: boolean) => (
+  const canCreateAlert =
+    isDemoModeActive() ||
+    hasEveryAccess(['alerts:write'], {organization}) ||
+    projects.some(p => hasEveryAccess(['alerts:write'], {project: p}));
+
+  return (
     <LinkButton
-      disabled={!hasAccess}
-      title={hasAccess ? undefined : permissionTooltipText}
-      icon={!hideIcon && <IconSiren {...iconProps} />}
+      disabled={!canCreateAlert}
+      icon={<IconSiren />}
       to={to ?? (projectSlug ? createAlertUrl(projectSlug) : '')}
       tooltipProps={{
+        title: canCreateAlert ? undefined : permissionTooltipText,
         isHoverable: true,
         position: 'top',
         overlayStyle: {
           maxWidth: '270px',
         },
       }}
-      onClick={projectSlug ? onEnter : handleClickWithoutProject}
+      onClick={projectSlug ? undefined : handleClickWithoutProject}
       {...buttonProps}
     >
-      {buttonProps.children ?? t('Create Alert')}
+      {buttonProps.children ?? t('Create Monitor')}
     </LinkButton>
-  );
-
-  const showGuide = !organization.alertsMemberWrite && !!showPermissionGuide;
-  const canCreateAlert =
-    isDemoModeActive() ||
-    hasEveryAccess(['alerts:write'], {organization}) ||
-    projects.some(p => hasEveryAccess(['alerts:write'], {project: p}));
-  const hasOrgWrite = hasEveryAccess(['org:write'], {organization});
-
-  return showGuide ? (
-    <GuideAnchor
-      target={hasOrgWrite ? 'alerts_write_owner' : 'alerts_write_member'}
-      onFinish={hasOrgWrite ? enableAlertsMemberWrite : undefined}
-    >
-      {renderButton(canCreateAlert)}
-    </GuideAnchor>
-  ) : (
-    renderButton(canCreateAlert)
   );
 }

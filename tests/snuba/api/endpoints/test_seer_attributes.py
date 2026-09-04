@@ -1,10 +1,17 @@
 from uuid import uuid4
 
-from sentry.api.endpoints.seer_rpc import (
+from sentry.explore.models import (
+    TraceItemAttributeContext,
+    TraceItemAttributeTypes,
+    TraceItemTypes,
+)
+from sentry.seer.assisted_query.traces_tools import (
+    _get_built_in_fields,
     get_attribute_names,
-    get_attribute_values,
     get_attribute_values_with_substring,
 )
+from sentry.seer.endpoints.seer_rpc import get_attributes_and_values
+from sentry.seer.sentry_data_models import AttributeMeta
 from sentry.testutils.cases import BaseSpansTestCase
 from sentry.testutils.helpers.datetime import before_now
 from tests.snuba.api.endpoints.test_organization_trace_item_attributes import (
@@ -15,7 +22,7 @@ from tests.snuba.api.endpoints.test_organization_trace_item_attributes import (
 class OrganizationTraceItemAttributesEndpointSpansTest(
     OrganizationTraceItemAttributesEndpointTestBase, BaseSpansTestCase
 ):
-    def test_get_attribute_names(self):
+    def test_get_attribute_names(self) -> None:
         self.store_segment(
             self.project.id,
             uuid4().hex,
@@ -27,25 +34,208 @@ class OrganizationTraceItemAttributesEndpointSpansTest(
             transaction="foo",
             duration=100,
             exclusive_time=100,
-            is_eap=True,
         )
 
-        result = get_attribute_names(
-            org_id=self.organization.id,
-            project_ids=[self.project.id],
-            stats_period="7d",
-        )
-        result["fields"] = result["fields"].sort()
-        assert result == {
-            "fields": [
-                "span.description",
-                "transaction",
-                "project",
-                "span.duration",
-            ].sort(),
+        with self.feature(
+            [
+                "organizations:visibility-explore-view",
+            ]
+        ):
+            result = get_attribute_names(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+            )
+        assert result.dict() == {
+            "fields": {
+                "string": [
+                    "transaction",
+                    "span.description",
+                    "device.class",
+                    "span.module",
+                    "project",
+                ],
+                "number": ["span.duration"],
+            },
+            "built_in_fields": [
+                {"key": "id", "type": "string", "context": None},
+                {"key": "project", "type": "string", "context": None},
+                {"key": "span.description", "type": "string", "context": None},
+                {"key": "span.op", "type": "string", "context": None},
+                {"key": "timestamp", "type": "string", "context": None},
+                {"key": "transaction", "type": "string", "context": None},
+                {"key": "trace", "type": "string", "context": None},
+                {"key": "is_transaction", "type": "string", "context": None},
+                {"key": "sentry.normalized_description", "type": "string", "context": None},
+                {"key": "release", "type": "string", "context": None},
+                {"key": "project.id", "type": "string", "context": None},
+                {"key": "sdk.name", "type": "string", "context": None},
+                {"key": "sdk.version", "type": "string", "context": None},
+                {"key": "span.system", "type": "string", "context": None},
+                {"key": "span.category", "type": "string", "context": None},
+                {"key": "span.duration", "type": "number", "context": None},
+                {"key": "span.self_time", "type": "number", "context": None},
+            ],
+            "custom_fields": [],
         }
 
-    def test_get_attribute_values(self):
+    def test_get_attribute_names_with_context(self) -> None:
+        self.store_segment(
+            self.project.id,
+            uuid4().hex,
+            uuid4().hex,
+            span_id=uuid4().hex[:16],
+            organization_id=self.organization.id,
+            parent_span_id=None,
+            timestamp=before_now(days=0, minutes=10).replace(microsecond=0),
+            transaction="foo",
+            duration=100,
+            exclusive_time=100,
+        )
+
+        with self.feature(
+            [
+                "organizations:visibility-explore-view",
+                "organizations:data-browsing-attribute-context",
+            ]
+        ):
+            result = get_attribute_names(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+                include_context=True,
+            )
+
+        built_in_by_key = {field.key: field for field in result.built_in_fields}
+
+        # A deprecated built-in attribute surfaces its conventions context,
+        # including the replacement attribute.
+        transaction_context = built_in_by_key["transaction"].context
+        assert transaction_context is not None
+        assert transaction_context["isDeprecated"] is True
+        assert transaction_context["replacementAttribute"] == "sentry.segment.name"
+        assert transaction_context["brief"]
+
+        # Built-in fields that aren't returned by the public endpoint (e.g. no
+        # data for them) carry no context.
+        assert built_in_by_key["span.self_time"].context is None
+
+        # Convention-backed attributes that aren't hardcoded built-ins (e.g.
+        # device.class) are still surfaced in built_in_fields with their context.
+        assert "device.class" not in {f["key"] for f in _get_built_in_fields("spans")}
+        device_class_context = built_in_by_key["device.class"].context
+        assert device_class_context is not None
+        assert device_class_context["isConvention"] is True
+        assert device_class_context["brief"]
+
+        # Sentry-defined attributes that aren't conventions (e.g. span.description)
+        # carry context too, marked isConvention=False.
+        span_description_context = built_in_by_key["span.description"].context
+        assert span_description_context is not None
+        assert span_description_context["isConvention"] is False
+        assert span_description_context["brief"]
+
+        # Context is either None or populated, never an empty dict (the endpoint
+        # attaches an empty context to attributes without convention metadata).
+        for field in result.built_in_fields:
+            assert field.context is None or field.context != {}
+
+        # This org has authored no context, so there are no custom fields.
+        assert result.custom_fields == []
+
+    def test_get_attribute_names_with_custom_context(self) -> None:
+        self.store_segment(
+            self.project.id,
+            uuid4().hex,
+            uuid4().hex,
+            span_id=uuid4().hex[:16],
+            organization_id=self.organization.id,
+            parent_span_id=None,
+            timestamp=before_now(days=0, minutes=10).replace(microsecond=0),
+            transaction="foo",
+            duration=100,
+            exclusive_time=100,
+            tags={"my_custom_attr": "value", "undescribed_attr": "value"},
+        )
+        TraceItemAttributeContext.objects.create(
+            organization=self.organization,
+            project=None,
+            attribute_key="my_custom_attr",
+            item_type=TraceItemTypes.SPANS,
+            attribute_type=TraceItemAttributeTypes.STRING,
+            brief="Set by the checkout service",
+            additional_context="Only present on payment spans.",
+            examples=["visa", "amex"],
+        )
+
+        with self.feature(
+            [
+                "organizations:visibility-explore-view",
+                "organizations:data-browsing-attribute-context",
+            ]
+        ):
+            result = get_attribute_names(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+                include_context=True,
+            )
+
+        # A described custom attribute is surfaced separately from the
+        # Sentry-owned built_in_fields.
+        assert result.custom_fields == [
+            AttributeMeta(
+                key="my_custom_attr",
+                type="string",
+                context={
+                    "isCustom": True,
+                    "brief": "Set by the checkout service",
+                    "details": ["Only present on payment spans."],
+                    "examples": ["visa", "amex"],
+                },
+            )
+        ]
+        assert "my_custom_attr" not in {field.key for field in result.built_in_fields}
+        # Custom attributes are listed in `fields` whether described or not.
+        assert "my_custom_attr" in result.fields["string"]
+        assert "undescribed_attr" in result.fields["string"]
+
+    def test_get_attribute_names_custom_context_requires_feature(self) -> None:
+        self.store_segment(
+            self.project.id,
+            uuid4().hex,
+            uuid4().hex,
+            span_id=uuid4().hex[:16],
+            organization_id=self.organization.id,
+            parent_span_id=None,
+            timestamp=before_now(days=0, minutes=10).replace(microsecond=0),
+            transaction="foo",
+            duration=100,
+            exclusive_time=100,
+            tags={"my_custom_attr": "value"},
+        )
+        TraceItemAttributeContext.objects.create(
+            organization=self.organization,
+            project=None,
+            attribute_key="my_custom_attr",
+            item_type=TraceItemTypes.SPANS,
+            attribute_type=TraceItemAttributeTypes.STRING,
+            brief="Set by the checkout service",
+        )
+
+        # Custom context is gated, so without the flag there's nothing to surface.
+        with self.feature(["organizations:visibility-explore-view"]):
+            result = get_attribute_names(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+                include_context=True,
+            )
+
+        assert result.custom_fields == []
+        assert "my_custom_attr" in result.fields["string"]
+
+    def test_get_attribute_values_with_substring(self) -> None:
         for transaction in ["foo", "bar", "baz"]:
             self.store_segment(
                 self.project.id,
@@ -58,40 +248,35 @@ class OrganizationTraceItemAttributesEndpointSpansTest(
                 transaction=transaction,
                 duration=100,
                 exclusive_time=100,
-                is_eap=True,
             )
 
-        attribute_names = get_attribute_names(
-            org_id=self.organization.id,
-            project_ids=[self.project.id],
-            stats_period="7d",
-        )
-
-        result = get_attribute_values(
-            fields=attribute_names["fields"],
-            org_id=self.organization.id,
-            project_ids=[self.project.id],
-            stats_period="7d",
-        )
+        with self.feature(
+            [
+                "organizations:visibility-explore-view",
+            ]
+        ):
+            result = get_attribute_values_with_substring(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+                fields_with_substrings=[
+                    {
+                        "field": "transaction",
+                        "substring": "ba",
+                    },
+                    {
+                        "field": "transaction",
+                        "substring": "b",
+                    },
+                ],
+            )
 
         assert result == {
-            "values": {
-                "span.description": [
-                    "bar",
-                    "baz",
-                    "foo",
-                ],
-                "transaction": [
-                    "bar",
-                    "baz",
-                    "foo",
-                ],
-                "project": [],
-            }
+            "transaction": ["bar", "baz"],
         }
 
-    def test_get_attribute_values_with_substring(self):
-        for transaction in ["foo", "bar", "baz"]:
+    def test_get_attributes_and_values(self) -> None:
+        for tag_value in ["foo", "bar", "baz"]:
             self.store_segment(
                 self.project.id,
                 uuid4().hex,
@@ -100,30 +285,63 @@ class OrganizationTraceItemAttributesEndpointSpansTest(
                 organization_id=self.organization.id,
                 parent_span_id=None,
                 timestamp=before_now(days=0, minutes=10).replace(microsecond=0),
-                transaction=transaction,
+                tags={"test_tag": tag_value},
                 duration=100,
                 exclusive_time=100,
-                is_eap=True,
             )
 
+        self.store_segment(
+            self.project.id,
+            uuid4().hex,
+            uuid4().hex,
+            span_id=uuid4().hex[:16],
+            organization_id=self.organization.id,
+            parent_span_id=None,
+            timestamp=before_now(days=0, minutes=10).replace(microsecond=0),
+            tags={"another_tag": "another_value"},
+            duration=100,
+            exclusive_time=100,
+        )
+
+        with self.feature(
+            [
+                "organizations:visibility-explore-view",
+            ]
+        ):
+            result = get_attributes_and_values(
+                org_id=self.organization.id,
+                project_ids=[self.project.id],
+                stats_period="7d",
+                sampled=False,
+                attributes_ignored=[
+                    "sentry.segment_id",
+                    "sentry.event_id",
+                    "sentry.raw_description",
+                    "sentry.transaction",
+                ],
+            )
+
+        assert result.dict() == {
+            "attributes_and_values": {
+                "test_tag": [
+                    {"value": "foo", "count": 1.0},
+                    {"value": "baz", "count": 1.0},
+                    {"value": "bar", "count": 1.0},
+                ],
+                "another_tag": [
+                    {"value": "another_value", "count": 1.0},
+                ],
+            },
+        }
+
+    def test_get_attribute_values_with_substring_empty_field_list(self) -> None:
+        """Test handling of empty fields_with_substrings list"""
         result = get_attribute_values_with_substring(
             org_id=self.organization.id,
             project_ids=[self.project.id],
             stats_period="7d",
-            fields_with_substrings=[
-                {
-                    "field": "transaction",
-                    "substring": "ba",
-                },
-                {
-                    "field": "transaction",
-                    "substring": "b",
-                },
-            ],
+            fields_with_substrings=[],
         )
 
-        assert result == {
-            "values": {
-                "transaction": {"bar", "baz"},
-            }
-        }
+        expected: dict = {}
+        assert result == expected

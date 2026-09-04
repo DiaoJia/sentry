@@ -1,25 +1,33 @@
-import {Fragment, useContext, useEffect} from 'react';
+import {Fragment, useEffect} from 'react';
 import styled from '@emotion/styled';
+
+import {Link} from '@sentry/scraps/link';
 
 import {analyzeFramesForRootCause} from 'sentry/components/events/interfaces/analyzeFrames';
 import {StackTraceContent} from 'sentry/components/events/interfaces/crashContent/stackTrace';
-import NoStackTraceMessage from 'sentry/components/events/interfaces/noStackTraceMessage';
-import getThreadStacktrace from 'sentry/components/events/interfaces/threads/threadSelector/getThreadStacktrace';
-import {getThreadById, inferPlatform} from 'sentry/components/events/interfaces/utils';
-import GlobalSelectionLink from 'sentry/components/globalSelectionLink';
-import ShortId from 'sentry/components/group/inboxBadges/shortId';
+import {NoStackTraceMessage} from 'sentry/components/events/interfaces/noStackTraceMessage';
+import {getThreadStacktrace} from 'sentry/components/events/interfaces/threads/threadSelector/getThreadStacktrace';
+import {
+  getEventTimestampInSeconds,
+  getThreadById,
+  inferPlatform,
+} from 'sentry/components/events/interfaces/utils';
+import {ShortId} from 'sentry/components/group/inboxBadges/shortId';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
 import {StackView} from 'sentry/types/stacktrace';
-import {defined} from 'sentry/utils';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {QuickTraceContext} from 'sentry/utils/performance/quickTrace/quickTraceContext';
-import useProjects from 'sentry/utils/useProjects';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {defined} from 'sentry/utils/defined';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useProjects} from 'sentry/utils/useProjects';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
+import {useIssuesTraceTree} from 'sentry/views/performance/newTraceDetails/traceApi/useIssuesTraceTree';
+import {useTrace} from 'sentry/views/performance/newTraceDetails/traceApi/useTrace';
+import {useTraceStateAnalytics} from 'sentry/views/performance/newTraceDetails/useTraceStateAnalytics';
 
 enum AnrRootCauseAllowlist {
   PERFORMANCE_FILE_IO_MAIN_THREAD_GROUP_TYPE = 1008,
@@ -32,7 +40,24 @@ interface Props {
 }
 
 export function AnrRootCause({event, organization}: Props) {
-  const quickTrace = useContext(QuickTraceContext);
+  const traceSlug = event.contexts.trace?.trace_id ?? '';
+  const location = useLocation();
+
+  const trace = useTrace({
+    timestamp: getEventTimestampInSeconds(event),
+    traceSlug,
+    limit: 10000,
+  });
+  const tree = useIssuesTraceTree({trace, replay: null});
+  useTraceStateAnalytics({
+    trace,
+    organization,
+    traceTreeSource: 'issue_details_anr_root_cause',
+    tree,
+  });
+
+  const traceNode = tree.root.children[0];
+
   const {projects} = useProjects();
 
   const anrCulprit = analyzeFramesForRootCause(event);
@@ -49,34 +74,25 @@ export function AnrRootCause({event, organization}: Props) {
     });
   }, [anrCulprit, organization, event?.groupID]);
 
-  const noPerfIssueOnTrace =
-    !quickTrace ||
-    quickTrace.error ||
-    quickTrace.trace === null ||
-    quickTrace.trace.length === 0 ||
-    quickTrace.trace[0]?.performance_issues?.length === 0;
+  if (tree.type === 'loading' || tree.type === 'error') {
+    return null;
+  }
+
+  const occurrences = Array.from(traceNode?.occurrences ?? []);
+  const noPerfIssueOnTrace = occurrences.length === 0;
 
   if (noPerfIssueOnTrace && !anrCulprit) {
     return null;
   }
 
-  const potentialAnrRootCause = quickTrace?.trace?.[0]?.performance_issues?.filter(
-    issue =>
-      Object.values(AnrRootCauseAllowlist).includes(issue.type as AnrRootCauseAllowlist)
-  );
-
-  const helpText =
-    !potentialAnrRootCause || potentialAnrRootCause.length === 0
-      ? t(
-          'Suspect Root Cause identifies common patterns that may be contributing to this ANR'
-        )
-      : t(
-          'Suspect Root Cause identifies potential Performance Issues that may be contributing to this ANR.'
-        );
+  const potentialAnrRootCause = occurrences.filter(issue => {
+    const issueType = 'type' in issue ? issue.type : issue.issue_type;
+    return Object.values(AnrRootCauseAllowlist).includes(issueType);
+  });
 
   function renderAnrCulprit() {
     if (!defined(anrCulprit)) {
-      return undefined;
+      return;
     }
 
     if (typeof anrCulprit.culprit === 'string') {
@@ -114,33 +130,36 @@ export function AnrRootCause({event, organization}: Props) {
   }
 
   return (
-    <InterimSection
+    <FoldSection
+      sectionKey={SectionKey.SUSPECT_ROOT_CAUSE}
       title={t('Suspect Root Cause')}
-      type={SectionKey.SUSPECT_ROOT_CAUSE}
-      help={helpText}
     >
-      {potentialAnrRootCause?.map(issue => {
-        const project = projects.find(p => p.id === issue.project_id.toString());
+      {potentialAnrRootCause?.map(occurence => {
+        const project = projects.find(p => p.id === occurence.project_id.toString());
+        const isEAPOccurence = 'description' in occurence;
+        const title = isEAPOccurence ? occurence.description : occurence.title;
+        const shortId = isEAPOccurence ? occurence.short_id : occurence.issue_short_id;
         return (
-          <IssueSummary key={issue.issue_id}>
+          <IssueSummary key={occurence.issue_id}>
             <Title>
               <TitleWithLink
                 to={{
-                  pathname: `/organizations/${organization.id}/issues/${issue.issue_id}/${
-                    issue.event_id ? `events/${issue.event_id}/` : ''
+                  pathname: `/organizations/${organization.id}/issues/${occurence.issue_id}/${
+                    occurence.event_id ? `events/${occurence.event_id}/` : ''
                   }`,
+                  query: extractSelectionParameters(location.query),
                 }}
               >
-                {issue.title}
+                {title}
                 <Fragment>
                   <Spacer />
-                  <Subtitle title={issue.culprit}>{issue.culprit}</Subtitle>
+                  <Subtitle title={occurence.culprit}>{occurence.culprit}</Subtitle>
                 </Fragment>
               </TitleWithLink>
             </Title>
-            {issue.issue_short_id && (
+            {shortId && (
               <ShortId
-                shortId={issue.issue_short_id}
+                shortId={shortId}
                 avatar={
                   project && <ProjectBadge project={project} hideName avatarSize={12} />
                 }
@@ -149,13 +168,13 @@ export function AnrRootCause({event, organization}: Props) {
           </IssueSummary>
         );
       })}
-      {organization.features.includes('anr-analyze-frames') && renderAnrCulprit()}
-    </InterimSection>
+      {renderAnrCulprit()}
+    </FoldSection>
   );
 }
 
 const IssueSummary = styled('div')`
-  padding-bottom: ${space(2)};
+  padding-bottom: ${p => p.theme.space.xl};
 `;
 
 /**
@@ -168,21 +187,21 @@ function Spacer() {
 }
 
 const Subtitle = styled('div')`
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
-  font-weight: ${p => p.theme.fontWeightNormal};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
-const TitleWithLink = styled(GlobalSelectionLink)`
+const TitleWithLink = styled(Link)`
   display: flex;
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
 const Title = styled('div')`
   line-height: 1;
-  margin-bottom: ${space(0.5)};
+  margin-bottom: ${p => p.theme.space.xs};
 `;
 
 const StackTraceWrapper = styled('div')`
-  margin-top: ${space(2)};
+  margin-top: ${p => p.theme.space.xl};
 `;

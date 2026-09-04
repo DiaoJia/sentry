@@ -1,26 +1,23 @@
 import {
   EventType,
-  type eventWithTime as TEventWithTime,
   IncrementalSource,
   MouseInteractions,
+  type eventWithTime as TEventWithTime,
 } from '@sentry-internal/rrweb';
-
-import type {Event} from 'sentry/types/event';
+import type {
+  ReplayBreadcrumbFrameEvent as TBreadcrumbFrameEvent,
+  ReplayOptionFrameEvent as TOptionFrameEvent,
+  ReplayBreadcrumbFrame as TRawBreadcrumbFrame,
+  ReplaySpanFrame as TRawSpanFrame,
+  ReplaySpanFrameEvent as TSpanFrameEvent,
+} from '@sentry/react';
+import invariant from 'invariant';
 
 export type {serializedNodeWithId} from '@sentry-internal/rrweb-snapshot';
 export type {fullSnapshotEvent, incrementalSnapshotEvent} from '@sentry-internal/rrweb';
 
 export {NodeType} from '@sentry-internal/rrweb-snapshot';
 export {EventType, IncrementalSource} from '@sentry-internal/rrweb';
-
-import type {
-  ReplayBreadcrumbFrame as TRawBreadcrumbFrame,
-  ReplayBreadcrumbFrameEvent as TBreadcrumbFrameEvent,
-  ReplayOptionFrameEvent as TOptionFrameEvent,
-  ReplaySpanFrame as TRawSpanFrame,
-  ReplaySpanFrameEvent as TSpanFrameEvent,
-} from '@sentry/react';
-import invariant from 'invariant';
 
 export type Dimensions = {
   height: number;
@@ -135,7 +132,6 @@ export type RawBreadcrumbFrame = TRawBreadcrumbFrame | ExtraBreadcrumbTypes;
 export type BreadcrumbFrameEvent = TBreadcrumbFrameEvent;
 export type RecordingFrame = TEventWithTime;
 export type OptionFrame = TOptionFrameEvent['data']['payload'];
-export type OptionFrameEvent = TOptionFrameEvent;
 export type RawSpanFrame =
   | Exclude<TRawSpanFrame, {op: ReplayWebVitalFrameOps}>
   | CompatibleReplayWebVitalFrame;
@@ -216,8 +212,13 @@ export function isFeedbackFrame(frame: ReplayFrame | undefined): frame is Feedba
   return Boolean(frame && 'category' in frame && frame.category === 'feedback');
 }
 
-export function isHydrateCrumb(item: BreadcrumbFrame | Event): item is BreadcrumbFrame {
-  return 'category' in item && item.category === 'replay.hydrate-error';
+export function isHydrateCrumb(item: unknown): item is BreadcrumbFrame {
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    'category' in item &&
+    item.category === 'replay.hydrate-error'
+  );
 }
 
 export function isSpanFrame(frame: ReplayFrame | undefined): frame is SpanFrame {
@@ -250,8 +251,8 @@ export function isConsoleFrame(frame: BreadcrumbFrame): frame is ConsoleFrame {
   return false;
 }
 
-export function isWebVitalFrame(frame: SpanFrame): frame is WebVitalFrame {
-  return frame.op === 'web-vital';
+export function isWebVitalFrame(frame: ReplayFrame): frame is WebVitalFrame {
+  return isSpanFrame(frame) && frame.op === 'web-vital';
 }
 
 export function isCLSFrame(frame: WebVitalFrame): frame is WebVitalFrame {
@@ -262,9 +263,19 @@ export function isPaintFrame(frame: SpanFrame): frame is PaintFrame {
   return frame.op === 'paint';
 }
 
-export function isDeadClick(frame: SlowClickFrame) {
+export function isSlowClickFrame(frame: BreadcrumbFrame): frame is SlowClickFrame {
   return (
-    ['a', 'button', 'input'].includes(frame.data.node?.tagName.toLowerCase() ?? '') &&
+    frame.category === 'ui.slowClickDetected' &&
+    typeof frame.data === 'object' &&
+    frame.data !== null
+  );
+}
+
+export function isDeadClick(frame: SlowClickFrame) {
+  const node: ClickFrameNode | undefined = frame.data.node;
+
+  return (
+    ['a', 'button', 'input'].includes(node?.tagName?.toLowerCase() ?? '') &&
     frame.data.endReason === 'timeout'
   );
 }
@@ -361,6 +372,8 @@ export type FeedbackFrame = {
   type: string;
 };
 
+export type ClickFrameNode = Partial<NonNullable<SlowClickFrame['data']['node']>>;
+
 export type ClickFrame = HydratedBreadcrumb<'ui.click'>;
 export type TapFrame = HydratedBreadcrumb<'ui.tap'>;
 export type SwipeFrame = HydratedBreadcrumb<'ui.swipe'>;
@@ -434,6 +447,14 @@ export type ResourceFrame = HydratedSpan<
   | 'resource.script'
 >;
 
+// OurLogs converted from log to frame for use with jump buttons etc.
+export type OurLogsPseudoFrame = {
+  category: 'ourlogs';
+  offsetMs: number;
+  timestampMs: number;
+  data?: undefined;
+};
+
 /**
  * This is a result of a custom discover query
  */
@@ -442,8 +463,11 @@ export type RawReplayError = {
   id: string;
   issue: string;
   ['issue.id']: number;
+  level: string;
   ['project.name']: string;
-  timestamp: string;
+  // Discover returns ms-precision timestamps in "YYYY-MM-DD HH:MM:SS.sss"
+  // format (no "T", no timezone).
+  timestamp_ms: string;
   title: string;
 };
 
@@ -457,13 +481,14 @@ export type ErrorFrame = Overwrite<
       groupShortId: string;
       label: string;
       labels: string[];
+      level: string;
       projectSlug: string;
     };
     message: string;
   }
 >;
 
-export type ReplayFrame = BreadcrumbFrame | ErrorFrame | SpanFrame;
+export type ReplayFrame = BreadcrumbFrame | ErrorFrame | SpanFrame | OurLogsPseudoFrame;
 
 interface VideoFrame {
   container: string;

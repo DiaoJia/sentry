@@ -3,13 +3,12 @@ import {IssueType} from 'sentry/types/group';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const httpClientConfig: IssueCategoryConfigMapping = {
+export const httpClientConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
       delete: {
-        enabled: false,
-        disabledReason: t('Not yet supported for performance issues'),
+        enabled: true,
       },
       deleteAndDiscard: {
         enabled: false,
@@ -90,7 +89,7 @@ const httpClientConfig: IssueCategoryConfigMapping = {
   [IssueType.PERFORMANCE_LARGE_HTTP_PAYLOAD]: {
     resources: {
       description: t(
-        'A Large HTTP Payload issue occurs when an http payload size consistently exceeds a threshold of 300KB'
+        'A Large HTTP Payload issue occurs when an http payload size consistently exceeds a threshold of 300kB'
       ),
       links: [
         {
@@ -102,5 +101,3 @@ const httpClientConfig: IssueCategoryConfigMapping = {
     },
   },
 };
-
-export default httpClientConfig;

@@ -1,8 +1,9 @@
 from copy import deepcopy
 from time import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import responses
+from django.test import override_settings
 from responses import matchers
 
 from fixtures.vsts import (
@@ -23,10 +24,11 @@ from sentry.testutils.cases import APITestCase
 from sentry.testutils.silo import assume_test_silo_mode
 from sentry.users.models.identity import Identity
 from sentry.utils.http import absolute_uri
+from sentry.viewer_context import ActorType, get_viewer_context
 
 
 class VstsWebhookWorkItemTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.access_token = "1234567890"
         self.account_id = "80ded3e8-3cd3-43b1-9f96-52032624aa3a"
         self.instance = "https://instance.visualstudio.com/"
@@ -49,7 +51,7 @@ class VstsWebhookWorkItemTest(APITestCase):
                 data={
                     "access_token": self.access_token,
                     "refresh_token": "qwertyuiop",
-                    "expires": int(time()) + int(1234567890),
+                    "expires": int(time()) + 1234567890,
                 },
             )
             self.org_integration = self.model.add_organization(
@@ -68,7 +70,7 @@ class VstsWebhookWorkItemTest(APITestCase):
 
         self.user_to_assign = self.create_user("sentryuseremail@email.com")
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         responses.reset()
 
     def create_linked_group(self, external_issue, project, status):
@@ -96,7 +98,7 @@ class VstsWebhookWorkItemTest(APITestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_workitem_change_assignee(self, mock_record):
+    def test_workitem_change_assignee(self, mock_record: MagicMock) -> None:
         work_item_id = 31
 
         external_issue = ExternalIssue.objects.create(
@@ -123,7 +125,9 @@ class VstsWebhookWorkItemTest(APITestCase):
 
     @patch("sentry.integrations.vsts.webhooks.handle_updated_workitem")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_workitem_change_assignee_error_metric(self, mock_record, mock_handle):
+    def test_workitem_change_assignee_error_metric(
+        self, mock_record: MagicMock, mock_handle: MagicMock
+    ) -> None:
         error = Exception("oops")
         mock_handle.side_effect = error
 
@@ -138,7 +142,7 @@ class VstsWebhookWorkItemTest(APITestCase):
         assert_failure_metric(mock_record, error)
 
     @responses.activate
-    def test_workitem_unassign(self):
+    def test_workitem_unassign(self) -> None:
         work_item_id = 33
         external_issue = ExternalIssue.objects.create(
             organization_id=self.organization.id, integration_id=self.model.id, key=work_item_id
@@ -162,10 +166,9 @@ class VstsWebhookWorkItemTest(APITestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_inbound_status_sync_resolve(self, mock_record):
-
+    def test_inbound_status_sync_resolve(self, mock_record: MagicMock) -> None:
         header_validation = []
-        if SiloMode.get_current_mode() != SiloMode.REGION:
+        if SiloMode.get_current_mode() != SiloMode.CELL:
             header_validation = [
                 matchers.header_matcher(
                     {
@@ -214,7 +217,9 @@ class VstsWebhookWorkItemTest(APITestCase):
 
     @patch("sentry.integrations.vsts.webhooks.handle_updated_workitem")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_inbound_status_sync_error_metric(self, mock_record, mock_handle):
+    def test_inbound_status_sync_error_metric(
+        self, mock_record: MagicMock, mock_handle: MagicMock
+    ) -> None:
         error = Exception("oops")
         mock_handle.side_effect = error
 
@@ -232,7 +237,7 @@ class VstsWebhookWorkItemTest(APITestCase):
         assert_failure_metric(mock_record, error)  # multiple success metrics being recorded
 
     @responses.activate
-    def test_inbound_status_sync_unresolve(self):
+    def test_inbound_status_sync_unresolve(self) -> None:
         responses.add(
             responses.GET,
             "https://instance.visualstudio.com/c0bf429a-c03c-4a99-9336-d45be74db5a6/_apis/wit/workitemtypes/Bug/states",
@@ -265,7 +270,43 @@ class VstsWebhookWorkItemTest(APITestCase):
         assert len(Activity.objects.filter(group_id__in=group_ids)) == num_groups
 
     @responses.activate
-    def test_inbound_status_sync_new_workitem(self):
+    def test_stale_workitem_replay_does_not_unresolve(self) -> None:
+        # VSTS unresolves on almost any `workitem.updated`, so a replay would reopen an
+        # issue resolved since the event was generated.
+        responses.add(
+            responses.GET,
+            "https://instance.visualstudio.com/c0bf429a-c03c-4a99-9336-d45be74db5a6/_apis/wit/workitemtypes/Bug/states",
+            json=WORK_ITEM_STATES,
+        )
+        group = self.create_group(project=self.project, status=GroupStatus.UNRESOLVED)
+        self.create_integration_external_issue(group=group, integration=self.model, key=33)
+
+        work_item = self.set_workitem_state("New", "Active")
+
+        with self.feature("organizations:integrations-issue-sync"), self.tasks():
+            resp = self.client.post(
+                absolute_uri("/extensions/vsts/issue-updated/"),
+                data=work_item,
+                HTTP_SHARED_SECRET=self.shared_secret,
+            )
+        assert resp.status_code == 200
+
+        # A human resolves the Sentry issue after that event was processed.
+        group.update(status=GroupStatus.RESOLVED, substatus=None)
+
+        # The same delivery is replayed off the webhook backlog.
+        with self.feature("organizations:integrations-issue-sync"), self.tasks():
+            resp = self.client.post(
+                absolute_uri("/extensions/vsts/issue-updated/"),
+                data=work_item,
+                HTTP_SHARED_SECRET=self.shared_secret,
+            )
+        assert resp.status_code == 200
+
+        assert Group.objects.get(id=group.id).status == GroupStatus.RESOLVED
+
+    @responses.activate
+    def test_inbound_status_sync_new_workitem(self) -> None:
         responses.add(
             responses.GET,
             "https://instance.visualstudio.com/c0bf429a-c03c-4a99-9336-d45be74db5a6/_apis/wit/workitemtypes/Bug/states",
@@ -292,3 +333,49 @@ class VstsWebhookWorkItemTest(APITestCase):
             assert Group.objects.get(id=group.id).status == GroupStatus.UNRESOLVED
             # no change happened. no activity should be created here
             assert len(Activity.objects.filter(group_id=group.id)) == 0
+
+    @responses.activate
+    @override_settings(SENTRY_VIEWER_CONTEXT_ENABLED=True)
+    def test_status_change_sets_viewer_context(self) -> None:
+        """ViewerContext is set with correct org_id and actor_type during status sync."""
+        captured_contexts: list = []
+
+        original_sync = VstsIntegration.sync_status_inbound
+
+        def capturing_sync(self_integration, *args, **kwargs):
+            captured_contexts.append(get_viewer_context())
+            return original_sync(self_integration, *args, **kwargs)
+
+        work_item_id = 33
+        ExternalIssue.objects.create(
+            organization_id=self.organization.id,
+            integration_id=self.model.id,
+            key=work_item_id,
+        )
+
+        responses.add(
+            responses.GET,
+            "https://instance.visualstudio.com/c0bf429a-c03c-4a99-9336-d45be74db5a6/_apis/wit/workitemtypes/Bug/states",
+            json=WORK_ITEM_STATES,
+        )
+
+        work_item = self.set_workitem_state("Active", "Resolved")
+
+        with (
+            patch.object(VstsIntegration, "sync_status_inbound", capturing_sync),
+            self.feature("organizations:integrations-issue-sync"),
+            self.tasks(),
+        ):
+            resp = self.client.post(
+                absolute_uri("/extensions/vsts/issue-updated/"),
+                data=work_item,
+                HTTP_SHARED_SECRET=self.shared_secret,
+            )
+
+        assert resp.status_code == 200
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.organization_id == self.organization.id
+        assert ctx.actor_type == ActorType.INTEGRATION
+        assert ctx.user_id is None

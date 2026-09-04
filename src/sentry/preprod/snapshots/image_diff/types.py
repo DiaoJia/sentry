@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from typing import NamedTuple
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ImageSize(NamedTuple):
+    width: int
+    height: int
+
+    @property
+    def pixel_count(self) -> int:
+        return self.width * self.height
+
+
+class DiffResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    diff_mask_png: bytes
+    changed_pixels: int
+    total_pixels: int
+    aligned_height: int
+    before_width: int
+    before_height: int
+    after_width: int
+    after_height: int
+
+
+class OdiffResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    requestId: int
+    match: bool = False
+    reason: str | None = None
+    diffCount: int | None = None
+    diffPercentage: float | None = None
+    error: str | None = None

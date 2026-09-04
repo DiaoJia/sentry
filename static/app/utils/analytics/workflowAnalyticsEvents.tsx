@@ -1,4 +1,5 @@
 import type {GroupStatus} from 'sentry/types/group';
+import type {ProjectCreationVariant} from 'sentry/utils/analytics/projectCreationAnalyticsEvents';
 import type {CommonGroupAnalyticsData} from 'sentry/utils/events';
 import type {Tab} from 'sentry/views/issueDetails/types';
 
@@ -65,28 +66,9 @@ type BaseTour = {
 type ReleasesTour = BaseTour & {project_id: string};
 
 export type TeamInsightsEventParameters = {
-  'alert_builder.filter': {query: string; session_id?: string};
-  'alert_builder.noisy_warning_agreed': Record<string, unknown>;
-  'alert_builder.noisy_warning_viewed': Record<string, unknown>;
   'alert_details.viewed': {alert_id: number};
-  'alert_rule_details.viewed': {alert: string; has_chartcuterie: string; rule_id: number};
-  'alert_rules.viewed': {sort: string};
   'alert_stream.viewed': Record<string, unknown>;
-  'alert_wizard.option_selected': {alert_type: string};
-  'edit_alert_rule.add_row': {
-    name: string;
-    project_id: string;
-    type: string;
-  };
-  'edit_alert_rule.delete_row': {
-    name: string;
-    project_id: string;
-    type: string;
-  };
-  'edit_alert_rule.incompatible_rule': Record<string, unknown>;
-  'edit_alert_rule.notification_test': {success: boolean};
   'edit_alert_rule.viewed': RuleViewed;
-  'issue_alert_rule_details.edit_clicked': {rule_id: number};
   'issue_details.action_clicked': IssueDetailsWithAlert & {
     action_type:
       | 'deleted'
@@ -107,9 +89,7 @@ export type TeamInsightsEventParameters = {
   'issue_details.attachment_tab.screenshot_modal_deleted': Record<string, unknown>;
   'issue_details.attachment_tab.screenshot_modal_download': Record<string, unknown>;
   'issue_details.attachment_tab.screenshot_modal_opened': Record<string, unknown>;
-  'issue_details.attachment_tab.screenshot_title_clicked': Record<string, unknown>;
   'issue_details.event_json_clicked': {group_id: number; streamline: boolean};
-  'issue_details.event_navigation_clicked': {button: string; project_id: number};
   'issue_details.issue_tab.screenshot_dropdown_deleted': Record<string, unknown>;
   'issue_details.issue_tab.screenshot_dropdown_download': Record<string, unknown>;
   'issue_details.issue_tab.screenshot_modal_deleted': Record<string, unknown>;
@@ -134,6 +114,17 @@ export type TeamInsightsEventParameters = {
     group_id: string | undefined;
     resource: string;
   };
+  'issue_details.seer_opened': {
+    autofix_exists: boolean;
+    autofix_step_type: string | null;
+    group_id: string;
+    has_coded_solution: boolean;
+    has_pr: boolean;
+    has_root_cause: boolean;
+    has_solution: boolean;
+    has_streamlined_ui: boolean;
+    has_summary: boolean;
+  };
   'issue_details.suspect_commits.commit_clicked': IssueDetailsWithAlert & {
     has_pull_request: boolean;
     suspect_commit_calculation: string;
@@ -147,12 +138,22 @@ export type TeamInsightsEventParameters = {
   'issue_details.tab_changed': IssueDetailsWithAlert & {
     tab: Tab;
   };
+  'issue_inbox.resolve_clicked': IssueDetailsWithAlert & {
+    action_type: GroupStatus;
+    org_streamline_only: boolean | undefined;
+    action_status_details?: string;
+    action_substatus?: string;
+  };
   'issue_stream.updated_empty_state_viewed': {platform: string};
   'project_creation_page.created': {
     issue_alert: 'Default' | 'Custom' | 'No Rule';
+    notification_rule_created: boolean;
     platform: string;
     project_id: string;
-    rule_ids: string[];
+    workflow_ids: string[];
+    // 'legacy' from CreateProject, 'scm' from the SCM wizard. Both variants
+    // populate the same payload; only this discriminator differs.
+    variant?: ProjectCreationVariant;
   };
   'project_detail.change_chart': {chart_index: number; metric: string};
   'project_detail.open_anr_issues': Record<string, unknown>;
@@ -165,6 +166,19 @@ export type TeamInsightsEventParameters = {
   'release_detail.pagination': {direction: string};
   'releases_list.click_add_release_health': {
     project_id: number;
+  };
+  'supergroup.drawer_opened': {
+    supergroup_id: number;
+  };
+  'supergroup.feedback_submitted': {
+    choice_selected: boolean;
+    supergroup_id: number;
+    user_id: string;
+  };
+  'suspect_commit.feedback_submitted': {
+    choice_selected: boolean;
+    group_owner_id: number;
+    user_id: string;
   };
   trace_timeline_clicked: {
     area: string;
@@ -180,23 +194,11 @@ export type TeamInsightsEventParameters = {
 type TeamInsightsEventKey = keyof TeamInsightsEventParameters;
 
 export const workflowEventMap: Record<TeamInsightsEventKey, string | null> = {
-  'alert_builder.filter': 'Alert Builder: Filter',
-  'alert_builder.noisy_warning_viewed': 'Alert Builder: Noisy Warning Viewed',
-  'alert_builder.noisy_warning_agreed': 'Alert Builder: Noisy Warning Agreed',
   'alert_details.viewed': 'Alert Details: Viewed',
-  'alert_rule_details.viewed': 'Alert Rule Details: Viewed',
-  'alert_rules.viewed': 'Alert Rules: Viewed',
   'alert_stream.viewed': 'Alert Stream: Viewed',
-  'alert_wizard.option_selected': 'Alert Wizard: Option Selected',
-  'edit_alert_rule.add_row': 'Edit Alert Rule: Add Row',
-  'edit_alert_rule.delete_row': 'Edit Alert Rule: Delete Row',
   'edit_alert_rule.viewed': 'Edit Alert Rule: Viewed',
-  'edit_alert_rule.incompatible_rule': 'Edit Alert Rule: Incompatible Rule',
-  'edit_alert_rule.notification_test': 'Edit Alert Rule: Notification Test',
-  'issue_alert_rule_details.edit_clicked': 'Issue Alert Rule Details: Edit Clicked',
   'issue_details.action_clicked': 'Issue Details: Action Clicked',
-  'issue_details.attachment_tab.screenshot_title_clicked':
-    'Attachment Tab: Screenshot title clicked',
+  'issue_inbox.resolve_clicked': 'Issue Inbox: Resolve Action Clicked',
   'issue_details.attachment_tab.screenshot_modal_deleted':
     'Attachment Tab: Screenshot deleted from modal',
   'issue_details.attachment_tab.screenshot_modal_download':
@@ -204,7 +206,6 @@ export const workflowEventMap: Record<TeamInsightsEventKey, string | null> = {
   'issue_details.attachment_tab.screenshot_modal_opened':
     'Attachment Tab: Screenshot modal opened',
   'issue_details.event_json_clicked': 'Issue Details: Event JSON Clicked',
-  'issue_details.event_navigation_clicked': 'Issue Details: Event Navigation Clicked',
   'issue_details.issue_tab.screenshot_dropdown_deleted':
     'Issue Details: Screenshot deleted from dropdown',
   'issue_details.issue_tab.screenshot_dropdown_download':
@@ -220,6 +221,7 @@ export const workflowEventMap: Record<TeamInsightsEventKey, string | null> = {
   'issue_details.issue_tab.trace_timeline_more_events_clicked':
     'Issue Details: Trace Timeline More Events Clicked',
   'issue_details.resources_link_clicked': 'Issue Details: Resources Link Clicked',
+  'issue_details.seer_opened': 'Issue Details: Seer Opened',
   'issue_details.suspect_commits.commit_clicked': 'Issue Details: Suspect Commit Clicked',
   'issue_details.suspect_commits.pull_request_clicked':
     'Issue Details: Suspect Pull Request Clicked',
@@ -241,4 +243,7 @@ export const workflowEventMap: Record<TeamInsightsEventKey, string | null> = {
   'releases_list.click_add_release_health': 'Releases List: Click Add Release Health',
   trace_timeline_clicked: 'Trace Timeline Clicked',
   trace_timeline_more_events_clicked: 'Trace Timeline More Events Clicked',
+  'supergroup.drawer_opened': 'Supergroup Drawer Opened',
+  'supergroup.feedback_submitted': 'Supergroup Feedback Submitted',
+  'suspect_commit.feedback_submitted': 'Suspect Commit Feedback Submitted',
 };

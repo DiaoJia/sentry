@@ -2,7 +2,7 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import {
   getMissingInstrumentationContextData,
   type MissingInstrumentationContext,
@@ -17,7 +17,7 @@ const MOCK_MISSING_INSTRUMENTATION_CONTEXT: MissingInstrumentationContext = {
 };
 
 const MOCK_REDACTION = {
-  ['package']: {
+  package: {
     '': {
       chunks: [
         {
@@ -33,8 +33,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('MissingInstrumentationContext', function () {
-  it('returns formatted data correctly', function () {
+describe('MissingInstrumentationContext', () => {
+  it('returns formatted data correctly', () => {
     expect(
       getMissingInstrumentationContextData({data: MOCK_MISSING_INSTRUMENTATION_CONTEXT})
     ).toEqual([
@@ -63,7 +63,7 @@ describe('MissingInstrumentationContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {missing_instrumentation: MOCK_REDACTION}},
     });
@@ -71,8 +71,8 @@ describe('MissingInstrumentationContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'missing_instrumentation'}
-        alias={'missing_instrumentation'}
+        type="missing_instrumentation"
+        alias="missing_instrumentation"
         value={{...MOCK_MISSING_INSTRUMENTATION_CONTEXT, package: ''}}
       />
     );

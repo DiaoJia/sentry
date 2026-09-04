@@ -9,8 +9,7 @@ import pytest
 from django.urls import reverse
 from rest_framework.exceptions import ErrorDetail
 
-from sentry.sentry_metrics.aggregation_option_registry import AggregationOption
-from sentry.testutils.cases import APITestCase, MetricsEnhancedPerformanceTestCase, SnubaTestCase
+from sentry.testutils.cases import APITestCase, SnubaTestCase
 from sentry.testutils.helpers.datetime import before_now
 from sentry.utils.samples import load_data
 from sentry.utils.snuba import get_array_column_alias
@@ -25,11 +24,11 @@ ARRAY_COLUMNS = ["measurements", "span_op_breakdowns"]
 
 
 class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.min_ago = before_now(minutes=1)
         self.data = load_data("transaction")
-        self.features = {}
+        self.features: dict[str, bool] = {}
 
     def populate_events(self, specs):
         start = before_now(minutes=5)
@@ -77,14 +76,14 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
         with self.feature(features):
             return self.client.get(url, query, format="json")
 
-    def test_no_projects(self):
+    def test_no_projects(self) -> None:
         response = self.do_request({})
 
         assert response.status_code == 200, response.content
         assert response.data == {}
 
     @pytest.mark.querybuilder
-    def test_good_params(self):
+    def test_good_params(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -97,7 +96,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             response = self.do_request(query)
             assert response.status_code == 200, f"failing for {array_column}"
 
-    def test_good_params_with_optionals(self):
+    def test_good_params_with_optionals(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -113,7 +112,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             response = self.do_request(query)
             assert response.status_code == 200, f"failing for {array_column}"
 
-    def test_bad_params_reverse_min_max(self):
+    def test_bad_params_reverse_min_max(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -129,7 +128,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             response = self.do_request(query)
             assert response.data == {"non_field_errors": ["min cannot be greater than max."]}
 
-    def test_bad_params_missing_fields(self):
+    def test_bad_params_missing_fields(self) -> None:
         query = {
             "project": [self.project.id],
             "numBuckets": 10,
@@ -141,7 +140,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             "field": [ErrorDetail(string="This field is required.", code="required")],
         }
 
-    def test_bad_params_too_many_fields(self):
+    def test_bad_params_too_many_fields(self) -> None:
         query = {
             "project": [self.project.id],
             "field": ["foo", "bar", "baz", "qux", "quux"],
@@ -157,7 +156,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             "field": ["Ensure this field has no more than 4 elements."],
         }
 
-    def test_bad_params_mixed_fields(self):
+    def test_bad_params_mixed_fields(self) -> None:
         for array_column in ARRAY_COLUMNS:
             for other_array_column in ARRAY_COLUMNS:
                 query = {
@@ -181,7 +180,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                     ],
                 }, f"failing for {array_column}"
 
-    def test_bad_params_missing_num_buckets(self):
+    def test_bad_params_missing_num_buckets(self) -> None:
         query = {
             "project": [self.project.id],
             "field": ["foo"],
@@ -192,7 +191,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             "numBuckets": ["This field is required."],
         }
 
-    def test_bad_params_invalid_num_buckets(self):
+    def test_bad_params_invalid_num_buckets(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -206,7 +205,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "numBuckets": ["A valid integer is required."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_invalid_negative_num_buckets(self):
+    def test_bad_params_invalid_negative_num_buckets(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -220,7 +219,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "numBuckets": ["Ensure this value is greater than or equal to 1."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_num_buckets_too_large(self):
+    def test_bad_params_num_buckets_too_large(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -234,7 +233,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "numBuckets": ["Ensure this value is less than or equal to 100."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_invalid_precision_too_small(self):
+    def test_bad_params_invalid_precision_too_small(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -250,7 +249,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "precision": ["Ensure this value is greater than or equal to 0."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_invalid_precision_too_big(self):
+    def test_bad_params_invalid_precision_too_big(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -266,7 +265,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "precision": ["Ensure this value is less than or equal to 4."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_invalid_min(self):
+    def test_bad_params_invalid_min(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -282,7 +281,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "min": ["A valid number is required."],
             }, f"failing for {array_column}"
 
-    def test_bad_params_invalid_max(self):
+    def test_bad_params_invalid_max(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -298,7 +297,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "max": ["A valid number is required."],
             }, f"failing for {array_column}"
 
-    def test_histogram_empty(self):
+    def test_histogram_empty(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -312,7 +311,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             expected = [(i, i + 1, [(f"{alias}.foo", 0), (f"{alias}.bar", 0)]) for i in range(5)]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_simple(self):
+    def test_histogram_simple(self) -> None:
         # range is [0, 5), so it is divided into 5 buckets of width 1
         specs = [
             (0, 1, [("foo", 1)]),
@@ -341,7 +340,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_simple_using_min_max(self):
+    def test_histogram_simple_using_min_max(self) -> None:
         # range is [0, 5), so it is divided into 5 buckets of width 1
         specs = [
             (0, 1, [("foo", 1)]),
@@ -372,7 +371,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_simple_using_given_min_above_queried_max(self):
+    def test_histogram_simple_using_given_min_above_queried_max(self) -> None:
         # All these events are out of range of the query parameters,
         # and should not appear in the results.
         specs = [
@@ -399,7 +398,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_simple_using_given_max_below_queried_min(self):
+    def test_histogram_simple_using_given_max_below_queried_min(self) -> None:
         # All these events are out of range of the query parameters,
         # and should not appear in the results.
         specs = [
@@ -426,7 +425,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_large_buckets(self):
+    def test_histogram_large_buckets(self) -> None:
         # make sure that it works for large width buckets
         # range is [0, 99], so it is divided into 5 buckets of width 20
         specs = [
@@ -454,7 +453,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_non_zero_offset(self):
+    def test_histogram_non_zero_offset(self) -> None:
         # range is [10, 15), so it is divided into 5 buckets of width 1
         specs = [
             (10, 11, [("foo", 1)]),
@@ -483,7 +482,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_extra_data(self):
+    def test_histogram_extra_data(self) -> None:
         # range is [11, 16), so it is divided into 5 buckets of width 1
         # make sure every bin has some value
         specs = [
@@ -518,7 +517,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_non_zero_min_large_buckets(self):
+    def test_histogram_non_zero_min_large_buckets(self) -> None:
         # range is [10, 59], so it is divided into 5 buckets of width 10
         specs = [
             (10, 10, [("foo", 1)]),
@@ -547,7 +546,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
     @pytest.mark.xfail(reason="snuba does not allow - in alias names")
-    def test_histogram_negative_values(self):
+    def test_histogram_negative_values(self) -> None:
         # range is [-9, -4), so it is divided into 5 buckets of width 1
         specs = [
             (-9, -8, [("foo", 3)]),
@@ -575,7 +574,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
     @pytest.mark.xfail(reason="snuba does not allow - in alias names")
-    def test_histogram_positive_and_negative_values(self):
+    def test_histogram_positive_and_negative_values(self) -> None:
         # range is [-50, 49], so it is divided into 5 buckets of width 10
         specs = [
             (-50, -50, [("foo", 1)]),
@@ -603,7 +602,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_increased_precision(self):
+    def test_histogram_increased_precision(self) -> None:
         # range is [1.00, 2.24], so it is divided into 5 buckets of width 0.25
         specs = [
             (1.00, 1.00, [("foo", 3)]),
@@ -631,7 +630,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_increased_precision_with_min_max(self):
+    def test_histogram_increased_precision_with_min_max(self) -> None:
         # range is [1.25, 2.24], so it is divided into 5 buckets of width 0.25
         specs = [
             (1.00, 1.25, [("foo", 3)]),
@@ -659,7 +658,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_increased_precision_large_buckets(self):
+    def test_histogram_increased_precision_large_buckets(self) -> None:
         # range is [10.0000, 59.9999] so it is divided into 5 buckets of width 10
         specs = [
             (10.0000, 10.0000, [("foo", 1)]),
@@ -688,7 +687,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_multiple_measures(self):
+    def test_histogram_multiple_measures(self) -> None:
         # range is [10, 59] so it is divided into 5 buckets of width 10
         specs = [
             (10, 10, [("bar", 0), ("baz", 0), ("foo", 1)]),
@@ -756,7 +755,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_max_value_on_edge(self):
+    def test_histogram_max_value_on_edge(self) -> None:
         # range is [11, 21] so it is divided into 5 buckets of width 5
         # because using buckets of width 2 will exclude 21, and the next
         # nice number is 5
@@ -807,7 +806,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_bins_exceed_max(self):
+    def test_histogram_bins_exceed_max(self) -> None:
         specs = [
             (10, 15, [("bar", 0), ("baz", 0), ("foo", 1)]),
             (30, 30, [("bar", 1), ("baz", 1), ("foo", 1)]),
@@ -857,7 +856,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_bad_params_invalid_data_filter(self):
+    def test_bad_params_invalid_data_filter(self) -> None:
         for array_column in ARRAY_COLUMNS:
             alias = get_array_column_alias(array_column)
             query = {
@@ -873,7 +872,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
                 "dataFilter": ['"invalid" is not a valid choice.'],
             }, f"failing for {array_column}"
 
-    def test_histogram_all_data_filter(self):
+    def test_histogram_all_data_filter(self) -> None:
         specs = [
             (0, 1, [("foo", 4)]),
             (4000, 5000, [("foo", 1)]),
@@ -900,7 +899,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_exclude_outliers_data_filter(self):
+    def test_histogram_exclude_outliers_data_filter(self) -> None:
         specs = [
             (0, 0, [("foo", 4)]),
             (4000, 4001, [("foo", 1)]),
@@ -923,7 +922,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_missing_measurement_data(self):
+    def test_histogram_missing_measurement_data(self) -> None:
         # make sure there is at least one transaction
         specs = [
             (0, 1, [("foo", 1)]),
@@ -951,7 +950,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_missing_measurement_data_with_explicit_bounds(self):
+    def test_histogram_missing_measurement_data_with_explicit_bounds(self) -> None:
         # make sure there is at least one transaction
         specs = [
             (0, 1, [("foo", 1)]),
@@ -980,7 +979,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_ignores_aggregate_conditions(self):
+    def test_histogram_ignores_aggregate_conditions(self) -> None:
         # range is [0, 5), so it is divided into 5 buckets of width 1
         specs = [
             (0, 1, [("foo", 1)]),
@@ -1011,7 +1010,7 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             ]
             assert response.data == self.as_response_data(expected), f"failing for {array_column}"
 
-    def test_histogram_outlier_filtering_with_no_rows(self):
+    def test_histogram_outlier_filtering_with_no_rows(self) -> None:
         query = {
             "project": [self.project.id],
             "field": ["transaction.duration"],
@@ -1025,143 +1024,3 @@ class OrganizationEventsHistogramEndpointTest(APITestCase, SnubaTestCase):
             (0, 1, [("transaction.duration", 0)]),
         ]
         assert response.data == self.as_response_data(expected)
-
-
-class OrganizationEventsMetricsEnhancedPerformanceHistogramEndpointTest(
-    MetricsEnhancedPerformanceTestCase
-):
-    def setUp(self):
-        super().setUp()
-        self.min_ago = before_now(minutes=1)
-        self.features = {}
-
-    def populate_events(self, specs):
-        start = before_now(minutes=5)
-        for spec in specs:
-            spec = HistogramSpec(*spec)
-            for suffix_key, count in spec.fields:
-                for i in range(count):
-                    self.store_transaction_metric(
-                        (spec.end + spec.start) / 2,
-                        metric=suffix_key,
-                        tags={"transaction": suffix_key, **spec.tags},
-                        timestamp=start,
-                        aggregation_option=AggregationOption.HIST,
-                    )
-
-    def as_response_data(self, specs):
-        data: dict[str, list[dict[str, int]]] = {}
-        for spec in specs:
-            spec = HistogramSpec(*spec)
-            for measurement, count in sorted(spec.fields):
-                if measurement not in data:
-                    data[measurement] = []
-                data[measurement].append({"bin": spec.start, "count": count})
-        return data
-
-    def do_request(self, query, features=None):
-        if features is None:
-            features = {
-                "organizations:performance-view": True,
-                "organizations:performance-use-metrics": True,
-            }
-        features.update(self.features)
-        self.login_as(user=self.user)
-        url = reverse(
-            "sentry-api-0-organization-events-histogram",
-            kwargs={"organization_id_or_slug": self.organization.slug},
-        )
-        with self.feature(features):
-            return self.client.get(url, query, format="json")
-
-    def test_no_projects(self):
-        response = self.do_request({})
-
-        assert response.status_code == 200, response.content
-        assert response.data == {}
-
-    def test_histogram_simple(self):
-        specs = [
-            (0, 1, [("transaction.duration", 5)]),
-            (1, 2, [("transaction.duration", 10)]),
-            (2, 3, [("transaction.duration", 1)]),
-            (4, 5, [("transaction.duration", 15)]),
-        ]
-        self.populate_events(specs)
-        query = {
-            "project": [self.project.id],
-            "field": ["transaction.duration"],
-            "numBuckets": 5,
-            "dataset": "metrics",
-        }
-        response = self.do_request(query)
-        assert response.status_code == 200, response.content
-        expected = [
-            (0, 1, [("transaction.duration", 6)]),
-            (1, 2, [("transaction.duration", 9)]),
-            (2, 3, [("transaction.duration", 3)]),
-            (3, 4, [("transaction.duration", 8)]),
-            (4, 5, [("transaction.duration", 7)]),
-        ]
-        # Note metrics data is approximate, these values are based on running the test and asserting the results
-        expected_response = self.as_response_data(expected)
-        expected_response["meta"] = {"isMetricsData": True}
-        assert response.data == expected_response
-
-    def test_multi_histogram(self):
-        specs = [
-            (0, 1, [("measurements.fcp", 5), ("measurements.lcp", 5)]),
-            (1, 2, [("measurements.fcp", 5), ("measurements.lcp", 5)]),
-        ]
-        self.populate_events(specs)
-        query = {
-            "project": [self.project.id],
-            "field": ["measurements.fcp", "measurements.lcp"],
-            "numBuckets": 2,
-            "dataset": "metrics",
-        }
-        response = self.do_request(query)
-        assert response.status_code == 200, response.content
-        expected = [
-            (0, 1, [("measurements.fcp", 5), ("measurements.lcp", 5)]),
-            (1, 2, [("measurements.fcp", 5), ("measurements.lcp", 5)]),
-        ]
-        # Note metrics data is approximate, these values are based on running the test and asserting the results
-        expected_response = self.as_response_data(expected)
-        expected_response["meta"] = {"isMetricsData": True}
-        assert response.data == expected_response
-
-    def test_histogram_exclude_outliers_data_filter(self):
-        specs = [
-            (0, 0, [("transaction.duration", 4)], {"histogram_outlier": "inlier"}),
-            (1, 1, [("transaction.duration", 4)], {"histogram_outlier": "inlier"}),
-            (4000, 4001, [("transaction.duration", 1)], {"histogram_outlier": "outlier"}),
-        ]
-        self.populate_events(specs)
-
-        query = {
-            "project": [self.project.id],
-            "field": ["transaction.duration"],
-            "numBuckets": 5,
-            "dataFilter": "exclude_outliers",
-            "dataset": "metrics",
-        }
-
-        response = self.do_request(query)
-        assert response.status_code == 200, response.content
-        # Metrics approximation means both buckets got merged
-        expected = [
-            (0, 0, [("transaction.duration", 8)]),
-            (1, 2, [("transaction.duration", 0)]),
-        ]
-        expected_response = self.as_response_data(expected)
-        expected_response["meta"] = {"isMetricsData": True}
-        assert response.data == expected_response
-
-
-class OrganizationEventsMetricsEnhancedPerformanceHistogramEndpointTestWithMetricLayer(
-    OrganizationEventsMetricsEnhancedPerformanceHistogramEndpointTest
-):
-    def setUp(self):
-        super().setUp()
-        self.features["organizations:use-metrics-layer"] = True

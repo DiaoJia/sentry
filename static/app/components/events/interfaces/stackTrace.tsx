@@ -7,10 +7,11 @@ import {t} from 'sentry/locale';
 import type {Event, ExceptionValue} from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
-import type {PlatformKey, Project} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project} from 'sentry/types/project';
 
 import {StackTraceContent} from './crashContent/stackTrace';
-import NoStackTraceMessage from './noStackTraceMessage';
+import {NoStackTraceMessage} from './noStackTraceMessage';
 import {isStacktraceNewestFirst} from './utils';
 
 type Props = {
@@ -18,7 +19,6 @@ type Props = {
   event: Event;
   projectSlug: Project['slug'];
   groupingCurrentLevel?: Group['metadata']['current_level'];
-  hideGuide?: boolean;
 };
 
 function StackTraceContentWrapper({
@@ -70,6 +70,7 @@ export function StackTrace({projectSlug, event, data, groupingCurrentLevel}: Pro
       <TraceEventDataSection
         type={EntryType.STACKTRACE}
         projectSlug={projectSlug}
+        event={event}
         eventId={event.id}
         platform={platform}
         stackTraceNotFound={stackTraceNotFound}

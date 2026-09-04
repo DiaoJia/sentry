@@ -1,18 +1,22 @@
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tabs} from 'sentry/components/core/tabs';
-import {space} from 'sentry/styles/space';
+import {
+  Container,
+  Grid,
+  Stack,
+  type ContainerProps,
+  type GridProps,
+} from '@sentry/scraps/layout';
+import {Tabs} from '@sentry/scraps/tabs';
+
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 /**
  * Main container for a page.
  */
-export const Page = styled('main')<{withPadding?: boolean}>`
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  ${p => p.withPadding && `padding: ${space(3)} ${space(4)}`};
-`;
+export function Page(props: {children: React.ReactNode}) {
+  return <Stack as="main" flex="1" background="primary" {...props} />;
+}
 
 /**
  * Header container for header content and header actions.
@@ -23,8 +27,8 @@ export const Page = styled('main')<{withPadding?: boolean}>`
  *
  * Use `noActionWrap` to disable wrapping if there are minimal actions.
  */
-export const Header = styled('header')<{
-  borderStyle?: 'dashed' | 'solid';
+type HeaderProps = {
+  children: React.ReactNode;
   noActionWrap?: boolean;
   /**
    * Whether to use the unified header variant. Unified headers have the
@@ -32,87 +36,52 @@ export const Header = styled('header')<{
    * "unifying" the two areas.
    */
   unified?: boolean;
-}>`
-  display: grid;
-  grid-template-columns: ${p =>
-    p.noActionWrap ? 'minmax(0, 1fr) auto' : 'minmax(0, 1fr)'};
+};
 
-  padding: ${space(2)} ${space(2)} 0 ${space(2)};
-  background-color: ${p =>
-    p.theme.isChonk
-      ? p.theme.background
-      : p.unified
-        ? p.theme.background
-        : 'transparent'};
-
-  ${p =>
-    !p.unified &&
-    css`
-      border-bottom: 1px ${p.borderStyle ?? 'solid'} ${p.theme.border};
-    `}
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    padding: ${space(2)} ${space(4)} 0 ${space(4)};
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-`;
+export function Header({noActionWrap, unified, ...props}: HeaderProps) {
+  return (
+    <Grid
+      as="header"
+      columns={{
+        zero: noActionWrap ? 'minmax(0, 1fr) auto' : 'minmax(0, 1fr)',
+        '3xl': 'minmax(0, 1fr) auto',
+      }}
+      padding={{zero: 'md lg 0 lg', '3xl': 'lg xl 0 xl'}}
+      borderBottom={unified ? 'none' : 'primary'}
+      {...props}
+    />
+  );
+}
 
 /**
  * Use HeaderContent to create horizontal regions in the header
  * that contain a heading/breadcrumbs and a button group.
  */
-export const HeaderContent = styled('div')<{unified?: boolean}>`
-  display: flex;
-  flex-direction: column;
-  justify-content: normal;
-  margin-bottom: ${space(1)};
-  max-width: 100%;
-
-  ${p =>
-    p.unified &&
-    css`
-      margin-bottom: 0;
-    `}
-`;
+export function HeaderContent(props: {children: React.ReactNode}) {
+  return <Stack justify="start" marginBottom="md" maxWidth="100%" {...props} />;
+}
 
 /**
  * Container for action buttons and secondary information that
  * flows on the top right of the header.
  */
-export const HeaderActions = styled('div')`
-  display: flex;
-  flex-direction: column;
-  justify-content: normal;
-  min-width: max-content;
-  margin-top: ${space(0.25)};
+export function HeaderActions(props: {children: React.ReactNode}) {
+  return (
+    <Stack
+      justify="start"
+      width={{zero: '100%', xl: 'max-content', '3xl': 'auto'}}
+      minWidth={{zero: '100%', xl: 'max-content'}}
+      maxWidth={{zero: '100%', xl: 'none'}}
+      marginTop="2xs"
+      marginBottom={{zero: 'xl', '3xl': '0'}}
+      {...props}
+    />
+  );
+}
 
-  @media (max-width: ${p => p.theme.breakpoints.medium}) {
-    width: max-content;
-    margin-bottom: ${space(2)};
-  }
-`;
-
-/**
- * Heading title
- *
- * Includes flex gap for additional items placed with the text (such as feature
- * badges or ID badges)
- */
-export const Title = styled('h1')<{withMargins?: boolean}>`
-  ${p => p.theme.overflowEllipsis};
-  font-size: 1.625rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0;
-  color: ${p => p.theme.headingColor};
-  margin-bottom: ${p => p.withMargins && space(3)};
-  margin-top: ${p => p.withMargins && space(1)};
-  line-height: 40px;
-
-  display: flex;
-  gap: ${space(1)};
-  align-items: center;
-`;
+export function Title(props: {children: React.ReactNode}) {
+  return <TopBar.Slot name="title">{props.children}</TopBar.Slot>;
+}
 
 /**
  * Styled Tabs for use inside a Layout.Header component
@@ -124,35 +93,62 @@ export const HeaderTabs = styled(Tabs)`
 /**
  * Base container for 66/33 containers.
  */
-export const Body = styled('div')<{noRowGap?: boolean}>`
-  padding: ${space(2)};
-  margin: 0;
-  background-color: ${p => p.theme.background};
-  flex-grow: 1;
+type BodyProps = GridProps & {noRowGap?: boolean};
 
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    padding: ${p => (p.noRowGap ? `${space(2)} ${space(4)}` : `${space(3)} ${space(4)}`)};
-  }
+export function Body({noRowGap, ...props}: BodyProps) {
+  return (
+    <Grid
+      flexGrow={1}
+      columns={{zero: 'minmax(0, 1fr)', '4xl': 'minmax(100px, auto) 325px'}}
+      alignContent="start"
+      gap={noRowGap ? '0 2xl' : '2xl'}
+      background="primary"
+      padding="lg xl"
+      {...props}
+    />
+  );
+}
 
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    display: grid;
-    grid-template-columns: minmax(100px, auto) 325px;
-    align-content: start;
-    gap: ${p => (p.noRowGap ? `0 ${space(3)}` : `${space(3)}`)};
-  }
-`;
+interface MainProps extends Omit<ContainerProps<'section'>, 'width'> {
+  children: React.ReactNode;
+  /**
+   * Set the width of the main content.
+   * - 'twothirds': The main content will span the left two-thirds of the Body. Use this for layouts with a side column.
+   * - 'full': The main content will span the width of the container. Use when the layout does not have a side column.
+   * - 'full-constrained': The main content will span the width of the container and wrapped in a 1440px wide container.
+   * Defaults to 'twothirds'.
+   */
+  width?: 'twothirds' | 'full' | 'full-constrained';
+}
 
 /**
  * Containers for left column of the 66/33 layout.
  */
-export const Main = styled('section')<{fullWidth?: boolean}>`
-  grid-column: ${p => (p.fullWidth ? '1/3' : '1/2')};
-  max-width: 100%;
-`;
+export function Main({children, width = 'twothirds', ...props}: MainProps) {
+  // We need the extra DOM element when the width is constrained because Main is a part of a grid layout.
+  // If we apply the max width directly the right end of the page background will be missing
+  return (
+    <Container
+      column={{
+        zero: '1 / -1',
+        '4xl': width === 'twothirds' ? '1/2' : '1/3',
+      }}
+      as="section"
+      width="100%"
+      {...props}
+    >
+      {width === 'full-constrained' ? (
+        <Container maxWidth="1440px">{children}</Container>
+      ) : (
+        children
+      )}
+    </Container>
+  );
+}
 
 /**
  * Container for the right column the 66/33 layout
  */
-export const Side = styled('aside')`
-  grid-column: 2/3;
-`;
+export function Side(props: ContainerProps<'aside'>) {
+  return <Container as="aside" column={{zero: '1 / -1', '4xl': '2/3'}} {...props} />;
+}

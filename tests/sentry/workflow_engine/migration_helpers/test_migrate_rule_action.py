@@ -1,10 +1,11 @@
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sentry.eventstore.models import GroupEvent
+from sentry.models.options.project_option import ProjectOption
 from sentry.notifications.models.notificationaction import ActionTarget
+from sentry.services.eventstore.models import GroupEvent
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.data_blobs import (
     AZURE_DEVOPS_ACTION_DATA_BLOBS,
@@ -20,8 +21,8 @@ from sentry.workflow_engine.migration_helpers.rule_action import (
 from sentry.workflow_engine.models.action import Action
 from sentry.workflow_engine.typings.notification_action import (
     EXCLUDED_ACTION_DATA_KEYS,
+    ActionType,
     SentryAppDataBlob,
-    SentryAppIdentifier,
     TicketDataBlob,
     TicketFieldMappingKeys,
     issue_alert_action_translator_mapping,
@@ -29,14 +30,13 @@ from sentry.workflow_engine.typings.notification_action import (
 
 
 class TestNotificationActionMigrationUtils(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.group = self.create_group(project=self.project)
         self.group_event = GroupEvent.from_event(self.event, self.group)
 
     def assert_ticketing_action_data_blob(
-        self, action: Action, compare_dict: dict, exclude_keys: list[str]
-    ):
-
+        self, action: Action, compare_dict: dict[str, Any], exclude_keys: list[str]
+    ) -> None:
         # Check dynamic_form_fields
         assert action.data.get(
             TicketFieldMappingKeys.DYNAMIC_FORM_FIELDS_KEY.value, {}
@@ -53,8 +53,8 @@ class TestNotificationActionMigrationUtils(TestCase):
                 assert additional_fields.get(key) == value
 
     def assert_sentry_app_form_config_data_blob(
-        self, action: Action, compare_dict: dict, exclude_keys: list[str]
-    ):
+        self, action: Action, compare_dict: dict[str, Any], exclude_keys: list[str]
+    ) -> None:
         settings = action.data.get("settings", None)
         settings_dict = compare_dict.get("settings", None)
         if not settings or not settings_dict:
@@ -73,12 +73,12 @@ class TestNotificationActionMigrationUtils(TestCase):
     def assert_action_data_blob(
         self,
         action: Action,
-        compare_dict: dict,
+        compare_dict: dict[str, Any],
         integration_id_key: str | None = None,
         target_identifier_key: str | None = None,
         target_display_key: str | None = None,
         target_type_key: str | None = None,
-    ):
+    ) -> None:
         """
         Asserts that the action data is equivalent to the compare_dict.
         Uses the translator to determine which keys should be excluded from the data blob.
@@ -114,11 +114,15 @@ class TestNotificationActionMigrationUtils(TestCase):
                         assert action.data.get(field) == source_value
                     else:
                         # For unmapped fields, check directly with empty string default
-                        if action.type == Action.Type.EMAIL and field == "fallthroughType":
-                            # for email actions, the default value for fallthroughType should be "ActiveMembers"
-                            assert action.data.get(field) == compare_dict.get(
-                                field, "ActiveMembers"
+                        if action.type == Action.Type.EMAIL and field == "fallthrough_type":
+                            fallthrough_fields = ["fallthrough_type", "fallthroughType"]
+                            assert any(
+                                [
+                                    action.data.get(field) == compare_dict.get(f, "ActiveMembers")
+                                    for f in fallthrough_fields
+                                ]
                             )
+                            # for email actions, the default value for fallthrough_type should be "ActiveMembers"
                         else:
                             assert action.data.get(field) == compare_dict.get(field, "")
                 # Ensure no extra fields
@@ -131,10 +135,10 @@ class TestNotificationActionMigrationUtils(TestCase):
                 if key not in exclude_keys:
                     if (
                         action.type == Action.Type.EMAIL
-                        and key == "fallthroughType"
+                        and (key == "fallthrough_type" or key == "fallthroughType")
                         and action.config.get("target_type") != ActionTarget.ISSUE_OWNERS
                     ):
-                        # for email actions, fallthroughType should only be set for when targetType is ISSUE_OWNERS
+                        # for email actions, fallthrough_type should only be set for when targetType is ISSUE_OWNERS
                         continue
                     else:
                         assert compare_dict[key] == action.data[key]
@@ -150,7 +154,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         integration_id_key: str | None = None,
         target_identifier_key: str | None = None,
         target_display_key: str | None = None,
-    ):
+    ) -> None:
         """
         Asserts that the action attributes are equivalent to the compare_dict using the translator.
         """
@@ -162,7 +166,7 @@ class TestNotificationActionMigrationUtils(TestCase):
 
         # Assert integration_id matches if specified
         if integration_id_key:
-            assert action.integration_id == compare_dict.get(integration_id_key)
+            assert str(action.integration_id) == compare_dict.get(integration_id_key)
 
         # Assert target_identifier matches if specified
         if target_identifier_key:
@@ -186,18 +190,19 @@ class TestNotificationActionMigrationUtils(TestCase):
     def assert_actions_migrated_correctly(
         self,
         actions: list[Action],
-        rule_data_actions: list[dict],
+        rule_data_actions: list[dict[str, Any]],
         integration_id_key: str | None = None,
         target_identifier_key: str | None = None,
         target_display_key: str | None = None,
         target_type_key: str | None = None,
-    ):
+    ) -> None:
         """
         Asserts that the actions are equivalent to the Rule.
         """
 
         for action, rule_data in zip(actions, rule_data_actions):
             assert isinstance(action, Action)
+            action.refresh_from_db()
             self.assert_action_attributes(
                 action,
                 rule_data,
@@ -215,7 +220,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             )
 
     @patch("sentry.workflow_engine.migration_helpers.rule_action.logger.error")
-    def test_missing_id_in_action_data(self, mock_logger):
+    def test_missing_id_in_action_data(self, mock_logger: MagicMock) -> None:
         action_data = [
             {
                 "workspace": "1",
@@ -237,7 +242,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         )
 
     @patch("sentry.workflow_engine.migration_helpers.rule_action.logger.exception")
-    def test_unregistered_action_translator(self, mock_logger):
+    def test_unregistered_action_translator(self, mock_logger: MagicMock) -> None:
         action_data = [
             {
                 "workspace": "1",
@@ -258,7 +263,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             },
         )
 
-    def test_slack_action_migration_simple(self):
+    def test_slack_action_migration_simple(self) -> None:
         action_data = [
             {
                 "workspace": "1",
@@ -312,7 +317,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         )
 
     @patch("sentry.workflow_engine.migration_helpers.rule_action.logger.error")
-    def test_slack_action_migration_malformed(self, mock_logger):
+    def test_slack_action_migration_malformed(self, mock_logger: MagicMock) -> None:
         action_data = [
             # Missing required fields
             {
@@ -352,7 +357,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             },
         )
 
-    def test_discord_action_migration(self):
+    def test_discord_action_migration(self) -> None:
         action_data = [
             {
                 "server": "1",
@@ -375,7 +380,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         self.assert_actions_migrated_correctly(actions, action_data, "server", "channel_id", None)
 
     @patch("sentry.workflow_engine.migration_helpers.rule_action.logger.error")
-    def test_discord_action_migration_malformed(self, mock_logger):
+    def test_discord_action_migration_malformed(self, mock_logger: MagicMock) -> None:
         action_data = [
             # Missing required fields
             {
@@ -405,7 +410,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             },
         )
 
-    def test_msteams_action_migration(self):
+    def test_msteams_action_migration(self) -> None:
         action_data = [
             # MsTeams Action will  always include, channel and channel_id
             # It won't store anything in the data blob
@@ -432,7 +437,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         )
 
     @patch("sentry.workflow_engine.migration_helpers.rule_action.logger.error")
-    def test_msteams_action_migration_malformed(self, mock_logger):
+    def test_msteams_action_migration_malformed(self, mock_logger: MagicMock) -> None:
         action_data = [
             # Missing required fields
             {
@@ -462,7 +467,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             },
         )
 
-    def test_pagerduty_action_migration(self):
+    def test_pagerduty_action_migration(self) -> None:
         action_data = [
             {
                 "account": "123456",
@@ -497,7 +502,7 @@ class TestNotificationActionMigrationUtils(TestCase):
 
         self.assert_actions_migrated_correctly(actions, action_data, "account", "service", None)
 
-    def test_pagerduty_action_migration_malformed(self):
+    def test_pagerduty_action_migration_malformed(self) -> None:
         action_data = [
             # Missing required fields
             {
@@ -516,7 +521,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_opsgenie_action_migration(self):
+    def test_opsgenie_action_migration(self) -> None:
         action_data = [
             {
                 "account": "11111",
@@ -551,7 +556,7 @@ class TestNotificationActionMigrationUtils(TestCase):
 
         self.assert_actions_migrated_correctly(actions, action_data, "account", "team", None)
 
-    def test_opsgenie_action_migration_malformed(self):
+    def test_opsgenie_action_migration_malformed(self) -> None:
         action_data = [
             # Missing required fields
             {
@@ -570,7 +575,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_github_action_migration(self):
+    def test_github_action_migration(self) -> None:
         # Includes both, Github and Github Enterprise. We currently don't have any rules configured for Github Enterprise.
         # The Github Enterprise action should have the same shape as the Github action.
         action_data = GITHUB_ACTION_DATA_BLOBS
@@ -579,7 +584,7 @@ class TestNotificationActionMigrationUtils(TestCase):
 
         self.assert_actions_migrated_correctly(actions, action_data, "integration", None, None)
 
-    def test_github_action_migration_malformed(self):
+    def test_github_action_migration_malformed(self) -> None:
         action_data = [
             # Missing required fields
             {
@@ -591,12 +596,12 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_azure_devops_migration(self):
+    def test_azure_devops_migration(self) -> None:
         action_data = AZURE_DEVOPS_ACTION_DATA_BLOBS
         actions = build_notification_actions_from_rule_data_actions(action_data)
         self.assert_actions_migrated_correctly(actions, action_data, "integration", None, None)
 
-    def test_azure_devops_migration_malformed(self):
+    def test_azure_devops_migration_malformed(self) -> None:
         action_data = [
             # Missing required fields
             {
@@ -608,7 +613,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_email_migration(self):
+    def test_email_migration(self) -> None:
         action_data = EMAIL_ACTION_DATA_BLOBS
 
         actions = build_notification_actions_from_rule_data_actions(action_data)
@@ -616,7 +621,7 @@ class TestNotificationActionMigrationUtils(TestCase):
             actions, action_data, None, "targetIdentifier", None, "targetType"
         )
 
-    def test_email_migration_malformed(self):
+    def test_email_migration_malformed(self) -> None:
         action_data = [
             {
                 "uuid": "12345678-90ab-cdef-0123-456789abcdef",
@@ -626,9 +631,9 @@ class TestNotificationActionMigrationUtils(TestCase):
             {
                 "uuid": "12345678-90ab-cdef-0123-456789abcdef",
                 "id": "sentry.mail.actions.NotifyEmailAction",
-                "fallthroughType": "NoOne",
+                "fallthrough_type": "NoOne",
             },
-            # This should be ok since we have a default value for fallthroughType
+            # This should be ok since we have a default value for fallthrough_type
             {
                 "uuid": "12345678-90ab-cdef-0123-456789abcdef",
                 "id": "sentry.mail.actions.NotifyEmailAction",
@@ -639,47 +644,52 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_plugin_action_migration(self):
-        action_data = [
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "c792d184-81db-419f-8ab2-83baef1216f4",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "0202a169-326b-4575-8887-afe69cc58040",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "ad671f12-6bb7-4b9d-a4fe-f32e985fe08e",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "efe1841d-d33a-460a-8d65-7697893ec7f1",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "8c0c2fc9-5d89-4974-9d3c-31b1d602a065",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "e63c387c-94f4-4284-bef8-c08b218654a3",
-            },
-            {
-                "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                "uuid": "0269d028-9466-4826-8ab9-18cd47fb08d2",
-            },
-        ]
+    NOTIFY_EVENT_ACTION_DATA = [
+        {
+            "id": "sentry.rules.actions.notify_event.NotifyEventAction",
+            "uuid": "c792d184-81db-419f-8ab2-83baef1216f4",
+        },
+        {
+            "id": "sentry.rules.actions.notify_event.NotifyEventAction",
+            "uuid": "0202a169-326b-4575-8887-afe69cc58040",
+        },
+    ]
 
-        actions = build_notification_actions_from_rule_data_actions(action_data)
-        self.assert_actions_migrated_correctly(actions, action_data, None, None, None)
+    def test_notify_event_action_migration_webhooks_enabled(self) -> None:
+        # NotifyEventAction dual-writes a WEBHOOK("webhooks") action when webhooks are enabled.
+        ProjectOption.objects.set_value(self.project, "webhooks:enabled", True)
 
-    def test_webhook_action_migration(self):
+        actions = build_notification_actions_from_rule_data_actions(
+            self.NOTIFY_EVENT_ACTION_DATA, project=self.project
+        )
+        assert len(actions) == len(self.NOTIFY_EVENT_ACTION_DATA)
+        for action in actions:
+            action.refresh_from_db()
+            assert action.type == Action.Type.WEBHOOK
+            assert action.config.get("target_identifier") == "webhooks"
+            assert action.config.get("target_display") is None
+            assert action.config.get("target_type") is None
+            assert action.integration_id is None
+            assert action.data == {}
+
+    def test_notify_event_action_migration_webhooks_disabled(self) -> None:
+        # Webhooks disabled: skip the action instead of writing a dead one.
+        actions = build_notification_actions_from_rule_data_actions(
+            self.NOTIFY_EVENT_ACTION_DATA, project=self.project
+        )
+        assert actions == []
+
+    def test_notify_event_action_migration_no_project(self) -> None:
+        # No project to gate on: skip.
+        actions = build_notification_actions_from_rule_data_actions(self.NOTIFY_EVENT_ACTION_DATA)
+        assert actions == []
+
+    def test_webhook_action_migration(self) -> None:
         action_data = WEBHOOK_ACTION_DATA_BLOBS
         actions = build_notification_actions_from_rule_data_actions(action_data)
         self.assert_actions_migrated_correctly(actions, action_data, None, "service", None)
 
-    def test_webhook_action_migration_to_sentry_app(self):
+    def test_webhook_action_migration_to_sentry_app(self) -> None:
         app = self.create_sentry_app(
             organization=self.organization,
             name="Test Application",
@@ -701,7 +711,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         assert actions[0].config.get("target_type") is None
         assert actions[0].data == {}
 
-    def test_webhook_action_migration_malformed(self):
+    def test_webhook_action_migration_malformed(self) -> None:
         action_data = [
             {
                 "id": "sentry.rules.actions.notify_event_service.NotifyEventServiceAction",
@@ -712,52 +722,52 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_action_types(self):
+    def test_action_types(self) -> None:
         """Test that all registered action translators have the correct action type set."""
         test_cases = [
             (
                 "sentry.integrations.slack.notify_action.SlackNotifyServiceAction",
-                Action.Type.SLACK,
+                ActionType.SLACK,
             ),
             (
                 "sentry.integrations.discord.notify_action.DiscordNotifyServiceAction",
-                Action.Type.DISCORD,
+                ActionType.DISCORD,
             ),
             (
                 "sentry.integrations.msteams.notify_action.MsTeamsNotifyServiceAction",
-                Action.Type.MSTEAMS,
+                ActionType.MSTEAMS,
             ),
             (
                 "sentry.integrations.pagerduty.notify_action.PagerDutyNotifyServiceAction",
-                Action.Type.PAGERDUTY,
+                ActionType.PAGERDUTY,
             ),
             (
                 "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                Action.Type.OPSGENIE,
+                ActionType.OPSGENIE,
             ),
             (
                 "sentry.integrations.github.notify_action.GitHubCreateTicketAction",
-                Action.Type.GITHUB,
+                ActionType.GITHUB,
             ),
             (
                 "sentry.integrations.github_enterprise.notify_action.GitHubEnterpriseCreateTicketAction",
-                Action.Type.GITHUB_ENTERPRISE,
+                ActionType.GITHUB_ENTERPRISE,
             ),
             (
                 "sentry.integrations.vsts.notify_action.AzureDevopsCreateTicketAction",
-                Action.Type.AZURE_DEVOPS,
+                ActionType.AZURE_DEVOPS,
             ),
             (
                 "sentry.mail.actions.NotifyEmailAction",
-                Action.Type.EMAIL,
+                ActionType.EMAIL,
             ),
             (
                 "sentry.rules.actions.notify_event.NotifyEventAction",
-                Action.Type.PLUGIN,
+                ActionType.WEBHOOK,
             ),
             (
                 "sentry.rules.actions.notify_event_service.NotifyEventServiceAction",
-                Action.Type.WEBHOOK,
+                ActionType.WEBHOOK,
             ),
         ]
 
@@ -770,7 +780,7 @@ class TestNotificationActionMigrationUtils(TestCase):
                 f"Expected {expected_type}, got {translator.action_type}"
             )
 
-    def test_action_type_in_migration(self):
+    def test_action_type_in_migration(self) -> None:
         """Test that action types are correctly set during migration."""
         test_cases = [
             # Slack
@@ -830,6 +840,7 @@ class TestNotificationActionMigrationUtils(TestCase):
                 {
                     "integration": "1",
                     "id": "sentry.integrations.github.notify_action.GitHubCreateTicketAction",
+                    "repo": "owner/repo",
                     "uuid": "test-uuid",
                 },
                 Action.Type.GITHUB,
@@ -839,6 +850,7 @@ class TestNotificationActionMigrationUtils(TestCase):
                 {
                     "integration": "1",
                     "id": "sentry.integrations.github_enterprise.notify_action.GitHubEnterpriseCreateTicketAction",
+                    "repo": "owner/repo",
                     "uuid": "test-uuid",
                 },
                 Action.Type.GITHUB_ENTERPRISE,
@@ -861,14 +873,6 @@ class TestNotificationActionMigrationUtils(TestCase):
                 },
                 Action.Type.EMAIL,
             ),
-            # Plugin
-            (
-                {
-                    "id": "sentry.rules.actions.notify_event.NotifyEventAction",
-                    "uuid": "test-uuid",
-                },
-                Action.Type.PLUGIN,
-            ),
             # Webhook
             (
                 {
@@ -888,12 +892,12 @@ class TestNotificationActionMigrationUtils(TestCase):
                 f"Expected {expected_type}, got {actions[0].type}"
             )
 
-    def test_jira_action_migration(self):
+    def test_jira_action_migration(self) -> None:
         action_data = JIRA_ACTION_DATA_BLOBS
         actions = build_notification_actions_from_rule_data_actions(action_data)
         self.assert_actions_migrated_correctly(actions, action_data, "integration", None, None)
 
-    def test_jira_action_migration_malformed(self):
+    def test_jira_action_migration_malformed(self) -> None:
         action_data: list[dict[str, Any]] = [
             # Missing required fields
             {
@@ -919,12 +923,12 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_jira_server_action_migration(self):
+    def test_jira_server_action_migration(self) -> None:
         action_data = JIRA_SERVER_ACTION_DATA_BLOBS
         actions = build_notification_actions_from_rule_data_actions(action_data)
         self.assert_actions_migrated_correctly(actions, action_data, "integration", None, None)
 
-    def test_jira_server_action_migration_malformed(self):
+    def test_jira_server_action_migration_malformed(self) -> None:
         action_data: list[dict[str, Any]] = [
             # Missing required fields
             {
@@ -948,7 +952,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         with pytest.raises(ValueError):
             build_notification_actions_from_rule_data_actions(action_data, is_dry_run=True)
 
-    def test_sentry_app_action_migration(self):
+    def test_sentry_app_action_migration(self) -> None:
         self.create_sentry_app(
             organization=self.organization,
             name="Test Application",
@@ -1099,13 +1103,9 @@ class TestNotificationActionMigrationUtils(TestCase):
         # Verify that action type is set correctly
         for action in actions:
             assert action.type == Action.Type.SENTRY_APP
-            assert action.config.get("target_identifier") == install.uuid
-            assert (
-                action.config.get("sentry_app_identifier")
-                == SentryAppIdentifier.SENTRY_APP_INSTALLATION_UUID
-            )
+            assert action.config.get("target_identifier") == str(install.sentry_app.id)
 
-    def test_dry_run_flag(self):
+    def test_dry_run_flag(self) -> None:
         """Test that the dry_run flag prevents database writes."""
         action_data = [
             {
@@ -1132,7 +1132,7 @@ class TestNotificationActionMigrationUtils(TestCase):
         assert action.config.get("target_display") == "#test-channel"
         assert action.config.get("target_identifier") == "C123456"
 
-    def test_skip_failures_flag(self):
+    def test_skip_failures_flag(self) -> None:
         """Test that the skip_failures flag skips invalid actions."""
         action_data: list[dict[str, str | Any]] = [
             # Invalid action type, should skip

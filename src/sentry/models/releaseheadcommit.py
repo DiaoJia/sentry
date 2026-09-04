@@ -4,19 +4,19 @@ from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 
 
-@region_silo_model
+@cell_silo_model
 class ReleaseHeadCommit(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
     organization_id = BoundedBigIntegerField(db_index=True)
     repository_id = BoundedPositiveIntegerField()
     release = FlexibleForeignKey("sentry.Release")
-    commit = FlexibleForeignKey("sentry.Commit")
+    commit = FlexibleForeignKey("sentry.Commit", db_constraint=False)
 
     class Meta:
         app_label = "sentry"

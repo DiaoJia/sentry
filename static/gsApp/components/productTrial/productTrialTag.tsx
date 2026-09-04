@@ -1,51 +1,49 @@
-import moment from 'moment-timezone';
+import {Tag, type TagProps} from '@sentry/scraps/badge';
 
-import {Tag, type TagProps} from 'sentry/components/core/badge/tag';
 import {IconBusiness} from 'sentry/icons';
 import {IconClock} from 'sentry/icons/iconClock';
 import {IconFlag} from 'sentry/icons/iconFlag';
 import {t} from 'sentry/locale';
-import getDaysSinceDate from 'sentry/utils/getDaysSinceDate';
+import {getDaysSinceDate} from 'sentry/utils/getDaysSinceDate';
 
 import type {ProductTrial} from 'getsentry/types';
 
 interface ProductTrialTagProps {
   trial: ProductTrial;
   showTrialEnded?: boolean;
-  type?: TagProps['type'];
+  variant?: TagProps['variant'];
 }
 
-function ProductTrialTag({trial, type, showTrialEnded = false}: ProductTrialTagProps) {
-  const now = moment();
+export function ProductTrialTag({
+  trial,
+  variant,
+  showTrialEnded = false,
+}: ProductTrialTagProps) {
+  const daysLeft = -1 * getDaysSinceDate(trial.endDate ?? '');
 
-  if (moment(trial.endDate).add(1, 'days').isBefore(now)) {
+  if (daysLeft < 0) {
     if (!showTrialEnded) {
       return null;
     }
 
     return (
-      <Tag icon={<IconFlag />} type={type ?? 'default'}>
-        {t('Trial Ended')}
+      <Tag icon={<IconFlag />} variant={variant ?? 'muted'}>
+        {t('Trial ended')}
       </Tag>
     );
   }
 
   if (!trial.isStarted) {
     return (
-      <Tag icon={<IconBusiness gradient />} type={type ?? 'info'}>
-        {t('Trial Available')}
+      <Tag icon={<IconBusiness />} variant={variant ?? 'promotion'}>
+        {t('Trial available')}
       </Tag>
     );
   }
 
-  const daysLeft = -1 * getDaysSinceDate(trial.endDate ?? '');
-  const tagType = type ?? (daysLeft <= 7 ? 'promotion' : 'highlight');
-
   return (
-    <Tag icon={<IconClock />} type={tagType}>
+    <Tag icon={<IconClock />} variant={variant ?? (daysLeft <= 7 ? 'warning' : 'info')}>
       {t('%d days left', daysLeft)}
     </Tag>
   );
 }
-
-export default ProductTrialTag;

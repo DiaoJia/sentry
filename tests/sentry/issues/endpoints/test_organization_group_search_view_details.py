@@ -1,10 +1,13 @@
+from unittest.mock import MagicMock
+
 from django.urls import reverse
 from django.utils import timezone
 
+from sentry.issues.endpoints.bases.group_search_view import GroupSearchViewPermission
 from sentry.models.groupsearchview import GroupSearchView, GroupSearchViewVisibility
 from sentry.models.groupsearchviewlastvisited import GroupSearchViewLastVisited
 from sentry.models.groupsearchviewstarred import GroupSearchViewStarred
-from sentry.testutils.cases import APITestCase
+from sentry.testutils.cases import APITestCase, TestCase
 from sentry.testutils.helpers import with_feature
 
 
@@ -123,6 +126,14 @@ class OrganizationGroupSearchViewsGetTest(BaseGSVTestCase):
         assert response.data["id"] == self.view_id
         assert response.data["name"] == view.name
         assert response.data["query"] == view.query
+
+    def test_get_invalid_view_id(self) -> None:
+        url = reverse(
+            "sentry-api-0-organization-group-search-view-details",
+            kwargs={"organization_id_or_slug": self.organization.slug, "view_id": "abc"},
+        )
+        response = self.client.get(url)
+        assert response.status_code == 404
 
     def test_get_nonexistent_view(self) -> None:
         nonexistent_id = "37373"
@@ -427,7 +438,7 @@ class OrganizationGroupSearchViewsPutTest(BaseGSVTestCase):
             kwargs={"organization_id_or_slug": self.organization.slug, "view_id": self.view_id},
         )
 
-    @with_feature({"organizations:issue-views": True, "organizations:global-views": True})
+    @with_feature({"organizations:issue-views": True})
     def test_put_view_success(self) -> None:
         data = {
             "name": "Updated View Name",
@@ -453,7 +464,6 @@ class OrganizationGroupSearchViewsPutTest(BaseGSVTestCase):
         assert updated_view.time_filters == {"period": "14d"}
 
     @with_feature({"organizations:issue-views": True})
-    @with_feature({"organizations:global-views": True})
     def test_put_update_projects(self) -> None:
         second_project = self.create_project(organization=self.organization)
 
@@ -477,7 +487,6 @@ class OrganizationGroupSearchViewsPutTest(BaseGSVTestCase):
         }
 
     @with_feature({"organizations:issue-views": True})
-    @with_feature({"organizations:global-views": True})
     def test_put_all_projects(self) -> None:
         data = {
             "name": "All Projects View",
@@ -576,23 +585,6 @@ class OrganizationGroupSearchViewsPutTest(BaseGSVTestCase):
         response = self.client.put(self.url, data=data)
         assert response.status_code == 400
 
-    @with_feature({"organizations:issue-views": True})
-    def test_put_multi_project_without_global_views(self) -> None:
-        second_project = self.create_project(organization=self.organization)
-
-        data = {
-            "name": "Multi Project View",
-            "query": "is:unresolved",
-            "querySort": "date",
-            "projects": [self.project.id, second_project.id],
-            "environments": [],
-            "timeFilters": {"period": "14d"},
-        }
-
-        response = self.client.put(self.url, data=data)
-        assert response.status_code == 400
-        assert "projects" in response.data
-
     def test_put_without_feature_flag(self) -> None:
         data = {
             "name": "Updated View",
@@ -604,3 +596,22 @@ class OrganizationGroupSearchViewsPutTest(BaseGSVTestCase):
 
         response = self.client.put(self.url, data=data)
         assert response.status_code == 404
+
+
+class GroupSearchViewPermissionTest(TestCase):
+    def test_denies_unknown_object_types(self) -> None:
+        permission = GroupSearchViewPermission()
+        request = MagicMock()
+        request.method = "PUT"
+        view = MagicMock()
+
+        assert permission.has_object_permission(request, view, object()) is False
+
+    def test_denies_related_model_types(self) -> None:
+        permission = GroupSearchViewPermission()
+        request = MagicMock()
+        request.method = "GET"
+        view = MagicMock()
+
+        starred = MagicMock(spec=GroupSearchViewStarred)
+        assert permission.has_object_permission(request, view, starred) is False

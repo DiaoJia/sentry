@@ -1,71 +1,146 @@
-import {useState} from 'react';
+import {Link} from 'react-router-dom';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
+import orderBy from 'lodash/orderBy';
+
+import {Flex} from '@sentry/scraps/layout';
 
 import {DateTime} from 'sentry/components/dateTime';
-import Duration from 'sentry/components/duration';
-import GridEditable, {
+import {
   COL_WIDTH_UNDEFINED,
+  GridEditable,
   type GridColumnOrder,
-} from 'sentry/components/gridEditable';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+} from 'sentry/components/tables/gridEditable';
+import {IconSeer} from 'sentry/icons';
 import {t} from 'sentry/locale';
+import type {GroupOpenPeriodActivity} from 'sentry/types/group';
+import {selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {getShortEventId} from 'sentry/utils/events';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import {unreachable} from 'sentry/utils/unreachable';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
-import {EventListTable} from 'sentry/views/issueDetails/streamline/eventListTable';
-import {useGroup} from 'sentry/views/issueDetails/useGroup';
+import {openPeriodsApiOptions} from 'sentry/views/detectors/hooks/useOpenPeriods';
+import {investigationCandidatesQueryOptions} from 'sentry/views/investigations/api';
+import type {MetricOpenPeriodInvestigationSource} from 'sentry/views/investigations/types';
+import {EventListTable} from 'sentry/views/issueDetails/eventListTable';
 
 interface OpenPeriodDisplayData {
-  duration: React.ReactNode;
+  description: string;
   end: React.ReactNode;
+  eventId: React.ReactNode;
+  investigation: React.ReactNode;
+  openPeriod: React.ReactNode;
   start: React.ReactNode;
-  title: React.ReactNode;
+}
+
+function getOpenPeriodActivityTypeLabel(activity: GroupOpenPeriodActivity): string {
+  switch (activity.type) {
+    case 'opened':
+      return t('Issue regressed');
+    case 'closed':
+      return t('Resolved');
+    case 'status_change':
+      return t('Priority updated to %s', activity.value);
+    default:
+      unreachable(activity.type);
+      return t('Updated');
+  }
 }
 
 // TODO(snigdha): make this work for the old UI
-// TODO(snigdha): support pagination
 function IssueOpenPeriodsList() {
-  const [now] = useState(() => new Date());
+  const organization = useOrganization();
+  const location = useLocation();
   const params = useParams<{groupId: string}>();
   const {
-    data: group,
-    isPending: isGroupPending,
-    isError: isGroupError,
-    refetch: refetchGroup,
-  } = useGroup({groupId: params.groupId});
+    data: response,
+    isPending,
+    error,
+  } = useQuery({
+    ...openPeriodsApiOptions({
+      organization,
+      groupId: params.groupId,
+      cursor: location.query?.cursor,
+      limit: 10,
+    }),
+    select: selectJsonWithHeaders,
+  });
+  const openPeriods = response?.json ?? [];
+  const investigationsEnabled = organization.features.includes('investigations');
+  const candidateSources: MetricOpenPeriodInvestigationSource[] = openPeriods.map(
+    period => ({
+      type: 'metric_open_period',
+      ref: {groupId: params.groupId, openPeriodId: period.id},
+    })
+  );
+  const {data: candidates} = useQuery({
+    ...investigationCandidatesQueryOptions({
+      organizationSlug: organization.slug,
+      sources: candidateSources,
+    }),
+    enabled: investigationsEnabled && candidateSources.length > 0,
+  });
 
-  if (isGroupError) {
-    return <LoadingError onRetry={refetchGroup} />;
-  }
+  const data = openPeriods.flatMap((period, periodIndex) => {
+    const candidate = candidates?.items[periodIndex];
+    const periodActivities = orderBy(
+      period.activities.filter(activity => activity.type !== 'closed'),
+      'dateCreated',
+      'desc'
+    );
 
-  if (isGroupPending) {
-    return <LoadingIndicator />;
-  }
+    return periodActivities.map((activity, index) => {
+      const startDate = new Date(activity.dateCreated);
+      const endDate =
+        index === 0 ? (period.end ? new Date(period.end) : undefined) : undefined;
 
-  // update the open periods to have date objects
-  const openPeriods = group.openPeriods?.map(period => ({
-    ...period,
-    start: new Date(period.start),
-    end: period.end ? new Date(period.end) : null,
-  }));
+      return {
+        openPeriod: activity.type === 'opened' ? `#${period.id}` : undefined,
+        eventId: activity.eventId ? (
+          <Link
+            to={`/organizations/${organization.slug}/issues/${params.groupId}/events/${activity.eventId}/`}
+          >
+            {getShortEventId(activity.eventId)}
+          </Link>
+        ) : (
+          '—'
+        ),
+        description: getOpenPeriodActivityTypeLabel(activity),
+        start: <DateTime date={startDate} />,
+        end: endDate ? <DateTime date={endDate} /> : undefined,
+        investigation:
+          activity.type === 'opened' && candidate?.status === 'view' ? (
+            <Link
+              to={`/organizations/${organization.slug}/explore/investigations/${candidate.investigationId}/`}
+            >
+              <Flex as="span" align="center" gap="xs">
+                <IconSeer size="xs" />
+                {candidate.investigationId}
+              </Flex>
+            </Link>
+          ) : undefined,
+      };
+    });
+  });
 
-  const getDuration = (start: Date, end?: Date) => {
-    const duration = end
-      ? (end.getTime() - start.getTime()) / 1000
-      : (now.getTime() - start.getTime()) / 1000;
-
-    return <Duration seconds={duration} precision="minutes" exact />;
-  };
-
-  if (!openPeriods) {
-    return <LoadingError onRetry={refetchGroup} />;
-  }
-
-  const data: OpenPeriodDisplayData[] = openPeriods.map(period => ({
-    title: <DateTime date={period.start} />,
-    start: <DateTime date={period.start} />,
-    end: period.end ? <DateTime date={period.end} /> : '—',
-    duration: getDuration(period.start, period.end ?? undefined),
-  }));
+  const columnOrder: Array<GridColumnOrder<string>> = [
+    {key: 'openPeriod', width: COL_WIDTH_UNDEFINED, name: t('Open Period')},
+    {key: 'eventId', width: 100, name: t('Event ID')},
+    {key: 'description', width: COL_WIDTH_UNDEFINED, name: t('Description')},
+    {key: 'start', width: COL_WIDTH_UNDEFINED, name: t('Start')},
+    {key: 'end', width: COL_WIDTH_UNDEFINED, name: t('End')},
+    ...(investigationsEnabled
+      ? [
+          {
+            key: 'investigation',
+            width: COL_WIDTH_UNDEFINED,
+            name: t('Investigation'),
+          },
+        ]
+      : []),
+  ];
 
   const renderHeadCell = (col: GridColumnOrder) => {
     return <AlignLeft>{col.name}</AlignLeft>;
@@ -76,21 +151,34 @@ function IssueOpenPeriodsList() {
     dataRow: OpenPeriodDisplayData
   ) => {
     const column = col.key as keyof OpenPeriodDisplayData;
+
     return <AlignLeft>{dataRow[column]}</AlignLeft>;
   };
 
+  const links = parseLinkHeader(response?.headers.Link ?? '');
+  const totalCount = response?.headers['X-Hits'];
+  const previousDisabled = links.previous?.results === false;
+  const nextDisabled = links.next?.results === false;
+
   return (
-    <EventListTable title={t('All Open Periods')} pagination={{enabled: false}}>
+    <EventListTable
+      title={t('All Open Periods')}
+      pagination={{
+        enabled: true,
+        links,
+        paginatorType: 'offset',
+        pageCount: openPeriods.length,
+        totalCount,
+        previousDisabled,
+        nextDisabled,
+        tableUnits: t('open periods'),
+      }}
+    >
       <GridEditable
-        isLoading={isGroupPending}
+        isLoading={isPending}
         data={data}
-        columnOrder={[
-          {key: 'title', width: COL_WIDTH_UNDEFINED, name: t('Title')},
-          {key: 'start', width: COL_WIDTH_UNDEFINED, name: t('Start')},
-          {key: 'end', width: COL_WIDTH_UNDEFINED, name: t('End')},
-          {key: 'duration', width: COL_WIDTH_UNDEFINED, name: t('Duration')},
-        ]}
-        columnSortBy={[]}
+        error={error}
+        columnOrder={columnOrder}
         grid={{
           renderHeadCell,
           renderBodyCell,
@@ -104,4 +192,5 @@ const AlignLeft = styled('span')`
   text-align: left;
   width: 100%;
 `;
+
 export default IssueOpenPeriodsList;

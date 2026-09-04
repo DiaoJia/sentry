@@ -1,38 +1,39 @@
 import {t} from 'sentry/locale';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 
-const popularPlatformCategories: Set<PlatformKey> = new Set([
+export const popularPlatformCategories = new Set<PlatformKey>([
   'javascript-nextjs',
   'javascript-react',
   'react-native',
+  'node',
   'php-laravel',
+  'python-fastapi',
   'flutter',
   'python-django',
-  'node',
-  'javascript',
-  'node-express',
-  'python-fastapi',
-  'php',
   'python',
-  'dotnet-maui',
-  'node-nestjs',
-  'javascript-vue',
-  'android',
-  'apple-ios',
+  'node-express',
+  'javascript',
+  'php',
   'ruby-rails',
+  'apple-ios',
+  'node-nestjs',
   'python-flask',
+  'javascript-vue',
   'dotnet-aspnetcore',
-  'javascript-angular',
-  'php-symfony',
-  'javascript-remix',
-  'java-spring-boot',
-  'javascript-sveltekit',
-  'unity',
   'javascript-nuxt',
-  'javascript-astro',
+  'dotnet-maui',
+  'javascript-angular',
+  'android',
+  'java-spring-boot',
+  'php-symfony',
+  'node-cloudflare-workers',
+  'electron',
+  'unity',
+  'javascript-remix',
 ]);
 
-const browser: Set<PlatformKey> = new Set([
+const browser = new Set<PlatformKey>([
+  'dart',
   'flutter',
   'javascript',
   'javascript-angular',
@@ -55,8 +56,9 @@ const browser: Set<PlatformKey> = new Set([
   'unity',
 ]);
 
-const server: Set<PlatformKey> = new Set([
+const server = new Set<PlatformKey>([
   'bun',
+  'dart',
   'deno',
   'dotnet',
   'dotnet-aspnet',
@@ -84,6 +86,7 @@ const server: Set<PlatformKey> = new Set([
   'node-express',
   'node-fastify',
   'node-hapi',
+  'node-hono',
   'node-koa',
   'node-nestjs',
   'php',
@@ -100,6 +103,7 @@ const server: Set<PlatformKey> = new Set([
   'python-falcon',
   'python-fastapi',
   'python-flask',
+  'python-litestar',
   'python-pyramid',
   'python-quart',
   'python-rq',
@@ -114,13 +118,14 @@ const server: Set<PlatformKey> = new Set([
   'rust',
 ]);
 
-const mobile: Set<PlatformKey> = new Set([
+const mobile = new Set<PlatformKey>([
   'android',
   'apple-ios',
   'capacitor',
   'cordova',
   'dotnet-maui',
   'dotnet-xamarin',
+  'dart',
   'flutter',
   'ionic',
   'react-native',
@@ -128,13 +133,14 @@ const mobile: Set<PlatformKey> = new Set([
   'unreal',
 ]);
 
-const desktop: Set<PlatformKey> = new Set([
+const desktop = new Set<PlatformKey>([
   'apple-macos',
   'dotnet',
   'dotnet-maui',
   'dotnet-winforms',
   'dotnet-wpf',
   'electron',
+  'dart',
   'flutter',
   'godot',
   'java',
@@ -146,7 +152,7 @@ const desktop: Set<PlatformKey> = new Set([
   'unreal',
 ]);
 
-const serverless: Set<PlatformKey> = new Set([
+const serverless = new Set<PlatformKey>([
   'dotnet-awslambda',
   'dotnet-gcpfunctions',
   'node-awslambda',
@@ -159,7 +165,17 @@ const serverless: Set<PlatformKey> = new Set([
   'python-serverless',
 ]);
 
-export const createablePlatforms: Set<PlatformKey> = new Set([
+const gaming = new Set<PlatformKey>([
+  'godot',
+  'native',
+  'nintendo-switch',
+  'playstation',
+  'unity',
+  'unreal',
+  'xbox',
+]);
+
+export const createablePlatforms = new Set<PlatformKey>([
   ...popularPlatformCategories,
   ...browser,
   ...server,
@@ -175,7 +191,7 @@ export const filterAliases: Partial<Record<PlatformKey, string[]>> = {
   native: ['cpp', 'c++'],
 };
 
-const categoryList = [
+export const categoryList = [
   {id: 'popular', name: t('Popular'), platforms: popularPlatformCategories},
   {id: 'browser', name: t('Browser'), platforms: browser},
   {id: 'server', name: t('Server'), platforms: server},
@@ -183,18 +199,13 @@ const categoryList = [
   {id: 'desktop', name: t('Desktop'), platforms: desktop},
   {id: 'serverless', name: t('Serverless'), platforms: serverless},
   {
+    id: 'gaming',
+    name: t('Gaming'),
+    platforms: gaming,
+  },
+  {
     id: 'all',
     name: t('All'),
     platforms: createablePlatforms,
   },
 ];
-
-export default categoryList;
-
-// TODO(aknaus): Drop in favour of PlatformIntegration
-export type Platform = {
-  key: PlatformKey;
-  id?: string;
-  link?: string | null;
-  name?: string;
-};

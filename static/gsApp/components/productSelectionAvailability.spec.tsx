@@ -2,6 +2,7 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {BillingConfigFixture} from 'getsentry-test/fixtures/billingConfig';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
+import {PlanTier} from 'getsentry-test/planTier';
 import {
   act,
   render,
@@ -18,46 +19,41 @@ import {PlanFixture} from 'getsentry/__fixtures__/plan';
 import {PreviewDataFixture} from 'getsentry/__fixtures__/previewData';
 import {ProductSelectionAvailability} from 'getsentry/components/productSelectionAvailability';
 import type {Reservations} from 'getsentry/components/upgradeNowModal/types';
-import usePreviewData from 'getsentry/components/upgradeNowModal/usePreviewData';
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
-import {PlanTier} from 'getsentry/types';
+import {usePreviewData} from 'getsentry/components/upgradeNowModal/usePreviewData';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 
 jest.mock('getsentry/components/upgradeNowModal/usePreviewData');
 
 function renderMockRequests({
-  planTier,
   organization,
   canSelfServe,
 }: {
   organization: Organization;
-  planTier: PlanTier;
   canSelfServe?: boolean;
 }) {
   const subscription = SubscriptionFixture({
     organization,
-    planTier,
     canSelfServe,
   });
 
   act(() => SubscriptionStore.set(organization.slug, subscription));
 
   MockApiClient.addMockResponse({
-    url: `/subscriptions/org-slug/`,
+    url: '/customers/org-slug/',
     body: {
-      planTier,
       canSelfServe,
     },
   });
 
   MockApiClient.addMockResponse({
     url: `/customers/${organization.slug}/billing-config/`,
-    body: BillingConfigFixture(planTier),
+    body: BillingConfigFixture(PlanTier.AM2),
   });
 }
 
-describe('ProductSelectionAvailability', function () {
-  describe('with no billing access', function () {
-    it('with performance and session replay', async function () {
+describe('ProductSelectionAvailability', () => {
+  describe('with no billing access', () => {
+    it('with performance and session replay', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'session-replay'],
       });
@@ -73,7 +69,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -119,10 +115,10 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
     });
 
-    it('without performance and session replay', async function () {
+    it('without performance and session replay', async () => {
       const organization = OrganizationFixture();
 
-      renderMockRequests({planTier: PlanTier.MM2, organization, canSelfServe: true});
+      renderMockRequests({organization, canSelfServe: true});
 
       render(
         <ProductSelectionAvailability
@@ -162,7 +158,7 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
     });
 
-    it('without session replay', async function () {
+    it('without session replay', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view'],
       });
@@ -175,7 +171,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM1, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -208,8 +204,8 @@ describe('ProductSelectionAvailability', function () {
     });
   });
 
-  describe('with billing access', function () {
-    it('with performance and session replay', async function () {
+  describe('with billing access', () => {
+    it('with performance and session replay', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'session-replay'],
         access: ['org:billing'] as any, // TODO(ts): Fix this type for organizations on a plan
@@ -226,7 +222,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -272,12 +268,12 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
     });
 
-    it('without performance, session replay and profiling', async function () {
+    it('without performance, session replay and profiling', async () => {
       const organization = OrganizationFixture({
         access: ['org:billing'],
       });
 
-      renderMockRequests({planTier: PlanTier.MM2, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -319,7 +315,7 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
     });
 
-    it('without session replay', async function () {
+    it('without session replay', async () => {
       const organization = OrganizationFixture({
         access: ['org:billing'],
         features: ['performance-view'],
@@ -333,9 +329,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      const MockUsePreviewData = usePreviewData as jest.MockedFunction<
-        typeof usePreviewData
-      >;
+      const MockUsePreviewData = jest.mocked(usePreviewData);
       const mockReservations: Reservations = {
         reservedErrors: 50000,
         reservedTransactions: 0,
@@ -345,6 +339,13 @@ describe('ProductSelectionAvailability', function () {
         reservedUptime: 0,
         reservedProfileDuration: 0,
         reservedProfileDurationUI: 0,
+        reservedLogBytes: 0,
+        reservedSpans: undefined,
+        reservedSeerAutofix: undefined,
+        reservedSeerScanner: undefined,
+        reservedSeerUsers: undefined,
+        reservedSizeAnalyses: 0,
+        reservedTraceMetricBytes: 0,
       };
       const mockPlan = PlanFixture({});
       const mockPreview = PreviewDataFixture({});
@@ -358,7 +359,7 @@ describe('ProductSelectionAvailability', function () {
       });
 
       // can self-serve
-      renderMockRequests({planTier: PlanTier.AM1, organization, canSelfServe: true});
+      renderMockRequests({organization, canSelfServe: true});
 
       const {rerender} = render(
         <ProductSelectionAvailability
@@ -403,7 +404,7 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
 
       // can't self-serve
-      renderMockRequests({planTier: PlanTier.AM1, organization, canSelfServe: false});
+      renderMockRequests({organization, canSelfServe: false});
       rerender(
         <ProductSelectionAvailability
           organization={organization}
@@ -419,7 +420,7 @@ describe('ProductSelectionAvailability', function () {
       expect(await screen.findByText(/Manage Subscription/i)).toBeInTheDocument();
     });
 
-    it('with profiling and without session replay', async function () {
+    it('with profiling and without session replay', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'profiling-view'],
       });
@@ -432,7 +433,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -467,7 +468,7 @@ describe('ProductSelectionAvailability', function () {
       expect(screen.getByRole('presentation', {name: 'Profiling'})).toBeChecked();
     });
 
-    it('without profiling and without session replay', async function () {
+    it('without profiling and without session replay', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view'],
       });
@@ -480,7 +481,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       render(
         <ProductSelectionAvailability
@@ -522,12 +523,12 @@ describe('ProductSelectionAvailability', function () {
       ).toBeInTheDocument();
     });
 
-    it('enabling Profiling, shall check and "disabled" Tracing', async function () {
+    it('enabling Profiling, shall check and "disabled" Tracing', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'profiling-view'],
       });
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       const {router} = render(
         <ProductSelectionAvailability
@@ -560,7 +561,7 @@ describe('ProductSelectionAvailability', function () {
       expect(screen.getByRole('button', {name: 'Tracing'})).toBeEnabled();
     });
 
-    it('with Profiling and Tracing', async function () {
+    it('with Profiling and Tracing', async () => {
       const organization = OrganizationFixture({
         features: ['performance-view', 'profiling-view'],
       });
@@ -573,7 +574,7 @@ describe('ProductSelectionAvailability', function () {
         },
       };
 
-      renderMockRequests({planTier: PlanTier.AM2, organization});
+      renderMockRequests({organization});
 
       const {router} = render(
         <ProductSelectionAvailability

@@ -1,11 +1,12 @@
-import * as Layout from 'sentry/components/layouts/thirds';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import PageFiltersContainer from 'sentry/components/organizations/pageFilters/container';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {Stack} from '@sentry/scraps/layout';
+
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {PageFiltersContainer} from 'sentry/components/pageFilters/container';
+import type {DatePageFilterProps} from 'sentry/components/pageFilters/date/datePageFilter';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import type {InsightEventKey} from 'sentry/utils/analytics/insightAnalyticEvents';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {WidgetSyncContextProvider} from 'sentry/views/dashboards/contexts/widgetSyncContext';
-import {useInsightsEap} from 'sentry/views/insights/common/utils/useEap';
 import {useHasDataTrackAnalytics} from 'sentry/views/insights/common/utils/useHasDataTrackAnalytics';
 import {useModuleTitles} from 'sentry/views/insights/common/utils/useModuleTitle';
 import {useDomainViewFilters} from 'sentry/views/insights/pages/useFilters';
@@ -13,24 +14,23 @@ import {INSIGHTS_TITLE, QUERY_DATE_RANGE_LIMIT} from 'sentry/views/insights/sett
 import type {ModuleName} from 'sentry/views/insights/types';
 
 type ModuleNameStrings = `${ModuleName}`;
-export type TitleableModuleNames = Exclude<ModuleNameStrings, '' | 'other'>;
+type TitleableModuleNames = Exclude<ModuleNameStrings, '' | 'other'>;
 
 interface Props {
   children: React.ReactNode;
   moduleName: TitleableModuleNames;
   analyticEventName?: InsightEventKey;
-  pageTitle?: string;
+  maxPickableDays?: DatePageFilterProps['maxPickableDays'];
 }
 
 export function ModulePageProviders({
   moduleName,
-  pageTitle,
   children,
   analyticEventName,
+  maxPickableDays,
 }: Props) {
   const organization = useOrganization();
   const moduleTitles = useModuleTitles();
-  const useEap = useInsightsEap();
   const {view} = useDomainViewFilters();
 
   const hasDateRangeQueryLimit = organization.features.includes(
@@ -41,23 +41,21 @@ export function ModulePageProviders({
 
   const moduleTitle = moduleTitles[moduleName];
 
-  const fullPageTitle = [pageTitle, moduleTitle, INSIGHTS_TITLE]
-    .filter(Boolean)
-    .join(' — ');
-
-  const storageNamespace = useEap ? view : undefined;
+  const fullPageTitle = [moduleTitle, INSIGHTS_TITLE].filter(Boolean).join(' — ');
 
   return (
     <PageFiltersContainer
-      maxPickableDays={hasDateRangeQueryLimit ? QUERY_DATE_RANGE_LIMIT : undefined}
-      storageNamespace={storageNamespace}
+      maxPickableDays={
+        maxPickableDays ?? (hasDateRangeQueryLimit ? QUERY_DATE_RANGE_LIMIT : undefined)
+      }
+      storageNamespace={view}
     >
       <SentryDocumentTitle title={fullPageTitle} orgSlug={organization.slug}>
-        <Layout.Page>
+        <Stack flex={1}>
           <NoProjectMessage organization={organization}>
             <WidgetSyncContextProvider>{children}</WidgetSyncContextProvider>
           </NoProjectMessage>
-        </Layout.Page>
+        </Stack>
       </SentryDocumentTitle>
     </PageFiltersContainer>
   );

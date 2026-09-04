@@ -1,0 +1,230 @@
+import {OrganizationFixture} from 'sentry-fixture/organization';
+
+import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+
+import {PreprodBuildsDisplay} from 'sentry/components/preprod/preprodBuildsDisplay';
+import {PreprodBuildsTable} from 'sentry/components/preprod/preprodBuildsTable';
+import {BuildDetailsState} from 'sentry/views/preprod/types/buildDetailsTypes';
+import type {Platform} from 'sentry/views/preprod/types/sharedTypes';
+import {getInstallBuildPath} from 'sentry/views/preprod/utils/buildLinkUtils';
+
+const organization = OrganizationFixture();
+
+const baseBuild = {
+  id: 'build-1',
+  project_id: 1,
+  project_slug: 'project-1',
+  state: BuildDetailsState.UPLOADED,
+  app_info: {
+    app_id: 'com.example.app',
+    name: 'Example App',
+    platform: 'apple' as Platform,
+    build_number: '1',
+    version: '1.0.0',
+    date_added: '2024-01-01T00:00:00Z',
+  },
+  distribution_info: {
+    is_installable: true,
+    download_count: 1234,
+    release_notes: null,
+    install_groups: null,
+  },
+  vcs_info: {
+    head_sha: 'abcdef1',
+  },
+};
+
+describe('PreprodBuildsTable', () => {
+  it('renders size columns by default', () => {
+    render(
+      <PreprodBuildsTable
+        builds={[baseBuild]}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('Install Size')).toBeInTheDocument();
+    expect(screen.getByText('Download Size')).toBeInTheDocument();
+    expect(screen.queryByText('Download Count')).not.toBeInTheDocument();
+  });
+
+  it('renders distribution columns and keeps non-installable rows visible but not linked', () => {
+    const nonInstallableBuild = {
+      ...baseBuild,
+      id: 'build-2',
+      app_info: {
+        ...baseBuild.app_info,
+        name: 'Non Installable App',
+      },
+      distribution_info: {
+        ...baseBuild.distribution_info,
+        is_installable: false,
+        download_count: 99,
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[baseBuild, nonInstallableBuild]}
+        display={PreprodBuildsDisplay.DISTRIBUTION}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('Download Count')).toBeInTheDocument();
+    expect(screen.queryByText('Download Size')).not.toBeInTheDocument();
+    expect(screen.getByText('1,234')).toBeInTheDocument();
+    expect(screen.getByText('Non Installable App')).toBeInTheDocument();
+
+    const rowLink = screen.getByRole('link', {name: /Example App/});
+    expect(rowLink).toHaveAttribute(
+      'href',
+      getInstallBuildPath({
+        organizationSlug: organization.slug,
+        baseArtifactId: 'build-1',
+      })
+    );
+    expect(
+      screen.queryByRole('link', {name: /Non Installable App/})
+    ).not.toBeInTheDocument();
+  });
+
+  it('renders install groups in distribution rows', () => {
+    const buildWithOneGroup = {
+      ...baseBuild,
+      distribution_info: {
+        ...baseBuild.distribution_info,
+        install_groups: ['internal'],
+      },
+    };
+    const buildWithThreeGroups = {
+      ...baseBuild,
+      id: 'build-2',
+      distribution_info: {
+        ...baseBuild.distribution_info,
+        install_groups: ['qa', 'beta', 'release-candidate'],
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[buildWithOneGroup, buildWithThreeGroups]}
+        display={PreprodBuildsDisplay.DISTRIBUTION}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('internal')).toBeInTheDocument();
+    expect(screen.getByText('qa')).toBeInTheDocument();
+    expect(screen.getByText('beta')).toBeInTheDocument();
+    expect(screen.getByText('release-candidate')).toBeInTheDocument();
+    expect(screen.queryByLabelText(/more install groups/)).not.toBeInTheDocument();
+  });
+
+  it('collapses install groups beyond the visible limit', async () => {
+    const buildWithManyGroups = {
+      ...baseBuild,
+      distribution_info: {
+        ...baseBuild.distribution_info,
+        install_groups: ['internal', 'qa', 'beta', 'design-review', 'release-candidate'],
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[buildWithManyGroups]}
+        display={PreprodBuildsDisplay.DISTRIBUTION}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('internal')).toBeInTheDocument();
+    expect(screen.getByText('qa')).toBeInTheDocument();
+    expect(screen.getByText('beta')).toBeInTheDocument();
+    expect(screen.queryByText('design-review')).not.toBeInTheDocument();
+    expect(screen.queryByText('release-candidate')).not.toBeInTheDocument();
+
+    const overflow = screen.getByLabelText('2 more install groups');
+    expect(overflow).toHaveTextContent('+2');
+
+    await userEvent.hover(overflow);
+    expect(
+      await screen.findByText('design-review, release-candidate')
+    ).toBeInTheDocument();
+  });
+
+  it('does not render install groups in the size view', () => {
+    const buildWithGroup = {
+      ...baseBuild,
+      distribution_info: {
+        ...baseBuild.distribution_info,
+        install_groups: ['internal'],
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[buildWithGroup]}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.queryByText('internal')).not.toBeInTheDocument();
+  });
+
+  it('prefers build_number_raw over the synthesized build_number', () => {
+    const buildWithRawNumber = {
+      ...baseBuild,
+      app_info: {
+        ...baseBuild.app_info,
+        build_number: '1000002000003',
+        build_number_raw: '1.2.3',
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[buildWithRawNumber]}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('(1.2.3)')).toBeInTheDocument();
+    expect(screen.queryByText('(1000002000003)')).not.toBeInTheDocument();
+  });
+
+  it('falls back to build_number when build_number_raw is an empty string', () => {
+    const buildWithEmptyRawNumber = {
+      ...baseBuild,
+      app_info: {
+        ...baseBuild.app_info,
+        build_number: '456',
+        build_number_raw: '',
+      },
+    };
+
+    render(
+      <PreprodBuildsTable
+        builds={[buildWithEmptyRawNumber]}
+        isLoading={false}
+        organizationSlug={organization.slug}
+      />,
+      {organization}
+    );
+
+    expect(screen.getByText('(456)')).toBeInTheDocument();
+    expect(screen.queryByText('()')).not.toBeInTheDocument();
+  });
+});

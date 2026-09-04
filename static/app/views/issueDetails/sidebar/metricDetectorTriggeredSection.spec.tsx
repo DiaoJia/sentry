@@ -1,0 +1,933 @@
+import type {ComponentProps} from 'react';
+import {SnubaQueryDataSourceFixture} from 'sentry-fixture/detectors';
+import {EventFixture} from 'sentry-fixture/event';
+import {GroupFixture} from 'sentry-fixture/group';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+
+import {act, render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
+
+import {ConfigStore} from 'sentry/stores/configStore';
+import {IssueCategory, IssueType} from 'sentry/types/group';
+import {
+  DataConditionType,
+  DetectorPriorityLevel,
+} from 'sentry/types/workflowEngine/dataConditions';
+import type {MetricCondition} from 'sentry/types/workflowEngine/detectors';
+import {Dataset, EventTypes} from 'sentry/views/alerts/rules/metric/types';
+import {
+  MetricDetectorTriggeredSection,
+  MetricIssueSeerInvestigationSection,
+} from 'sentry/views/issueDetails/sidebar/metricDetectorTriggeredSection';
+
+describe('MetricDetectorTriggeredSection', () => {
+  const condition: MetricCondition = {
+    id: 'cond-1',
+    type: DataConditionType.GREATER,
+    comparison: 100,
+    conditionResult: true,
+  };
+  const dataSource = SnubaQueryDataSourceFixture();
+  const openPeriodStartDate = '2024-01-01T00:00:00Z';
+  const openPeriodEndDate = '2024-01-01T00:05:00.000Z';
+  const defaultGroup = GroupFixture({
+    issueType: IssueType.METRIC_ISSUE,
+    issueCategory: IssueCategory.METRIC,
+  });
+  const defaultEvent = EventFixture({
+    id: 'event-1',
+    eventID: 'event-1',
+    occurrence: {
+      id: '1',
+      eventId: 'event-1',
+      fingerprint: ['fingerprint'],
+      issueTitle: 'Test Issue',
+      subtitle: 'Subtitle',
+      resourceId: 'resource-1',
+      evidenceData: {
+        conditions: [condition],
+        dataSources: [dataSource],
+        value: 150,
+      },
+      evidenceDisplay: [],
+      type: 8001,
+      detectionTime: '2024-01-01T00:00:00Z',
+    },
+  });
+  const defaultProps: ComponentProps<typeof MetricDetectorTriggeredSection> = {
+    group: defaultGroup,
+    event: defaultEvent,
+  };
+
+  beforeEach(() => {
+    ConfigStore.set('customerDomain', null);
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/members/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/users/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/issues/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      body: [
+        {
+          id: '101',
+          start: openPeriodStartDate,
+          end: openPeriodEndDate,
+          isOpen: false,
+          eventId: 'event-1',
+          activities: [],
+        },
+      ],
+    });
+  });
+
+  it('links to an existing investigation for the selected open period', async () => {
+    ConfigStore.set('customerDomain', {
+      subdomain: 'org-slug',
+      organizationUrl: 'https://org-slug.sentry.io',
+      sentryUrl: 'https://sentry.io',
+    });
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'view', investigationId: '4567'}]},
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/4567/',
+      body: {
+        id: '4567',
+        summary: 'Errors rose across releases',
+        summaryDescription: 'All active releases increased together.',
+        titleGeneration: {status: 'completed'},
+      },
+    });
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} />, {
+      organization,
+    });
+
+    await screen.findByRole('region', {
+      name: 'Seer Investigation',
+    });
+    expect(await screen.findByText('Errors rose across releases')).toBeInTheDocument();
+    expect(
+      screen.getByText('All active releases increased together.')
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', {name: 'View Investigation'})
+    ).toHaveAttribute('href', '/explore/investigations/4567/');
+  });
+
+  it('hides an existing investigation summary until all summary fields are ready', async () => {
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'view', investigationId: '4567'}]},
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/4567/',
+      body: {
+        id: '4567',
+        summary: 'Errors rose across releases',
+        summaryDescription: null,
+        titleGeneration: {status: 'failed'},
+      },
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByRole('button', {name: 'View Investigation'})
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('investigation-summary')).not.toBeInTheDocument();
+  });
+
+  it('keeps polling briefly while metadata generation is starting', async () => {
+    jest.useFakeTimers();
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'view', investigationId: '4567'}]},
+    });
+    const detailRequest = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/4567/',
+      body: {
+        id: '4567',
+        summary: null,
+        summaryDescription: null,
+        titleGeneration: {status: null},
+        blocks: [
+          {
+            id: 'block-1',
+            config: {autoRun: true},
+            dependencies: [],
+            outputStatus: 'completed',
+            currentExecution: {status: 'completed'},
+          },
+        ],
+      },
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByRole('button', {name: 'View Investigation'})
+    ).toBeInTheDocument();
+    act(() => jest.advanceTimersByTime(2000));
+    await waitFor(() => expect(detailRequest).toHaveBeenCalledTimes(2));
+    jest.useRealTimers();
+  });
+
+  it('keeps polling while a parallel branch is active after another branch fails', async () => {
+    jest.useFakeTimers();
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'view', investigationId: '4567'}]},
+    });
+    const detailRequest = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/4567/',
+      body: {
+        id: '4567',
+        summary: null,
+        summaryDescription: null,
+        titleGeneration: {status: null},
+        blocks: [
+          {
+            id: 'block-1',
+            config: {autoRun: true},
+            dependencies: [],
+            outputStatus: 'failed',
+            currentExecution: {status: 'failed'},
+          },
+          {
+            id: 'block-2',
+            config: {autoRun: true},
+            dependencies: [],
+            outputStatus: 'running',
+            currentExecution: {status: 'running'},
+          },
+        ],
+      },
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByRole('button', {name: 'View Investigation'})
+    ).toBeInTheDocument();
+    act(() => jest.advanceTimersByTime(2000));
+    await waitFor(() => expect(detailRequest).toHaveBeenCalledTimes(2));
+    jest.useRealTimers();
+  });
+
+  it('launches an investigation for the selected open period', async () => {
+    ConfigStore.set('customerDomain', {
+      subdomain: 'org-slug',
+      organizationUrl: 'https://org-slug.sentry.io',
+      sentryUrl: 'https://sentry.io',
+    });
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'investigate'}]},
+    });
+    const launchMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/',
+      method: 'POST',
+      body: {id: '4567'},
+    });
+
+    const {router} = render(<MetricIssueSeerInvestigationSection {...defaultProps} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByText(
+        'Launch a Seer investigation to understand what happened, identify what drove the breach, and get evidence-backed next steps.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('investigation-summary')).not.toBeInTheDocument();
+
+    await userEvent.click(
+      await screen.findByRole('button', {name: 'Launch Investigation'})
+    );
+
+    await waitFor(() => {
+      expect(launchMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          data: {
+            templateKey: 'breached_metric',
+            templateVersion: 1,
+            source: {
+              type: 'metric_open_period',
+              ref: {groupId: defaultGroup.id, openPeriodId: '101'},
+            },
+          },
+        })
+      );
+    });
+    expect(router.location.pathname).toBe('/explore/investigations/4567/');
+  });
+
+  it('uses the latest open period when the displayed event is not linked to one', async () => {
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    const event = {...defaultEvent, id: 'unlinked-event', eventID: 'unlinked-event'};
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      body: [],
+      match: [
+        MockApiClient.matchQuery({
+          groupId: defaultGroup.id,
+          eventId: 'unlinked-event',
+          per_page: 1,
+        }),
+      ],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      body: [
+        {
+          id: 'latest-period',
+          start: openPeriodStartDate,
+          end: openPeriodEndDate,
+          isOpen: false,
+          activities: [],
+        },
+      ],
+      match: [MockApiClient.matchQuery({groupId: defaultGroup.id, per_page: 1})],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'investigate'}]},
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} event={event} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByRole('button', {name: 'Launch Investigation'})
+    ).toBeInTheDocument();
+  });
+
+  it('does not fall back to an unrelated open period when the event lookup fails', async () => {
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    const event = {...defaultEvent, id: 'failed-event', eventID: 'failed-event'};
+    const latestPeriodMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      body: [],
+      match: [MockApiClient.matchQuery({groupId: defaultGroup.id, per_page: 1})],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/open-periods/',
+      statusCode: 500,
+      match: [
+        MockApiClient.matchQuery({
+          groupId: defaultGroup.id,
+          eventId: 'failed-event',
+          per_page: 1,
+        }),
+      ],
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} event={event} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByText('Unable to load investigation information.')
+    ).toBeInTheDocument();
+    expect(latestPeriodMock).not.toHaveBeenCalled();
+  });
+
+  it('renders nothing when event has no occurrence', () => {
+    const event = EventFixture({
+      occurrence: null,
+    });
+
+    const {container} = render(
+      <MetricDetectorTriggeredSection {...defaultProps} event={event} />
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders the investigation entrypoint when a metric event has no occurrence', async () => {
+    const organization = OrganizationFixture({
+      slug: 'org-slug',
+      features: ['investigations'],
+    });
+    const event = EventFixture({occurrence: null});
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/investigations/candidates/',
+      method: 'POST',
+      body: {items: [{status: 'investigate'}]},
+    });
+
+    render(<MetricIssueSeerInvestigationSection {...defaultProps} event={event} />, {
+      organization,
+    });
+
+    expect(
+      await screen.findByRole('region', {name: 'Seer Investigation'})
+    ).toBeInTheDocument();
+  });
+
+  it('renders only message when conditions are missing but subtitle exists', () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [],
+          dataSources: [dataSource],
+          value: 150,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    expect(screen.getByRole('region', {name: 'Message'})).toBeInTheDocument();
+    expect(screen.getByText('Subtitle')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', {name: 'Triggered Condition'})
+    ).not.toBeInTheDocument();
+  });
+
+  it('renders nothing when evidenceData is missing', () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: '',
+        resourceId: 'resource-1',
+        evidenceData: {},
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    const {container} = render(
+      <MetricDetectorTriggeredSection {...defaultProps} event={event} />
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders metric detector details with static condition', async () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSource],
+          value: 150,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    // Check sections exist by aria-label
+    expect(await screen.findByRole('region', {name: 'Message'})).toBeInTheDocument();
+    expect(screen.getByRole('region', {name: 'Triggered Condition'})).toBeInTheDocument();
+    expect(screen.getByRole('region', {name: 'Timeline'})).toBeInTheDocument();
+
+    // Check message content
+    expect(screen.getByText('Subtitle')).toBeInTheDocument();
+
+    // Check key-value pairs
+    expect(screen.getByRole('cell', {name: 'Dataset'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Errors'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Aggregate'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'count()'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Query'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'is:unresolved'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Interval'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: '1 minute'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Above 100'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Evaluated Value'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: '150'})).toBeInTheDocument();
+  });
+
+  it('renders evaluated value correctly when value is an object (anomaly detector)', async () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSource],
+          value: {value: 250},
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    expect(
+      await screen.findByRole('region', {name: 'Triggered Condition'})
+    ).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'Evaluated Value'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: '250'})).toBeInTheDocument();
+  });
+
+  it('omits the evaluated value when the value is null', async () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSource],
+          value: null,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    expect(
+      await screen.findByRole('region', {name: 'Triggered Condition'})
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('cell', {name: 'Evaluated Value'})).not.toBeInTheDocument();
+  });
+
+  it('omits the evaluated value when the anomaly detector value is null', async () => {
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSource],
+          value: {value: null},
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    expect(
+      await screen.findByRole('region', {name: 'Triggered Condition'})
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('cell', {name: 'Evaluated Value'})).not.toBeInTheDocument();
+  });
+
+  it('renders contributing issues section for errors dataset', async () => {
+    // Start date is eventDateCreated minus the timeWindow (60 seconds) minus 1 extra minute
+    const startDate = '2023-12-31T23:58:00.000Z';
+
+    const contributingIssuesMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/issues/',
+      body: [GroupFixture()],
+    });
+    const event = EventFixture({
+      dateCreated: openPeriodStartDate,
+      eventID: 'event-1',
+      groupID: '123',
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSource],
+          value: 150,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('region', {name: 'Contributing Issues'})
+      ).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(contributingIssuesMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          query: expect.objectContaining({
+            query: 'issue.type:error event.type:error is:unresolved',
+            start: startDate,
+            end: openPeriodEndDate,
+          }),
+        })
+      );
+    });
+
+    await screen.findByRole('link', {name: 'RequestError'});
+  });
+
+  it('filters contributing issues by environment when set on detector', async () => {
+    const startDate = '2023-12-31T23:58:00.000Z';
+
+    const dataSourceWithEnv = SnubaQueryDataSourceFixture({
+      queryObj: {
+        id: '1',
+        status: 1,
+        subscription: '1',
+        snubaQuery: {
+          aggregate: 'count()',
+          dataset: Dataset.ERRORS,
+          id: '',
+          query: 'is:unresolved',
+          timeWindow: 60,
+          eventTypes: [EventTypes.ERROR],
+          environment: 'production',
+        },
+      },
+    });
+
+    const contributingIssuesMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/issues/',
+      body: [GroupFixture()],
+    });
+
+    const event = EventFixture({
+      dateCreated: openPeriodStartDate,
+      eventID: 'event-1',
+      groupID: '123',
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSourceWithEnv],
+          value: 150,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    await waitFor(() => {
+      expect(contributingIssuesMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          query: expect.objectContaining({
+            query: 'issue.type:error event.type:error is:unresolved',
+            start: startDate,
+            end: openPeriodEndDate,
+            environment: 'production',
+          }),
+        })
+      );
+    });
+
+    expect(screen.getByRole('cell', {name: 'Environment'})).toBeInTheDocument();
+    expect(screen.getByRole('cell', {name: 'production'})).toBeInTheDocument();
+  });
+
+  it('renders contributing issues section for crash free rate (releases) dataset', async () => {
+    const startDate = '2023-12-31T23:58:00.000Z';
+
+    const contributingIssuesMock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/issues/',
+      body: [GroupFixture()],
+    });
+    const crashFreeDataSource = SnubaQueryDataSourceFixture({
+      queryObj: {
+        id: '1',
+        status: 1,
+        subscription: '1',
+        snubaQuery: {
+          aggregate:
+            'percentage(sessions_crashed, sessions) AS _crash_rate_alert_aggregate',
+          dataset: Dataset.SESSIONS,
+          id: '',
+          query: '',
+          timeWindow: 60,
+          eventTypes: [],
+        },
+      },
+    });
+
+    const event = EventFixture({
+      dateCreated: openPeriodStartDate,
+      eventID: 'event-1',
+      groupID: '123',
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [crashFreeDataSource],
+          value: 0.95,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('region', {name: 'Contributing Issues'})
+      ).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(contributingIssuesMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          query: expect.objectContaining({
+            query: 'issue.type:error ',
+            start: startDate,
+            end: openPeriodEndDate,
+          }),
+        })
+      );
+    });
+  });
+
+  it('selects the condition with the highest conditionResult', async () => {
+    const lowCondition: MetricCondition = {
+      id: 'cond-low',
+      type: DataConditionType.GREATER,
+      comparison: 50,
+      conditionResult: DetectorPriorityLevel.LOW,
+    };
+    const highCondition: MetricCondition = {
+      id: 'cond-high',
+      type: DataConditionType.GREATER,
+      comparison: 200,
+      conditionResult: DetectorPriorityLevel.HIGH,
+    };
+
+    const event = EventFixture({
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [lowCondition, highCondition],
+          dataSources: [dataSource],
+          value: 250,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    // Should show the HIGH condition (Above 200), not LOW (Above 50)
+    expect(await screen.findByRole('cell', {name: 'Above 200'})).toBeInTheDocument();
+    expect(screen.queryByRole('cell', {name: 'Above 50'})).not.toBeInTheDocument();
+  });
+
+  it('renders boolean logic error when query contains OR', async () => {
+    const dataSourceWithOr = SnubaQueryDataSourceFixture({
+      queryObj: {
+        id: '1',
+        status: 1,
+        subscription: '1',
+        snubaQuery: {
+          aggregate: 'count()',
+          dataset: Dataset.ERRORS,
+          id: '',
+          query: 'browser.name:Chrome OR browser.name:Firefox',
+          timeWindow: 60,
+          eventTypes: [EventTypes.ERROR],
+        },
+      },
+    });
+
+    const event = EventFixture({
+      dateCreated: '2024-01-01T00:00:00Z',
+      occurrence: {
+        id: '1',
+        eventId: 'event-1',
+        fingerprint: ['fingerprint'],
+        issueTitle: 'Test Issue',
+        subtitle: 'Subtitle',
+        resourceId: 'resource-1',
+        evidenceData: {
+          conditions: [condition],
+          dataSources: [dataSourceWithOr],
+          value: 150,
+        },
+        evidenceDisplay: [],
+        type: 8001,
+        detectionTime: '2024-01-01T00:00:00Z',
+      },
+    });
+
+    render(<MetricDetectorTriggeredSection {...defaultProps} event={event} />);
+
+    // Check that the boolean logic error alert is shown
+    expect(
+      await screen.findByText('Contributing issues unavailable for this detector.')
+    ).toBeInTheDocument();
+
+    // The View All button should not be present when there's boolean logic
+    expect(screen.queryByRole('button', {name: 'View All'})).not.toBeInTheDocument();
+
+    // The Open in Discover button should be present
+    expect(screen.getByRole('button', {name: 'Open in Discover'})).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Open in Discover'})).toHaveAttribute(
+      'href',
+      '/organizations/org-slug/explore/discover/results/?dataset=errors&end=2024-01-01T00%3A05%3A00.000&field=issue&field=count%28%29&field=count_unique%28user%29&interval=1m&name=Transactions&project=1&query=event.type%3Aerror%20browser.name%3AChrome%20OR%20browser.name%3AFirefox&sort=-count&start=2023-12-31T23%3A58%3A00.000&yAxis=count%28%29'
+    );
+  });
+
+  describe('zoom to open period', () => {
+    it('applies detector zoom range when URL has no time period', async () => {
+      const {router} = render(<MetricDetectorTriggeredSection {...defaultProps} />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/org-slug/issues/${defaultGroup.id}/`,
+            query: {},
+          },
+          routes: [
+            '/organizations/:orgId/issues/:groupId/',
+            '/organizations/:orgId/issues/:groupId/events/:eventId/',
+          ],
+        },
+      });
+
+      await screen.findByRole('region', {name: 'Triggered Condition'});
+
+      await waitFor(() => {
+        expect(router.location.pathname).toMatch(
+          `/organizations/org-slug/issues/${defaultGroup.id}/events/${defaultEvent.id}/`
+        );
+      });
+      expect(router.location.query.statsPeriod).toBeDefined();
+    });
+
+    it('does not apply detector zoom range when URL already has a time period', async () => {
+      const {router} = render(<MetricDetectorTriggeredSection {...defaultProps} />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/org-slug/issues/${defaultGroup.id}/`,
+            query: {statsPeriod: '24h'},
+          },
+          routes: [
+            '/organizations/:orgId/issues/:groupId/',
+            '/organizations/:orgId/issues/:groupId/events/:eventId/',
+          ],
+        },
+      });
+
+      await screen.findByRole('region', {name: 'Triggered Condition'});
+
+      expect(router.location.pathname).toMatch(
+        `/organizations/org-slug/issues/${defaultGroup.id}/`
+      );
+      expect(router.location.query.statsPeriod).toBe('24h');
+      expect(router.location.query.start).toBeUndefined();
+      expect(router.location.query.end).toBeUndefined();
+    });
+  });
+});

@@ -1,9 +1,8 @@
-from collections.abc import Mapping, MutableMapping
+from collections.abc import MutableMapping
 from typing import Any, TypedDict
 
 from django.db import IntegrityError
 from django.http import Http404
-from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
@@ -19,7 +18,7 @@ from sentry.integrations.api.parsers.external_actor import (
 )
 from sentry.integrations.api.parsers.integrations import validate_provider
 from sentry.integrations.models.external_actor import ExternalActor
-from sentry.integrations.types import ExternalProviders
+from sentry.integrations.types import ExternalActorSource, ExternalProviders
 from sentry.integrations.utils.providers import get_provider_choices
 from sentry.models.organization import Organization
 from sentry.models.team import Team
@@ -32,13 +31,22 @@ AVAILABLE_PROVIDERS = {
     ExternalProviders.GITHUB_ENTERPRISE,
     ExternalProviders.GITLAB,
     ExternalProviders.SLACK,
+    ExternalProviders.SLACK_STAGING,
     ExternalProviders.MSTEAMS,
     ExternalProviders.JIRA_SERVER,
+    ExternalProviders.PERFORCE,
     ExternalProviders.CUSTOM,
 }
 
 STRICT_NAME_PROVIDERS = {
     ExternalProviders.GITHUB,
+    ExternalProviders.GITHUB_ENTERPRISE,
+    ExternalProviders.GITLAB,
+}
+
+CASE_INSENSITIVE_PROVIDERS = {
+    ExternalProviders.GITHUB,
+    ExternalProviders.GITHUB_ENTERPRISE,
     ExternalProviders.GITLAB,
 }
 
@@ -86,7 +94,7 @@ class ExternalActorSerializerBase(CamelSnakeModelSerializer):
         provider = validate_provider(provider_name_option, available_providers=AVAILABLE_PROVIDERS)
         return int(provider.value)
 
-    def get_actor_params(self, validated_data: MutableMapping[str, Any]) -> Mapping[str, int]:
+    def get_actor_params(self, validated_data: MutableMapping[str, Any]) -> dict[str, Any]:
         actor_model = validated_data.pop(self._actor_key)
         if isinstance(actor_model, Team):
             return dict(team_id=actor_model.id)
@@ -95,6 +103,18 @@ class ExternalActorSerializerBase(CamelSnakeModelSerializer):
 
     def create(self, validated_data: MutableMapping[str, Any]) -> tuple[ExternalActor, bool]:
         actor_params = self.get_actor_params(validated_data)
+        actor_params["source"] = ExternalActorSource.MANUAL.value
+
+        if validated_data["provider"] in CASE_INSENSITIVE_PROVIDERS:
+            external_name = validated_data.pop("external_name")
+
+            return ExternalActor.objects.get_or_create(
+                external_name__iexact=external_name,
+                **validated_data,
+                organization=self.organization,
+                defaults={**actor_params, "external_name": external_name},
+            )
+
         return ExternalActor.objects.get_or_create(
             **validated_data,
             organization=self.organization,
@@ -157,11 +177,13 @@ class ExternalUserSerializer(ExternalActorSerializerBase):
         fields = ["user_id", "external_id", "external_name", "provider", "integration_id", "id"]
 
 
-@extend_schema_serializer(exclude_fields=["team_id"])
 class ExternalTeamSerializer(ExternalActorSerializerBase):
     _actor_key = "team_id"
 
-    team_id = serializers.IntegerField(required=True)
+    team_id = serializers.IntegerField(
+        required=True,
+        help_text="ID of the Sentry team to link to the external team.",
+    )
 
     def validate_team_id(self, team_id: int) -> Team:
         """Ensure that this team exists and that they belong to the organization."""

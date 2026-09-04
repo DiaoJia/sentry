@@ -1,43 +1,60 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
+import {TeamFixture} from 'sentry-fixture/team';
 
 import {canCreateProject} from './canCreateProject';
 
-describe('ProjectCreationAccess', function () {
+describe('ProjectCreationAccess', () => {
   const organization = OrganizationFixture();
 
-  it('passes project creation eligibility for org-manager', function () {
+  it('passes project creation eligibility for org-manager', () => {
     const result = canCreateProject(organization);
     expect(result).toBeTruthy();
   });
 
-  it('passes for members if org has team-roles', function () {
-    const experiment_org = OrganizationFixture({
+  it('passes for members when allowMemberProjectCreation is enabled', () => {
+    const memberOrg = OrganizationFixture({
       access: ['org:read', 'team:read', 'project:read'],
-      features: ['team-roles'],
       allowMemberProjectCreation: true,
     });
 
-    const result = canCreateProject(experiment_org);
+    const result = canCreateProject(memberOrg);
     expect(result).toBeTruthy();
   });
 
-  it('fails for members if org has team-roles but disabled allowMemberProjectCreation', function () {
-    const experiment_org = OrganizationFixture({
+  it('passes for members without team-roles when allowMemberProjectCreation is enabled', () => {
+    const memberOrg = OrganizationFixture({
       access: ['org:read', 'team:read', 'project:read'],
-      features: ['team-roles'],
+      features: [],
+      allowMemberProjectCreation: true,
+    });
+
+    const result = canCreateProject(memberOrg);
+    expect(result).toBeTruthy();
+  });
+
+  it('fails for members when allowMemberProjectCreation is disabled', () => {
+    const memberOrg = OrganizationFixture({
+      access: ['org:read', 'team:read', 'project:read'],
       allowMemberProjectCreation: false,
     });
 
-    const result = canCreateProject(experiment_org);
+    const result = canCreateProject(memberOrg);
     expect(result).toBeFalsy();
   });
 
-  it('fails for members if org does not have team-roles', function () {
-    const no_team_role_org = OrganizationFixture({
+  it('passes for team admins when allowMemberProjectCreation is disabled', () => {
+    const memberOrg = OrganizationFixture({
       access: ['org:read', 'team:read', 'project:read'],
+      allowMemberProjectCreation: false,
     });
+    const teams = [
+      TeamFixture({
+        teamRole: 'admin',
+        access: ['team:admin', 'team:write', 'team:read'],
+      }),
+    ];
 
-    const result = canCreateProject(no_team_role_org);
-    expect(result).toBeFalsy();
+    const result = canCreateProject(memberOrg, teams);
+    expect(result).toBeTruthy();
   });
 });

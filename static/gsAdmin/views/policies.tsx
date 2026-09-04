@@ -1,16 +1,14 @@
 import moment from 'moment-timezone';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import Link from 'sentry/components/links/link';
-import ConfigStore from 'sentry/stores/configStore';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {Button} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
 
-import PageHeader from 'admin/components/pageHeader';
-import AddPolicyModal from 'admin/components/policies/addPolicyModal';
-import ResultGrid from 'admin/components/resultGrid';
+import {ConfigStore} from 'sentry/stores/configStore';
 
-type Props = RouteComponentProps<unknown, unknown>;
+import {PageHeader} from 'admin/components/pageHeader';
+import {AddPolicyModal} from 'admin/components/policies/addPolicyModal';
+import {ResultGrid} from 'admin/components/resultGrid';
 
 const getRow = (row: any) => [
   <td key="policy">
@@ -26,7 +24,9 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function Policies(props: Props) {
+export function Policies() {
+  const {openModal} = useModal();
+
   const hasPermission = ConfigStore.get('user').permissions.has('policies.admin');
 
   return (
@@ -36,9 +36,11 @@ function Policies(props: Props) {
           onClick={() => openModal(deps => <AddPolicyModal {...deps} />)}
           size="sm"
           disabled={!hasPermission}
-          title={
-            hasPermission ? undefined : "You don't have the policies.admin permission"
-          }
+          tooltipProps={{
+            title: hasPermission
+              ? undefined
+              : "You don't have the policies.admin permission",
+          }}
         >
           Add Policy
         </Button>
@@ -59,10 +61,7 @@ function Policies(props: Props) {
           </th>,
         ]}
         columnsForRow={getRow}
-        {...props}
       />
     </div>
   );
 }
-
-export default Policies;

@@ -3,10 +3,84 @@ import {Fragment} from 'react';
 import type {Organization} from 'sentry/types/organization';
 import {descopeFeatureName} from 'sentry/utils';
 
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
+import {UNLIMITED_RESERVED} from 'getsentry/constants';
 import {useBillingConfig} from 'getsentry/hooks/useBillingConfig';
 import type {Plan, Subscription} from 'getsentry/types';
-import {isBizPlanFamily, isDeveloperPlan} from 'getsentry/utils/billing';
+import {
+  isBizPlanFamily,
+  isDeveloperPlan,
+  isTeamPlanFamily,
+} from 'getsentry/utils/billing';
+
+/**
+ * Plan tiers ordered from least to most capable. A plan satisfies a feature's
+ * requirement when its own rank is at or above the feature's minimum.
+ */
+const ORDERED_PLAN_TYPES = ['team', 'business', 'enterprise'] as const;
+
+type PlanType = (typeof ORDERED_PLAN_TYPES)[number];
+
+/**
+ * The lowest plan tier that includes each upsellable feature.
+ *
+ * Feature *gating* is owned by Flagpole; this map exists only to answer "which
+ * plan must a customer buy to get this?" so an upsell can name a plan. Keys are
+ * descoped feature names, so both `organizations:foo` and `foo` resolve here.
+ *
+ * A feature absent from this map has no upgrade target and its upsell renders
+ * without a plan name, so add an entry when wiring up a new `feature-disabled:*`
+ * override.
+ */
+const UPSELL_MINIMUM_PLAN_TYPE: Record<string, PlanType> = {
+  'custom-inbound-filters': 'business',
+  'custom-symbol-sources': 'business',
+  'data-forwarding': 'business',
+  'discard-groups': 'business',
+  'discover-basic': 'team',
+  'discover-query': 'team',
+  'extended-data-retention': 'team',
+  incidents: 'team',
+  'integrations-scm-multi-org': 'business',
+  'integrations-ticket-rules': 'business',
+  'issue-views': 'team',
+  'performance-view': 'team',
+  'rate-limits': 'business',
+  'spend-allocations': 'enterprise',
+  'sso-basic': 'team',
+  'sso-saml2': 'business',
+  'team-roles': 'business',
+};
+
+function planType(plan: Plan): PlanType | null {
+  if (plan.isEnterprise) {
+    return 'enterprise';
+  }
+  if (isBizPlanFamily(plan)) {
+    return 'business';
+  }
+  if (isTeamPlanFamily(plan)) {
+    return 'team';
+  }
+  return null;
+}
+
+/**
+ * Whether `plan` is capable enough for every requested feature.
+ */
+function planSatisfies(plan: Plan, requestedFeatures: string[]) {
+  const type = planType(plan);
+  if (type === null) {
+    return false;
+  }
+
+  const rank = ORDERED_PLAN_TYPES.indexOf(type);
+
+  return requestedFeatures.map(descopeFeatureName).every(feature => {
+    const required = UPSELL_MINIMUM_PLAN_TYPE[feature];
+    return required !== undefined && rank >= ORDERED_PLAN_TYPES.indexOf(required);
+  });
+}
 
 type RenderProps = {
   /**
@@ -17,11 +91,6 @@ type RenderProps = {
    * user-selectable or if the users current plan is on a special tier.
    */
   plan: Plan | null;
-  /**
-   * If the feature requires changing plan tiers, this will report the required
-   * plan tier that is DIFFERENT from the users current subscription tier.
-   */
-  tierChange: string | null;
 };
 
 type Props = {
@@ -36,19 +105,15 @@ type Props = {
  * particular set of features.
  */
 function PlanFeature({subscription, features, organization, children}: Props) {
-  const {data: billingConfig} = useBillingConfig({organization, subscription});
+  const {data: billingConfig} = useBillingConfig({organization});
 
   if (!billingConfig) {
     return null;
   }
 
-  const {billingInterval, contractInterval} = subscription;
+  const {billingInterval} = subscription;
 
   const billingIntervalFilter = (p: Plan) => p.billingInterval === billingInterval;
-
-  // Plans may not have a contract interval.
-  const contractIntervalFilter = (p: Plan) =>
-    contractInterval === undefined || p.contractInterval === contractInterval;
 
   let plans = billingConfig.planList
     .filter(
@@ -58,26 +123,13 @@ function PlanFeature({subscription, features, organization, children}: Props) {
         // Only recommend business plans if the subscription is sponsored
         (subscription.isSponsored ? isBizPlanFamily(p) : true)
     )
-    .sort((a, b) => a.price - b.price);
+    .sort((a, b) => a.totalPrice - b.totalPrice);
 
   // We try and keep the list of plans as close to the user current plan
-  // configuration as we can, however some older plans (mm2) have
-  // configurations not present in newer billing plans.
-  //
-  // As an example, am1 does NOT have plans where the contract interval is
-  // different from the billing interval.
-  //
-  // Because of this we incrementally loosen the filters when we produce an
-  // empty set of plans.
+  // configuration as we can by matching on the billing interval, but fall
+  // back to the full list when that produces an empty set.
   function matchPlanConfiguration() {
-    let filtered: Plan[] = [];
-
-    filtered = plans.filter(billingIntervalFilter).filter(contractIntervalFilter);
-    if (filtered.length > 0) {
-      return filtered;
-    }
-
-    filtered = plans.filter(billingIntervalFilter);
+    const filtered = plans.filter(billingIntervalFilter);
     if (filtered.length > 0) {
       return filtered;
     }
@@ -87,15 +139,13 @@ function PlanFeature({subscription, features, organization, children}: Props) {
 
   plans = matchPlanConfiguration();
 
-  // XXX: Enterprise plans are *not* user selectable, but should be included
-  // in the list of plans. Unfortunately we don't distinguish between Trial /
-  // Friends & Family / Enterprise, so we hardcode the name here.
-  //
-  // XXX(epurkhiser): We don't really have enterprise plans anymore, so maybe
-  // we no longer need this.
+  // Enterprise plans are *not* user selectable, so they're excluded from the
+  // list above, but some features are only offered on them (e.g.
+  // spend-allocations). Include them so those features can still resolve to an
+  // upgrade target.
   const enterprisePlans = billingConfig.planList
     .filter(billingIntervalFilter)
-    .filter(p => p.id.includes('ent'));
+    .filter(p => p.isEnterprise);
 
   plans.push(...enterprisePlans);
 
@@ -106,16 +156,15 @@ function PlanFeature({subscription, features, organization, children}: Props) {
   }
 
   // Locate the first plan that offers these features
-  const requiredPlan = plans.find(plan =>
-    features.map(descopeFeatureName).every(f => plan.features.includes(f))
-  );
+  let requiredPlan = plans.find(plan => planSatisfies(plan, features));
 
-  const tierChange =
-    requiredPlan !== undefined && subscription.planTier !== billingConfig.id
-      ? billingConfig.id
-      : null;
+  if (!requiredPlan && features.some(f => descopeFeatureName(f) === 'dashboards-edit')) {
+    // XXX(isabella): This is a temporary fix to allow upsells using dashboards-edit
+    // to work as expected before the feature was migrated to flagpole (to represent unlimited dashboards)
+    requiredPlan = plans.find(plan => plan.dashboardLimit === UNLIMITED_RESERVED);
+  }
 
-  return <Fragment>{children({plan: requiredPlan ?? null, tierChange})}</Fragment>;
+  return <Fragment>{children({plan: requiredPlan ?? null})}</Fragment>;
 }
 
 export default withSubscription(PlanFeature, {noLoader: true});

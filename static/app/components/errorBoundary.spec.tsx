@@ -1,6 +1,6 @@
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ErrorBoundary from './errorBoundary';
+import {ErrorBoundary} from './errorBoundary';
 
 describe('ErrorBoundary', () => {
   it('renders components', () => {
@@ -21,6 +21,23 @@ describe('ErrorBoundary', () => {
       <ErrorBoundary>
         <HelloComponent />
         <ErrorComponent />
+      </ErrorBoundary>
+    );
+
+    expect(screen.queryByText('hello')).not.toBeInTheDocument();
+    expect(screen.getByTestId('error-boundary')).toBeInTheDocument();
+    expect(screen.getByText(/I really did it/)).toBeInTheDocument();
+
+    errorSpy.mockRestore();
+  });
+
+  it('catches string errors', () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(
+      <ErrorBoundary>
+        <HelloComponent />
+        <StringErrorComponent />
       </ErrorBoundary>
     );
 
@@ -86,6 +103,11 @@ function HelloComponent() {
 
 function ErrorComponent(): React.ReactNode {
   throw new Error('I really did it this time');
+}
+
+function StringErrorComponent(): React.ReactNode {
+  // eslint-disable-next-line @typescript-eslint/only-throw-error
+  throw 'I really did it this time';
 }
 
 function ErrorMessage({error}: {error: Error | null}) {

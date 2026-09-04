@@ -4,6 +4,7 @@ import logging
 
 from django import forms
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.http import HttpRequest, HttpResponseRedirect
 from django.http.response import HttpResponse, HttpResponseBadRequest, HttpResponseBase
 from django.urls import reverse
@@ -12,8 +13,10 @@ from django.utils.translation import gettext_lazy as _
 from sentry import audit_log, features, roles
 from sentry.auth import manager
 from sentry.auth.helper import AuthHelper
+from sentry.auth.providers.saml2.generic.provider import GenericSAML2Provider
 from sentry.auth.services.auth import RpcAuthProvider, auth_service
 from sentry.auth.store import FLOW_SETUP_PROVIDER
+from sentry.auth.superuser import is_active_superuser
 from sentry.models.authprovider import AuthProvider
 from sentry.models.organization import Organization
 from sentry.organizations.services.organization import RpcOrganization, organization_service
@@ -34,6 +37,19 @@ logger = logging.getLogger("sentry.saml_setup_error")
 
 
 def auth_provider_settings_form(provider, auth_provider, organization, request):
+    # Determine the default role choices the current user is allowed to assign
+    if is_active_superuser(request):
+        role_choices = roles.get_choices()
+    else:
+        org_member = organization_service.check_membership_by_id(
+            organization_id=organization.id, user_id=request.user.id
+        )
+        if org_member is None:
+            raise PermissionDenied("User is not a member of the organization")
+
+        member_role = roles.get(org_member.role)
+        role_choices = [(r.id, r.name) for r in roles.get_all() if member_role.can_manage(r)]
+
     class AuthProviderSettingsForm(forms.Form):
         disabled = provider.is_partner
         require_link = forms.BooleanField(
@@ -58,15 +74,16 @@ def auth_provider_settings_form(provider, auth_provider, organization, request):
 
         default_role = forms.ChoiceField(
             label=_("Default Role"),
-            choices=roles.get_choices(),
+            choices=role_choices,
             help_text=_(
                 "The default role new members will receive when logging in for the first time."
             ),
             disabled=disabled,
         )
 
-        if provider.is_saml and provider.name != "SAML2":
-            # Generic SAML2 provider already includes the certificate field in it's own configure view
+        # Generic SAML2 providers (including Active Directory / Azure Entra and
+        # Jumpcloud) already render the certificate in their configure view.
+        if provider.is_saml and not isinstance(provider, GenericSAML2Provider):
             x509cert = forms.CharField(
                 label="x509 public certificate",
                 widget=forms.Textarea,
@@ -82,7 +99,7 @@ def auth_provider_settings_form(provider, auth_provider, organization, request):
     if provider.can_use_scim(organization.id, request.user):
         initial["enable_scim"] = bool(auth_provider.flags.scim_enabled)
 
-    if provider.is_saml:
+    if provider.is_saml and not isinstance(provider, GenericSAML2Provider):
         initial_idp = auth_provider.config.get("idp", {})
         certificate = initial_idp.get("x509cert", "")
         initial["x509cert"] = certificate
@@ -139,6 +156,7 @@ class OrganizationAuthSettingsView(ControlSiloOrganizationView):
                 next_uri = f"/settings/{organization.slug}/auth/"
                 return self.redirect(next_uri)
             elif op == "reinvite":
+                assert request.user.is_authenticated
                 email_missing_links_control.delay(organization.id, request.user.id, provider.key)
 
                 messages.add_message(request, messages.SUCCESS, OK_REMINDERS_SENT)
@@ -209,6 +227,8 @@ class OrganizationAuthSettingsView(ControlSiloOrganizationView):
         pending_links_count = organization_service.count_members_without_sso(
             organization_id=organization.id
         )
+        scim_token_display = auth_provider.get_scim_token_for_display()
+
         context = {
             "form": form,
             "pending_links_count": pending_links_count,
@@ -218,7 +238,12 @@ class OrganizationAuthSettingsView(ControlSiloOrganizationView):
             ),
             "auth_provider": auth_provider,
             "provider_name": provider.name,
-            "scim_api_token": auth_provider.get_scim_token(),
+            "require_link": (
+                form.cleaned_data["require_link"]
+                if form.is_valid()
+                else not auth_provider.flags.allow_unlinked
+            ),
+            "scim_token_display": scim_token_display,
             "scim_url": get_scim_url(auth_provider, organization),
             "content": response,
             "disabled": provider.is_partner,

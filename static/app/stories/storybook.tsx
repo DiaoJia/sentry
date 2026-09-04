@@ -1,16 +1,28 @@
 import type {ReactNode} from 'react';
-import {Children, Fragment} from 'react';
-import styled from '@emotion/styled';
+import {Children, Fragment, Suspense, lazy, useEffect} from 'react';
 
-import {space} from 'sentry/styles/space';
+import {Container} from '@sentry/scraps/layout';
+import {Heading} from '@sentry/scraps/text';
 
-import * as Storybook from './';
+import {Section, SideBySide} from './layout';
+
+// Lazy-loaded to bypass circular dependencies on Button
+const StoryHeading = lazy(() =>
+  import('sentry/stories/view/storyHeading').then(m => ({default: m.StoryHeading}))
+);
+const APIReference = lazy(() =>
+  import('./apiReference').then(m => ({default: m.APIReference}))
+);
+
+function makeStorybookDocumentTitle(title: string | undefined): string {
+  return title ? `${title} — Scraps` : 'Scraps';
+}
 
 type StoryRenderFunction = () => ReactNode | ReactNode[];
 type StoryContext = (storyName: string, story: StoryRenderFunction) => void;
 type SetupFunction = (
   story: StoryContext,
-  apiReference: (documentation: TypeLoader.ComponentDocWithFilename | undefined) => void
+  apiReference: (documentation: TypeLoader.ComponentDoc | undefined) => void
 ) => void;
 
 export function story(title: string, setup: SetupFunction): StoryRenderFunction {
@@ -18,29 +30,33 @@ export function story(title: string, setup: SetupFunction): StoryRenderFunction 
     name: string;
     render: StoryRenderFunction;
   }> = [];
-  const APIDocumentation: Array<TypeLoader.ComponentDocWithFilename | undefined> = [];
+  const APIDocumentation: Array<TypeLoader.ComponentDoc | undefined> = [];
 
-  const storyFn: StoryContext = (name: string, render: StoryRenderFunction) => {
+  const storyFn: StoryContext = (name, render) => {
     stories.push({name, render});
   };
 
-  const apiReferenceFn: (
-    documentation: TypeLoader.ComponentDocWithFilename | undefined
-  ) => void = (documentation: TypeLoader.ComponentDocWithFilename | undefined) => {
+  const apiReferenceFn = (documentation: TypeLoader.ComponentDoc | undefined) => {
     APIDocumentation.push(documentation);
   };
 
   setup(storyFn, apiReferenceFn);
 
   return function RenderStory() {
+    useEffect(() => {
+      document.title = makeStorybookDocumentTitle(title);
+    }, []);
+
     return (
       <Fragment>
-        <StoryTitle>{title}</StoryTitle>
-        {stories.map(({name, render}, i) => (
-          <Story key={i} name={name} render={render} />
+        <Heading as="h1">{title}</Heading>
+        {stories.map(({name, render}, idx) => (
+          <Story key={name + idx} name={name} render={render} />
         ))}
         {APIDocumentation.map((documentation, i) => (
-          <Storybook.APIReference key={i} types={documentation} />
+          <Suspense key={i} fallback={null}>
+            <APIReference componentProps={documentation} />
+          </Suspense>
         ))}
       </Fragment>
     );
@@ -52,22 +68,15 @@ function Story(props: {name: string; render: StoryRenderFunction}) {
   const isOneChild = Children.count(children) === 1;
 
   return (
-    <StorySection>
-      <StoryTitle>{props.name}</StoryTitle>
-      {isOneChild ? children : <Storybook.SideBySide>{children}</Storybook.SideBySide>}
-    </StorySection>
+    <Section>
+      <Container borderBottom="primary">
+        <Suspense fallback={<Heading as="h2">{props.name}</Heading>}>
+          <StoryHeading as="h2" size="2xl">
+            {props.name}
+          </StoryHeading>
+        </Suspense>
+      </Container>
+      {isOneChild ? children : <SideBySide>{children}</SideBySide>}
+    </Section>
   );
 }
-
-const StorySection = styled('section')`
-  margin-top: ${space(4)};
-
-  & > p {
-    margin: ${space(3)} 0;
-  }
-`;
-
-const StoryTitle = styled('h3')`
-  border-bottom: 1px solid ${p => p.theme.border};
-  scroll-margin-top: ${space(2)};
-`;

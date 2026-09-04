@@ -1,10 +1,11 @@
-import moment from 'moment-timezone';
-
 import type {PromptData} from 'sentry/actionCreators/prompts';
+import {IconBuilding, IconGroup, IconSeer, IconUser} from 'sentry/icons';
+import type {SVGIconProps} from 'sentry/icons/svgIcon';
 import {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
-import getDaysSinceDate from 'sentry/utils/getDaysSinceDate';
+import {defined} from 'sentry/utils/defined';
+import {getDaysSinceDate} from 'sentry/utils/getDaysSinceDate';
+import {toTitleCase} from 'sentry/utils/string/toTitleCase';
 
 import {
   BILLION,
@@ -12,22 +13,30 @@ import {
   GIGABYTE,
   MILLION,
   RESERVED_BUDGET_QUOTA,
-  TRIAL_PLANS,
   UNLIMITED,
   UNLIMITED_RESERVED,
 } from 'getsentry/constants';
+import {
+  AddOnCategory,
+  CREDIT_INVOICE_ITEM_TYPES,
+  FEE_INVOICE_ITEM_TYPES,
+  OnDemandBudgetMode,
+  PlanName,
+  ReservedBudgetCategoryType,
+} from 'getsentry/types';
 import type {
   BillingConfig,
+  BillingDetails,
   BillingMetricHistory,
   BillingStatTotal,
   EventBucket,
+  InvoiceItemType,
   Plan,
   ProductTrial,
   Subscription,
 } from 'getsentry/types';
-import {OnDemandBudgetMode, PlanName, PlanTier} from 'getsentry/types';
-import {isContinuousProfiling} from 'getsentry/utils/dataCategory';
-import titleCase from 'getsentry/utils/titleCase';
+import {getCategoryInfoFromPlural} from 'getsentry/utils/dataCategory';
+import {titleCase} from 'getsentry/utils/titleCase';
 import {displayPriceWithCents} from 'getsentry/views/amCheckout/utils';
 
 export const MILLISECONDS_IN_HOUR = 3600_000;
@@ -104,19 +113,12 @@ export const getSlot = (
   return Math.min(s, slots.length - 1);
 };
 
-type ReservedSku =
-  | Subscription['reservedErrors']
-  | Subscription['reservedTransactions']
-  | Subscription['reservedAttachments']
-  | number
-  | null;
-
 /**
  * isAbbreviated: Shortens the number using K for thousand, M for million, etc
  *                Useful for Errors/Transactions but not recommended to be used
  *                with Attachments because "1K GB" is hard to read.
  * isGifted: For gifted data volumes, 0 is displayed as 0 instead of unlimited.
- * useUnitScaling: For Attachments only. Scale from KB -> MB -> GB -> TB -> etc
+ * useUnitScaling: For Attachments only. Scale from kB -> MB -> GB -> TB -> etc
  */
 type FormatOptions = {
   fractionDigits?: number;
@@ -133,7 +135,7 @@ type FormatOptions = {
  * If isReservedBudget is true, the reservedQuantity is in cents
  */
 export function formatReservedWithUnits(
-  reservedQuantity: ReservedSku,
+  reservedQuantity: number | null,
   dataCategory: DataCategory,
   options: FormatOptions = {
     isAbbreviated: false,
@@ -145,36 +147,53 @@ export function formatReservedWithUnits(
   if (isReservedBudget) {
     return displayPriceWithCents({cents: reservedQuantity ?? 0});
   }
-  if (dataCategory !== DataCategory.ATTACHMENTS) {
+
+  const categoryInfo = getCategoryInfoFromPlural(dataCategory);
+  const unitType = categoryInfo?.formatting.unitType ?? 'count';
+
+  if (unitType !== 'bytes') {
     return formatReservedNumberToString(reservedQuantity, options);
   }
+
   // convert reservedQuantity to BYTES to check for unlimited
-  const usageGb = reservedQuantity ? reservedQuantity * GIGABYTE : reservedQuantity;
+  // unless it's already unlimited
+  const usageGb =
+    reservedQuantity && !isUnlimitedReserved(reservedQuantity)
+      ? reservedQuantity * GIGABYTE
+      : reservedQuantity;
   if (isUnlimitedReserved(usageGb)) {
     return options.isGifted ? '0 GB' : UNLIMITED;
   }
+
   if (!options.useUnitScaling) {
-    const formatted = formatReservedNumberToString(reservedQuantity, options);
+    const byteOptions =
+      dataCategory === DataCategory.LOG_BYTE
+        ? {...options, isAbbreviated: false}
+        : options;
+    const formatted = formatReservedNumberToString(reservedQuantity, byteOptions);
     return `${formatted} GB`;
   }
 
-  return formatAttachmentUnits(reservedQuantity || 0, 3);
+  return formatByteUnits(reservedQuantity || 0, 3);
 }
 
 /**
  * This expects values from CustomerUsageEndpoint, which contains usage
  * quantities for the data categories that we sell.
  *
- * Note: usageQuantity for Attachments should be in BYTES
+ * Note: usageQuantity for Attachments and Logs should be in BYTES
  */
 export function formatUsageWithUnits(
   usageQuantity = 0,
   dataCategory: DataCategory,
   options: FormatOptions = {isAbbreviated: false, useUnitScaling: false}
 ) {
-  if (dataCategory === DataCategory.ATTACHMENTS) {
+  const categoryInfo = getCategoryInfoFromPlural(dataCategory);
+  const unitType = categoryInfo?.formatting.unitType ?? 'count';
+
+  if (unitType === 'bytes') {
     if (options.useUnitScaling) {
-      return formatAttachmentUnits(usageQuantity);
+      return formatByteUnits(usageQuantity);
     }
 
     const usageGb = usageQuantity / GIGABYTE;
@@ -182,18 +201,36 @@ export function formatUsageWithUnits(
       ? `${displayNumber(usageGb)} GB`
       : `${usageGb.toLocaleString(undefined, {maximumFractionDigits: 2})} GB`;
   }
-  if (isContinuousProfiling(dataCategory)) {
+  if (unitType === 'durationHours') {
     const usageProfileHours = usageQuantity / MILLISECONDS_IN_HOUR;
     if (usageProfileHours === 0) {
       return '0';
     }
     return options.isAbbreviated
       ? displayNumber(usageProfileHours, 1)
-      : usageProfileHours.toLocaleString(undefined, {maximumFractionDigits: 1});
+      : usageProfileHours.toLocaleString(undefined, {
+          maximumFractionDigits: 1,
+        });
   }
   return options.isAbbreviated
-    ? displayNumber(usageQuantity, 0)
+    ? displayNumber(usageQuantity)
     : usageQuantity.toLocaleString();
+}
+
+export function convertUsageToReservedUnit(
+  usage: number,
+  category: DataCategory | string
+): number {
+  const categoryInfo = getCategoryInfoFromPlural(category as DataCategory);
+  const unitType = categoryInfo?.formatting.unitType ?? 'count';
+
+  if (unitType === 'bytes') {
+    return usage / GIGABYTE;
+  }
+  if (unitType === 'durationHours') {
+    return usage / MILLISECONDS_IN_HOUR;
+  }
+  return usage;
 }
 
 /**
@@ -201,7 +238,7 @@ export function formatUsageWithUnits(
  * Helper method for formatReservedWithUnits
  */
 function formatReservedNumberToString(
-  reservedQuantity: ReservedSku,
+  reservedQuantity: number | null,
   options: FormatOptions = {
     isAbbreviated: false,
     isGifted: false,
@@ -242,8 +279,8 @@ function formatReservedNumberToString(
  * For storage/memory/file sizes, please take a look at the function in
  * sentry/utils/formatBytes.
  */
-function formatAttachmentUnits(bytes: number, u = 0) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+function formatByteUnits(bytes: number, u = 0) {
+  const units = ['B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
   const threshold = 1000;
 
   while (bytes >= threshold) {
@@ -275,14 +312,6 @@ function displayNumber(n: number, fractionDigits = 0) {
   return n.toFixed(fractionDigits).toLocaleString();
 }
 
-/**
- * Utility functions for Pricing Plans
- */
-export const isEnterprise = (plan: string) =>
-  ['e1', 'enterprise'].some(p => plan.startsWith(p)) || isAmEnterprisePlan(plan);
-
-export const isTrialPlan = (plan: string) => TRIAL_PLANS.includes(plan);
-
 export const hasPerformance = (plan?: Plan) => {
   return (
     // Older plans will have Transactions
@@ -304,52 +333,37 @@ export const isBizPlanFamily = (plan?: Plan) => plan?.name.includes(PlanName.BUS
 
 export const isTeamPlanFamily = (plan?: Plan) => plan?.name.includes(PlanName.TEAM);
 
+/**
+ * Whether the subscription is currently on a trial, derived from `trialPlan`
+ * (non-null iff trialing).
+ */
+export const isTrial = (subscription: Subscription) => defined(subscription.trialPlan);
+
 export const isBusinessTrial = (subscription: Subscription) => {
-  return (
-    subscription.isTrial &&
-    !subscription.isPerformancePlanTrial &&
-    !subscription.isEnterpriseTrial
-  );
+  return isTrial(subscription) && !subscription.isEnterpriseTrial;
 };
 
-export function isAmPlan(planId?: string) {
-  return typeof planId === 'string' && planId.startsWith('am');
-}
-
-export function isAm2Plan(planId?: string) {
-  return typeof planId === 'string' && planId.startsWith('am2');
-}
-
-export function isAm3Plan(planId?: string) {
-  return typeof planId === 'string' && planId.startsWith('am3');
-}
-
-export function isAm3DsPlan(planId?: string) {
-  return typeof planId === 'string' && planId.startsWith('am3') && planId.includes('_ds');
-}
-
-export function isAmEnterprisePlan(planId?: string) {
-  if (typeof planId !== 'string' || !isAmPlan(planId)) {
-    return false;
-  }
-
-  return planId.includes('_ent');
-}
-
 export function hasJustStartedPlanTrial(subscription: Subscription) {
-  return subscription.isTrial && subscription.isTrialStarted;
+  return isTrial(subscription) && subscription.isTrialStarted;
 }
 
 export const displayBudgetName = (
   plan?: Plan | null,
   options: {
+    abbreviated?: boolean;
     pluralOndemand?: boolean;
     title?: boolean;
     withBudget?: boolean;
   } = {}
 ) => {
-  const budgetTerm = plan?.budgetTerm ?? 'on-demand';
+  const budgetTerm = plan?.budgetTerm ?? 'pay-as-you-go';
   const text = `${budgetTerm}${options.withBudget ? ' budget' : ''}`;
+  if (options.abbreviated) {
+    if (budgetTerm === 'pay-as-you-go') {
+      return 'PAYG';
+    }
+    return 'OD';
+  }
   if (options.title) {
     if (budgetTerm === 'on-demand') {
       if (options.withBudget) {
@@ -382,9 +396,11 @@ export const getOnDemandCategories = ({
 }) => {
   if (budgetMode === OnDemandBudgetMode.PER_CATEGORY) {
     return plan.onDemandCategories.filter(category => {
-      return Object.values(plan.availableReservedBudgetTypes).every(
-        budgetType => !budgetType.dataCategories.includes(category)
-      );
+      const categoryInfo = getCategoryInfoFromPlural(category);
+      if (!categoryInfo) {
+        return false;
+      }
+      return categoryInfo.hasPerCategory;
     });
   }
 
@@ -392,20 +408,7 @@ export const getOnDemandCategories = ({
 };
 
 export const displayPlanName = (plan?: Plan | null) => {
-  return isAmEnterprisePlan(plan?.id) ? 'Enterprise' : (plan?.name ?? '[unavailable]');
-};
-
-export const getAmPlanTier = (plan: string) => {
-  if (isAm3Plan(plan)) {
-    return PlanTier.AM3;
-  }
-  if (isAm2Plan(plan)) {
-    return PlanTier.AM2;
-  }
-  if (isAmPlan(plan)) {
-    return PlanTier.AM1;
-  }
-  return null;
+  return plan?.isEnterprise ? 'Enterprise' : (plan?.name ?? '[unavailable]');
 };
 
 export const isNewPayingCustomer = (
@@ -413,18 +416,8 @@ export const isNewPayingCustomer = (
   organization: Organization
 ) =>
   subscription.isFree ||
-  isTrialPlan(subscription.plan) ||
+  subscription.onTrialPlan ||
   hasPartnerMigrationFeature(organization);
-
-/**
- * Promotion utility functions that are based off of formData which has the plan as a string
- * instead of a Plan
- */
-
-export const getBusinessPlanOfTier = (plan: string) =>
-  plan.startsWith('am2_') ? 'am2_business' : 'am1_business';
-
-export const isTeamPlan = (plan: string) => plan.includes('team');
 
 /**
  * Get the number of days left on trial
@@ -432,14 +425,6 @@ export const isTeamPlan = (plan: string) => plan.includes('team');
 export function getTrialDaysLeft(subscription: Subscription): number {
   // trial end is in the future
   return -1 * getDaysSinceDate(subscription.trialEnd ?? '');
-}
-
-/**
- * Get the number of days left on contract
- */
-export function getContractDaysLeft(subscription: Subscription): number {
-  // contract period end is in the future
-  return -1 * getDaysSinceDate(subscription.contractPeriodEnd ?? '');
 }
 
 /**
@@ -452,7 +437,7 @@ function sortPlansForUpgrade(billingConfig: BillingConfig, subscription: Subscri
   // contract interval. Sorted by price as features will become progressively
   // more available.
   let plans = billingConfig.planList
-    .sort((a, b) => a.price - b.price)
+    .sort((a, b) => a.totalPrice - b.totalPrice)
     .filter(p => p.userSelectable && p.billingInterval === subscription.billingInterval);
 
   // If we're dealing with plans that are *not part of a tier* Then we can
@@ -499,7 +484,7 @@ export function getBestActionToIncreaseEventLimits(
   organization: Organization,
   subscription: Subscription
 ) {
-  const isPaidPlan = subscription.planDetails?.price > 0;
+  const isPaidPlan = subscription.planDetails?.totalPrice > 0;
   const hasBillingPerms = organization.access?.includes('org:billing');
 
   // free orgs can increase event limits by trialing
@@ -507,11 +492,17 @@ export function getBestActionToIncreaseEventLimits(
     return UsageAction.START_TRIAL;
   }
   // paid plans should add events without changing plans
-  if (isPaidPlan && hasPerformance(subscription.planDetails)) {
+  const hasAnyUsageExceeded = Object.values(subscription.categories).some(
+    category => category.usageExceeded
+  );
+  if (isPaidPlan && hasPerformance(subscription.planDetails) && hasAnyUsageExceeded) {
     return hasBillingPerms ? UsageAction.ADD_EVENTS : UsageAction.REQUEST_ADD_EVENTS;
   }
-  // otherwise, we want them to upgrade to a different plan
-  return hasBillingPerms ? UsageAction.SEND_TO_CHECKOUT : UsageAction.REQUEST_UPGRADE;
+  // otherwise, we want them to upgrade to a different plan if they're not already on a Business plan
+  if (!isBizPlanFamily(subscription.planDetails)) {
+    return hasBillingPerms ? UsageAction.SEND_TO_CHECKOUT : UsageAction.REQUEST_UPGRADE;
+  }
+  return '';
 }
 
 /**
@@ -527,11 +518,61 @@ export function getFriendlyPlanName(subscription: Subscription) {
   }
 }
 
-export function hasAccessToSubscriptionOverview(
+export function getPlanIcon(plan: Plan) {
+  if (isBizPlanFamily(plan)) {
+    return <IconBuilding />;
+  }
+
+  if (isTeamPlanFamily(plan)) {
+    return <IconGroup />;
+  }
+
+  return <IconUser />;
+}
+
+export function getProductIcon(product: AddOnCategory, size?: SVGIconProps['size']) {
+  if ([AddOnCategory.LEGACY_SEER, AddOnCategory.SEER].includes(product)) {
+    return <IconSeer size={size} />;
+  }
+  return null;
+}
+
+/**
+ * Returns true if the subscription can use pay-as-you-go.
+ */
+export function supportsPayg(subscription: Subscription) {
+  return subscription.planDetails.allowOnDemand && subscription.supportsOnDemand;
+}
+
+/**
+ * Whether the category can use PAYG on the subscription given existing budgets.
+ * Does not check if there is PAYG left.
+ */
+export function hasPaygBudgetForCategory(
   subscription: Subscription,
-  organization: Organization
+  category: DataCategory
 ) {
-  return organization.access.includes('org:billing') || subscription.canSelfServe;
+  if (!subscription.onDemandBudgets) {
+    return false;
+  }
+  if (subscription.onDemandBudgets.budgetMode === OnDemandBudgetMode.PER_CATEGORY) {
+    return (subscription.onDemandBudgets.budgets?.[category] ?? 0) > 0;
+  }
+  return subscription.onDemandBudgets.sharedMaxBudget > 0;
+}
+
+/**
+ * Returns true if the current user has billing perms.
+ */
+export function hasBillingAccess(organization: Organization) {
+  return organization.access.includes('org:billing');
+}
+
+export function hasAccessToSubscriptionOverview(
+  subscription: Subscription | null,
+  organization: Organization
+): boolean {
+  return hasBillingAccess(organization) || Boolean(subscription?.canSelfServe);
 }
 
 /**
@@ -540,10 +581,9 @@ export function hasAccessToSubscriptionOverview(
  */
 export function getSoftCapType(metricHistory: BillingMetricHistory): string | null {
   if (metricHistory.softCapType) {
-    return titleCase(metricHistory.softCapType.replace(/_/g, ' '));
-  }
-  if (metricHistory.trueForward) {
-    return 'True Forward';
+    return toTitleCase(metricHistory.softCapType.replace(/_/g, ' ').toLowerCase(), {
+      allowInnerUpperCase: true,
+    }).replace(' ', metricHistory.softCapType === 'ON_DEMAND' ? '-' : ' ');
   }
   return null;
 }
@@ -596,7 +636,8 @@ export function getActiveProductTrial(
       pt =>
         pt.category === category &&
         pt.isStarted &&
-        getDaysSinceDate(pt.endDate ?? '') <= 0
+        getDaysSinceDate(pt.endDate ?? '') <= 0 &&
+        getDaysSinceDate(pt.startDate ?? '') >= 0
     )
     .sort((a, b) => b.endDate?.localeCompare(a.endDate ?? '') || 0);
 
@@ -626,6 +667,45 @@ export function getPotentialProductTrial(
   return potentialTrials[0] ?? null;
 }
 
+/**
+ * Gets the appropriate Seer data category for product trials.
+ * Uses SEER_USER for seat-based billing, falls back to SEER_AUTOFIX for legacy.
+ *
+ * Priority order:
+ * 1. SEER_USER (seat-based billing)
+ * 2. SEER_AUTOFIX (legacy billing)
+ */
+export function getSeerTrialCategory(
+  productTrials: ProductTrial[] | null
+): DataCategory | null {
+  if (!productTrials) {
+    return null;
+  }
+
+  // Check for SEER_USER trial first (seat-based billing takes precedence)
+  // For unstarted trials, endDate is the "start by" deadline
+  // For started trials, endDate is the expiration date
+  // In both cases, endDate must not have passed
+  const seerUserTrial = productTrials.find(
+    pt =>
+      pt.category === DataCategory.SEER_USER && getDaysSinceDate(pt.endDate ?? '') <= 0
+  );
+  if (seerUserTrial) {
+    return DataCategory.SEER_USER;
+  }
+
+  // Fall back to SEER_AUTOFIX (legacy)
+  const seerAutofixTrial = productTrials.find(
+    pt =>
+      pt.category === DataCategory.SEER_AUTOFIX && getDaysSinceDate(pt.endDate ?? '') <= 0
+  );
+  if (seerAutofixTrial) {
+    return DataCategory.SEER_AUTOFIX;
+  }
+
+  return null;
+}
+
 export function trialPromptIsDismissed(prompt: PromptData, subscription: Subscription) {
   const {snoozedTime, dismissedTime} = prompt || {};
   const time = snoozedTime || dismissedTime;
@@ -636,32 +716,277 @@ export function trialPromptIsDismissed(prompt: PromptData, subscription: Subscri
   return time >= onDemandPeriodStart.getTime() / 1000;
 }
 
-export function partnerPlanEndingModalIsDismissed(
-  prompt: PromptData,
+export function getPercentage(quantity: number, total: number | null) {
+  if (typeof total === 'number' && total > 0) {
+    return (Math.min(quantity, total) / total) * 100;
+  }
+  return 0;
+}
+
+export function displayPercentage(quantity: number, total: number | null) {
+  const percentage = getPercentage(quantity, total);
+  return percentage.toFixed(0) + '%';
+}
+
+/**
+ * Returns true if some billing details are set.
+ */
+export function hasSomeBillingDetails(billingDetails: BillingDetails | undefined) {
+  if (!billingDetails) {
+    return false;
+  }
+  return (
+    billingDetails &&
+    Object.entries(billingDetails)
+      .filter(
+        ([key, _]) =>
+          key !== 'billingEmail' && key !== 'companyName' && key !== 'taxNumber'
+      )
+      .some(([_, value]) => defined(value))
+  );
+}
+
+export function getReservedBudgetCategoryForAddOn(addOnCategory: AddOnCategory) {
+  if (addOnCategory === AddOnCategory.LEGACY_SEER) {
+    return ReservedBudgetCategoryType.SEER;
+  }
+  return null;
+}
+
+// There are the data categories whose retention settings
+// are exposed in Relay and can be set in _admin
+export const RETENTION_SETTINGS_CATEGORIES = new Set([
+  DataCategory.SPANS,
+  DataCategory.LOG_BYTE,
+  DataCategory.TRANSACTIONS,
+]);
+
+export function getCredits<T extends {amount: number; type: InvoiceItemType}>({
+  invoiceItems,
+}: {
+  invoiceItems: T[];
+}) {
+  return invoiceItems.filter(
+    item =>
+      CREDIT_INVOICE_ITEM_TYPES.includes(item.type as any) ||
+      (item.type === 'balance_change' && item.amount < 0)
+  );
+}
+
+/**
+ * Returns the credit applied to an invoice or preview data.
+ * If the invoice items contain a BALANCE_CHANGE item with a negative amount,
+ * the invoice/preview data already accounts for the credit applied, so we return 0.
+ */
+export function getCreditApplied({
+  creditApplied,
+  invoiceItems,
+}: {
+  creditApplied: number;
+  invoiceItems: Array<{amount: number; type: InvoiceItemType}>;
+}) {
+  const credits = getCredits({invoiceItems});
+  if (credits.some(item => item.type === 'balance_change')) {
+    return 0;
+  }
+  return creditApplied;
+}
+
+/**
+ * Returns extra fees included in the invoice or preview data, such as tax
+ * or cancellation fees.
+ */
+export function getFees<T extends {amount: number; type: InvoiceItemType}>({
+  invoiceItems,
+}: {
+  invoiceItems: T[];
+}) {
+  return invoiceItems.filter(
+    item =>
+      FEE_INVOICE_ITEM_TYPES.includes(item.type as any) ||
+      (item.type === 'balance_change' && item.amount > 0)
+  );
+}
+
+/**
+ * Returns ondemand invoice items from the invoice or preview data.
+ */
+export function getOnDemandItems<T extends {amount: number; type: InvoiceItemType}>({
+  invoiceItems,
+}: {
+  invoiceItems: T[];
+}) {
+  return invoiceItems.filter(item => item.type.startsWith('ondemand'));
+}
+
+/**
+ * Removes the budget term (pay-as-you-go/on-demand) from an ondemand item description.
+ */
+export function formatOnDemandDescription(
+  description: string,
+  plan?: Plan | null
+): string {
+  const budgetTerm = displayBudgetName(plan, {title: false}).toLowerCase();
+  return description.replace(new RegExp(`\\s*${budgetTerm}\\s*`, 'gi'), ' ').trim();
+}
+
+/**
+ * Given a DataCategory or AddOnCategory, returns true if it is an add-on, false otherwise.
+ */
+export function checkIsAddOn(
+  selectedProduct: DataCategory | AddOnCategory | string
+): boolean {
+  return Object.values(AddOnCategory).includes(selectedProduct as AddOnCategory);
+}
+
+/**
+ * Check if a data category is a child category of an add-on.
+ * If `checkReserved` is true, we check if the data category is a child of an add-on
+ * for this particular subscription.
+ */
+export function checkIsAddOnChildCategory(
   subscription: Subscription,
-  timeframe: string
+  category: DataCategory,
+  checkReserved: boolean
 ) {
-  const {snoozedTime, dismissedTime} = prompt || {};
-  const time = snoozedTime || dismissedTime;
-  if (!time) {
+  const parentAddOn = getParentAddOn(subscription, category, checkReserved);
+  return !!parentAddOn;
+}
+
+/**
+ * Get the parent add-on for a data category, if any.
+ *
+ * When `checkReserved` is true and a potential parent is found, we check if the data category
+ * has any sibling categories also tallied for billing. If so, we need to check if the data category
+ * should be treated as part of the add-on (reserved budget or zero prepaid) or as a separate
+ * product (any other prepaid volume).
+ *
+ * If the data category has no sibling categories, `checkReserved` is ignored and we return the parent add-on.
+ */
+function getParentAddOn(
+  subscription: Subscription | null,
+  category: DataCategory,
+  checkReserved: boolean
+): AddOnCategory | null {
+  if (!subscription) {
+    return null;
+  }
+  const parentAddOn = Object.values(subscription.addOns ?? {})
+    .filter(addOn => addOn.isAvailable)
+    .find(addOn => addOn.dataCategories.includes(category));
+
+  if (!parentAddOn) {
+    return null;
+  }
+
+  const hasMultipleTalliedCategories = parentAddOn.dataCategories.length > 1;
+  if (hasMultipleTalliedCategories && checkReserved) {
+    const metricHistory = subscription.categories[category];
+    if (!metricHistory) {
+      return null;
+    }
+    if (![RESERVED_BUDGET_QUOTA, 0].includes(metricHistory.reserved ?? 0)) {
+      return null;
+    }
+  }
+
+  return parentAddOn.apiName;
+}
+
+/**
+ * Get the billed DataCategory for an add-on or DataCategory.
+ */
+export function getBilledCategory(
+  subscription: Subscription,
+  selectedProduct: DataCategory | AddOnCategory
+): DataCategory | null {
+  if (checkIsAddOn(selectedProduct)) {
+    const category = selectedProduct as AddOnCategory;
+    const addOnInfo = subscription.addOns?.[category];
+    if (!addOnInfo) {
+      return null;
+    }
+
+    const {dataCategories, apiName} = addOnInfo;
+    const reservedBudgetCategory = getReservedBudgetCategoryForAddOn(apiName);
+    const reservedBudget = subscription.reservedBudgets?.find(
+      budget => budget.apiName === reservedBudgetCategory
+    );
+    return reservedBudget
+      ? (dataCategories.find(dataCategory =>
+          subscription.planDetails.planCategories[dataCategory]?.find(
+            bucket => bucket.events === RESERVED_BUDGET_QUOTA
+          )
+        ) ?? dataCategories[0]!)
+      : dataCategories[0]!;
+  }
+
+  return selectedProduct as DataCategory;
+}
+
+export function productIsEnabled(
+  subscription: Subscription,
+  selectedProduct: DataCategory | AddOnCategory
+): boolean {
+  const billedCategory = getBilledCategory(subscription, selectedProduct);
+  if (!billedCategory) {
     return false;
   }
 
-  const lastDaysLeft = moment(subscription.contractPeriodEnd).diff(
-    moment.unix(time),
-    'days'
+  const activeProductTrial = getActiveProductTrial(
+    subscription.productTrials ?? null,
+    billedCategory
   );
-
-  switch (timeframe) {
-    case 'zero':
-      return lastDaysLeft <= 0;
-    case 'two':
-      return lastDaysLeft <= 2 && lastDaysLeft > 0;
-    case 'week':
-      return lastDaysLeft <= 7 && lastDaysLeft > 2;
-    case 'month':
-      return lastDaysLeft <= 30 && lastDaysLeft > 7;
-    default:
-      return true;
+  if (activeProductTrial) {
+    return true;
   }
+
+  if (checkIsAddOn(selectedProduct)) {
+    const addOnInfo = subscription.addOns?.[selectedProduct as AddOnCategory];
+    if (!addOnInfo) {
+      return false;
+    }
+    return addOnInfo.enabled;
+  }
+
+  const metricHistory = subscription.categories[billedCategory];
+  if (!metricHistory) {
+    return false;
+  }
+  const hasNonPaygAccess =
+    (metricHistory.prepaid ?? 0) !== 0 || !!metricHistory.softCapType;
+  const hasPaygBudget =
+    metricHistory.onDemandBudget > 0 ||
+    (subscription.onDemandBudgets?.budgetMode === OnDemandBudgetMode.SHARED &&
+      subscription.onDemandBudgets.sharedMaxBudget > 0);
+  return hasNonPaygAccess || hasPaygBudget;
+}
+
+/**
+ * Given a data category and potential metric history, returns a normalized metric history object.
+ *
+ * If the metric history is null or undefined, we return a default metric history object with all
+ * fields set to 0, null, or false.
+ */
+export function normalizeMetricHistory(
+  category: DataCategory,
+  metricHistory: BillingMetricHistory | null | undefined
+): BillingMetricHistory {
+  return (
+    metricHistory ?? {
+      category,
+      reserved: 0,
+      usage: 0,
+      prepaid: 0,
+      free: 0,
+      onDemandSpendUsed: 0,
+      onDemandBudget: 0,
+      onDemandQuantity: 0,
+      customPrice: null,
+      order: 0,
+      paygCpe: null,
+      softCapType: null,
+      usageExceeded: false,
+    }
+  );
 }

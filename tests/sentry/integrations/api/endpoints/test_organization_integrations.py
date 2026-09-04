@@ -1,3 +1,6 @@
+from sentry.integrations.api.endpoints.organization_integrations_index import (
+    OrganizationIntegrationsEndpoint,
+)
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.silo import control_silo_test
 
@@ -6,7 +9,7 @@ from sentry.testutils.silo import control_silo_test
 class OrganizationIntegrationsListTest(APITestCase):
     endpoint = "sentry-api-0-organization-integrations"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
         self.integration = self.create_integration(
@@ -34,19 +37,25 @@ class OrganizationIntegrationsListTest(APITestCase):
             external_id="slack:1",
         )
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         response = self.get_success_response(self.organization.slug)
 
         assert len(response.data) == 4
         assert response.data[0]["id"] == str(self.integration.id)
         assert "configOrganization" in response.data[0]
 
-    def test_no_config(self):
+    def test_no_config(self) -> None:
         response = self.get_success_response(self.organization.slug, qs_params={"includeConfig": 0})
 
         assert "configOrganization" not in response.data[0]
 
-    def test_feature_filters(self):
+    def test_opts_out_of_organization_projects_and_teams(self) -> None:
+        # This endpoint only needs the organization id, so it skips serializing every
+        # project and team into the cross silo RPC payload.
+        assert OrganizationIntegrationsEndpoint.include_organization_projects is False
+        assert OrganizationIntegrationsEndpoint.include_organization_teams is False
+
+    def test_feature_filters(self) -> None:
         response = self.get_success_response(
             self.organization.slug, qs_params={"features": "issue_basic"}
         )
@@ -56,7 +65,7 @@ class OrganizationIntegrationsListTest(APITestCase):
         )
         assert response.data == []
 
-    def test_provider_key(self):
+    def test_provider_key(self) -> None:
         response = self.get_success_response(
             self.organization.slug, qs_params={"providerKey": "example"}
         )
@@ -70,7 +79,7 @@ class OrganizationIntegrationsListTest(APITestCase):
         )
         assert response.data == []
 
-    def test_integration_type(self):
+    def test_integration_type(self) -> None:
         response = self.get_success_response(
             self.organization.slug, qs_params={"integrationType": "messaging"}
         )
@@ -88,7 +97,7 @@ class OrganizationIntegrationsListTest(APITestCase):
         assert response.data == {"detail": "Invalid integration type"}
         assert response.status_code == 400
 
-    def test_provider_key_and_integration_type(self):
+    def test_provider_key_and_integration_type(self) -> None:
         response = self.get_success_response(
             self.organization.slug,
             qs_params={"providerKey": "slack", "integrationType": "messaging"},

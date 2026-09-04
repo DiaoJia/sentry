@@ -1,8 +1,9 @@
 from datetime import timedelta
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from sentry.issues.grouptype import PerformanceNPlusOneGroupType
+from sentry.models.group import Group
 from sentry.testutils.cases import PerformanceIssueTestCase, RuleTestCase, SnubaTestCase
 from sentry.testutils.helpers.datetime import before_now
 from sentry.utils.samples import load_data
@@ -15,39 +16,47 @@ from tests.sentry.workflow_engine.test_base import BaseWorkflowTest
 
 
 class ConditionTestCase(BaseWorkflowTest):
-    def setUp(self):
+    def setUp(self) -> None:
         self.group, self.event, self.group_event = self.create_group_event()
 
     def translate_to_data_condition(
-        self, data: dict[str, Any], dcg: DataConditionGroup
+        self, data: Mapping[str, Any], dcg: DataConditionGroup
     ) -> DataCondition:
         data_condition = dual_write_condition(data, dcg)
         data_condition.save()
         return data_condition
 
     def assert_passes(
-        self, data_condition: DataCondition, job: WorkflowEventData | DataPacket
+        self, data_condition: DataCondition, job: WorkflowEventData | DataPacket[Any]
     ) -> None:
-        assert data_condition.evaluate_value(job) == data_condition.get_condition_result()
+        evaluation = data_condition.evaluate_value(job)
+
+        assert evaluation.data == job
+        assert evaluation.triggered is True
+        assert evaluation.result == data_condition.get_condition_result()
 
     def assert_does_not_pass(
-        self, data_condition: DataCondition, job: WorkflowEventData | DataPacket
+        self, data_condition: DataCondition, job: WorkflowEventData | DataPacket[Any]
     ) -> None:
-        assert data_condition.evaluate_value(job) != data_condition.get_condition_result()
+        evaluation = data_condition.evaluate_value(job)
+        assert evaluation.data == job
+        assert evaluation.triggered is False
+        assert evaluation.result != data_condition.get_condition_result()
 
     def assert_slow_condition_passes(self, data_condition: DataCondition, value: list[int]) -> None:
-        assert data_condition.evaluate_value(value) == data_condition.get_condition_result()
+        evaluation = data_condition.evaluate_value(value)
+        assert evaluation.result == data_condition.get_condition_result()
 
     def assert_slow_condition_does_not_pass(
         self, data_condition: DataCondition, value: list[int]
     ) -> None:
-        assert data_condition.evaluate_value(value) != data_condition.get_condition_result()
-
-    # TODO: activity
+        evaluation = data_condition.evaluate_value(value)
+        assert evaluation.triggered is False
+        assert evaluation.result != data_condition.get_condition_result()
 
 
 class EventFrequencyQueryTestBase(SnubaTestCase, RuleTestCase, PerformanceIssueTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.start = before_now(minutes=5)
@@ -129,3 +138,14 @@ class EventFrequencyQueryTestBase(SnubaTestCase, RuleTestCase, PerformanceIssueT
             fingerprint=fingerprint,
         )
         self.data = {"interval": "5m", "value": 30}
+
+        self.groups = list(
+            Group.objects.filter(
+                id__in={self.event.group_id, self.event2.group_id, self.perf_event.group_id}
+            ).values("id", "type", "project_id", "project__organization_id")
+        )
+        self.group_3 = list(
+            Group.objects.filter(id=self.event3.group_id).values(
+                "id", "type", "project_id", "project__organization_id"
+            )
+        )

@@ -1,7 +1,7 @@
-import styled from '@emotion/styled';
 import type {Location} from 'history';
 
-import {space} from 'sentry/styles/space';
+import {Grid} from '@sentry/scraps/layout';
+
 import type {PageFilters} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 import {SessionFieldWithOperation} from 'sentry/types/organization';
@@ -9,9 +9,9 @@ import type {Project} from 'sentry/types/project';
 import {isPlatformANRCompatible} from 'sentry/views/projectDetail/utils';
 
 import {ProjectAnrScoreCard} from './projectAnrScoreCard';
-import ProjectApdexScoreCard from './projectApdexScoreCard';
-import ProjectStabilityScoreCard from './projectStabilityScoreCard';
-import ProjectVelocityScoreCard from './projectVelocityScoreCard';
+import {ProjectApdexScoreCard} from './projectApdexScoreCard';
+import {ProjectStabilityScoreCard} from './projectStabilityScoreCard';
+import {ProjectVelocityScoreCard} from './projectVelocityScoreCard';
 
 type Props = {
   hasSessions: boolean | null;
@@ -24,7 +24,7 @@ type Props = {
   query?: string;
 };
 
-function ProjectScoreCards({
+export function ProjectScoreCards({
   organization,
   selection,
   isProjectStabilized,
@@ -35,7 +35,15 @@ function ProjectScoreCards({
   project,
 }: Props) {
   return (
-    <CardWrapper>
+    <Grid
+      columns={{
+        zero: '1fr',
+        '3xl': 'repeat(2, minmax(0, 1fr))',
+        '5xl': 'repeat(4, minmax(0, 1fr))',
+      }}
+      gap="xl"
+      marginBottom="xl"
+    >
       <ProjectStabilityScoreCard
         selection={selection}
         isProjectStabilized={isProjectStabilized}
@@ -61,7 +69,7 @@ function ProjectScoreCards({
         query={query}
       />
 
-      {isPlatformANRCompatible(project?.platform, project?.features) ? (
+      {isPlatformANRCompatible(project?.platform) ? (
         <ProjectAnrScoreCard
           organization={organization}
           selection={selection}
@@ -79,25 +87,6 @@ function ProjectScoreCards({
           query={query}
         />
       )}
-    </CardWrapper>
+    </Grid>
   );
 }
-
-const CardWrapper = styled('div')`
-  display: grid;
-  gap: ${space(2)};
-  grid-template-columns: 1fr;
-  margin-bottom: ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    display: grid;
-    grid-column-gap: ${space(2)};
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @media (min-width: 1600px) {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-`;
-
-export default ProjectScoreCards;

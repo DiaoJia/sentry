@@ -1,12 +1,13 @@
 import {useCallback, useEffect, useState} from 'react';
 
+import {Alert, AlertLink} from '@sentry/scraps/alert';
+
 import type {Client} from 'sentry/api';
-import {Alert} from 'sentry/components/core/alert';
-import {AlertLink} from 'sentry/components/core/alert/alertLink';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 
 enum ReprocessableEventReason {
   // It can have many reasons. The event is too old to be reprocessed (very unlikely!)
@@ -31,7 +32,13 @@ type Props = {
   projSlug: Project['slug'];
 };
 
-function ReprocessAlert({onReprocessEvent, api, orgSlug, projSlug, eventId}: Props) {
+export function ReprocessAlert({
+  onReprocessEvent,
+  api,
+  orgSlug,
+  projSlug,
+  eventId,
+}: Props) {
   const [reprocessableEvent, setReprocessableEvent] = useState<
     undefined | ReprocessableEvent
   >();
@@ -39,7 +46,10 @@ function ReprocessAlert({onReprocessEvent, api, orgSlug, projSlug, eventId}: Pro
   const checkEventReprocessable = useCallback(async () => {
     try {
       const response = await api.requestPromise(
-        `/projects/${orgSlug}/${projSlug}/events/${eventId}/reprocessable/`
+        getApiUrl(
+          '/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/reprocessable/',
+          {path: {organizationIdOrSlug: orgSlug, projectIdOrSlug: projSlug, eventId}}
+        )
       );
       setReprocessableEvent(response);
     } catch {
@@ -59,7 +69,7 @@ function ReprocessAlert({onReprocessEvent, api, orgSlug, projSlug, eventId}: Pro
 
   if (reprocessable) {
     return (
-      <AlertLink type="warning" onClick={onReprocessEvent}>
+      <AlertLink variant="warning" onClick={onReprocessEvent}>
         {t(
           'You’ve uploaded new debug files. Reprocess events in this issue to view a better stack trace'
         )}
@@ -81,7 +91,9 @@ function ReprocessAlert({onReprocessEvent, api, orgSlug, projSlug, eventId}: Pro
     }
   }
 
-  return <Alert type="info">{getAlertInfoMessage()}</Alert>;
+  return (
+    <Alert variant="info" showIcon={false}>
+      {getAlertInfoMessage()}
+    </Alert>
+  );
 }
-
-export default ReprocessAlert;

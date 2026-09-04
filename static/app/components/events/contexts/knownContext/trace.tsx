@@ -1,12 +1,14 @@
 import type {Location} from 'history';
 
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {getContextKeys} from 'sentry/components/events/contexts/utils';
-import {generateTraceTarget} from 'sentry/components/quickTrace/utils';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {KeyValueListData} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
+import {getTraceTargetFromEvent} from 'sentry/views/performance/traceDetails/traceTarget';
 import {transactionSummaryRouteWithQuery} from 'sentry/views/performance/transactionSummary/utils';
 
 enum TraceContextKeys {
@@ -45,9 +47,9 @@ export function getTraceContextData({
   meta,
 }: {
   data: TraceContext;
-  event: Event;
   location: Location;
   organization: Organization;
+  event?: Event;
   meta?: Record<keyof TraceContext, any>;
 }): KeyValueListData {
   return getContextKeys({data})
@@ -56,15 +58,35 @@ export function getTraceContextData({
         case TraceContextKeys.TRACE_ID: {
           const traceId = data.trace_id || '';
           if (!traceId) {
-            return undefined;
+            return;
           }
-          const link = generateTraceTarget(event, organization, location);
-          const hasPerformanceView = organization.features.includes('performance-view');
+
+          // We want to default to true for backwards compatibility, but we want to show
+          // a tooltip if the trace was not sampled.
+          const traceWasSampled = data?.sampled ?? true;
+
+          if (traceWasSampled) {
+            const link = event
+              ? getTraceTargetFromEvent(event, organization, location)
+              : undefined;
+            const hasPerformanceView = organization.features.includes('performance-view');
+
+            return {
+              key: ctxKey,
+              subject: t('Trace ID'),
+              value: traceId,
+              action: hasPerformanceView ? {link} : undefined,
+            };
+          }
+
           return {
             key: ctxKey,
             subject: t('Trace ID'),
-            value: traceId,
-            action: hasPerformanceView ? {link} : undefined,
+            value: (
+              <Tooltip showUnderline title={t('Trace was not sampled.')}>
+                {traceId}
+              </Tooltip>
+            ),
           };
         }
         case TraceContextKeys.SPAN_ID: {
@@ -136,7 +158,7 @@ export function getTraceContextData({
           });
 
           if (!eventTag || typeof eventTag.value !== 'string') {
-            return undefined;
+            return;
           }
           const transactionName = eventTag.value;
 
@@ -151,7 +173,7 @@ export function getTraceContextData({
           const link = transactionSummaryRouteWithQuery({
             organization,
             transaction: transactionName,
-            projectID: event.projectID,
+            projectID: event?.projectID,
             query: {},
           });
 

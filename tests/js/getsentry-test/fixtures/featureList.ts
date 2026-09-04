@@ -62,10 +62,6 @@ export function FeatureListFixture(): Record<string, Feature> {
       description:
         'Automatically forward processed Sentry events into third party tools such as Amazon SQS, Segment, and Splunk.',
     },
-    'weekly-reports': {
-      name: 'Weekly Reports',
-      description: "A weekly email summary of your organization's health.",
-    },
     'discover-basic': {
       name: 'Discover',
       description: 'Browse raw event data outside of Issues.',
@@ -73,10 +69,6 @@ export function FeatureListFixture(): Record<string, Feature> {
     'discover-query': {
       name: 'Discover Query Builder',
       description: 'Build and save custom queries using Discover.',
-    },
-    'global-views': {
-      name: 'Cross project visibility',
-      description: 'View data across all projects in your organization.',
     },
     invoices: {
       name: 'Invoicing',
@@ -95,15 +87,6 @@ export function FeatureListFixture(): Record<string, Feature> {
       name: 'Custom Repositories',
       description:
         'Configure custom Symbol Servers, Amazon S3 buckets, or GCS buckets for debug files.',
-    },
-    relay: {
-      name: 'Relay',
-      description:
-        'Use Relay as middle layer for on premise data scrubbing before sending data to Sentry.',
-    },
-    'app-store-connect-multiple': {
-      name: 'Multiple App Store Connect apps',
-      description: 'Add multiple Apple App Store Connect apps per project',
     },
   };
 }

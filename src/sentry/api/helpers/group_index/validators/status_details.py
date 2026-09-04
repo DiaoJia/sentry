@@ -3,14 +3,12 @@ from typing import NotRequired, TypedDict
 from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
-from sentry import features
 from sentry.api.helpers.group_index.validators.in_commit import InCommitResult, InCommitValidator
 from sentry.models.release import Release
 
 
 class StatusDetailsResult(TypedDict):
     inNextRelease: NotRequired[bool]
-    inUpcomingRelease: NotRequired[bool]
     inRelease: NotRequired[str]
     inCommit: NotRequired[InCommitResult]
     ignoreDuration: NotRequired[int]
@@ -21,12 +19,9 @@ class StatusDetailsResult(TypedDict):
 
 
 @extend_schema_serializer()
-class StatusDetailsValidator(serializers.Serializer):
+class StatusDetailsValidator(serializers.Serializer[StatusDetailsResult]):
     inNextRelease = serializers.BooleanField(
         help_text="If true, marks the issue as resolved in the next release."
-    )
-    inUpcomingRelease = serializers.BooleanField(
-        help_text="If true, marks the issue as resolved in the upcoming release."
     )
     inRelease = serializers.CharField(
         help_text=(
@@ -38,20 +33,24 @@ class StatusDetailsValidator(serializers.Serializer):
         help_text="The commit data that the issue should use for resolution.", required=False
     )
     ignoreDuration = serializers.IntegerField(
-        help_text="Ignore the issue until for this many minutes."
+        help_text="Ignore the issue until for this many minutes.", min_value=0
     )
     ignoreCount = serializers.IntegerField(
-        help_text="Ignore the issue until it has occurred this many times in `ignoreWindow` minutes."
+        help_text="Ignore the issue until it has occurred this many times in `ignoreWindow` minutes.",
+        min_value=0,
     )
     ignoreWindow = serializers.IntegerField(
         help_text="Ignore the issue until it has occurred `ignoreCount` times in this many minutes. (Max: 1 week)",
+        min_value=0,
         max_value=7 * 24 * 60,
     )
     ignoreUserCount = serializers.IntegerField(
-        help_text="Ignore the issue until it has affected this many users in `ignoreUserWindow` minutes."
+        help_text="Ignore the issue until it has affected this many users in `ignoreUserWindow` minutes.",
+        min_value=0,
     )
     ignoreUserWindow = serializers.IntegerField(
         help_text="Ignore the issue until it has affected `ignoreUserCount` users in this many minutes. (Max: 1 week)",
+        min_value=0,
         max_value=7 * 24 * 60,
     )
 
@@ -92,20 +91,3 @@ class StatusDetailsValidator(serializers.Serializer):
             raise serializers.ValidationError(
                 "No release data present in the system to form a basis for 'Next Release'"
             )
-
-    def validate_inUpcomingRelease(self, value: bool) -> "Release":
-        project = self.context["project"]
-
-        if not features.has("organizations:resolve-in-upcoming-release", project.organization):
-            raise serializers.ValidationError(
-                "Your organization does not have access to this feature."
-            )
-
-        try:
-            return (
-                Release.objects.filter(projects=project, organization_id=project.organization_id)
-                .extra(select={"sort": "COALESCE(date_released, date_added)"})
-                .order_by("-sort")[0]
-            )
-        except IndexError:
-            raise serializers.ValidationError("No release data present in the system.")

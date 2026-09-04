@@ -1,10 +1,13 @@
+import {useMutation, useQueryClient} from '@tanstack/react-query';
+import type {UseMutationOptions} from '@tanstack/react-query';
 import type {LocationDescriptor} from 'history';
 import pick from 'lodash/pick';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import type {ApiResult, Client} from 'sentry/api';
+import type {Client} from 'sentry/api';
 import {canIncludePreviousPeriod} from 'sentry/components/charts/utils';
 import {t} from 'sentry/locale';
+import type {ApiResult} from 'sentry/types/api';
 import type {DateString} from 'sentry/types/core';
 import type {IssueAttachment} from 'sentry/types/group';
 import type {
@@ -12,26 +15,17 @@ import type {
   MultiSeriesEventsStats,
   OrganizationSummary,
 } from 'sentry/types/organization';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import type {LocationQuery} from 'sentry/utils/discover/eventView';
 import type {DiscoverDatasets} from 'sentry/utils/discover/types';
 import {getPeriod} from 'sentry/utils/duration/getPeriod';
 import {PERFORMANCE_URL_PARAM} from 'sentry/utils/performance/constants';
-import type {QueryBatching} from 'sentry/utils/performance/contexts/genericQueryBatcher';
-import type {
-  ApiQueryKey,
-  UseApiQueryOptions,
-  UseMutationOptions,
-} from 'sentry/utils/queryClient';
-import {
-  getApiQueryData,
-  setApiQueryData,
-  useApiQuery,
-  useMutation,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import type {UseApiQueryOptions} from 'sentry/utils/queryClient';
+import {getApiQueryData, setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import type {SamplingMode} from 'sentry/views/explore/hooks/useProgressiveQuery';
 
 type Options = {
@@ -42,6 +36,7 @@ type Options = {
   end?: DateString;
   environment?: readonly string[];
   excludeOther?: boolean;
+  extrapolationMode?: string;
   field?: string[];
   generatePathname?: (org: OrganizationSummary) => string;
   includePrevious?: boolean;
@@ -51,8 +46,7 @@ type Options = {
   period?: string | null;
   project?: readonly number[];
   query?: string;
-  queryBatching?: QueryBatching;
-  queryExtras?: Record<string, string | boolean | number>;
+  queryExtras?: Record<string, string | boolean | number | string[]>;
   referrer?: string;
   sampling?: SamplingMode;
   start?: DateString;
@@ -80,7 +74,6 @@ export type EventsStatsOptions<T extends boolean> = {includeAllArgs: T} & Option
  * @param {Boolean} options.includePrevious Should request also return reqsults for previous period?
  * @param {Number} options.limit The number of rows to return
  * @param {String} options.query Search query
- * @param {QueryBatching} options.queryBatching A container for batching functions from a provider
  * @param {Record<string, string>} options.queryExtras A list of extra query parameters
  * @param {(org: OrganizationSummary) => string} options.generatePathname A function that returns an override for the pathname
  */
@@ -105,13 +98,13 @@ export const doEventsRequest = <IncludeAllArgsType extends boolean>(
     partial,
     withoutZerofill,
     referrer,
-    queryBatching,
     generatePathname,
     queryExtras,
     excludeOther,
     includeAllArgs,
     dataset,
     sampling,
+    extrapolationMode,
   }: EventsStatsOptions<IncludeAllArgsType>
 ): IncludeAllArgsType extends true
   ? Promise<ApiResult<EventsStats | MultiSeriesEventsStats>>
@@ -139,7 +132,8 @@ export const doEventsRequest = <IncludeAllArgsType extends boolean>(
       excludeOther: excludeOther ? '1' : undefined,
       dataset,
       sampling,
-    }).filter(([, value]) => typeof value !== 'undefined')
+      extrapolationMode,
+    }).filter(([, value]) => value !== undefined)
   );
 
   // Doubling period for absolute dates is not accurate unless starting and
@@ -155,10 +149,6 @@ export const doEventsRequest = <IncludeAllArgsType extends boolean>(
       ...queryExtras,
     },
   };
-
-  if (queryBatching?.batchRequest) {
-    return queryBatching.batchRequest(api, pathname, queryObject);
-  }
 
   return api.requestPromise<IncludeAllArgsType>(pathname, queryObject);
 };
@@ -177,6 +167,7 @@ export type EventQuery = {
   referrer?: string;
   sort?: string | string[];
   team?: string | string[];
+  truncate?: number;
 };
 
 export type TagSegment = {
@@ -205,10 +196,15 @@ export function fetchTagFacets(
 
   const queryOption = {...urlParams, query: query.query};
 
-  return api.requestPromise(`/organizations/${orgSlug}/events-facets/`, {
-    query: queryOption,
-    includeAllArgs: true,
-  });
+  return api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/events-facets/', {
+      path: {organizationIdOrSlug: orgSlug},
+    }),
+    {
+      query: queryOption,
+      includeAllArgs: true,
+    }
+  );
 }
 
 /**
@@ -228,9 +224,14 @@ export function fetchTotalCount(
   };
 
   return api
-    .requestPromise(`/organizations/${orgSlug}/events-meta/`, {
-      query: queryOption,
-    })
+    .requestPromise(
+      getApiUrl('/organizations/$organizationIdOrSlug/events-meta/', {
+        path: {organizationIdOrSlug: orgSlug},
+      }),
+      {
+        query: queryOption,
+      }
+    )
     .then((res: Response) => res.count);
 }
 
@@ -247,7 +248,16 @@ const makeFetchEventAttachmentsQueryKey = ({
   projectSlug,
   eventId,
 }: FetchEventAttachmentParameters): ApiQueryKey => [
-  `/projects/${orgSlug}/${projectSlug}/events/${eventId}/attachments/`,
+  getApiUrl(
+    '/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/attachments/',
+    {
+      path: {
+        organizationIdOrSlug: orgSlug,
+        projectIdOrSlug: projectSlug!,
+        eventId,
+      },
+    }
+  ),
 ];
 
 export const useFetchEventAttachments = (
@@ -288,17 +298,24 @@ type DeleteEventAttachmentOptions = UseMutationOptions<
   DeleteEventAttachmentContext
 >;
 
-export const useDeleteEventAttachmentOptimistic = (
-  incomingOptions: Partial<DeleteEventAttachmentOptions> = {}
-) => {
+export const useDeleteEventAttachmentOptimistic = () => {
   const api = useApi({persistInFlight: true});
   const queryClient = useQueryClient();
 
   const options: DeleteEventAttachmentOptions = {
-    ...incomingOptions,
     mutationFn: ({orgSlug, projectSlug, eventId, attachmentId}) => {
       return api.requestPromise(
-        `/projects/${orgSlug}/${projectSlug}/events/${eventId}/attachments/${attachmentId}/`,
+        getApiUrl(
+          '/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/attachments/$attachmentId/',
+          {
+            path: {
+              organizationIdOrSlug: orgSlug,
+              projectIdOrSlug: projectSlug,
+              eventId,
+              attachmentId,
+            },
+          }
+        ),
         {method: 'DELETE'}
       );
     },
@@ -324,22 +341,18 @@ export const useDeleteEventAttachmentOptimistic = (
         }
       );
 
-      incomingOptions.onMutate?.(variables);
-
       return {previous};
     },
-    onError: (error, variables, context) => {
+    onError: (_error, variables, onMutateResult) => {
       addErrorMessage(t('An error occurred while deleting the attachment'));
 
-      if (context) {
+      if (onMutateResult) {
         setApiQueryData(
           queryClient,
           makeFetchEventAttachmentsQueryKey(variables),
-          context.previous
+          onMutateResult.previous
         );
       }
-
-      incomingOptions.onError?.(error, variables, context);
     },
   };
 

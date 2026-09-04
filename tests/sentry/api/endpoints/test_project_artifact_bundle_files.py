@@ -10,7 +10,23 @@ from sentry.testutils.helpers.datetime import freeze_time
 
 @freeze_time("2023-03-15 00:00:00")
 class ProjectArtifactBundleFilesEndpointTest(APITestCase):
-    def test_get_artifact_bundle_files_with_multiple_files(self):
+    def test_get_artifact_bundle_files_with_invalid_bundle_id(self) -> None:
+        project = self.create_project(name="foo")
+        url = reverse(
+            "sentry-api-0-project-artifact-bundle-files",
+            kwargs={
+                "organization_id_or_slug": project.organization.slug,
+                "project_id_or_slug": project.slug,
+                "bundle_id": "not-a-uuid",
+            },
+        )
+
+        self.login_as(user=self.user)
+        response = self.client.get(url)
+
+        assert response.status_code == 400
+
+    def test_get_artifact_bundle_files_with_multiple_files(self) -> None:
         project = self.create_project(name="foo")
 
         artifact_bundle = self.create_artifact_bundle(
@@ -112,7 +128,7 @@ class ProjectArtifactBundleFilesEndpointTest(APITestCase):
             ],
         }
 
-    def test_get_artifact_bundle_files_pagination_with_multiple_files(self):
+    def test_get_artifact_bundle_files_pagination_with_multiple_files(self) -> None:
         project = self.create_project(name="foo")
 
         artifact_bundle = self.create_artifact_bundle(
@@ -223,7 +239,7 @@ class ProjectArtifactBundleFilesEndpointTest(APITestCase):
             assert response.status_code == 200, response.content
             assert response.data == expected[index]
 
-    def test_get_artifact_bundle_files_with_multiple_files_and_search_query(self):
+    def test_get_artifact_bundle_files_with_multiple_files_and_search_query(self) -> None:
         project = self.create_project(name="foo")
 
         artifact_bundle = self.create_artifact_bundle(

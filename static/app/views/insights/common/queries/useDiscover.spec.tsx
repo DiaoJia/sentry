@@ -1,39 +1,22 @@
-import type {ReactNode} from 'react';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {PageFilterStateFixture} from 'sentry-fixture/pageFilters';
 
-import {makeTestQueryClient} from 'sentry-test/queryClient';
-import {renderHook, waitFor} from 'sentry-test/reactTestingLibrary';
+import {renderHookWithProviders, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import {QueryClientProvider} from 'sentry/utils/queryClient';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {useLocation} from 'sentry/utils/useLocation';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import {
-  useSpanMetrics,
-  useSpansIndexed,
-} from 'sentry/views/insights/common/queries/useDiscover';
-import {
-  SpanIndexedField,
-  type SpanIndexedProperty,
-  type SpanMetricsProperty,
-} from 'sentry/views/insights/types';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {SAMPLING_MODE} from 'sentry/views/explore/hooks/useProgressiveQuery';
+import {useSpans} from 'sentry/views/insights/common/queries/useDiscover';
+import type {SpanProperty} from 'sentry/views/insights/types';
+import {SpanFields} from 'sentry/views/insights/types';
 
 jest.mock('sentry/utils/useLocation');
-jest.mock('sentry/utils/usePageFilters');
-
-function Wrapper({children}: {children?: ReactNode}) {
-  return (
-    <QueryClientProvider client={makeTestQueryClient()}>
-      <OrganizationContext value={OrganizationFixture()}>{children}</OrganizationContext>
-    </QueryClientProvider>
-  );
-}
+jest.mock('sentry/components/pageFilters/usePageFilters');
 
 describe('useDiscover', () => {
-  describe('useSpanMetrics', () => {
+  describe('useSpans', () => {
     const organization = OrganizationFixture();
 
     jest.mocked(usePageFilters).mockReturnValue(PageFilterStateFixture());
@@ -51,12 +34,11 @@ describe('useDiscover', () => {
         body: {data: []},
       });
 
-      const {result} = renderHook(
-        ({fields, enabled}) => useSpanMetrics({fields, enabled}, 'span-metrics-series'),
+      const {result} = renderHookWithProviders(
+        ({fields, enabled}) => useSpans({fields, enabled}, 'span-metrics-series'),
         {
-          wrapper: Wrapper,
           initialProps: {
-            fields: ['epm()'] as SpanMetricsProperty[],
+            fields: ['epm()'] as SpanProperty[],
             enabled: false,
           },
         }
@@ -81,9 +63,9 @@ describe('useDiscover', () => {
         },
       });
 
-      const {result} = renderHook(
+      const {result} = renderHookWithProviders(
         ({filters, fields, sorts, limit, cursor, referrer}) =>
-          useSpanMetrics(
+          useSpans(
             {
               search: MutableSearch.fromQueryObject(filters),
               fields,
@@ -94,7 +76,6 @@ describe('useDiscover', () => {
             referrer
           ),
         {
-          wrapper: Wrapper,
           initialProps: {
             filters: {
               'span.group': '221aa7ebd216',
@@ -102,7 +83,7 @@ describe('useDiscover', () => {
               release: '0.0.1',
               environment: undefined,
             },
-            fields: ['epm()'] as SpanMetricsProperty[],
+            fields: ['epm()'] as SpanProperty[],
             sorts: [{field: 'epm()', kind: 'desc' as const}],
             limit: 10,
             referrer: 'api-spec',
@@ -118,14 +99,15 @@ describe('useDiscover', () => {
         expect.objectContaining({
           method: 'GET',
           query: {
-            dataset: 'spansMetrics',
+            dataset: 'spans',
             environment: [],
             field: ['epm()'],
             per_page: 10,
             project: [],
             sort: '-epm()',
-            query: `span.group:221aa7ebd216 transaction:/api/details release:0.0.1`,
+            query: 'span.group:221aa7ebd216 transaction:/api/details release:0.0.1',
             referrer: 'api-spec',
+            sampling: SAMPLING_MODE.NORMAL,
             statsPeriod: '10d',
           },
         })
@@ -177,12 +159,11 @@ describe('useDiscover', () => {
         body: {data: []},
       });
 
-      const {result} = renderHook(
-        ({fields, enabled}) => useSpansIndexed({fields, enabled}, 'referrer'),
+      const {result} = renderHookWithProviders(
+        ({fields, enabled}) => useSpans({fields, enabled}, 'referrer'),
         {
-          wrapper: Wrapper,
           initialProps: {
-            fields: [SpanIndexedField.SPAN_DESCRIPTION] as SpanIndexedProperty[],
+            fields: [SpanFields.SPAN_DESCRIPTION] as SpanProperty[],
             enabled: false,
           },
         }
@@ -214,9 +195,9 @@ describe('useDiscover', () => {
         },
       });
 
-      const {result} = renderHook(
+      const {result} = renderHookWithProviders(
         ({filters, fields, sorts, limit, cursor, referrer}) =>
-          useSpansIndexed(
+          useSpans(
             {
               search: MutableSearch.fromQueryObject(filters),
               fields,
@@ -227,7 +208,6 @@ describe('useDiscover', () => {
             referrer
           ),
         {
-          wrapper: Wrapper,
           initialProps: {
             filters: {
               'span.group': '221aa7ebd216',
@@ -236,10 +216,10 @@ describe('useDiscover', () => {
               release: '0.0.1',
             },
             fields: [
-              SpanIndexedField.SPAN_OP,
-              SpanIndexedField.SPAN_GROUP,
-              SpanIndexedField.SPAN_DESCRIPTION,
-            ] as SpanIndexedProperty[],
+              SpanFields.SPAN_OP,
+              SpanFields.SPAN_GROUP,
+              SpanFields.SPAN_DESCRIPTION,
+            ] as SpanProperty[],
             sorts: [{field: 'span.group', kind: 'desc' as const}],
             limit: 10,
             referrer: 'api-spec',
@@ -255,13 +235,15 @@ describe('useDiscover', () => {
         expect.objectContaining({
           method: 'GET',
           query: {
-            dataset: 'spansIndexed',
+            dataset: 'spans',
+            sampling: SAMPLING_MODE.NORMAL,
             environment: [],
             field: ['span.op', 'span.group', 'span.description'],
             per_page: 10,
             project: [],
             sort: '-span.group',
-            query: `span.group:221aa7ebd216 measurements.inp:<50 measurements.inp:>0 transaction:/api/details release:0.0.1`,
+            query:
+              'span.group:221aa7ebd216 measurements.inp:<50 measurements.inp:>0 transaction:/api/details release:0.0.1',
             referrer: 'api-spec',
             statsPeriod: '10d',
           },

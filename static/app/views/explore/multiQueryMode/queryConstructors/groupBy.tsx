@@ -1,30 +1,38 @@
 import styled from '@emotion/styled';
 
-import {CompactSelect, type SelectOption} from 'sentry/components/core/compactSelect';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {t} from 'sentry/locale';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
 import {useGroupByFields} from 'sentry/views/explore/hooks/useGroupByFields';
+import {useSpanItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 import {
-  type ReadableExploreQueryParts,
   useUpdateQueryAtIndex,
+  type ReadableExploreQueryParts,
 } from 'sentry/views/explore/multiQueryMode/locationUtils';
 import {
   Section,
   SectionHeader,
   SectionLabel,
 } from 'sentry/views/explore/multiQueryMode/queryConstructors/styles';
+import {TraceItemDataset} from 'sentry/views/explore/types';
+import {sortSearchedAttributes} from 'sentry/views/explore/utils/sortSearchedAttributes';
 
 type Props = {index: number; query: ReadableExploreQueryParts};
 
 export function GroupBySection({query, index}: Props) {
-  const {tags} = useTraceItemTags();
+  const {attributes: numberTags} = useSpanItemAttributes({}, 'number');
+  const {attributes: stringTags} = useSpanItemAttributes({}, 'string');
+  const {attributes: booleanTags} = useSpanItemAttributes({}, 'boolean');
 
   const updateGroupBys = useUpdateQueryAtIndex(index);
 
-  const enabledOptions: Array<SelectOption<string>> = useGroupByFields({
+  const enabledOptions = useGroupByFields({
     groupBys: [],
-    tags,
+    numberTags,
+    stringTags,
+    booleanTags,
+    traceItemType: TraceItemDataset.SPANS,
     hideEmptyOption: true,
   });
 
@@ -44,7 +52,16 @@ export function GroupBySection({query, index}: Props) {
         options={enabledOptions}
         value={query.groupBys}
         clearable
-        searchable
+        search={{
+          highlight: true,
+          filter: (option, searchText) => {
+            return sortSearchedAttributes({
+              fieldDefinitionType: TraceItemDataset.SPANS,
+              option,
+              searchText,
+            });
+          },
+        }}
         onChange={options =>
           updateGroupBys({groupBys: options.map(value => value.value.toString())})
         }

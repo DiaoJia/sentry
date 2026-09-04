@@ -2,7 +2,9 @@ import type React from 'react';
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
+import {InfoTip} from '@sentry/scraps/info';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+
 import {
   CALL_TREE_FRAME_WEIGHT_CELL_WIDTH_PX,
   CallTreeDynamicColumnsContainer,
@@ -18,7 +20,6 @@ import {
   makeCallTreeTableSortFunction,
   syncCallTreeTableScroll,
 } from 'sentry/components/profiling/flamegraph/callTreeTable';
-import QuestionTooltip from 'sentry/components/questionTooltip';
 import {IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {
@@ -89,7 +90,7 @@ export function FlamegraphTreeTable({
 
   const onRowContextMenu = useCallback(
     (item: VirtualizedTreeNode<FlamegraphFrame>) => {
-      return (e: React.MouseEvent<Element, MouseEvent>) => {
+      return (e: React.MouseEvent) => {
         setClickedContextMenuNode(item);
         contextMenu.handleContextMenu(e);
       };
@@ -227,9 +228,7 @@ export function FlamegraphTreeTable({
     );
 
   const scrollContainers = useMemo(() => {
-    return [scrollContainerRef, dynamicScrollContainerRef].filter(
-      c => !!c
-    ) as HTMLElement[];
+    return [scrollContainerRef, dynamicScrollContainerRef].filter(c => !!c);
   }, [dynamicScrollContainerRef, scrollContainerRef]);
 
   const {
@@ -255,19 +254,16 @@ export function FlamegraphTreeTable({
     tree,
   });
 
-  const onSortChange = useCallback(
-    (newSort: 'total weight' | 'self weight' | 'name') => {
-      const newDirection =
-        newSort === sort ? (direction === 'asc' ? 'desc' : 'asc') : 'desc';
+  const onSortChange = (newSort: 'total weight' | 'self weight' | 'name') => {
+    const newDirection =
+      newSort === sort ? (direction === 'asc' ? 'desc' : 'asc') : 'desc';
 
-      setDirection(newDirection);
-      setSort(newSort);
+    setDirection(newDirection);
+    setSort(newSort);
 
-      const sortFn = makeCallTreeTableSortFunction(newSort, newDirection);
-      handleSortingChange(sortFn);
-    },
-    [sort, direction, handleSortingChange]
-  );
+    const sortFn = makeCallTreeTableSortFunction(newSort, newDirection);
+    handleSortingChange(sortFn);
+  };
 
   useEffect(() => {
     function onShowInTableView(frame: FlamegraphFrame) {
@@ -291,7 +287,7 @@ export function FlamegraphTreeTable({
               <InteractionStateLayer />
               <span>
                 {t('Self Time')}{' '}
-                <QuestionTooltip
+                <InfoTip
                   title={t(
                     'Self time is the amount of time spent by this function excluding the time spent by other functions called within it.'
                   )}
@@ -309,7 +305,7 @@ export function FlamegraphTreeTable({
               <InteractionStateLayer />
               <span>
                 {t('Total Time')}{' '}
-                <QuestionTooltip
+                <InfoTip
                   title={t(
                     'Total time is the total amount of time spent by this function.'
                   )}
@@ -391,8 +387,8 @@ const FrameBar = styled('div')`
   overflow: auto;
   width: 100%;
   position: relative;
-  background-color: ${p => p.theme.surface200};
-  border-top: 1px solid ${p => p.theme.border};
+  background-color: ${p => p.theme.tokens.background.tertiary};
+  border-top: 1px solid ${p => p.theme.tokens.border.primary};
   flex: 1 1 100%;
   grid-area: table;
 `;

@@ -2,10 +2,11 @@ import type {ReactElement} from 'react';
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {IconOpen} from 'sentry/icons';
-import {isUrl} from 'sentry/utils/string/isUrl';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 
 interface RenderLinksInTextProps {
   exceptionText: string;
@@ -30,17 +31,17 @@ export const renderLinksInText = ({
   //    The "i" modifier makes the regex match both upper and lower case characters
 
   const urlRegex =
-    /https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9]{1,6}(?:[-a-zA-Z0-9@:%_\+~#?&\/=,\[\].]*[-a-zA-Z0-9@:%_\+~#?&\/=,\[\]])?/gi;
+    /https?:\/\/(?:www\.)?[-\w@:%.+~#=]{1,256}\.[a-z0-9]{1,6}(?:[-\w@:%+~#?&/=,[\].]*[-\w@:%+~#?&/=,[\]])?/gi;
 
   const parts = exceptionText.split(urlRegex);
   const urls = exceptionText.match(urlRegex) || [];
 
   const elements = parts.flatMap((part, index) => {
     const url = urls[index]!;
-    const isUrlValid = isUrl(url);
+    const linkIsValid = isValidUrl(url);
 
     let link: ReactElement | undefined;
-    if (isUrlValid) {
+    if (linkIsValid) {
       link = (
         <ExternalLink
           key={`link-${index}`}

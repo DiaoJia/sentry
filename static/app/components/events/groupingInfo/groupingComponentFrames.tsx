@@ -1,29 +1,32 @@
-import {Fragment, useState} from 'react';
+import {Fragment, useEffect, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
+import {Button} from '@sentry/scraps/button';
+
 import {IconAdd, IconSubtract} from 'sentry/icons';
 import {tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-
-import {GroupingComponentListItem} from './groupingComponent';
 
 interface GroupingComponentFramesProps {
+  initialCollapsed: boolean;
   items: React.ReactNode[];
-  maxVisibleItems?: number;
 }
 
-function GroupingComponentFrames({
+export function GroupingComponentFrames({
   items,
-  maxVisibleItems = 2,
+  initialCollapsed,
 }: GroupingComponentFramesProps) {
-  const [collapsed, setCollapsed] = useState(true);
-  const isCollapsible = items.length > maxVisibleItems;
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
+  const isCollapsible = items.length > 2;
+
+  useEffect(() => {
+    // eslint-disable-next-line react-you-might-not-need-an-effect/no-derived-state
+    setCollapsed(initialCollapsed);
+  }, [initialCollapsed]);
 
   return (
     <Fragment>
       {items.map((item, index) => {
-        if (!collapsed || index < maxVisibleItems) {
+        if (!collapsed || index < 2) {
           return (
             <GroupingComponentListItem isCollapsible={isCollapsible} key={index}>
               {item}
@@ -31,17 +34,17 @@ function GroupingComponentFrames({
           );
         }
 
-        if (index === maxVisibleItems) {
+        if (index === 2) {
           return (
             <GroupingComponentListItem key={index}>
               <ToggleCollapse
                 size="sm"
-                priority="link"
+                variant="link"
                 icon={<IconAdd legacySize="8px" />}
                 onClick={() => setCollapsed(false)}
               >
                 {tct('show [numberOfFrames] similar', {
-                  numberOfFrames: items.length - maxVisibleItems,
+                  numberOfFrames: items.length - 2,
                 })}
               </ToggleCollapse>
             </GroupingComponentListItem>
@@ -51,16 +54,16 @@ function GroupingComponentFrames({
         return null;
       })}
 
-      {!collapsed && items.length > maxVisibleItems && (
+      {!collapsed && items.length > 2 && (
         <GroupingComponentListItem>
           <ToggleCollapse
             size="sm"
-            priority="link"
+            variant="link"
             icon={<IconSubtract legacySize="8px" />}
             onClick={() => setCollapsed(true)}
           >
             {tct('collapse [numberOfFrames] similar', {
-              numberOfFrames: items.length - maxVisibleItems,
+              numberOfFrames: items.length - 2,
             })}
           </ToggleCollapse>
         </GroupingComponentListItem>
@@ -70,8 +73,12 @@ function GroupingComponentFrames({
 }
 
 const ToggleCollapse = styled(Button)`
-  margin: ${space(0.5)} 0;
-  color: ${p => p.theme.linkColor};
+  margin: ${p => p.theme.space.xs} 0;
+  color: ${p => p.theme.tokens.interactive.link.accent.rest};
 `;
 
-export default GroupingComponentFrames;
+export const GroupingComponentListItem = styled('li')<{isCollapsible?: boolean}>`
+  padding: 0;
+  margin: ${p => p.theme.space['2xs']} 0 ${p => p.theme.space['2xs']}
+    ${p => p.theme.space.lg};
+`;

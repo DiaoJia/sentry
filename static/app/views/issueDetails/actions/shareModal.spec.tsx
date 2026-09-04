@@ -6,9 +6,8 @@ import {ProjectFixture} from 'sentry-fixture/project';
 import {act, renderGlobalModal, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import {openModal} from 'sentry/actionCreators/modal';
-import GroupStore from 'sentry/stores/groupStore';
-import ModalStore from 'sentry/stores/modalStore';
-import ShareIssueModal from 'sentry/views/issueDetails/actions/shareModal';
+import {GroupStore} from 'sentry/stores/groupStore';
+import {ShareIssueModal} from 'sentry/views/issueDetails/actions/shareModal';
 
 describe('ShareIssueModal', () => {
   const project = ProjectFixture();
@@ -24,7 +23,6 @@ describe('ShareIssueModal', () => {
     });
   });
   afterEach(() => {
-    ModalStore.reset();
     GroupStore.reset();
     MockApiClient.clearMockResponses();
     jest.clearAllMocks();
@@ -54,7 +52,7 @@ describe('ShareIssueModal', () => {
     await userEvent.click(screen.getByRole('button', {name: 'Copy Link'}));
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      `http://localhost/organizations/org-slug/issues/1/`
+      'http://localhost/organizations/org-slug/issues/1/'
     );
   });
 
@@ -83,7 +81,7 @@ describe('ShareIssueModal', () => {
     await userEvent.click(screen.getByRole('button', {name: 'Copy Link'}));
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      `http://localhost/organizations/org-slug/issues/1/events/1/`
+      'http://localhost/organizations/org-slug/issues/1/events/1/'
     );
   });
 

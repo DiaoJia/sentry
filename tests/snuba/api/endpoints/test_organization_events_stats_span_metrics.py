@@ -1,5 +1,4 @@
 from datetime import timedelta
-from unittest.mock import patch
 
 import pytest
 from django.urls import reverse
@@ -8,7 +7,12 @@ from sentry.search.events import constants
 from sentry.testutils.cases import MetricsEnhancedPerformanceTestCase
 from sentry.testutils.helpers.datetime import before_now
 
-pytestmark = pytest.mark.sentry_metrics
+pytestmark = [
+    pytest.mark.sentry_metrics,
+    pytest.mark.skip(
+        reason="Generic metrics sets, gauges, and distributions are no longer queryable"
+    ),
+]
 
 
 class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformanceTestCase):
@@ -18,7 +22,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
     ]
     features = {"organizations:discover-basic": True}
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
         self.day_ago = before_now(days=1).replace(hour=10, minute=0, second=0, microsecond=0)
@@ -28,13 +32,11 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
             "sentry-api-0-organization-events-stats",
             kwargs={"organization_id_or_slug": self.project.organization.slug},
         )
-        self.features = {
-            "organizations:performance-use-metrics": True,
-        }
+        self.features = {}
 
     # These throughput tests should roughly match the ones in OrganizationEventsStatsEndpointTest
     @pytest.mark.querybuilder
-    def test_throughput_epm_hour_rollup(self):
+    def test_throughput_epm_hour_rollup(self) -> None:
         # Each of these denotes how many events to create in each hour
         event_counts = [6, 0, 6, 3, 0, 3]
         for hour, count in enumerate(event_counts):
@@ -65,7 +67,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
             for test in zip(event_counts, rows):
                 assert test[1][1][0]["count"] == test[0] / (3600.0 / 60.0)
 
-    def test_throughput_epm_day_rollup(self):
+    def test_throughput_epm_day_rollup(self) -> None:
         # Each of these denotes how many events to create in each minute
         event_counts = [6, 0, 6, 3, 0, 3]
         for hour, count in enumerate(event_counts):
@@ -94,7 +96,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
 
             assert data[0][1][0]["count"] == sum(event_counts) / (86400.0 / 60.0)
 
-    def test_throughput_epm_hour_rollup_offset_of_hour(self):
+    def test_throughput_epm_hour_rollup_offset_of_hour(self) -> None:
         # Each of these denotes how many events to create in each hour
         event_counts = [6, 0, 6, 3, 0, 3]
         for hour, count in enumerate(event_counts):
@@ -125,7 +127,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
             for test in zip(event_counts, rows):
                 assert test[1][1][0]["count"] == test[0] / (3600.0 / 60.0)
 
-    def test_throughput_eps_minute_rollup(self):
+    def test_throughput_eps_minute_rollup(self) -> None:
         # Each of these denotes how many events to create in each minute
         event_counts = [6, 0, 6, 3, 0, 3]
         for minute, count in enumerate(event_counts):
@@ -156,7 +158,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
             for test in zip(event_counts, rows):
                 assert test[1][1][0]["count"] == test[0] / 60.0
 
-    def test_top_events(self):
+    def test_top_events(self) -> None:
         # Each of these denotes how many events to create in each minute
         for transaction in ["foo", "bar"]:
             self.store_span_metric(
@@ -186,7 +188,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert "bar" in response.data
         assert response.data["Other"]["meta"]["dataset"] == "spansMetrics"
 
-    def test_llm_tokens(self):
+    def test_llm_tokens(self) -> None:
         self.store_span_metric(
             4,
             metric="ai.total_tokens.used",
@@ -221,7 +223,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert data[1][1][0]["count"] == 8.0
         assert meta["units"]["sum_ai_total_tokens_used"] is None
 
-    def test_resource_encoded_length(self):
+    def test_resource_encoded_length(self) -> None:
         self.store_span_metric(
             4,
             metric="http.response_content_length",
@@ -248,7 +250,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert not data[0][1][0]["count"]
         assert data[1][1][0]["count"] == 4.0
 
-    def test_resource_decoded_length(self):
+    def test_resource_decoded_length(self) -> None:
         self.store_span_metric(
             4,
             metric="http.decoded_response_content_length",
@@ -274,7 +276,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert not data[0][1][0]["count"]
         assert data[1][1][0]["count"] == 4.0
 
-    def test_resource_transfer_size(self):
+    def test_resource_transfer_size(self) -> None:
         self.store_span_metric(
             4,
             metric="http.response_transfer_size",
@@ -300,7 +302,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert not data[0][1][0]["count"]
         assert data[1][1][0]["count"] == 4.0
 
-    def test_cache_item_size(self):
+    def test_cache_item_size(self) -> None:
         self.store_span_metric(
             4,
             metric="cache.item_size",
@@ -328,7 +330,7 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert not data[0][1][0]["count"]
         assert data[1][1][0]["count"] == 4.0
 
-    def test_messaging_receive_latency(self):
+    def test_messaging_receive_latency(self) -> None:
         self.store_span_metric(
             {
                 "min": 10,
@@ -361,34 +363,3 @@ class OrganizationEventsStatsSpansMetricsEndpointTest(MetricsEnhancedPerformance
         assert len(data) == 2
         assert not data[0][1][0]["count"]
         assert data[1][1][0]["count"] == 10.0
-
-
-class OrganizationEventsStatsSpansMetricsEndpointTestWithMetricLayer(
-    OrganizationEventsStatsSpansMetricsEndpointTest
-):
-    def setUp(self):
-        super().setUp()
-        self.features["organizations:use-metrics-layer"] = True
-
-    @patch("sentry.snuba.metrics.datasource")
-    def test_metrics_layer_is_not_used(self, get_series):
-        self.store_span_metric(
-            4,
-            metric="http.response_content_length",
-            timestamp=self.day_ago + timedelta(minutes=1),
-            tags={"transaction": "foo"},
-        )
-
-        self.do_request(
-            data={
-                "start": self.day_ago,
-                "end": self.day_ago + timedelta(minutes=2),
-                "interval": "1m",
-                "yAxis": "avg(http.response_content_length)",
-                "project": self.project.id,
-                "dataset": "spansMetrics",
-                "excludeOther": 0,
-            },
-        )
-
-        get_series.assert_not_called()

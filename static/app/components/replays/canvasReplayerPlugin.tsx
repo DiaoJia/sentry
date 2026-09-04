@@ -1,15 +1,15 @@
-import * as Sentry from '@sentry/react';
 import {
   canvasMutation,
+  EventType,
+  IncrementalSource,
   type canvasMutationData,
   type canvasMutationParam,
-  EventType,
   type eventWithTime,
-  IncrementalSource,
   type Replayer,
   type ReplayPlugin,
 } from '@sentry-internal/rrweb';
 import type {CanvasArg} from '@sentry-internal/rrweb-types';
+import * as Sentry from '@sentry/react';
 import debounce from 'lodash/debounce';
 
 import {deserializeCanvasArg} from './deserializeCanvasArgs';
@@ -79,7 +79,7 @@ function findIndex(
  *    - copies outside canvas to iframe canvas
  *    - this avoids having to remove iframe sandbox
  */
-export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
+export function canvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
   const PRELOAD_SIZE = 50;
   const BUFFER_TIME = 20_000;
   const canvases = new Map<number, HTMLCanvasElement>();
@@ -160,14 +160,14 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
             return {...c, args};
           })
         );
-        if (status.isUnchanged === false) {
+        if (!status.isUnchanged) {
           canvasEventMap.set(event, {...data, commands});
         }
       } else {
         const args = await Promise.all(
           (data.args as CanvasArg[]).map(deserializeCanvasArg(imageMap, null, status))
         );
-        if (status.isUnchanged === false) {
+        if (!status.isUnchanged) {
           canvasEventMap.set(event, {...data, args});
         }
       }
@@ -198,14 +198,14 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
     return cloneNode;
   }
 
-  async function preload(currentEvent?: eventWithTime, preloadCount = PRELOAD_SIZE) {
+  async function preload(currentEvent?: eventWithTime) {
     const foundIndex =
       nextPreloadIndex > -1
         ? nextPreloadIndex
         : findIndex(canvasMutationEvents, currentEvent);
     const startIndex = foundIndex > -1 ? foundIndex : 0;
     const eventsToPreload = canvasMutationEvents
-      .slice(startIndex, startIndex + preloadCount)
+      .slice(startIndex, startIndex + PRELOAD_SIZE)
       .filter(
         ({timestamp}) =>
           !currentEvent || timestamp - currentEvent.timestamp <= BUFFER_TIME
@@ -218,7 +218,7 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
         preloadQueue.add(event);
         // Deserialize and preload an event serially, otherwise for large event
         // counts, this can crash the browser
-        await deserializeAndPreloadCanvasEvents(event.data as canvasMutationData, event);
+        await deserializeAndPreloadCanvasEvents(event.data, event);
         preloadQueue.delete(event);
       }
     }
@@ -232,9 +232,9 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
   // event for all canvas mutation events before the current replay time
   const debouncedProcessQueuedEvents = debounce(
     function processQueuedEvents() {
-      const canvasIds = Array.from(canvases.keys());
       const queuedEventIds = Array.from(handleQueue.keys());
       const queuedEventIdsSet = new Set(queuedEventIds);
+      const canvasIds = Array.from(canvases.keys());
       const unusedCanvases = canvasIds.filter(id => !queuedEventIdsSet.has(id));
 
       // Compare the canvas ids from canvas mutation events against existing
@@ -243,7 +243,8 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
       unusedCanvases.forEach(id => {
         const el = containers.get(id);
         if (el) {
-          el.src = '';
+          // this is valid URL for a blank image
+          el.src = 'data:,';
         }
       });
 
@@ -332,7 +333,8 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
 
       if (node.nodeName === 'CANVAS' && node.nodeType === 1) {
         // Add new image container that will be written to
-        const el = containers.get(id) || document.createElement('img');
+        const ownerDoc = (node as Element).ownerDocument || document;
+        const el = containers.get(id) || ownerDoc.createElement('img');
         (node as HTMLCanvasElement).appendChild(el);
         containers.set(id, el);
       }
@@ -343,6 +345,9 @@ export function CanvasReplayerPlugin(events: eventWithTime[]): ReplayPlugin {
       if (!queueItem) {
         return;
       }
+      // Ensure that queued calls from `processEventSync` (e.g. when you seek into the middle of the replay) is called before continue to process the current event.
+      // Otherwise, if it runs after `processEvent`, `processQueuedEvents` will incorrectly clear the canvas assuming that the last queued event == current event.
+      debouncedProcessQueuedEvents.flush();
       const [event, replayer] = queueItem;
       processEvent(event, {replayer}).catch(handleProcessEventError);
     },

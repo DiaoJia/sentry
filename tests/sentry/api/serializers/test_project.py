@@ -19,6 +19,7 @@ from sentry.api.serializers.models.project import (
     bulk_fetch_project_latest_releases,
 )
 from sentry.app import env
+from sentry.conf.types.sentry_config import SentryMode
 from sentry.features.base import ProjectFeature
 from sentry.models.deploy import Deploy
 from sentry.models.environment import Environment, EnvironmentProject
@@ -27,30 +28,30 @@ from sentry.models.project import Project
 from sentry.models.release import Release
 from sentry.models.releaseprojectenvironment import ReleaseProjectEnvironment
 from sentry.models.userreport import UserReport
-from sentry.testutils.cases import SnubaTestCase, TestCase
+from sentry.snuba import metrics_enhanced_performance
+from sentry.testutils.cases import SnubaTestCase, SpanTestCase, TestCase
 from sentry.testutils.helpers import with_feature
 from sentry.testutils.helpers.datetime import before_now
-from sentry.utils.samples import load_data
 
 TEAM_CONTRIBUTOR = settings.SENTRY_TEAM_ROLES[0]
 TEAM_ADMIN = settings.SENTRY_TEAM_ROLES[1]
 
 
 class ProjectSerializerTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user()
         self.organization = self.create_organization()
         self.team = self.create_team(organization=self.organization)
         self.project = self.create_project(teams=[self.team], organization=self.organization)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         result = serialize(self.project, self.user)
         assert result["slug"] == self.project.slug
         assert result["name"] == self.project.name
         assert result["id"] == str(self.project.id)
 
-    def test_member(self):
+    def test_member(self) -> None:
         self.create_member(user=self.user, organization=self.organization)
 
         result = serialize(self.project, self.user)
@@ -74,7 +75,7 @@ class ProjectSerializerTest(TestCase):
         assert result["isMember"] is True
 
     @with_feature("organizations:team-roles")
-    def test_member_with_team_role(self):
+    def test_member_with_team_role(self) -> None:
         self.create_member(user=self.user, organization=self.organization)
 
         result = serialize(self.project, self.user)
@@ -97,7 +98,7 @@ class ProjectSerializerTest(TestCase):
         assert result["hasAccess"] is True
         assert result["isMember"] is True
 
-    def test_admin(self):
+    def test_admin(self) -> None:
         self.create_member(user=self.user, organization=self.organization, role="admin")
 
         result = serialize(self.project, self.user)
@@ -120,7 +121,7 @@ class ProjectSerializerTest(TestCase):
         assert result["hasAccess"] is True
         assert result["isMember"] is True
 
-    def test_manager(self):
+    def test_manager(self) -> None:
         self.create_member(user=self.user, organization=self.organization, role="manager")
 
         result = serialize(self.project, self.user)
@@ -143,7 +144,7 @@ class ProjectSerializerTest(TestCase):
         assert result["hasAccess"] is True
         assert result["isMember"] is True
 
-    def test_owner(self):
+    def test_owner(self) -> None:
         self.create_member(user=self.user, organization=self.organization, role="owner")
 
         result = serialize(self.project, self.user)
@@ -166,7 +167,7 @@ class ProjectSerializerTest(TestCase):
         assert result["hasAccess"] is True
         assert result["isMember"] is True
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         self.user = self.create_user(username="foo", is_superuser=True)
         req = self.make_request()
         req.user = self.user
@@ -187,7 +188,7 @@ class ProjectSerializerTest(TestCase):
             assert result["isMember"] is False
 
     @mock.patch("sentry.features.batch_has")
-    def test_project_batch_has(self, mock_batch):
+    def test_project_batch_has(self, mock_batch: mock.MagicMock) -> None:
         mock_batch.return_value = {
             f"project:{self.project.id}": {
                 "projects:test-feature": True,
@@ -199,7 +200,7 @@ class ProjectSerializerTest(TestCase):
         assert "disabled-feature" not in result["features"]
 
     @mock.patch("sentry.api.serializers.project.features")
-    def test_project_features(self, mock_features):
+    def test_project_features(self, mock_features: mock.MagicMock) -> None:
         test_features = features.FeatureManager()
         mock_features.all = test_features.all
         mock_features.has = test_features.has
@@ -231,7 +232,13 @@ class ProjectSerializerTest(TestCase):
             class ProjectColorFeatureHandler(features.FeatureHandler):
                 features = {color_flag}
 
-                def has(self, feature, actor, skip_entity: bool | None = False):
+                def has(
+                    self,
+                    feature,
+                    actor,
+                    skip_entity: bool | None = False,
+                    skip_experiment_exposure: bool = False,
+                ):
                     return feature.project in included_projects
 
                 def batch_has(self, *a, **k):
@@ -262,9 +269,27 @@ class ProjectSerializerTest(TestCase):
         assert_has_features(late_red, [red_flag])
         assert_has_features(late_blue, [blue_flag])
 
+    @mock.patch.object(settings, "SENTRY_MODE", SentryMode.SELF_HOSTED)
+    def test_has_logs_self_hosted_mode(self) -> None:
+        current_flags = self.project.flags
+        current_flags.has_logs = False
+        self.project.update(flags=current_flags)
+
+        result = serialize(self.project, self.user)
+        assert result["hasLogs"] is True
+
+    @mock.patch.object(settings, "SENTRY_MODE", SentryMode.SELF_HOSTED)
+    def test_has_trace_metrics_self_hosted_mode(self) -> None:
+        current_flags = self.project.flags
+        current_flags.has_trace_metrics = False
+        self.project.update(flags=current_flags)
+
+        result = serialize(self.project, self.user)
+        assert result["hasTraceMetrics"] is True
+
 
 class ProjectWithTeamSerializerTest(TestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization(owner=user)
         team = self.create_team(organization=organization)
@@ -282,8 +307,8 @@ class ProjectWithTeamSerializerTest(TestCase):
         }
 
 
-class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
-    def setUp(self):
+class ProjectSummarySerializerTest(SnubaTestCase, SpanTestCase, TestCase):
+    def setUp(self) -> None:
         super().setUp()
         self.date = datetime.datetime(2018, 1, 12, 3, 8, 25, tzinfo=UTC)
         self.user = self.create_user(username="foo")
@@ -320,7 +345,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
             last_deploy_id=deploy.id,
         )
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
 
         assert result["id"] == str(self.project.id)
@@ -336,7 +361,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["latestRelease"] == {"version": self.release.version}
         assert result["environments"] == ["production", "staging"]
 
-    def test_first_event_properties(self):
+    def test_first_event_properties(self) -> None:
         project = self.create_project(
             teams=[self.team], organization=self.organization, name="foobar", flags=None
         )
@@ -351,7 +376,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["firstEvent"]
         assert result["firstTransactionEvent"] is True
 
-    def test_user_reports(self):
+    def test_user_reports(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasUserReports"] is False
 
@@ -373,7 +398,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasUserReports"] is True
 
-    def test_has_sessions_flag(self):
+    def test_has_sessions_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasSessions"] is False
 
@@ -383,7 +408,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasSessions"] is True
 
-    def test_has_profiles_flag(self):
+    def test_has_profiles_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasProfiles"] is False
 
@@ -393,7 +418,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasProfiles"] is True
 
-    def test_has_replays_flag(self):
+    def test_has_replays_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasReplays"] is False
 
@@ -403,7 +428,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasReplays"] is True
 
-    def test_has_feedbacks_flag(self):
+    def test_has_feedbacks_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasFeedbacks"] is False
 
@@ -413,7 +438,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasFeedbacks"] is True
 
-    def test_has_new_feedbacks_flag(self):
+    def test_has_new_feedbacks_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasNewFeedbacks"] is False
 
@@ -423,7 +448,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasNewFeedbacks"] is True
 
-    def test_has_monitors_flag(self):
+    def test_has_monitors_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasMonitors"] is False
 
@@ -433,7 +458,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasMonitors"] is True
 
-    def test_has_minified_stracktrace_flag(self):
+    def test_has_minified_stracktrace_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasMinifiedStackTrace"] is False
 
@@ -443,7 +468,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasMinifiedStackTrace"] is True
 
-    def test_has_insight_module_flags(self):
+    def test_has_insight_module_flags(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
 
         assert result["hasInsightsHttp"] is False
@@ -454,8 +479,8 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["hasInsightsVitals"] is False
         assert result["hasInsightsCaches"] is False
         assert result["hasInsightsQueues"] is False
-        assert result["hasInsightsLlmMonitoring"] is False
         assert result["hasInsightsAgentMonitoring"] is False
+        assert result["hasInsightsMCP"] is False
 
         self.project.first_event = timezone.now()
         self.project.update(flags=F("flags").bitor(Project.flags.has_insights_http))
@@ -466,8 +491,8 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         self.project.update(flags=F("flags").bitor(Project.flags.has_insights_vitals))
         self.project.update(flags=F("flags").bitor(Project.flags.has_insights_caches))
         self.project.update(flags=F("flags").bitor(Project.flags.has_insights_queues))
-        self.project.update(flags=F("flags").bitor(Project.flags.has_insights_llm_monitoring))
         self.project.update(flags=F("flags").bitor(Project.flags.has_insights_agent_monitoring))
+        self.project.update(flags=F("flags").bitor(Project.flags.has_insights_mcp))
 
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasInsightsHttp"] is True
@@ -478,10 +503,10 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["hasInsightsVitals"] is True
         assert result["hasInsightsCaches"] is True
         assert result["hasInsightsQueues"] is True
-        assert result["hasInsightsLlmMonitoring"] is True
         assert result["hasInsightsAgentMonitoring"] is True
+        assert result["hasInsightsMCP"] is True
 
-    def test_has_flags_flag(self):
+    def test_has_flags_flag(self) -> None:
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasFlags"] is False
 
@@ -491,7 +516,18 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         result = serialize(self.project, self.user, ProjectSummarySerializer())
         assert result["hasFlags"] is True
 
-    def test_no_environments(self):
+    @mock.patch.object(settings, "SENTRY_MODE", SentryMode.SAAS)
+    def test_has_logs_flag(self) -> None:
+        result = serialize(self.project, self.user, ProjectSummarySerializer())
+        assert result["hasLogs"] is False
+
+        self.project.first_event = timezone.now()
+        self.project.update(flags=F("flags").bitor(Project.flags.has_logs))
+
+        result = serialize(self.project, self.user, ProjectSummarySerializer())
+        assert result["hasLogs"] is True
+
+    def test_no_environments(self) -> None:
         # remove environments and related models
         Deploy.objects.all().delete()
         Release.objects.all().delete()
@@ -510,7 +546,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["latestRelease"] is None
         assert result["environments"] == []
 
-    def test_avoid_hidden_and_no_env(self):
+    def test_avoid_hidden_and_no_env(self) -> None:
         hidden_env = Environment.objects.create(
             organization_id=self.organization.id, name="staging 2"
         )
@@ -537,7 +573,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert result["latestRelease"] == {"version": self.release.version}
         assert result["environments"] == ["production", "staging"]
 
-    def test_multiple_environments_deploys(self):
+    def test_multiple_environments_deploys(self) -> None:
         env_1_release = self.create_release(self.project)
         env_1_deploy = Deploy.objects.create(
             environment_id=self.environment_1.id,
@@ -605,7 +641,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
             }
         }
 
-    def test_stats_errors(self):
+    def test_stats_errors(self) -> None:
         two_min_ago = before_now(minutes=2)
         self.store_event(
             data={"event_id": "d" * 32, "message": "oh no", "timestamp": two_min_ago.isoformat()},
@@ -617,14 +653,15 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert 24 == len(results[0]["stats"])
         assert [1] == [v[1] for v in results[0]["stats"] if v[1] > 0]
 
-    def test_stats_with_transactions(self):
+    def test_stats_with_transactions(self) -> None:
         two_min_ago = before_now(minutes=2)
         self.store_event(
             data={"event_id": "d" * 32, "message": "oh no", "timestamp": two_min_ago.isoformat()},
             project_id=self.project.id,
         )
-        transaction = load_data("transaction", timestamp=two_min_ago)
-        self.store_event(data=transaction, project_id=self.project.id)
+        self.store_span(
+            self.create_span({"is_segment": True}, project=self.project, start_ts=two_min_ago)
+        )
         serializer = ProjectSummarySerializer(stats_period="24h", expand=["transaction_stats"])
         results = serialize([self.project], self.user, serializer)
         assert "stats" in results[0]
@@ -635,6 +672,28 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
         assert "transactionStats" in results[0]
         assert 24 == len(results[0]["transactionStats"])
         assert [1] == [v[1] for v in results[0]["transactionStats"] if v[1] > 0]
+
+    def test_stats_with_transactions_ignores_dataset(self) -> None:
+        self.store_span(
+            self.create_span(
+                {"is_segment": True}, project=self.project, start_ts=before_now(minutes=2)
+            )
+        )
+        serializer = ProjectSummarySerializer(
+            stats_period="24h",
+            expand=["transaction_stats"],
+            dataset=metrics_enhanced_performance,
+        )
+        results = serialize([self.project], self.user, serializer)
+
+        assert [1] == [v[1] for v in results[0]["transactionStats"] if v[1] > 0]
+
+    def test_stats_with_transactions_no_spans(self) -> None:
+        serializer = ProjectSummarySerializer(stats_period="24h", expand=["transaction_stats"])
+        results = serialize([self.project], self.user, serializer)
+
+        assert 24 == len(results[0]["transactionStats"])
+        assert 0 == sum(v[1] for v in results[0]["transactionStats"])
 
     @mock.patch(
         "sentry.api.serializers.models.project.release_health.backend.check_has_health_data"
@@ -692,7 +751,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
 
         assert check_has_health_data.call_count == 1
 
-    def test_project_with_collapsed_unused_frontend_flags(self):
+    def test_project_with_collapsed_unused_frontend_flags(self) -> None:
         result_with_unused_flags = serialize(
             self.project,
             self.user,
@@ -716,7 +775,7 @@ class ProjectSummarySerializerTest(SnubaTestCase, TestCase):
 
 
 class ProjectWithOrganizationSerializerTest(TestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization(owner=user)
         team = self.create_team(organization=organization)
@@ -731,7 +790,7 @@ class ProjectWithOrganizationSerializerTest(TestCase):
 
 
 class DetailedProjectSerializerTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.date = datetime.datetime(2018, 1, 12, 3, 8, 25, tzinfo=UTC)
         self.user = self.create_user(username="foo")
@@ -743,7 +802,7 @@ class DetailedProjectSerializerTest(TestCase):
 
         self.release = self.create_release(self.project)
 
-    def test_truncated_latest_release(self):
+    def test_truncated_latest_release(self) -> None:
         result = serialize(self.project, self.user, DetailedProjectSerializer())
 
         assert result["id"] == str(self.project.id)
@@ -754,7 +813,7 @@ class DetailedProjectSerializerTest(TestCase):
         assert result["platform"] == self.project.platform
         assert result["latestRelease"] == {"version": self.release.version}
 
-    def test_symbol_sources(self):
+    def test_symbol_sources(self) -> None:
         ProjectOption.objects.set_value(
             project=self.project,
             key="sentry:symbol_sources",
@@ -765,7 +824,7 @@ class DetailedProjectSerializerTest(TestCase):
         assert "sentry:token" not in result["options"]
         assert "sentry:symbol_sources" not in result["options"]
 
-    def test_feedback_flag_with_epochs(self):
+    def test_feedback_flag_with_epochs(self) -> None:
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         # new projects with default epoch should have feedback_user_report_notifications enabled
         assert result["options"]["sentry:feedback_user_report_notifications"] is True
@@ -782,7 +841,7 @@ class DetailedProjectSerializerTest(TestCase):
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["options"]["sentry:feedback_user_report_notifications"] is False
 
-    def test_replay_rage_click_flag(self):
+    def test_replay_rage_click_flag(self) -> None:
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         # default should be true
         assert result["options"]["sentry:replay_rage_click_issues"] is True
@@ -791,7 +850,7 @@ class DetailedProjectSerializerTest(TestCase):
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["options"]["sentry:replay_rage_click_issues"] is False
 
-    def test_replay_hydration_error_flag(self):
+    def test_replay_hydration_error_flag(self) -> None:
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         # default should be true
         assert result["options"]["sentry:replay_hydration_error_issues"] is True
@@ -800,7 +859,7 @@ class DetailedProjectSerializerTest(TestCase):
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["options"]["sentry:replay_hydration_error_issues"] is False
 
-    def test_toolbar_allowed_origins(self):
+    def test_toolbar_allowed_origins(self) -> None:
         # Does not allow trailing newline or extra whitespace.
         # Default is empty:
         result = serialize(self.project, self.user, DetailedProjectSerializer())
@@ -811,7 +870,7 @@ class DetailedProjectSerializerTest(TestCase):
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["options"]["sentry:toolbar_allowed_origins"].split("\n") == origins
 
-    def test_autofix_automation_tuning_flag(self):
+    def test_autofix_automation_tuning_flag(self) -> None:
         # Default is "off"
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["autofixAutomationTuning"] == "off"
@@ -821,7 +880,7 @@ class DetailedProjectSerializerTest(TestCase):
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["autofixAutomationTuning"] == "high"
 
-    def test_seer_scanner_automation_flag(self):
+    def test_seer_scanner_automation_flag(self) -> None:
         # Default is "on"
         result = serialize(self.project, self.user, DetailedProjectSerializer())
         assert result["seerScannerAutomation"] is True
@@ -841,10 +900,10 @@ class BulkFetchProjectLatestReleases(TestCase):
     def other_project(self):
         return self.create_project(teams=[self.team], organization=self.organization)
 
-    def test_single_no_release(self):
+    def test_single_no_release(self) -> None:
         assert bulk_fetch_project_latest_releases([self.project]) == []
 
-    def test_single_release(self):
+    def test_single_release(self) -> None:
         release = self.create_release(
             self.project, date_added=timezone.now() - timedelta(minutes=5)
         )
@@ -852,16 +911,16 @@ class BulkFetchProjectLatestReleases(TestCase):
         newer_release = self.create_release(self.project)
         assert bulk_fetch_project_latest_releases([self.project]) == [newer_release]
 
-    def test_multi_no_release(self):
+    def test_multi_no_release(self) -> None:
         assert bulk_fetch_project_latest_releases([self.project, self.other_project]) == []
 
-    def test_multi_mixed_releases(self):
+    def test_multi_mixed_releases(self) -> None:
         release = self.create_release(self.project)
         assert set(bulk_fetch_project_latest_releases([self.project, self.other_project])) == {
             release
         }
 
-    def test_multi_releases(self):
+    def test_multi_releases(self) -> None:
         release = self.create_release(
             self.project, date_added=timezone.now() - timedelta(minutes=5)
         )

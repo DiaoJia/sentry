@@ -1,17 +1,18 @@
+import type {Query} from 'history';
 import * as qs from 'query-string';
 
+import type {EventTag} from 'sentry/types/event';
 import {escapeDoubleQuotes} from 'sentry/utils';
 import type {Sort} from 'sentry/utils/discover/fields';
+import {
+  ISSUE_EVENT_FIELDS_THAT_MAY_CONFLICT_WITH_TAGS,
+  type FieldKey,
+} from 'sentry/utils/fields';
 import {safeURL} from 'sentry/utils/url/safeURL';
 
 // Create a string representation of the regex so we need to create a new regex
 // for each use to avoid carrying over state
 export const TAG_VALUE_ESCAPE_PATTERN = '[:\\s\\(\\)\\\\"]';
-
-// remove leading and trailing whitespace and remove double spaces
-function formatQueryString(query: string): string {
-  return query.trim().replace(/\s+/g, ' ');
-}
 
 export function addQueryParamsToExistingUrl(
   origUrl: string,
@@ -52,7 +53,11 @@ export function appendTagCondition(
 
   if (
     typeof value === 'string' &&
-    new RegExp(TAG_VALUE_ESCAPE_PATTERN, 'g').test(value)
+    // TODO(JoshuaKGoldberg):
+    //   Unnecessary escape character: \(  regexp/no-useless-escape
+    //   Unnecessary escape character: \)  regexp/no-useless-escape
+    // eslint-disable-next-line regexp/no-useless-escape
+    new RegExp(TAG_VALUE_ESCAPE_PATTERN).test(value)
   ) {
     value = `"${escapeDoubleQuotes(value)}"`;
   }
@@ -77,7 +82,7 @@ export function appendExcludeTagValuesCondition(
       : '';
   const filteredValuesCondition = `[${values
     .map(value => {
-      if (typeof value === 'string' && /[\s"]/g.test(value)) {
+      if (typeof value === 'string' && /[\s"]/.test(value)) {
         value = `"${escapeDoubleQuotes(value)}"`;
       }
       return value;
@@ -166,16 +171,51 @@ export function decodeBoolean(
   return fallback;
 }
 
-const queryString = {
-  decodeBoolean,
-  decodeInteger,
-  decodeList,
-  decodeScalar,
-  decodeSorts,
-  formatQueryString,
-  addQueryParamsToExistingUrl,
-  appendTagCondition,
-  appendExcludeTagValuesCondition,
-};
+/**
+ * If a tag conflicts with a reserved keyword, change it to `tags[key]:value`
+ */
+export function escapeIssueTagKey(key: string) {
+  if (key === '') {
+    return '""';
+  }
 
-export default queryString;
+  // Environment and project should be handled by the page filter
+  if (key === 'environment' || key === 'project') {
+    return key;
+  }
+
+  // Reserved keywords that conflict with issue search query
+  if (['project.name', 'project_id'].includes(key)) {
+    return `tags[${key}]`;
+  }
+
+  if (ISSUE_EVENT_FIELDS_THAT_MAY_CONFLICT_WITH_TAGS.has(key as FieldKey)) {
+    return `tags[${key}]`;
+  }
+
+  return key;
+}
+
+export function generateQueryWithTag(prevQuery: Query, tag: EventTag): Query {
+  const query = {...prevQuery};
+
+  // some tags are dedicated query strings since other parts of the app consumes this,
+  // for example, the global selection header.
+  switch (tag.key) {
+    case 'environment':
+      query.environment = tag.value;
+      break;
+    case 'project':
+      query.project = tag.value;
+      break;
+    default:
+      query.query = appendTagCondition(query.query, tag.key, tag.value);
+  }
+
+  // Checking for the absence of a tag value.
+  if (tag.value === '') {
+    query.query = `!has:${tag.key}`;
+  }
+
+  return query;
+}

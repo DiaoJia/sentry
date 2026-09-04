@@ -1,5 +1,6 @@
 import {OrgRoleListFixture, TeamRoleListFixture} from 'sentry-fixture/roleList';
 
+import {AutofixStoppingPoint} from 'sentry/components/events/autofix/types';
 import type {Organization} from 'sentry/types/organization';
 
 export function OrganizationFixture(params: Partial<Organization> = {}): Organization {
@@ -40,6 +41,8 @@ export function OrganizationFixture(params: Partial<Organization> = {}): Organiz
     allowMemberProjectCreation: false,
     allowSuperuserAccess: false,
     allowSharedIssues: false,
+    autoEnableCodeReview: false,
+    autoOpenPrs: false,
     attachmentsRole: 'member',
     availableRoles: [],
     avatar: {
@@ -47,18 +50,17 @@ export function OrganizationFixture(params: Partial<Organization> = {}): Organiz
       avatarUuid: null,
       avatarUrl: null,
     },
-    codecovAccess: false,
     dataScrubber: false,
     dataScrubberDefaults: false,
     dateCreated: new Date().toISOString(),
     debugFilesRole: '',
+    defaultAutomatedRunStoppingPoint: AutofixStoppingPoint.ROOT_CAUSE,
+    defaultCodeReviewTriggers: [],
+    defaultCodingAgentIntegrationId: null,
+    defaultCodingAgent: 'seer',
     defaultRole: '',
     enhancedPrivacy: false,
     eventsMemberAdmin: false,
-    githubNudgeInvite: false,
-    githubOpenPRBot: false,
-    githubPRBot: false,
-    gitlabPRBot: false,
     hideAiFeatures: false,
     isDefault: false,
     isDynamicallySampled: true,
@@ -67,13 +69,14 @@ export function OrganizationFixture(params: Partial<Organization> = {}): Organiz
     metricAlertsThreadFlag: false,
     openMembership: false,
     pendingAccessRequests: 0,
-    targetSampleRate: 1.0,
+    targetSampleRate: 1,
     quota: {
       accountLimit: null,
       maxRate: null,
       maxRateInterval: null,
       projectLimit: null,
     },
+    relayDsnEndpoint: null,
     relayPiiConfig: null,
     require2FA: false,
     requiresSso: false,
@@ -83,12 +86,14 @@ export function OrganizationFixture(params: Partial<Organization> = {}): Organiz
     scrubIPAddresses: false,
     sensitiveFields: [],
     aggregatedDataConsent: false,
+    enableSeerCoding: true,
     storeCrashReports: 0,
     trustedRelays: [],
     defaultAutofixAutomationTuning: 'off',
-    ...params,
-
     orgRoleList: OrgRoleListFixture(),
     teamRoleList: TeamRoleListFixture(),
+    hasGranularReplayPermissions: false,
+    replayAccessMembers: [],
+    ...params,
   };
 }

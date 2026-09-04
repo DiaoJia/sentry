@@ -1,10 +1,10 @@
 import styled from '@emotion/styled';
 
-import ExternalLink from 'sentry/components/links/externalLink';
-import {IconOpen} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
+import {ExternalLink} from '@sentry/scraps/link';
 
-import effectiveDirectives from './effectiveDirectives';
+import {IconOpen} from 'sentry/icons';
+
+import {effectiveDirectives} from './effectiveDirectives';
 
 type EffectiveDirective = keyof typeof effectiveDirectives;
 
@@ -16,11 +16,7 @@ export type HelpProps = {
   };
 };
 
-function CSPHelp({data: {effective_directive: key}}: HelpProps) {
-  const getHelp = () => ({
-    __html: effectiveDirectives[key],
-  });
-
+export function CSPHelp({data: {effective_directive: key}}: HelpProps) {
   const getLinkHref = () => {
     const baseLink =
       'https://developer.mozilla.org/en-US/docs/Web/Security/CSP/CSP_policy_directives#';
@@ -49,7 +45,7 @@ function CSPHelp({data: {effective_directive: key}}: HelpProps) {
       <h4>
         <code>{key}</code>
       </h4>
-      <blockquote dangerouslySetInnerHTML={getHelp()} />
+      <blockquote>{effectiveDirectives[key]}</blockquote>
       <StyledP>
         <span>{'\u2014 MDN ('}</span>
         <span>{getLink()}</span>
@@ -59,13 +55,11 @@ function CSPHelp({data: {effective_directive: key}}: HelpProps) {
   );
 }
 
-export default CSPHelp;
-
 const StyledP = styled('p')`
   text-align: right;
   display: grid;
   grid-template-columns: repeat(3, max-content);
-  gap: ${space(0.25)};
+  gap: ${p => p.theme.space['2xs']};
 `;
 
 const StyledExternalLink = styled(ExternalLink)`

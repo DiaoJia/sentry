@@ -9,16 +9,16 @@ import {
   waitFor,
 } from 'sentry-test/reactTestingLibrary';
 
-import TeamStore from 'sentry/stores/teamStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 import TeamSettings from 'sentry/views/settings/organizationTeams/teamSettings';
 
-describe('TeamSettings', function () {
-  beforeEach(function () {
+describe('TeamSettings', () => {
+  beforeEach(() => {
     TeamStore.reset();
     MockApiClient.clearMockResponses();
   });
 
-  it('can change slug', async function () {
+  it('can change slug', async () => {
     const organization = OrganizationFixture();
     const team = TeamFixture();
     const putMock = MockApiClient.addMockResponse({
@@ -29,13 +29,14 @@ describe('TeamSettings', function () {
       },
     });
 
-    const {router} = render(<TeamSettings team={team} />, {
+    const {router} = render(<TeamSettings />, {
       initialRouterConfig: {
         location: {
           pathname: `/settings/${organization.slug}/teams/${team.slug}/settings/`,
         },
         route: '/settings/:orgId/teams/:teamId/settings/',
       },
+      outletContext: {team},
     });
 
     const input = screen.getByRole('textbox', {name: 'Team Slug'});
@@ -63,11 +64,11 @@ describe('TeamSettings', function () {
     );
   });
 
-  it('needs team:admin in order to see an enabled Remove Team button', function () {
+  it('needs team:admin in order to see an enabled Remove Team button', () => {
     const team = TeamFixture();
     const organization = OrganizationFixture({access: []});
 
-    render(<TeamSettings team={team} />, {
+    render(<TeamSettings />, {
       organization,
       initialRouterConfig: {
         location: {
@@ -75,12 +76,13 @@ describe('TeamSettings', function () {
         },
         route: '/settings/:orgId/teams/:teamId/settings/',
       },
+      outletContext: {team},
     });
 
     expect(screen.getByTestId('button-remove-team')).toBeDisabled();
   });
 
-  it('can remove team', async function () {
+  it('can remove team', async () => {
     const team = TeamFixture({hasAccess: true});
     const organization = OrganizationFixture();
     const deleteMock = MockApiClient.addMockResponse({
@@ -89,13 +91,14 @@ describe('TeamSettings', function () {
     });
     TeamStore.loadInitialData([team]);
 
-    const {router} = render(<TeamSettings team={team} />, {
+    const {router} = render(<TeamSettings />, {
       initialRouterConfig: {
         location: {
           pathname: `/settings/${organization.slug}/teams/${team.slug}/settings/`,
         },
         route: '/settings/:orgId/teams/:teamId/settings/',
       },
+      outletContext: {team},
     });
     renderGlobalModal();
 
@@ -119,11 +122,32 @@ describe('TeamSettings', function () {
     expect(TeamStore.getAll()).toEqual([]);
   });
 
-  it('cannot modify idp:provisioned teams regardless of role', function () {
+  it('renders avatar chooser with upload and letter_avatar options', () => {
+    const team = TeamFixture();
+    const organization = OrganizationFixture();
+
+    render(<TeamSettings />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/settings/${organization.slug}/teams/${team.slug}/settings/`,
+        },
+        route: '/settings/:orgId/teams/:teamId/settings/',
+      },
+      outletContext: {team},
+    });
+
+    expect(screen.getByText('Avatar')).toBeInTheDocument();
+    expect(screen.getByRole('radio', {name: 'Use initials'})).toBeInTheDocument();
+    expect(screen.getByRole('radio', {name: 'Upload an image'})).toBeInTheDocument();
+    expect(screen.queryByRole('radio', {name: 'Use Gravatar'})).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Save Avatar'})).toBeInTheDocument();
+  });
+
+  it('cannot modify idp:provisioned teams regardless of role', () => {
     const team = TeamFixture({hasAccess: true, flags: {'idp:provisioned': true}});
     const organization = OrganizationFixture({access: []});
 
-    render(<TeamSettings team={team} />, {
+    render(<TeamSettings />, {
       organization,
       initialRouterConfig: {
         location: {
@@ -131,6 +155,7 @@ describe('TeamSettings', function () {
         },
         route: '/settings/:orgId/teams/:teamId/settings/',
       },
+      outletContext: {team},
     });
 
     expect(

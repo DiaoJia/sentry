@@ -1,9 +1,10 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {CodeBlock} from '@sentry/scraps/code';
+
 import * as Storybook from 'sentry/stories';
 import {sampleDurationTimeSeries} from 'sentry/views/dashboards/widgets/timeSeriesWidget/fixtures/sampleDurationTimeSeries';
 import {Line} from 'sentry/views/dashboards/widgets/timeSeriesWidget/plottables/line';
@@ -11,11 +12,14 @@ import {TimeSeriesWidgetVisualization} from 'sentry/views/dashboards/widgets/tim
 
 import {Widget} from './widget';
 
-import types from '!!type-loader!sentry/views/dashboards/widgets/widget/widget';
+export const documentation =
+  import('!!type-loader!sentry/views/dashboards/widgets/widget/widget');
 
-export default Storybook.story('Widget', (story, APIReference) => {
-  APIReference(types.exported);
+function BrokenVisualization(): React.ReactNode {
+  throw new Error('Cannot read properties of undefined (reading "series")');
+}
 
+export default Storybook.story('Widget', story => {
   story('Getting Started', () => {
     return (
       <Fragment>
@@ -28,7 +32,11 @@ export default Storybook.story('Widget', (story, APIReference) => {
         <SmallStorybookSizingWindow>
           <Widget
             Title={<Widget.WidgetTitle title="epm() : /insights/frontend/assets" />}
-            TitleBadges={[<Tag key="frontend">frontend</Tag>]}
+            TitleBadges={[
+              <Tag key="frontend" variant="muted">
+                frontend
+              </Tag>,
+            ]}
             Actions={
               <Widget.WidgetToolbar>
                 <Button size="xs">Say More</Button>
@@ -99,7 +107,7 @@ export default Storybook.story('Widget', (story, APIReference) => {
           shown above.
         </p>
 
-        <CodeSnippet language="jsx">
+        <CodeBlock language="jsx">
           {`import {LineChartWidgetVisualization} from '../lineChartWidget/lineChartWidgetVisualization';
 import {sampleDurationTimeSeries} from '../lineChartWidget/fixtures/sampleDurationTimeSeries';
 
@@ -128,7 +136,7 @@ import {Widget} from './widget';
 />
 
         `}
-        </CodeSnippet>
+        </CodeBlock>
       </Fragment>
     );
   });
@@ -142,12 +150,6 @@ import {Widget} from './widget';
             You can remove the padding within areas of the widget by passing the props{' '}
             <code>noFooterPadding</code>, <code>noHeaderPadding</code>, and{' '}
             <code>noVisualizationPadding</code>
-          </li>
-          <li>
-            The <code>revealActions</code> prop also controls the hover behavior. If you
-            set it to <code>"hover"</code>, the widget will have a grey hover state, to
-            create some contrast against the controls. If you set it to{' '}
-            <code>"always"</code>, the hover effect will be turned off
           </li>
           <li>
             Avoid the <code>height</code> prop if you can. It's much easier and more
@@ -193,7 +195,7 @@ import {Widget} from './widget';
           guidance on how to do it well.
         </p>
 
-        <CodeSnippet language="jsx">
+        <CodeBlock language="jsx">
           {`import {Widget} from './widget';
 
 function InsightsLineChart() {
@@ -248,7 +250,11 @@ function InsightsLineChart() {
             </Button>
           </Widget.WidgetToolbar>
         }
-        Visualization={<Widget.WidgetError error={error} />}
+        Visualization={
+          <Container position="absolute" inset={0}>
+            <Widget.WidgetError error={error} />
+          </Container>
+        }
       />
     );
   }
@@ -262,9 +268,11 @@ function InsightsLineChart() {
       <Widget
         Title={Title}
         Visualization={
-          <Widget.WidgetError
-            error={'No data! This is unusual, consider contacting support'}
-          />
+          <Container position="absolute" inset={0}>
+            <Widget.WidgetError
+              error={'No data! This is unusual, consider contacting support'}
+            />
+          </Container>
         }
       />
     );
@@ -291,7 +299,26 @@ function InsightsLineChart() {
 }
 
                 `}
-        </CodeSnippet>
+        </CodeBlock>
+      </Fragment>
+    );
+  });
+
+  story('Error states', () => {
+    return (
+      <Fragment>
+        <p>
+          If the visualization (or footer) throws while rendering, the Widget's
+          ErrorBoundary hides the raw error from the user and shows a friendly message
+          plus a "Give Feedback" button. The underlying error is still reported to Sentry.
+        </p>
+
+        <SmallStorybookSizingWindow>
+          <Widget
+            Title={<Widget.WidgetTitle title="epm() : /insights/frontend/assets" />}
+            Visualization={<BrokenVisualization />}
+          />
+        </SmallStorybookSizingWindow>
       </Fragment>
     );
   });

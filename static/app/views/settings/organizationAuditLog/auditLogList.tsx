@@ -1,42 +1,52 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
+import {UserAvatar} from '@sentry/scraps/avatar';
+import {Tag} from '@sentry/scraps/badge';
+import {Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import type {CursorHandler} from '@sentry/scraps/pagination';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Select} from '@sentry/scraps/select';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {ActivityAvatar} from 'sentry/components/activity/item/avatar';
-import {UserAvatar} from 'sentry/components/core/avatar/userAvatar';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {Flex} from 'sentry/components/core/layout';
-import {Select} from 'sentry/components/core/select';
-import {Tooltip} from 'sentry/components/core/tooltip';
 import {DateTime} from 'sentry/components/dateTime';
-import DropdownButton from 'sentry/components/dropdownButton';
-import Link from 'sentry/components/links/link';
-import type {CursorHandler} from 'sentry/components/pagination';
-import Pagination from 'sentry/components/pagination';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import type {ChangeData} from 'sentry/components/timeRangeSelector';
-import {TimeRangeSelector} from 'sentry/components/timeRangeSelector';
-import {getAbsoluteSummary} from 'sentry/components/timeRangeSelector/utils';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {
+  TimeRangeSelector,
+  TimeRangeSelectTrigger,
+  type ChangeData,
+} from 'sentry/components/timeRangeSelector';
+import {
+  getAbsoluteSummary,
+  getArbitraryRelativePeriod,
+} from 'sentry/components/timeRangeSelector/utils';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DateString} from 'sentry/types/core';
 import type {AuditLog, Organization} from 'sentry/types/organization';
 import type {User} from 'sentry/types/user';
 import {getInternalDate} from 'sentry/utils/dates';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {getDaysSinceDate} from 'sentry/utils/getDaysSinceDate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {useUser} from 'sentry/utils/useUser';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import {
-  projectDetectorSettingsId,
-  retentionPrioritiesLabels,
-} from 'sentry/views/settings/projectPerformance/projectPerformance';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {retentionPrioritiesLabels} from 'sentry/views/settings/projectPerformance';
+import {projectDetectorSettingsId} from 'sentry/views/settings/projectPerformance/detectors/detectorFieldGroups';
 
 const avatarStyle = {
   width: 36,
   height: 36,
   marginRight: 8,
 };
+
+const AUDIT_LOG_COLUMNS: TableColumnConfig[] = [
+  {key: 'member', width: 'auto'},
+  {key: 'action', width: 'auto'},
+  {key: 'ip', width: 'auto'},
+  {key: 'time', width: 'auto'},
+];
 
 const getAvatarDisplay = (logEntryUser: User | undefined) => {
   // Display Sentry's avatar for system or superuser-initiated events
@@ -57,9 +67,9 @@ const addUsernameDisplay = (logEntryUser: User | undefined) => {
   if (logEntryUser?.isSuperuser) {
     return (
       <Name data-test-id="actor-name">
-        <Flex align="center" gap={space(1)}>
+        <Flex align="center" gap="md">
           {logEntryUser.name}
-          <Tag>{t('Sentry Staff')}</Tag>
+          <Tag variant="muted">{t('Sentry Staff')}</Tag>
         </Flex>
       </Name>
     );
@@ -258,7 +268,7 @@ type Props = {
   utc?: boolean;
 };
 
-function AuditLogList({
+export function AuditLogList({
   entries,
   eventType,
   eventTypes,
@@ -296,8 +306,24 @@ function AuditLogList({
 
   const {displayStart, displayEnd} = getDisplayValues();
 
+  const currentValue = statsPeriod || allTime;
+  const arbitraryRelativePeriods = getArbitraryRelativePeriod(currentValue);
+  let displayLabel: React.ReactNode;
+
+  if (displayStart && displayEnd) {
+    // Show formatted absolute date range using display values (user's intended timezone)
+    displayLabel = getAbsoluteSummary(displayStart, displayEnd, utc);
+  } else if (start && end) {
+    // Fallback to regular start/end if display values not available
+    displayLabel = getAbsoluteSummary(start, end, utc);
+  } else if (currentValue === allTime) {
+    displayLabel = allTime;
+  } else {
+    displayLabel = arbitraryRelativePeriods[currentValue];
+  }
+
   const headerActions = (
-    <ButtonBar gap={2}>
+    <Grid flow="column" align="center" gap="xl">
       <TimeRangeSelector
         start={start}
         end={end}
@@ -305,29 +331,15 @@ function AuditLogList({
         onChange={onDateSelect}
         relativeOptions={{
           allTime,
+          ...arbitraryRelativePeriods,
         }}
         utc={utc}
-        maxPickableDays={Infinity}
-        trigger={(triggerProps, isOpen) => {
-          const currentValue = statsPeriod || allTime;
-          let displayLabel: React.ReactNode;
-
-          if (displayStart && displayEnd) {
-            // Show formatted absolute date range using display values (user's intended timezone)
-            displayLabel = getAbsoluteSummary(displayStart, displayEnd, utc);
-          } else if (start && end) {
-            // Fallback to regular start/end if display values not available
-            displayLabel = getAbsoluteSummary(start, end, utc);
-          } else if (currentValue === allTime) {
-            displayLabel = allTime;
-          }
-
-          return (
-            <DropdownButton isOpen={isOpen} {...triggerProps}>
-              {displayLabel}
-            </DropdownButton>
-          );
-        }}
+        maxPickableDays={getDaysSinceDate(organization.dateCreated)}
+        trigger={triggerProps => (
+          <TimeRangeSelectTrigger {...triggerProps}>
+            {displayLabel ?? triggerProps.children}
+          </TimeRangeSelectTrigger>
+        )}
       />
       <EventSelector
         clearable
@@ -340,110 +352,116 @@ function AuditLogList({
           onEventSelect(options?.value);
         }}
       />
-    </ButtonBar>
+    </Grid>
   );
 
   return (
     <div>
       <SettingsPageHeader title={t('Audit Log')} action={headerActions} />
-      <PanelTable
-        headers={[t('Member'), t('Action'), t('IP'), t('Time')]}
-        isEmpty={!hasEntries && entries?.length === 0}
-        emptyMessage={t('No audit entries available')}
-        isLoading={isLoading}
+      <SimpleTable
+        columns={AUDIT_LOG_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Member')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Action')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('IP')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Time')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
-        {(entries ?? []).map(entry => {
-          if (!entry) {
-            return null;
-          }
-          return (
-            <Fragment key={entry.id}>
-              <UserInfo>
-                <div>{getAvatarDisplay(entry.actor)}</div>
-                <NameContainer>
-                  {addUsernameDisplay(entry.actor)}
-                  <AuditNote entry={entry} orgSlug={organization.slug} />
-                </NameContainer>
-              </UserInfo>
-              <Flex align="center">
-                <MonoDetail>{getTypeDisplay(entry.event)}</MonoDetail>
-              </Flex>
-              <Flex align="center">
-                {entry.ipAddress && (
-                  <IpAddressOverflow>
-                    <Tooltip
-                      title={entry.ipAddress}
-                      disabled={entry.ipAddress.length <= ipv4Length}
-                    >
-                      <MonoDetail>{entry.ipAddress}</MonoDetail>
-                    </Tooltip>
-                  </IpAddressOverflow>
-                )}
-              </Flex>
-              <TimestampInfo>
-                <DateTime dateOnly date={entry.dateCreated} />
-                <DateTime
-                  timeOnly
-                  format={is24Hours ? 'HH:mm z' : 'LT z'}
-                  date={entry.dateCreated}
-                />
-              </TimestampInfo>
-            </Fragment>
-          );
-        })}
-      </PanelTable>
+        {isLoading && <SimpleTable.Loading />}
+        {!isLoading && !hasEntries && entries?.length === 0 && (
+          <SimpleTable.Empty>{t('No audit entries available')}</SimpleTable.Empty>
+        )}
+        {!isLoading &&
+          (entries ?? []).map(entry => {
+            if (!entry) {
+              return null;
+            }
+            return (
+              <SimpleTable.Row key={entry.id}>
+                <UserInfo>
+                  <div>{getAvatarDisplay(entry.actor)}</div>
+                  <Stack justify="center">
+                    {addUsernameDisplay(entry.actor)}
+                    <AuditNote entry={entry} orgSlug={organization.slug} />
+                  </Stack>
+                </UserInfo>
+                <SimpleTable.RowCell>
+                  <MonoDetail>{getTypeDisplay(entry.event)}</MonoDetail>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  {entry.ipAddress && (
+                    <IpAddressOverflow>
+                      <Tooltip
+                        title={entry.ipAddress}
+                        disabled={entry.ipAddress.length <= ipv4Length}
+                      >
+                        <MonoDetail>{entry.ipAddress}</MonoDetail>
+                      </Tooltip>
+                    </IpAddressOverflow>
+                  )}
+                </SimpleTable.RowCell>
+                <TimestampInfo>
+                  <DateTime dateOnly date={entry.dateCreated} />
+                  <DateTime
+                    timeOnly
+                    format={is24Hours ? 'HH:mm z' : 'LT z'}
+                    date={entry.dateCreated}
+                  />
+                </TimestampInfo>
+              </SimpleTable.Row>
+            );
+          })}
+      </SimpleTable>
       {pageLinks && <Pagination pageLinks={pageLinks} onCursor={onCursor} />}
     </div>
   );
 }
 
 const SentryAvatar = styled(ActivityAvatar)`
-  margin-right: ${space(1)};
+  margin-right: ${p => p.theme.space.md};
 `;
 
 const Name = styled('strong')`
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
 `;
 
 const EventSelector = styled(Select)`
   width: 250px;
 `;
 
-const UserInfo = styled('div')`
+const UserInfo = styled(SimpleTable.RowCell)`
   display: flex;
   align-items: center;
   line-height: 1.2;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   min-width: 250px;
 `;
 
-const NameContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-`;
-
 const Note = styled('div')`
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   word-break: break-word;
-  margin-top: ${space(0.5)};
+  margin-top: ${p => p.theme.space.xs};
 `;
 
 const IpAddressOverflow = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   min-width: 90px;
 `;
 
 const MonoDetail = styled('code')`
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
   white-space: no-wrap;
 `;
 
-const TimestampInfo = styled('div')`
+const TimestampInfo = styled(SimpleTable.RowCell)`
   display: grid;
   grid-template-rows: auto auto;
-  gap: ${space(1)};
-  font-size: ${p => p.theme.fontSize.md};
+  gap: ${p => p.theme.space.md};
+  font-size: ${p => p.theme.font.size.md};
 `;
-
-export default AuditLogList;

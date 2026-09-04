@@ -1,22 +1,11 @@
-import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import isFinite from 'lodash/isFinite';
 
-import {SectionHeading} from 'sentry/components/charts/styles';
 import type {ActiveOperationFilter} from 'sentry/components/events/interfaces/spans/filter';
-import type {
-  RawSpanType,
-  TraceContextType,
-} from 'sentry/components/events/interfaces/spans/types';
+import type {RawSpanType} from 'sentry/components/events/interfaces/spans/types';
 import {getSpanOperation} from 'sentry/components/events/interfaces/spans/utils';
-import {pickBarColor} from 'sentry/components/performance/waterfall/utils';
-import QuestionTooltip from 'sentry/components/questionTooltip';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {
   AggregateEventTransaction,
   EntrySpans,
-  Event,
   EventTransaction,
 } from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
@@ -43,16 +32,7 @@ type OpStats = {
   totalInterval: number;
 };
 
-const TOP_N_SPANS = 4;
-
 type OpBreakdownType = OpStats[];
-
-type Props = {
-  event: Event | AggregateEventTransaction;
-  operationNameFilters: ActiveOperationFilter;
-  hideHeader?: boolean;
-  topN?: number;
-};
 
 export function generateStats(
   transactionEvent: EventTransaction | AggregateEventTransaction,
@@ -63,7 +43,7 @@ export function generateStats(
     return [];
   }
 
-  const traceContext: TraceContextType | undefined = transactionEvent?.contexts?.trace;
+  const traceContext = transactionEvent?.contexts?.trace;
 
   if (!traceContext) {
     return [];
@@ -75,7 +55,7 @@ export function generateStats(
     }
   );
 
-  let spans: RawSpanType[] = spanEntry?.data ?? [];
+  let spans = spanEntry?.data ?? [];
 
   const rootSpan = {
     op: traceContext.op,
@@ -230,124 +210,14 @@ export function generateStats(
   return breakdown;
 }
 
-function OpsBreakdown({
-  event,
-  operationNameFilters,
-  hideHeader = false,
-  topN = TOP_N_SPANS,
-}: Props) {
-  const theme = useTheme();
-  const transactionEvent =
-    event.type === 'transaction' || event.type === 'aggregateTransaction'
-      ? event
-      : undefined;
-
-  if (!transactionEvent) {
-    return null;
-  }
-
-  const breakdown = generateStats(transactionEvent, operationNameFilters, topN);
-
-  const contents = breakdown.map(currOp => {
-    const {name, percentage, totalInterval} = currOp;
-
-    const isOther = name === OtherOperation;
-    const operationName = typeof name === 'string' ? name : t('Other');
-
-    const durLabel = Math.round(totalInterval * 1000 * 100) / 100;
-    const pctLabel = isFinite(percentage) ? Math.round(percentage * 100) : '∞';
-    const opsColor: string = pickBarColor(operationName, theme);
-
-    return (
-      <OpsLine key={operationName}>
-        <OpsNameContainer>
-          <OpsDot style={{backgroundColor: isOther ? 'transparent' : opsColor}} />
-          <OpsName>{operationName}</OpsName>
-        </OpsNameContainer>
-        <OpsContent>
-          <Dur>{durLabel}ms</Dur>
-          <Pct>{pctLabel}%</Pct>
-        </OpsContent>
-      </OpsLine>
-    );
-  });
-
-  if (!hideHeader) {
-    return (
-      <StyledBreakdown>
-        <SectionHeading>
-          {t('Operation Breakdown')}
-          <QuestionTooltip
-            position="top"
-            size="sm"
-            containerDisplayMode="block"
-            title={t(
-              'Span durations are summed over the course of an entire transaction. Any overlapping spans are only counted once. Percentages are calculated by dividing the summed span durations by the total of all span durations.'
-            )}
-          />
-        </SectionHeading>
-        {contents}
-      </StyledBreakdown>
-    );
-  }
-
-  return <StyledBreakdownNoHeader>{contents}</StyledBreakdownNoHeader>;
-}
-
-const StyledBreakdown = styled('div')`
-  font-size: ${p => p.theme.fontSize.md};
-  margin-bottom: ${space(4)};
-`;
-
-const StyledBreakdownNoHeader = styled('div')`
-  font-size: ${p => p.theme.fontSize.md};
-  margin: ${space(2)} ${space(3)};
-`;
-
-export const OpsLine = styled('div')`
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: ${space(0.5)};
-
-  * + * {
-    margin-left: ${space(0.5)};
-  }
-`;
-
 export const OpsDot = styled('div')`
   content: '';
   display: block;
   width: 8px;
   min-width: 8px;
   height: 8px;
-  margin-right: ${space(1)};
+  margin-right: ${p => p.theme.space.md};
   border-radius: 100%;
-`;
-
-const OpsContent = styled('div')`
-  display: flex;
-  align-items: center;
-`;
-
-const OpsNameContainer = styled(OpsContent)`
-  overflow: hidden;
-`;
-
-const OpsName = styled('div')`
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-`;
-
-const Dur = styled('div')`
-  color: ${p => p.theme.subText};
-  font-variant-numeric: tabular-nums;
-`;
-
-const Pct = styled('div')`
-  min-width: 40px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 `;
 
 function mergeInterval(intervals: TimeWindowSpan[]): TimeWindowSpan[] {
@@ -396,5 +266,3 @@ function mergeInterval(intervals: TimeWindowSpan[]): TimeWindowSpan[] {
 
   return merged;
 }
-
-export default OpsBreakdown;

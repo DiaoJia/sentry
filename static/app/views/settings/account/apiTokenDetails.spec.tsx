@@ -5,38 +5,70 @@ import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrar
 import * as indicators from 'sentry/actionCreators/indicator';
 import ApiTokenDetails from 'sentry/views/settings/account/apiTokenDetails';
 
-describe('ApiNewToken', function () {
-  MockApiClient.clearMockResponses();
+const ROUTER_CONFIG = {
+  initialRouterConfig: {
+    route: '/api/auth-tokens/:tokenId/',
+    location: {
+      pathname: '/api/auth-tokens/1/',
+    },
+  },
+};
 
-  it('renders', function () {
+describe('ApiTokenDetails', () => {
+  it('renders token name, preview, and scopes', async () => {
+    MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       method: 'GET',
-      url: `/api-tokens/1/`,
-      body: ApiTokenFixture({id: '1', name: 'token1'}),
+      url: '/api-tokens/1/',
+      body: ApiTokenFixture({
+        id: '1',
+        name: 'My Token',
+        scopes: ['project:read', 'project:write'],
+        tokenLastCharacters: 'n123',
+      }),
     });
-    render(<ApiTokenDetails params={{tokenId: '1'}} />);
+
+    render(<ApiTokenDetails />, ROUTER_CONFIG);
+
+    const nameInput = await screen.findByRole('textbox', {name: /name/i});
+    expect(nameInput).toHaveValue('My Token');
+    expect(screen.getByText('************n123')).toBeInTheDocument();
+    expect(screen.getByText('project:read, project:write')).toBeInTheDocument();
   });
 
-  it('renames token to new name', async function () {
+  it('shows error state when token fails to load', async () => {
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      method: 'GET',
+      url: '/api-tokens/1/',
+      statusCode: 500,
+    });
+
+    render(<ApiTokenDetails />, ROUTER_CONFIG);
+
+    expect(await screen.findByText('Failed to load personal token.')).toBeInTheDocument();
+  });
+
+  it('renames token to new name', async () => {
     MockApiClient.clearMockResponses();
     jest.spyOn(indicators, 'addSuccessMessage');
 
     const mock1 = MockApiClient.addMockResponse({
       method: 'GET',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
       body: ApiTokenFixture({id: '1', name: 'token1'}),
     });
 
-    render(<ApiTokenDetails params={{tokenId: '1'}} />);
+    render(<ApiTokenDetails />, ROUTER_CONFIG);
 
     await waitFor(() => expect(mock1).toHaveBeenCalledTimes(1));
 
     const assignMock = MockApiClient.addMockResponse({
       method: 'PUT',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
     });
 
-    await userEvent.type(screen.getByRole('textbox', {name: /name/i}), ' new');
+    await userEvent.type(await screen.findByRole('textbox', {name: /name/i}), ' new');
 
     await userEvent.click(screen.getByRole('button', {name: 'Save Changes'}));
 
@@ -55,26 +87,26 @@ describe('ApiNewToken', function () {
     expect(indicators.addSuccessMessage).toHaveBeenCalled();
   });
 
-  it('removes token name', async function () {
+  it('removes token name', async () => {
     MockApiClient.clearMockResponses();
     jest.spyOn(indicators, 'addSuccessMessage');
 
     const mock1 = MockApiClient.addMockResponse({
       method: 'GET',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
       body: ApiTokenFixture({id: '1', name: 'token1'}),
     });
 
-    render(<ApiTokenDetails params={{tokenId: '1'}} />);
+    render(<ApiTokenDetails />, ROUTER_CONFIG);
 
     await waitFor(() => expect(mock1).toHaveBeenCalledTimes(1));
 
     const assignMock = MockApiClient.addMockResponse({
       method: 'PUT',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
     });
 
-    await userEvent.clear(screen.getByRole('textbox', {name: /name/i}));
+    await userEvent.clear(await screen.findByRole('textbox', {name: /name/i}));
 
     await userEvent.click(screen.getByRole('button', {name: 'Save Changes'}));
 
@@ -93,28 +125,28 @@ describe('ApiNewToken', function () {
     expect(indicators.addSuccessMessage).toHaveBeenCalled();
   });
 
-  it('does not accept long name', async function () {
+  it('does not accept long name', async () => {
     MockApiClient.clearMockResponses();
     jest.spyOn(indicators, 'addErrorMessage');
 
     const mock1 = MockApiClient.addMockResponse({
       method: 'GET',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
       body: ApiTokenFixture({id: '1', name: 'token1'}),
     });
 
-    render(<ApiTokenDetails params={{tokenId: '1'}} />);
+    render(<ApiTokenDetails />, ROUTER_CONFIG);
 
     await waitFor(() => expect(mock1).toHaveBeenCalledTimes(1));
 
     const assignMock = MockApiClient.addMockResponse({
       method: 'PUT',
-      url: `/api-tokens/1/`,
+      url: '/api-tokens/1/',
       statusCode: 400,
     });
 
     await userEvent.type(
-      screen.getByRole('textbox', {name: /name/i}),
+      await screen.findByRole('textbox', {name: /name/i}),
       'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in'
     );
 

@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from redis import Redis
 
 from sentry.cache.redis import CommonRedisCache
@@ -16,19 +18,19 @@ def test_redis_cache_compat() -> None:
         CommonRedisCache(client=redis, raw_client=redis, version=version, prefix=prefix)
     )
     redis_backend = KVStorageCodecWrapper(
-        CacheKeyWrapper(RedisKVStorage(redis), version=version, prefix=prefix),
+        CacheKeyWrapper(RedisKVStorage[bytes](redis), version=version, prefix=prefix),
         JSONCodec() | BytesCodec(),
     )
 
     key = "key"
 
     value = [1, 2, 3]
-    cache_backend.set(key, value)
+    cache_backend.set(key, value, ttl=timedelta(hours=1))
     assert cache_backend.get(key) == value
     assert redis_backend.get(key) == value
 
     value = [4, 5, 6]
-    redis_backend.set("key", value)
+    redis_backend.set("key", value, ttl=timedelta(hours=1))
     assert cache_backend.get(key) == value
     assert redis_backend.get(key) == value
 

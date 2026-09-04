@@ -1,6 +1,8 @@
-import type {PlatformKey} from 'sentry/types/project';
+import type {Organization} from 'sentry/types/organization';
+import type {PlatformKey} from 'sentry/types/platform';
 import type {BaseVisualize} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
-import type {TraceWaterFallSource} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
+import type {CrossEventType} from 'sentry/views/explore/queryParams/crossEvent';
+import type {TraceTreeSource} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
 import type {TraceDrawerActionKind} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 
 export type TracingEventParameters = {
@@ -10,70 +12,78 @@ export type TracingEventParameters = {
   'trace.configurations_docs_link_clicked': {
     title: string;
   };
-  'trace.explorer.ai_query_applied': {
-    group_by_count: number;
-    query: string;
-    visualize_count: number;
+  'trace.explorer.cross_event_added': {
+    type: CrossEventType;
   };
-  'trace.explorer.ai_query_interface': {
-    action: 'opened' | 'closed';
+  'trace.explorer.cross_event_changed': {
+    new_type: CrossEventType;
+    old_type: CrossEventType;
   };
-  'trace.explorer.ai_query_rejected': {
-    natural_language_query: string;
-    num_queries_returned: number;
-  };
-  'trace.explorer.ai_query_submitted': {
-    natural_language_query: string;
+  'trace.explorer.cross_event_removed': {
+    type: CrossEventType;
   };
   'trace.explorer.metadata': {
-    columns: string[];
+    columns: readonly string[];
     columns_count: number;
     confidences: string[];
+    dataScanned: string;
     dataset: string;
+    empty_buckets_percentage: number[];
+    gave_seer_consent: 'given' | 'not_given' | 'gen_ai_features_disabled';
     has_exceeded_performance_usage_limit: boolean | null;
     interval: string;
     page_source: 'explore' | 'compare';
     query_status: 'success' | 'error' | 'pending';
     result_length: number;
     result_missing_root: number;
-    result_mode: 'trace samples' | 'span samples' | 'aggregates';
+    result_mode: 'trace samples' | 'span samples' | 'aggregates' | 'attribute breakdowns';
     sample_counts: number[];
     title: string;
     user_queries: string;
     user_queries_count: number;
+    version: 2;
     visualizes: BaseVisualize[];
     visualizes_count: number;
-    empty_buckets_percentage?: number[];
-  };
-  'trace.explorer.schema_hints_click': {
-    source: 'list' | 'drawer';
-    hint_key?: string;
-  };
-  'trace.explorer.schema_hints_drawer': {
-    drawer_open: boolean;
+    ai_query_run_id?: number | string;
+    attribute_breakdowns_mode?: 'breakdowns' | 'cohort_comparison';
+    cross_event_log_query_count?: number;
+    cross_event_metric_query_count?: number;
+    cross_event_span_query_count?: number;
   };
   'trace.explorer.table_pagination': {
     direction: string;
     num_results: number;
     type: 'samples' | 'traces' | 'aggregates';
   };
+  'trace.explorer.table_tab_changed': {
+    organization: Organization;
+    tab: string;
+  };
   'trace.load.empty_state': {
-    source: TraceWaterFallSource;
+    source: TraceTreeSource;
   };
   'trace.load.error_state': {
-    source: TraceWaterFallSource;
+    error_status: number | null;
+    source: TraceTreeSource;
+    span_count: number | null;
   };
   'trace.metadata': {
+    eap_spans_count: number;
     has_exceeded_performance_usage_limit: boolean | null;
+    issues_count: number;
     num_nodes: number;
     num_root_children: number;
     project_platforms: string[];
     referrer: string | null;
     shape: string;
-    source: TraceWaterFallSource;
+    source: TraceTreeSource;
+    trace_age: string;
     trace_duration_seconds: number;
   };
   'trace.preferences.autogrouping_change': {
+    enabled: boolean;
+  };
+  'trace.preferences.compressed_timeline_change': {
     enabled: boolean;
   };
   'trace.preferences.missing_instrumentation_change': {
@@ -92,12 +102,20 @@ export type TracingEventParameters = {
   'trace.quality.quota_exceeded.learn_more_clicked': {
     traceType: string;
   };
+  'trace.trace_drawer_details.eap_span_has_details': {
+    has_logs_details: boolean;
+    has_profile_details: boolean;
+  };
+  'trace.trace_drawer_details.gen_ai_span_details_viewed': {
+    operation_type: string;
+  };
   'trace.trace_drawer_explore_search': {
     key: string;
     kind: TraceDrawerActionKind;
     source: 'drawer' | 'toolbar_menu';
     value: string | number;
   };
+  'trace.trace_layout.ai_tab_clicked': Record<string, unknown>;
   'trace.trace_layout.change': {
     layout: string;
   };
@@ -114,9 +132,6 @@ export type TracingEventParameters = {
     num_children: number;
     project_platform: string;
     type: string;
-    next_op?: string;
-    parent_op?: string;
-    previous_op?: string;
   };
   'trace.trace_layout.tab_pin': Record<string, unknown>;
   'trace.trace_layout.tab_view': {
@@ -153,6 +168,11 @@ export type TracingEventParameters = {
   'trace_explorer.compare_queries': Record<string, unknown>;
   'trace_explorer.delete_query': Record<string, unknown>;
   'trace_explorer.open_in_issues': Record<string, unknown>;
+  'trace_explorer.open_saved_query': {
+    is_prebuilt: boolean;
+    query_name: string;
+    dataset?: string;
+  };
   'trace_explorer.open_trace': {
     source: 'trace explorer' | 'new explore';
   };
@@ -176,6 +196,7 @@ export type TracingEventParameters = {
   'trace_explorer.search_request': {
     queries: string[];
   };
+
   'trace_explorer.search_success': {
     has_data: boolean;
     num_missing_trace_root: number;
@@ -186,6 +207,9 @@ export type TracingEventParameters = {
   'trace_explorer.star_query': {
     save_type: 'star_query' | 'unstar_query';
     ui_source: 'table' | 'explorer';
+  };
+  'trace_explorer.toggle_span_details': {
+    expanded: boolean;
   };
   'trace_explorer.toggle_trace_details': {
     expanded: boolean;
@@ -200,19 +224,19 @@ export const tracingEventMap: Record<TracingEventKey, string | null> = {
   'trace.metadata': 'Trace Load Metadata',
   'trace.load.empty_state': 'Trace Load Empty State',
   'trace.load.error_state': 'Trace Load Error State',
-  'trace.explorer.ai_query_applied': 'Trace Explorer: AI Query Applied',
-  'trace.explorer.ai_query_rejected': 'Trace Explorer: AI Query Rejected',
-  'trace.explorer.ai_query_submitted': 'Trace Explorer: AI Query Submitted',
-  'trace.explorer.ai_query_interface': 'Trace Explorer: AI Query Interface',
   'trace.explorer.metadata': 'Improved Trace Explorer Pageload Metadata',
-  'trace.explorer.schema_hints_click':
-    'Improved Trace Explorer: Schema Hints Click Events',
-  'trace.explorer.schema_hints_drawer':
-    'Improved Trace Explorer: Schema Hints Drawer Events',
+  'trace.explorer.cross_event_added': 'Trace Explorer: Cross Event Added',
+  'trace.explorer.cross_event_changed': 'Trace Explorer: Cross Event Changed',
+  'trace.explorer.cross_event_removed': 'Trace Explorer: Cross Event Removed',
   'trace.explorer.table_pagination': 'Trace Explorer Table Pagination',
+  'trace.explorer.table_tab_changed': 'Trace Explorer: Table Tab Changed',
   'trace.trace_layout.change': 'Changed Trace Layout',
   'trace.trace_layout.drawer_minimize': 'Minimized Trace Drawer',
   'trace.trace_drawer_explore_search': 'Searched Trace Explorer',
+  'trace.trace_drawer_details.eap_span_has_details': 'EAP Span has Details',
+  'trace.trace_drawer_details.gen_ai_span_details_viewed':
+    'Viewed Gen AI Span Details in Trace',
+  'trace.trace_layout.ai_tab_clicked': 'Clicked AI Tab in Trace',
   'trace.tracing_onboarding': 'Tracing Onboarding UI',
   'trace.tracing_onboarding_platform_docs_viewed':
     'Viewed Platform Docs for Onboarding UI',
@@ -249,14 +273,18 @@ export const tracingEventMap: Record<TracingEventKey, string | null> = {
   'trace.trace_layout.span_row_click': 'Clicked Span Row in Trace',
   'trace_explorer.add_span_condition': 'Trace Explorer: Add Another Span',
   'trace_explorer.open_in_issues': 'Trace Explorer: Open Trace in Issues',
+  'trace_explorer.open_saved_query': 'Trace Explorer: Open Saved Query',
   'trace_explorer.open_trace': 'Trace Explorer: Open Trace in Trace Viewer',
   'trace_explorer.open_trace_span': 'Trace Explorer: Open Trace Span in Trace Viewer',
   'trace_explorer.remove_span_condition': 'Trace Explorer: Remove Span',
   'trace_explorer.toggle_trace_details': 'Trace Explorer: Toggle Trace Details in Table',
+  'trace_explorer.toggle_span_details': 'Trace Explorer: Toggle Span Details in Table',
   'trace_explorer.search_failure': 'Trace Explorer: Search Failure',
   'trace_explorer.search_request': 'Trace Explorer: Search Request',
   'trace_explorer.search_success': 'Trace Explorer: Search Success',
   'trace.preferences.autogrouping_change': 'Changed Autogrouping Preference',
+  'trace.preferences.compressed_timeline_change':
+    'Changed Compressed Timeline Preference',
   'trace.preferences.missing_instrumentation_change':
     'Changed Missing Instrumentation Preference',
   'trace_explorer.save_as': 'Trace Explorer: Save As',

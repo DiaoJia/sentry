@@ -1,11 +1,13 @@
 import styled from '@emotion/styled';
 
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import Link from 'sentry/components/links/link';
-import {t} from 'sentry/locale';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+import {useTranslation} from '@sentry/scraps/translationContext';
+
+import {MutableSearch} from 'sentry/components/searchSyntax/mutableSearch';
 import type {Deploy} from 'sentry/types/release';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
+
+import {Tag} from './tag';
 
 interface DeployBadgeProps {
   deploy: Deploy;
@@ -15,6 +17,8 @@ interface DeployBadgeProps {
 }
 
 export function DeployBadge(props: DeployBadgeProps) {
+  const {t} = useTranslation();
+
   return (
     <Link
       to={{
@@ -27,7 +31,7 @@ export function DeployBadge(props: DeployBadgeProps) {
       }}
     >
       <Tooltip title={t('Open In Issues')} skipWrapper>
-        <TruncatedTag type="highlight">{props.deploy.environment}</TruncatedTag>
+        <TruncatedTag variant="info">{props.deploy.environment}</TruncatedTag>
       </Tooltip>
     </Link>
   );

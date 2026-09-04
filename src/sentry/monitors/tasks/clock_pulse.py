@@ -3,12 +3,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import cache
 
 from arroyo import Partition
 from arroyo import Topic as ArroyoTopic
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer, build_kafka_configuration
-from confluent_kafka.admin import AdminClient, PartitionMetadata
+from arroyo.backends.kafka import KafkaPayload
+from confluent_kafka.admin import (  # type: ignore[attr-defined]
+    AdminClient,
+    PartitionMetadata,
+)
 from django.conf import settings
 from sentry_kafka_schemas.codecs import Codec
 from sentry_kafka_schemas.schema_types.ingest_monitors_v1 import ClockPulse, IngestMonitorMessage
@@ -17,32 +20,33 @@ from sentry.conf.types.kafka_definition import Topic, get_topic_codec
 from sentry.monitors.clock_dispatch import try_monitor_clock_tick
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import crons_tasks
-from sentry.utils.arroyo_producer import SingletonProducer
-from sentry.utils.kafka_config import (
-    get_kafka_admin_cluster_options,
-    get_kafka_producer_cluster_options,
-    get_topic_definition,
+from sentry.utils.arroyo_producer import (
+    get_arroyo_producer,
+    get_future_tracking_producer,
 )
+from sentry.utils.kafka_config import get_kafka_admin_cluster_options, get_topic_definition
 
 logger = logging.getLogger("sentry")
 
 MONITOR_CODEC: Codec[IngestMonitorMessage] = get_topic_codec(Topic.INGEST_MONITORS)
 
 
-def _get_producer() -> KafkaProducer:
-    cluster_name = get_topic_definition(Topic.INGEST_MONITORS)["cluster"]
-    producer_config = get_kafka_producer_cluster_options(cluster_name)
-    producer_config.pop("compression.type", None)
-    producer_config.pop("message.max.bytes", None)
-    return KafkaProducer(build_kafka_configuration(default_config=producer_config))
+def _get_producer():
+    return get_arroyo_producer(
+        name="sentry.monitors.tasks.clock_pulse",
+        topic=Topic.INGEST_MONITORS,
+        exclude_config_keys=["compression.type", "message.max.bytes"],
+    )
 
 
-_checkin_producer = SingletonProducer(_get_producer)
+_checkin_producer = get_future_tracking_producer(
+    producer_name="sentry.monitors.tasks.clock_pulse",
+    producer_factory=_get_producer,
+)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_partitions() -> Mapping[int, PartitionMetadata]:
     topic_defn = get_topic_definition(Topic.INGEST_MONITORS)
     topic = topic_defn["real_topic_name"]
@@ -58,8 +62,8 @@ def _get_partitions() -> Mapping[int, PartitionMetadata]:
 
 @instrumented_task(
     name="sentry.monitors.tasks.clock_pulse",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(namespace=crons_tasks),
+    namespace=crons_tasks,
+    silo_mode=SiloMode.CELL,
 )
 def clock_pulse(current_datetime=None):
     """

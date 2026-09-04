@@ -2,10 +2,10 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import {
-  type AppContext,
   getAppContextData,
+  type AppContext,
 } from 'sentry/components/events/contexts/knownContext/app';
 
 const MOCK_APP_CONTEXT: AppContext = {
@@ -18,8 +18,15 @@ const MOCK_APP_CONTEXT: AppContext = {
   app_id: '3145EA1A-0EAE-3F8C-969A-13A01394D3EA',
   type: 'app',
   in_foreground: false,
+  is_active: false,
   app_memory: 1048576 * 12,
   view_names: ['app.view1', 'app.view2'],
+  is_split_apks: false,
+  permissions: {
+    ACCESS_NETWORK_STATE: 'granted',
+    CAMERA: 'not_granted',
+    INTERNET: 'granted',
+  },
   // Extra data is still valid and preserved
   extra_data: 'something',
   unknown_key: 123,
@@ -42,8 +49,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('AppContext', function () {
-  it('returns values and according to the parameters', function () {
+describe('AppContext', () => {
+  it('returns values and according to the parameters', () => {
     expect(getAppContextData({data: MOCK_APP_CONTEXT, event: EventFixture()})).toEqual([
       {
         key: 'device_app_hash',
@@ -65,11 +72,22 @@ describe('AppContext', function () {
         value: '3145EA1A-0EAE-3F8C-969A-13A01394D3EA',
       },
       {key: 'in_foreground', subject: 'In Foreground', value: false},
+      {key: 'is_active', subject: 'Is Active', value: false},
       {key: 'app_memory', subject: 'Memory Usage', value: '12.0 MiB'},
       {
         key: 'view_names',
         subject: 'View Names',
         value: ['app.view1', 'app.view2'],
+      },
+      {key: 'is_split_apks', subject: 'Split APKs', value: false},
+      {
+        key: 'permissions',
+        subject: 'Permissions',
+        value: {
+          ACCESS_NETWORK_STATE: 'granted',
+          CAMERA: 'not_granted',
+          INTERNET: 'granted',
+        },
       },
       {
         key: 'extra_data',
@@ -84,7 +102,7 @@ describe('AppContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {app: MOCK_REDACTION}},
     });
@@ -92,8 +110,8 @@ describe('AppContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'app'}
-        alias={'app'}
+        type="app"
+        alias="app"
         value={{...MOCK_APP_CONTEXT, app_name: ''}}
       />
     );

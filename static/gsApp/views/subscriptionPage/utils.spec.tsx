@@ -2,7 +2,7 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {
   SubscriptionFixture,
-  SubscriptionWithSeerFixture,
+  SubscriptionWithLegacySeerFixture,
 } from 'getsentry-test/fixtures/subscription';
 
 import {DataCategory} from 'sentry/types/core';
@@ -15,7 +15,6 @@ describe('calculateTotalSpend', () => {
   it('should calculate reserved usage based on total price', () => {
     const subscription = SubscriptionFixture({
       organization,
-      planTier: 'am2',
       plan: 'am2_f',
       onDemandSpendUsed: 0,
     });
@@ -38,7 +37,6 @@ describe('calculateTotalSpend', () => {
   it('should calculate on demand usage', () => {
     const subscription = SubscriptionFixture({
       organization,
-      planTier: 'am2',
       plan: 'am2_f',
     });
     subscription.planDetails.categories = [DataCategory.ERRORS];
@@ -62,7 +60,6 @@ describe('calculateTotalSpend', () => {
   it('should convert annual prepaid price to monthly', () => {
     const subscription = SubscriptionFixture({
       organization,
-      planTier: 'am2',
       plan: 'am2_f',
     });
     subscription.planDetails.categories = [DataCategory.ERRORS];
@@ -82,7 +79,6 @@ describe('calculateTotalSpend', () => {
   it('should return 0 for prepaidTotalSpent when eventsByPrice is 0', () => {
     const subscription = SubscriptionFixture({
       organization,
-      planTier: 'am2',
       plan: 'am2_f',
     });
     subscription.planDetails.categories = [DataCategory.PROFILE_DURATION_UI];
@@ -99,7 +95,7 @@ describe('calculateTotalSpend', () => {
   });
 
   it('should calculate reserved budget spend', () => {
-    const seerSubscription = SubscriptionWithSeerFixture({
+    const seerSubscription = SubscriptionWithLegacySeerFixture({
       organization,
       plan: 'am3_business',
     });

@@ -1,16 +1,24 @@
+from __future__ import annotations
+
 import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import sentry_sdk
 
-from sentry.integrations.base import IntegrationDomain
+from sentry import options
+from sentry.exceptions import RestrictedIPAddress
 from sentry.integrations.types import EventLifecycleOutcome
 from sentry.utils import metrics
+
+if TYPE_CHECKING:
+    from sentry.integrations.base import IntegrationDomain
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +46,9 @@ class EventLifecycleMetric(ABC):
         """Get extra data to log."""
         return {}
 
-    def capture(self, assume_success: bool = True) -> "EventLifecycle":
+    def capture(self, assume_success: bool = True, sample_log_rate: float = 1.0) -> EventLifecycle:
         """Open a context to measure the event."""
-        return EventLifecycle(self, assume_success)
+        return EventLifecycle(self, assume_success, sample_log_rate)
 
 
 class IntegrationEventLifecycleMetric(EventLifecycleMetric, ABC):
@@ -82,12 +90,28 @@ class IntegrationEventLifecycleMetric(EventLifecycleMetric, ABC):
         tokens = ("integrations", self.get_metrics_domain(), str(outcome))
         return ".".join(tokens)
 
+    def get_integration_id(self) -> int | None:
+        """Return the integration ID if available. Override in subclasses."""
+        return None
+
     def get_metric_tags(self) -> Mapping[str, str]:
-        return {
+        tags: dict[str, str] = {
             "integration_domain": str(self.get_integration_domain()),
             "integration_name": self.get_integration_name(),
             "interaction_type": self.get_interaction_type(),
         }
+        # TODO(telkins): Remove killswitch once we no longer need integration_id on SLO metrics
+        integration_id = self.get_integration_id()
+        if integration_id is not None and options.get(
+            "integrations.slo.integration-id-tag-enabled"
+        ):
+            tags["integration_id"] = str(integration_id)
+        return tags
+
+    def capture(
+        self, assume_success: bool = True, sample_log_rate: float = 1.0
+    ) -> IntegrationEventLifecycle:
+        return IntegrationEventLifecycle(self, assume_success, sample_log_rate)
 
 
 class EventLifecycle:
@@ -102,9 +126,15 @@ class EventLifecycle:
     that inserting `record_failure` calls is still a dev to-do item.
     """
 
-    def __init__(self, payload: EventLifecycleMetric, assume_success: bool = True) -> None:
+    def __init__(
+        self,
+        payload: EventLifecycleMetric,
+        assume_success: bool = True,
+        sample_log_rate: float = 1.0,
+    ) -> None:
         self.payload = payload
         self.assume_success = assume_success
+        self.sample_log_rate = sample_log_rate
         self._state: EventLifecycleOutcome | None = None
         self._extra = dict(self.payload.get_extras())
 
@@ -127,6 +157,7 @@ class EventLifecycle:
         outcome: EventLifecycleOutcome,
         outcome_reason: BaseException | str | None = None,
         create_issue: bool = False,
+        sample_log_rate: float | None = None,
     ) -> None:
         """Record a starting or halting event.
 
@@ -167,27 +198,38 @@ class EventLifecycle:
         elif isinstance(outcome_reason, str):
             extra["outcome_reason"] = outcome_reason
 
-        if outcome == EventLifecycleOutcome.FAILURE:
-            logger.warning(key, **log_params)
-        elif outcome == EventLifecycleOutcome.HALTED:
-            logger.warning(key, **log_params)
+        if outcome == EventLifecycleOutcome.FAILURE or outcome == EventLifecycleOutcome.HALTED:
+            # Use provided sample_log_rate or fall back to instance default
+            effective_sample_log_rate = (
+                sample_log_rate if sample_log_rate is not None else self.sample_log_rate
+            )
+
+            should_log = (
+                effective_sample_log_rate >= 1.0 or random.random() < effective_sample_log_rate
+            )
+            if should_log:
+                if outcome == EventLifecycleOutcome.FAILURE:
+                    logger.warning(key, **log_params)
+                elif outcome == EventLifecycleOutcome.HALTED:
+                    logger.warning(key, **log_params)
 
     @staticmethod
     def _report_flow_error(message) -> None:
-        logger.error("EventLifecycle flow error: %s", message)
+        logger.warning("EventLifecycle flow error: %s", message)
 
     def _terminate(
         self,
         new_state: EventLifecycleOutcome,
         outcome_reason: BaseException | str | None = None,
         create_issue: bool = False,
+        sample_log_rate: float | None = None,
     ) -> None:
         if self._state is None:
             self._report_flow_error("The lifecycle has not yet been entered")
         if self._state != EventLifecycleOutcome.STARTED:
             self._report_flow_error("The lifecycle has already been exited")
         self._state = new_state
-        self.record_event(new_state, outcome_reason, create_issue)
+        self.record_event(new_state, outcome_reason, create_issue, sample_log_rate)
 
     def record_success(self) -> None:
         """Record that the event halted successfully.
@@ -204,6 +246,7 @@ class EventLifecycle:
         failure_reason: BaseException | str | None = None,
         extra: dict[str, Any] | None = None,
         create_issue: bool = True,
+        sample_log_rate: float | None = None,
     ) -> None:
         """Record that the event halted in failure. Additional data may be passed
         to be logged.
@@ -223,17 +266,26 @@ class EventLifecycle:
         example, if we receive an error status from a remote service and gracefully
         display an error response to the user, it would be necessary to manually call
         `record_failure` on the context object.
+
+        Args:
+            failure_reason: The reason for the failure (exception or string)
+            extra: Additional data to include in logs
+            create_issue: Whether to create a Sentry issue (default True)
+            sample_log_rate: Rate at which to sample logs (0.0-1.0). If None, uses instance default.
         """
 
         if extra:
             self._extra.update(extra)
-        self._terminate(EventLifecycleOutcome.FAILURE, failure_reason, create_issue)
+        self._terminate(
+            EventLifecycleOutcome.FAILURE, failure_reason, create_issue, sample_log_rate
+        )
 
     def record_halt(
         self,
         halt_reason: BaseException | str | None = None,
         extra: dict[str, Any] | None = None,
         create_issue: bool = False,
+        sample_log_rate: float | None = None,
     ) -> None:
         """Record that the event halted in an ambiguous state.
 
@@ -253,11 +305,17 @@ class EventLifecycle:
           (2) monitor it for sudden spikes in frequency; and
           (3) investigate whether more detailed error information is available
               (but probably later, as a backlog item).
+
+        Args:
+            halt_reason: The reason for the halt (exception or string)
+            extra: Additional data to include in logs
+            create_issue: Whether to create a Sentry issue (default False)
+            sample_log_rate: Rate at which to sample logs (0.0-1.0). If None, uses instance default.
         """
 
         if extra:
             self._extra.update(extra)
-        self._terminate(EventLifecycleOutcome.HALTED, halt_reason, create_issue)
+        self._terminate(EventLifecycleOutcome.HALTED, halt_reason, create_issue, sample_log_rate)
 
     def __enter__(self) -> Self:
         if self._state is not None:
@@ -276,7 +334,6 @@ class EventLifecycle:
             # The context called record_success or record_failure being closing,
             # so we can just exit quietly.
             return
-
         if exc_value is not None:
             # We were forced to exit the context by a raised exception.
             # Default to creating a Sentry issue for unhandled exceptions
@@ -292,6 +349,25 @@ class EventLifecycle:
             )
 
 
+class IntegrationEventLifecycle(EventLifecycle):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType,
+    ) -> None:
+        if self._state != EventLifecycleOutcome.STARTED:
+            # The context called record_success or record_failure being closing,
+            # so we can just exit quietly.
+            return
+
+        if exc_value is not None and isinstance(exc_value.__cause__, RestrictedIPAddress):
+            # ApiHostError is raised from RestrictedIPAddress
+            self.record_halt(exc_value)
+            return
+        super().__exit__(exc_type, exc_value, traceback)
+
+
 class IntegrationPipelineViewType(StrEnum):
     """A specific step in an integration's pipeline that is not a static page."""
 
@@ -299,6 +375,9 @@ class IntegrationPipelineViewType(StrEnum):
     IDENTITY_LOGIN = "identity_login"
     IDENTITY_LINK = "identity_link"
     TOKEN_EXCHANGE = "token_exchange"
+
+    # Datadog
+    DCR_REGISTRATION = "dcr_registration"
 
     # GitHub
     OAUTH_LOGIN = "oauth_login"
@@ -317,6 +396,12 @@ class IntegrationPipelineViewType(StrEnum):
 
     # Jira Server
     WEBHOOK_CREATION = "webhook_creation"
+
+    # All Integrations
+    FINISH_PIPELINE = "finish_pipeline"
+
+    # Opsgenie
+    INSTALLATION_CONFIGURATION = "installation_configuration"
 
 
 class IntegrationPipelineErrorReason(StrEnum):
@@ -355,10 +440,29 @@ class IntegrationPipelineViewEvent(IntegrationEventLifecycleMetric):
 
 
 class IntegrationWebhookEventType(StrEnum):
-    INSTALLATION = "installation"
-    PUSH = "push"
-    PULL_REQUEST = "pull_request"
+    """
+    Provider-agnostic event types for integration webhooks used for metrics tracking.
+
+    Enum names use generic SCM terminology:
+    - "merge request" instead of "pull request" (GitHub) or "merge request" (GitLab)
+    - "CI check" for continuous integration checks (GitHub Check Runs, GitLab Pipelines, etc.)
+
+    String values preserve original GitHub naming for backward compatibility with existing metrics.
+    """
+
+    CI_CHECK = "ci_check"  # e.g. GitHub Check Runs
+    # This represents a webhook event for an inbound sync operation, such as syncing external resources or data into Sentry.
     INBOUND_SYNC = "inbound_sync"
+    INSTALLATION = "installation"
+    INSTALLATION_REPOSITORIES = "installation_repositories"
+    ISSUE_COMMENT = "issue_comment"
+    MERGE_REQUEST = "pull_request"
+    MERGE_REQUEST_REVIEW = "pull_request_review"
+    MERGE_REQUEST_REVIEW_COMMENT = "pull_request_review_comment"
+    MERGE_REQUEST_REVIEW_THREAD = "pull_request_review_thread"
+    PUSH = "push"
+
+    CHECK_SUITE = "check_suite"
 
 
 @dataclass
@@ -380,3 +484,37 @@ class IntegrationWebhookEvent(IntegrationEventLifecycleMetric):
 
     def get_interaction_type(self) -> str:
         return str(self.interaction_type)
+
+
+class IntegrationProxyEventType(StrEnum):
+    """An instance to be recorded of a integration proxy event."""
+
+    SHOULD_PROXY = "should_proxy"
+    PROXY_REQUEST = "proxy_request"
+
+
+@dataclass
+class IntegrationProxyEvent(EventLifecycleMetric):
+    """An instance to be recorded of a integration proxy event."""
+
+    interaction_type: IntegrationProxyEventType
+
+    def get_metrics_domain(self) -> str:
+        return "integration_proxy"
+
+    def get_interaction_type(self) -> str:
+        return str(self.interaction_type)
+
+    def get_metric_key(self, outcome: EventLifecycleOutcome) -> str:
+        tokens = (self.get_metrics_domain(), self.interaction_type, str(outcome))
+        return ".".join(tokens)
+
+    def get_metric_tags(self) -> Mapping[str, str]:
+        return {
+            "interaction_type": self.interaction_type,
+        }
+
+    def get_extras(self) -> Mapping[str, Any]:
+        return {
+            "interaction_type": self.interaction_type,
+        }

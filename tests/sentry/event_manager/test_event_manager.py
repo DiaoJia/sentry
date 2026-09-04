@@ -16,11 +16,15 @@ from arroyo.backends.local.storages.memory import MemoryMessageStorage
 from arroyo.types import Partition, Topic
 from django.conf import settings
 from django.core.cache import cache
+from django.db import OperationalError, connections, router
 from django.db.models import F
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from sentry import eventstore, nodestore, tsdb
+from sentry import analytics, nodestore, tsdb
+from sentry.analytics.events.event_processing_error_recorded import EventProcessingErrorRecorded
 from sentry.attachments import CachedAttachment, attachment_cache
+from sentry.conf.server import DEFAULT_GROUPING_CONFIG
 from sentry.constants import MAX_VERSION_LENGTH, DataCategory, InsightModules
 from sentry.dynamic_sampling import (
     ExtendedBoostedRelease,
@@ -28,6 +32,7 @@ from sentry.dynamic_sampling import (
     ProjectBoostedReleases,
     get_redis_client_for_ds,
 )
+from sentry.dynamic_sampling.rules.helpers.latest_releases import LatestReleaseBias
 from sentry.event_manager import (
     EventManager,
     _get_event_instance,
@@ -36,14 +41,16 @@ from sentry.event_manager import (
     materialize_metadata,
     save_grouphash_and_group,
 )
-from sentry.eventstore.models import Event
 from sentry.exceptions import HashDiscarded
 from sentry.grouping.api import GroupingConfig, load_grouping_config
 from sentry.grouping.grouptype import ErrorGroupType
 from sentry.grouping.utils import hash_from_values
+from sentry.incidents.grouptype import MetricIssue
 from sentry.ingest.inbound_filters import FilterStatKeys
 from sentry.ingest.transaction_clusterer import ClustererNamespace
 from sentry.integrations.models.external_issue import ExternalIssue
+from sentry.issues.action_log import SYSTEM_ACTOR, ActionSource
+from sentry.issues.action_log.types import SetRegressedAction
 from sentry.issues.grouptype import (
     GroupCategory,
     PerformanceNPlusOneGroupType,
@@ -53,6 +60,7 @@ from sentry.issues.issue_occurrence import IssueEvidence
 from sentry.models.activity import Activity
 from sentry.models.commit import Commit
 from sentry.models.environment import Environment
+from sentry.models.eventattachment import EventAttachment, PendingEventAttachment
 from sentry.models.group import Group, GroupStatus
 from sentry.models.groupenvironment import GroupEnvironment
 from sentry.models.grouphash import GroupHash
@@ -66,7 +74,8 @@ from sentry.models.pullrequest import PullRequest, PullRequestCommit
 from sentry.models.release import Release
 from sentry.models.releasecommit import ReleaseCommit
 from sentry.models.releaseprojectenvironment import ReleaseProjectEnvironment
-from sentry.projectoptions.defaults import DEFAULT_GROUPING_CONFIG
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.signals import (
     first_event_with_minified_stack_trace_received,
     first_insight_span_received,
@@ -78,13 +87,13 @@ from sentry.testutils.cases import (
     PerformanceIssueTestCase,
     SnubaTestCase,
     TestCase,
-    TransactionTestCase,
 )
-from sentry.testutils.helpers import apply_feature_flag_on_cls, override_options
+from sentry.testutils.helpers import override_options
+from sentry.testutils.helpers.action_log import capture_action_log
 from sentry.testutils.helpers.datetime import before_now, freeze_time
 from sentry.testutils.helpers.features import with_feature
 from sentry.testutils.helpers.usage_accountant import usage_accountant_backend
-from sentry.testutils.performance_issues.event_generators import get_event
+from sentry.testutils.issue_detection.event_generators import get_event
 from sentry.testutils.pytest.fixtures import django_db_all
 from sentry.testutils.skips import requires_snuba
 from sentry.tsdb.base import TSDBModel
@@ -250,8 +259,340 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert event.group is not None
         assert event.group.title == f"TypeError: {cause_error_value}"
 
+    def test_java_rxjava_exceptions_correct_error_title_subtitle(self) -> None:
+        wrapper_exception_types = [
+            "OnErrorNotImplementedException",
+            "CompositeException",
+            "UndeliverableException",
+        ]
+        for exception_type in wrapper_exception_types:
+            manager = EventManager(
+                make_event(
+                    exception={
+                        "values": [
+                            {
+                                "type": "NullPointerException",
+                                "value": "Attempt to read from field 'a.b.c' on a null object",
+                                "module": "java.lang",
+                                "mechanism": {"type": "chained", "exception_id": 1, "parent_id": 0},
+                            },
+                            {
+                                "type": exception_type,
+                                "value": "The exception was not handled due to missing onError handler in the subscribe() method call.",
+                                "module": "io.reactivex.rxjava3.exceptions",
+                                "mechanism": {
+                                    "type": "chained",
+                                    "handled": False,
+                                    "exception_id": 0,
+                                },
+                            },
+                        ]
+                    },
+                )
+            )
+            event = manager.save(self.project.id)
+            assert event.data["metadata"]["type"] == "NullPointerException"
+            assert (
+                event.data["metadata"]["value"]
+                == "Attempt to read from field 'a.b.c' on a null object"
+            )
+            assert event.group is not None
+            assert (
+                event.group.title
+                == "NullPointerException: Attempt to read from field 'a.b.c' on a null object"
+            )
+
+    def test_java_rxjava_non_wrapped_exceptions_correct_title_subtitle(self) -> None:
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "MissingBackpressureException",
+                            "value": "Attempted to emit a value but the downstream wasn't ready for it.",
+                            "module": "io.reactivex.rxjava3.exceptions",
+                            "mechanism": {
+                                "type": "MissingBackpressureException",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "MissingBackpressureException"
+        assert (
+            event.data["metadata"]["value"]
+            == "Attempted to emit a value but the downstream wasn't ready for it."
+        )
+        assert event.group is not None
+        assert (
+            event.group.title
+            == "MissingBackpressureException: Attempted to emit a value but the downstream wasn't ready for it."
+        )
+
+    def test_java_rxjava_incomplete_error_correct_title_subtitle(self) -> None:
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "NullPointerException",
+                            "value": "Attempt to read from field 'a.b.c' on a null object",
+                        },
+                        {
+                            "type": "CompositeException",
+                            "value": "Can't call onError.",
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "CompositeException"
+        assert event.data["metadata"]["value"] == "Can't call onError."
+        assert event.group is not None
+        assert event.group.title == "CompositeException: Can't call onError."
+
+    def test_kotlin_coroutine_diagnostic_exception_correct_title(self) -> None:
+        """DiagnosticCoroutineContextException should not determine the title."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "RuntimeException",
+                            "value": "main exception",
+                            "module": "java.lang",
+                            "mechanism": {
+                                "type": "UncaughtExceptionHandler",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticCoroutineContextException",
+                            "module": "kotlinx.coroutines.internal",
+                            "mechanism": {
+                                "type": "suppressed",
+                                "exception_id": 1,
+                                "parent_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "RuntimeException"
+        assert event.data["metadata"]["value"] == "main exception"
+        assert event.group is not None
+        assert event.group.title == "RuntimeException: main exception"
+
+    def test_kotlin_coroutine_diagnostic_exception_chained_mechanism_correct_title(self) -> None:
+        """DiagnosticCoroutineContextException with chained mechanism should not determine the title."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "IllegalStateException",
+                            "value": "coroutine error",
+                            "module": "java.lang",
+                            "mechanism": {
+                                "type": "UncaughtExceptionHandler",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticCoroutineContextException",
+                            "module": "kotlinx.coroutines.internal",
+                            "mechanism": {
+                                "type": "chained",
+                                "exception_id": 1,
+                                "parent_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "IllegalStateException"
+        assert event.data["metadata"]["value"] == "coroutine error"
+        assert event.group is not None
+        assert event.group.title == "IllegalStateException: coroutine error"
+
+    def test_kotlin_coroutine_diagnostic_exception_no_parent_keeps_default_behavior(self) -> None:
+        """DiagnosticCoroutineContextException without parent_id should not change behavior."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "DiagnosticCoroutineContextException",
+                            "module": "kotlinx.coroutines.internal",
+                            "mechanism": {
+                                "type": "generic",
+                                "exception_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "DiagnosticCoroutineContextException"
+        assert event.group is not None
+        assert "DiagnosticCoroutineContextException" in event.group.title
+
+    def test_kotlin_coroutine_diagnostic_exception_invalid_parent_id_uses_root(self) -> None:
+        """DiagnosticCoroutineContextException with invalid parent_id becomes orphaned in exception tree."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "RuntimeException",
+                            "value": "actual error",
+                            "module": "java.lang",
+                            "mechanism": {
+                                "type": "UncaughtExceptionHandler",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticCoroutineContextException",
+                            "module": "kotlinx.coroutines.internal",
+                            "mechanism": {
+                                "type": "suppressed",
+                                "exception_id": 1,
+                                "parent_id": 999,  # References non-existent exception
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        # With invalid parent_id, DiagnosticCoroutineContextException is orphaned in the exception
+        # tree. The exception group filtering logic then picks RuntimeException (the root) as the
+        # main exception. This is correct behavior - the orphaned exception is effectively excluded.
+        assert event.data["metadata"]["type"] == "RuntimeException"
+        assert event.data["metadata"]["value"] == "actual error"
+        assert event.group is not None
+
+    def test_compose_diagnostic_exception_correct_title(self) -> None:
+        """DiagnosticComposeException should not determine the title."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "IllegalStateException",
+                            "value": "main exception",
+                            "module": "java.lang",
+                            "mechanism": {
+                                "type": "UncaughtExceptionHandler",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticComposeException",
+                            "value": "Composition stack when thrown:",
+                            "module": "androidx.compose.runtime.tooling",
+                            "mechanism": {
+                                "type": "suppressed",
+                                "exception_id": 1,
+                                "parent_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "IllegalStateException"
+        assert event.data["metadata"]["value"] == "main exception"
+        assert event.group is not None
+        assert event.group.title == "IllegalStateException: main exception"
+
+    def test_compose_diagnostic_exception_no_parent_keeps_default_behavior(self) -> None:
+        """DiagnosticComposeException without parent_id should not change behavior."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "DiagnosticComposeException",
+                            "value": "Composition stack when thrown:",
+                            "module": "androidx.compose.runtime.tooling",
+                            "mechanism": {
+                                "type": "generic",
+                                "exception_id": 0,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "DiagnosticComposeException"
+        assert event.group is not None
+        assert "DiagnosticComposeException" in event.group.title
+
+    def test_compose_and_coroutine_diagnostic_exceptions_chained_correct_title(self) -> None:
+        """When both DiagnosticComposeException and DiagnosticCoroutineContextException
+        are chained on top of the real error, the title should walk past both wrappers."""
+        manager = EventManager(
+            make_event(
+                exception={
+                    "values": [
+                        {
+                            "type": "IllegalStateException",
+                            "value": "boom",
+                            "module": "java.lang",
+                            "mechanism": {
+                                "type": "UncaughtExceptionHandler",
+                                "handled": False,
+                                "exception_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticComposeException",
+                            "value": "Composition stack when thrown:",
+                            "module": "androidx.compose.runtime.tooling",
+                            "mechanism": {
+                                "type": "suppressed",
+                                "exception_id": 1,
+                                "parent_id": 0,
+                            },
+                        },
+                        {
+                            "type": "DiagnosticCoroutineContextException",
+                            "module": "kotlinx.coroutines.internal",
+                            "mechanism": {
+                                "type": "suppressed",
+                                "exception_id": 2,
+                                "parent_id": 1,
+                            },
+                        },
+                    ]
+                },
+            )
+        )
+        event = manager.save(self.project.id)
+        assert event.data["metadata"]["type"] == "IllegalStateException"
+        assert event.data["metadata"]["value"] == "boom"
+        assert event.group is not None
+        assert event.group.title == "IllegalStateException: boom"
+
     @mock.patch("sentry.signals.issue_unresolved.send_robust")
-    @with_feature("organizations:issue-open-periods")
     def test_unresolve_auto_resolved_group(self, send_robust: mock.MagicMock) -> None:
         ts = before_now(minutes=5).isoformat()
 
@@ -261,6 +602,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         with self.tasks():
             event = manager.save(self.project.id)
 
+        assert event.group_id is not None
         group = Group.objects.get(id=event.group_id)
         group.status = GroupStatus.RESOLVED
         group.substatus = None
@@ -268,16 +610,11 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert group.is_resolved()
 
         resolved_at = before_now(minutes=4)
-        activity = Activity.objects.create(
+        Activity.objects.create(
             group=group,
             project=group.project,
             type=ActivityType.SET_RESOLVED_BY_AGE.value,
             datetime=resolved_at,
-        )
-
-        GroupOpenPeriod.objects.get(group=group, date_ended__isnull=True).close_open_period(
-            resolution_time=resolved_at,
-            resolution_activity=activity,
         )
 
         manager = EventManager(
@@ -292,18 +629,12 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert not group.is_resolved()
         assert send_robust.called
 
-        open_periods = GroupOpenPeriod.objects.filter(group=group).order_by("-date_started")
-        assert len(open_periods) == 2
-        open_period = open_periods[0]
-        assert open_period.date_started == event2.datetime
-        assert open_period.date_ended is None
-        open_period = open_periods[1]
-        assert open_period.date_started == group.first_seen
-        assert open_period.date_ended == resolved_at
-
     @mock.patch("sentry.signals.issue_unresolved.send_robust")
-    @with_feature("organizations:issue-open-periods")
-    def test_unresolves_group(self, send_robust: mock.MagicMock) -> None:
+    @mock.patch("sentry.models.groupopenperiod.get_group_type_by_type_id")
+    def test_unresolves_group(
+        self, mock_get_group_type: mock.MagicMock, send_robust: mock.MagicMock
+    ) -> None:
+        mock_get_group_type.return_value = MetricIssue
         ts = before_now(minutes=5).isoformat()
 
         # N.B. EventManager won't unresolve the group unless the event2 has a
@@ -312,6 +643,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         with self.tasks():
             event = manager.save(self.project.id)
 
+        assert event.group_id is not None
         group = Group.objects.get(id=event.group_id)
         group.status = GroupStatus.RESOLVED
         group.substatus = None
@@ -325,6 +657,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             type=ActivityType.SET_RESOLVED.value,
             datetime=resolved_at,
         )
+
         GroupOpenPeriod.objects.get(group=group, date_ended__isnull=True).close_open_period(
             resolution_time=resolved_at,
             resolution_activity=activity,
@@ -342,17 +675,20 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert not group.is_resolved()
         assert send_robust.called
 
+        regression_activity = Activity.objects.get(
+            group=group, type=ActivityType.SET_REGRESSION.value
+        )
+
         open_periods = GroupOpenPeriod.objects.filter(group=group).order_by("-date_started")
         assert len(open_periods) == 2
         open_period = open_periods[0]
-        assert open_period.date_started == event2.datetime
+        assert open_period.date_started == regression_activity.datetime
         assert open_period.date_ended is None
         open_period = open_periods[1]
         assert open_period.date_started == group.first_seen
         assert open_period.date_ended == resolved_at
 
     @mock.patch("sentry.signals.issue_unresolved.send_robust")
-    @with_feature("organizations:issue-open-periods")
     def test_unresolves_group_without_open_period(self, send_robust: mock.MagicMock) -> None:
         ts = before_now(minutes=5).isoformat()
 
@@ -362,13 +698,13 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         with self.tasks():
             event = manager.save(self.project.id)
 
+        assert event.group_id is not None
         group = Group.objects.get(id=event.group_id)
         group.status = GroupStatus.RESOLVED
         group.substatus = None
         group.save()
         assert group.is_resolved()
 
-        GroupOpenPeriod.objects.all().delete()
         manager = EventManager(
             make_event(
                 event_id="b" * 32, checksum="a" * 32, timestamp=before_now(minutes=3).isoformat()
@@ -381,46 +717,36 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert not group.is_resolved()
         assert send_robust.called
 
-        assert GroupOpenPeriod.objects.filter(group=group).count() == 0
-
-    @mock.patch("sentry.event_manager.plugin_is_regression")
-    def test_does_not_unresolve_group(self, plugin_is_regression: mock.MagicMock) -> None:
-        # N.B. EventManager won't unresolve the group unless the event2 has a
-        # later timestamp than event1.
-        plugin_is_regression.return_value = False
-
+    def test_regression_attributes_to_system(self) -> None:
         manager = EventManager(
-            make_event(event_id="a" * 32, checksum="a" * 32, timestamp=1403007314)
+            make_event(
+                event_id="a" * 32, checksum="a" * 32, timestamp=before_now(minutes=5).isoformat()
+            )
         )
         with self.tasks():
-            manager.normalize()
             event = manager.save(self.project.id)
 
+        assert event.group_id is not None
         group = Group.objects.get(id=event.group_id)
-        group.status = GroupStatus.RESOLVED
-        group.substatus = None
-        group.save()
-        assert group.is_resolved()
+        group.update(status=GroupStatus.RESOLVED, substatus=None)
 
         manager = EventManager(
-            make_event(event_id="b" * 32, checksum="a" * 32, timestamp=1403007315)
+            make_event(
+                event_id="b" * 32, checksum="a" * 32, timestamp=before_now(minutes=3).isoformat()
+            )
         )
-        manager.normalize()
-        event2 = manager.save(self.project.id)
-        assert event.group_id == event2.group_id
+        with capture_action_log() as log:
+            manager.save(self.project.id)
 
-        group = Group.objects.get(id=group.id)
-        assert group.is_resolved()
+        log.assert_logged(
+            SetRegressedAction, group_id=group.id, source=ActionSource.SYSTEM, actor=SYSTEM_ACTOR
+        )
 
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_marks_as_unresolved_with_new_release(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
     ) -> None:
-        plugin_is_regression.return_value = True
-
         old_release = Release.objects.create(
             version="a",
             organization_id=self.project.organization_id,
@@ -487,10 +813,8 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         mock_send_activity_notifications_delay.assert_called_once_with(activity.id)
 
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_that_release_in_latest_activity_prior_to_regression_is_not_overridden(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
     ) -> None:
         """
@@ -498,7 +822,6 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         activity to that regression is not overridden.
         It should only be overridden if the activity was awaiting the upcoming release
         """
-        plugin_is_regression.return_value = True
 
         # Create a release and a group associated with it
         old_release = self.create_release(
@@ -549,10 +872,8 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         mock_send_activity_notifications_delay.assert_called_once_with(regressed_activity.id)
 
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_current_release_version_in_latest_activity_prior_to_regression_is_not_overridden(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
     ) -> None:
         """
@@ -560,7 +881,6 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         activity to that regression is overridden with the release regression occurred in but the
         value of `current_release_version` used for semver is not lost in the update.
         """
-        plugin_is_regression.return_value = True
 
         # Create a release and a group associated with it
         old_release = self.create_release(
@@ -610,10 +930,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
 
         mock_send_activity_notifications_delay.assert_called_once_with(regressed_activity.id)
 
-    @mock.patch("sentry.event_manager.plugin_is_regression")
-    def test_resolved_in_release_regression_activity_follows_semver(
-        self, plugin_is_regression: mock.MagicMock
-    ) -> None:
+    def test_resolved_in_release_regression_activity_follows_semver(self) -> None:
         """
         Issue was marked resolved in 1.0.0, regression occurred in 2.0.0.
         If the project follows semver then the regression activity should have `follows_semver` set.
@@ -622,7 +939,6 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         This allows the UI to say the issue was resolved in 1.0.0, regressed in 2.0.0 and
         the versions were compared using semver.
         """
-        plugin_is_regression.return_value = True
 
         # Create a release and a group associated with it
         old_release = self.create_release(
@@ -859,15 +1175,11 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
 
     @mock.patch("sentry.integrations.example.integration.ExampleIntegration.sync_status_outbound")
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_marks_as_unresolved_with_new_release_with_integration(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
         mock_sync_status_outbound: mock.MagicMock,
     ) -> None:
-        plugin_is_regression.return_value = True
-
         old_release = Release.objects.create(
             version="a",
             organization_id=self.project.organization_id,
@@ -971,14 +1283,10 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
                 mock_send_activity_notifications_delay.assert_called_once_with(activity.id)
 
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_does_not_mark_as_unresolved_with_pending_commit(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
     ) -> None:
-        plugin_is_regression.return_value = True
-
         repo = self.create_repo(project=self.project)
         commit = self.create_commit(repo=repo)
 
@@ -1011,14 +1319,10 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert Group.objects.get(id=group.id).status == GroupStatus.RESOLVED
 
     @mock.patch("sentry.tasks.activity.send_activity_notifications.delay")
-    @mock.patch("sentry.event_manager.plugin_is_regression")
     def test_mark_as_unresolved_with_released_commit(
         self,
-        plugin_is_regression: mock.MagicMock,
         mock_send_activity_notifications_delay: mock.MagicMock,
     ) -> None:
-        plugin_is_regression.return_value = True
-
         release = self.create_release(project=self.project)
         repo = self.create_repo(project=self.project)
         commit = self.create_commit(repo=repo, release=release, project=self.project)
@@ -1053,53 +1357,6 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
 
         assert Group.objects.get(id=group.id).status == GroupStatus.UNRESOLVED
 
-    @mock.patch("sentry.models.Group.is_resolved")
-    @with_feature("organizations:issue-open-periods")
-    def test_unresolves_group_with_auto_resolve(self, mock_is_resolved: mock.MagicMock) -> None:
-        ts = before_now(minutes=5).isoformat()
-        mock_is_resolved.return_value = False
-        manager = EventManager(make_event(event_id="a" * 32, checksum="a" * 32, timestamp=ts))
-        with self.tasks():
-            event = manager.save(self.project.id)
-        assert event.group is not None
-
-        resolved_at = before_now(minutes=4)
-        activity = Activity.objects.create(
-            group=event.group,
-            project=event.group.project,
-            type=ActivityType.SET_RESOLVED.value,
-            datetime=resolved_at,
-        )
-        GroupOpenPeriod.objects.get(group=event.group, date_ended__isnull=True).close_open_period(
-            resolution_time=resolved_at,
-            resolution_activity=activity,
-        )
-
-        mock_is_resolved.return_value = True
-        manager = EventManager(
-            make_event(
-                event_id="b" * 32, checksum="a" * 32, timestamp=before_now(minutes=3).isoformat()
-            )
-        )
-        with self.tasks():
-            event2 = manager.save(self.project.id)
-        assert event2.group is not None
-        assert event.group_id == event2.group_id
-
-        group = Group.objects.get(id=event.group.id)
-        assert group.active_at
-        assert group.active_at.replace(second=0) == event2.datetime.replace(second=0)
-        assert group.active_at.replace(second=0) != event.datetime.replace(second=0)
-
-        open_periods = GroupOpenPeriod.objects.filter(group=group).order_by("-date_started")
-        assert len(open_periods) == 2
-        open_period = open_periods[0]
-        assert open_period.date_started == event2.datetime
-        assert open_period.date_ended is None
-        open_period = open_periods[1]
-        assert open_period.date_started == group.first_seen
-        assert open_period.date_ended == resolved_at
-
     def test_invalid_transaction(self) -> None:
         dict_input = {"messages": "foo"}
         manager = EventManager(make_event(transaction=dict_input))
@@ -1122,9 +1379,9 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert event1.culprit == "foobar"
 
     def test_culprit_after_stacktrace_processing(self) -> None:
-        from sentry.grouping.enhancer import Enhancements
+        from sentry.grouping.enhancer import EnhancementsConfig
 
-        enhancements_str = Enhancements.from_rules_text(
+        enhancements_str = EnhancementsConfig.from_rules_text(
             """
             function:in_app_function +app
             function:not_in_app_function -app
@@ -1185,6 +1442,44 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             assert not event.group.first_release
             assert Release.objects.filter(projects__in=[self.project.id]).count() == 0
             assert Release.objects.filter(organization_id=self.project.organization_id).count() == 0
+
+    def test_release_auto_creation_disabled(self) -> None:
+        # With the feature flag enabled and the project opting out, an ingested event
+        # with a brand-new release must not create a Release model.
+        self.project.update_option("sentry:enable_auto_release_creation", False)
+        with self.feature("organizations:auto-release-creation"):
+            event = self.make_release_event("1.0", self.project.id)
+
+        assert event.group is not None
+        assert not event.group.first_release
+        assert Release.objects.filter(organization_id=self.project.organization_id).count() == 0
+        assert not any(k == "sentry:release" for k, _ in event.tags)
+
+    def test_release_auto_creation_disabled_associates_existing_release(self) -> None:
+        # A release created out-of-band (e.g. via the CLI) is still associated even
+        # when auto-creation is disabled.
+        self.project.update_option("sentry:enable_auto_release_creation", False)
+        release = Release.objects.create(version="1.0", organization=self.project.organization)
+        release.add_project(self.project)
+
+        with self.feature("organizations:auto-release-creation"):
+            event = self.make_release_event("1.0", self.project.id)
+
+        assert event.group is not None
+        assert event.group.first_release is not None
+        assert event.group.first_release.id == release.id
+        release_tag = [v for k, v in event.tags if k == "sentry:release"][0]
+        assert release_tag == "1.0"
+
+    def test_release_auto_creation_disabled_without_feature_flag(self) -> None:
+        # Without the feature flag the project option is ignored and the release is
+        # auto-created as before.
+        self.project.update_option("sentry:enable_auto_release_creation", False)
+        event = self.make_release_event("1.0", self.project.id)
+
+        assert event.group is not None
+        assert event.group.first_release is not None
+        assert event.group.first_release.version == "1.0"
 
     def test_first_release(self) -> None:
         project_id = self.project.id
@@ -1433,8 +1728,49 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert None in manager.get_data().get("tags", [])
         assert 42 not in manager.get_data().get("tags", [])
         event = manager.save(self.project.id)
-        assert 42 not in event.tags
+        assert 42 not in event.tags  # type: ignore[comparison-overlap]
         assert None not in event.tags
+
+    @mock.patch("sentry.event_manager.eventstream.backend.insert")
+    def test_multi_group_environment(self, eventstream_insert: mock.MagicMock) -> None:
+        def save_event(env: str) -> Event:
+            manager = EventManager(
+                make_event(
+                    **{
+                        "message": "foo",
+                        "event_id": uuid.uuid1().hex,
+                        "environment": env,
+                        "release": "1.0",
+                    }
+                )
+            )
+            manager.normalize()
+            return manager.save(self.project.id)
+
+        event = save_event("dev")
+        assert event.group_id is not None
+
+        instance = GroupEnvironment.objects.get(
+            group_id=event.group_id,
+            environment_id=Environment.objects.get(
+                organization_id=self.project.organization_id, name="dev"
+            ).id,
+        )
+
+        assert instance.first_seen == event.datetime
+
+        event = save_event("prod")
+        assert event.group_id is not None
+
+        new_instance = GroupEnvironment.objects.get(
+            group_id=event.group_id,
+            environment_id=Environment.objects.get(
+                organization_id=self.project.organization_id, name="prod"
+            ).id,
+        )
+
+        assert new_instance.id != instance.id
+        assert new_instance.first_seen == event.datetime
 
     @mock.patch("sentry.event_manager.eventstream.backend.insert")
     def test_group_environment(self, eventstream_insert: mock.MagicMock) -> None:
@@ -1465,6 +1801,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             ).id,
         )
 
+        assert instance.first_seen == event.datetime
         assert Release.objects.get(id=instance.first_release_id).version == release_version
 
         group_states1 = {
@@ -1533,10 +1870,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert group.data["type"] == "default"
         assert group.data["metadata"]["title"] == "foo bar"
 
-    @with_feature("organizations:issue-open-periods")
     def test_error_event_type(self) -> None:
-        from sentry.models.groupopenperiod import GroupOpenPeriod
-
         manager = EventManager(
             make_event(**{"exception": {"values": [{"type": "Foo", "value": "bar"}]}})
         )
@@ -1553,19 +1887,12 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             "initial_priority": PriorityLevel.HIGH,
         }
 
-        open_period = GroupOpenPeriod.objects.filter(group=group)
-        assert len(open_period) == 1
-        assert open_period[0].group_id == group.id
-        assert open_period[0].project_id == self.project.id
-        assert open_period[0].date_started == group.first_seen
-        assert open_period[0].date_ended is None
-
-    @with_feature("organizations:issue-open-periods")
     def test_error_event_with_minified_stacktrace(self) -> None:
-        with patch(
-            "sentry.receivers.onboarding.record_event_with_first_minified_stack_trace_for_project",  # autospec=True
-        ) as mock_record_event_with_first_minified_stack_trace_for_project:
-
+        with (
+            patch(
+                "sentry.receivers.onboarding.record_event_with_first_minified_stack_trace_for_project",  # autospec=True
+            ) as mock_record_event_with_first_minified_stack_trace_for_project
+        ):
             first_event_with_minified_stack_trace_received.connect(
                 mock_record_event_with_first_minified_stack_trace_for_project, weak=False
             )
@@ -1989,7 +2316,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert "sentry.tasks.process" in search_message
 
     def test_search_message_skips_requested_keys(self) -> None:
-        from sentry.eventstore import models
+        from sentry.services.eventstore import models
 
         with patch.object(models, "SEARCH_MESSAGE_SKIPPED_KEYS", ("dogs",)):
             manager = EventManager(
@@ -2017,7 +2344,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             assert "are great" not in search_message  # "dogs" key is skipped
 
     def test_search_message_skips_bools_and_numbers(self) -> None:
-        from sentry.eventstore import models
+        from sentry.services.eventstore import models
 
         with patch.object(models, "SEARCH_MESSAGE_SKIPPED_KEYS", ("dogs",)):
             manager = EventManager(
@@ -2106,6 +2433,7 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         with self.tasks():
             event = manager.save(self.project.id)
 
+        assert event.group_id is not None
         group = Group.objects.get(id=event.group_id)
         tombstone = GroupTombstone.objects.create(
             project_id=group.project_id,
@@ -2133,17 +2461,16 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
             )
 
             cache_key = cache_key_for_event(manager.get_data())
-            attachment_cache.set(cache_key, attachments=[a1, a2])
+            attachment_cache.set(cache_key, attachments=[a1, a2], timeout=300)
 
             mock_track_outcome = mock.Mock(wraps=track_outcome)
             with (
                 mock.patch("sentry.event_manager.track_outcome", mock_track_outcome),
                 self.feature("organizations:event-attachments"),
-                self.feature("organizations:grouptombstones-hit-counter"),
                 self.tasks(),
                 pytest.raises(HashDiscarded),
             ):
-                manager.save(self.project.id, cache_key=cache_key, has_attachments=True)
+                manager.save(self.project.id, cache_key=cache_key, attachments=[a1, a2])
 
             assert mock_track_outcome.call_count == 3
 
@@ -2180,19 +2507,29 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         a1 = CachedAttachment(name="a1", data=b"hello", type="event.minidump")
         a2 = CachedAttachment(name="a2", data=b"world")
         cache_key = cache_key_for_event(manager.get_data())
-        attachment_cache.set(cache_key, attachments=[a1, a2])
+        attachment_cache.set(cache_key, attachments=[a1, a2], timeout=300)
 
+        mock_track_outcome = mock.Mock()
+        mock_track_outcome_aggregated = mock.Mock()
         with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
-            with self.feature("organizations:event-attachments"):
-                with self.tasks():
-                    manager.save(self.project.id, cache_key=cache_key, has_attachments=True)
+            with mock.patch(
+                "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+                mock_track_outcome_aggregated,
+            ):
+                with self.feature("organizations:event-attachments"):
+                    with self.tasks():
+                        manager.save(self.project.id, cache_key=cache_key, attachments=[a1, a2])
 
         # The first minidump should be accepted, since the limit is 1
-        assert mock_track_outcome.call_count == 3
+        # Event outcome goes through aggregator (1 call), attachments go through direct track_outcome (2 calls)
+        assert mock_track_outcome_aggregated.call_count == 1
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["outcome"] == Outcome.ACCEPTED
+        assert mock_track_outcome.call_count == 2
         for o in mock_track_outcome.mock_calls:
             assert o.kwargs["outcome"] == Outcome.ACCEPTED
 
         mock_track_outcome.reset_mock()
+        mock_track_outcome_aggregated.reset_mock()
 
         manager = EventManager(
             make_event(message="foo", event_id="b" * 32, fingerprint=["a" * 32]),
@@ -2201,16 +2538,25 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         manager.normalize()
 
         cache_key = cache_key_for_event(manager.get_data())
-        attachment_cache.set(cache_key, attachments=[a1, a2])
+        attachment_cache.set(cache_key, attachments=[a1, a2], timeout=300)
 
         with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
-            with self.feature("organizations:event-attachments"):
-                with self.tasks():
-                    event = manager.save(self.project.id, cache_key=cache_key, has_attachments=True)
+            with mock.patch(
+                "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+                mock_track_outcome_aggregated,
+            ):
+                with self.feature("organizations:event-attachments"):
+                    with self.tasks():
+                        event = manager.save(
+                            self.project.id, cache_key=cache_key, attachments=[a1, a2]
+                        )
 
         assert event.data["metadata"]["stripped_crash"] is True
 
-        assert mock_track_outcome.call_count == 3
+        # Event outcome goes through aggregator (1 call), attachments: 1 filtered + 1 accepted (2 calls)
+        assert mock_track_outcome_aggregated.call_count == 1
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["outcome"] == Outcome.ACCEPTED
+        assert mock_track_outcome.call_count == 2
         o = mock_track_outcome.mock_calls[0]
         assert o.kwargs["outcome"] == Outcome.FILTERED
         assert o.kwargs["category"] == DataCategory.ATTACHMENT
@@ -2223,12 +2569,15 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         manager = EventManager(make_event(message="foo"))
         manager.normalize()
 
-        mock_track_outcome = mock.Mock()
-        with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
+        mock_track_outcome_aggregated = mock.Mock()
+        with mock.patch(
+            "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+            mock_track_outcome_aggregated,
+        ):
             manager.save(self.project.id)
 
         assert_mock_called_once_with_partial(
-            mock_track_outcome, outcome=Outcome.ACCEPTED, category=DataCategory.ERROR
+            mock_track_outcome_aggregated, outcome=Outcome.ACCEPTED, category=DataCategory.ERROR
         )
 
     def test_attachment_accepted_outcomes(self) -> None:
@@ -2240,24 +2589,31 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         a3 = CachedAttachment(name="a3", data=b"world")
 
         cache_key = cache_key_for_event(manager.get_data())
-        attachment_cache.set(cache_key, attachments=[a1, a2, a3])
+        attachment_cache.set(cache_key, attachments=[a1, a2, a3], timeout=300)
 
         mock_track_outcome = mock.Mock()
+        mock_track_outcome_aggregated = mock.Mock()
         with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
-            with self.feature("organizations:event-attachments"):
-                manager.save(self.project.id, cache_key=cache_key, has_attachments=True)
+            with mock.patch(
+                "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+                mock_track_outcome_aggregated,
+            ):
+                with self.feature("organizations:event-attachments"):
+                    manager.save(self.project.id, cache_key=cache_key, attachments=[a1, a3])
 
-        assert mock_track_outcome.call_count == 3
+        # Event outcome goes through aggregator (1 call), attachments through direct track_outcome (2 calls)
+        assert mock_track_outcome_aggregated.call_count == 1
+        assert mock_track_outcome.call_count == 2
 
+        # Check aggregated event outcome
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["outcome"] == Outcome.ACCEPTED
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["category"] == DataCategory.ERROR
+
+        # Check attachment outcomes
         for o in mock_track_outcome.mock_calls:
             assert o.kwargs["outcome"] == Outcome.ACCEPTED
-
-        for o in mock_track_outcome.mock_calls[:2]:
             assert o.kwargs["category"] == DataCategory.ATTACHMENT
             assert o.kwargs["quantity"] == 5
-
-        final = mock_track_outcome.mock_calls[2]
-        assert final.kwargs["category"] == DataCategory.ERROR
 
     def test_attachment_filtered_outcomes(self) -> None:
         manager = EventManager(make_event(message="foo"), project=self.project)
@@ -2269,14 +2625,25 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         a3 = CachedAttachment(name="a3", data=b"world")
 
         cache_key = cache_key_for_event(manager.get_data())
-        attachment_cache.set(cache_key, attachments=[a1, a2, a3])
+        attachment_cache.set(cache_key, attachments=[a1, a2, a3], timeout=300)
 
         mock_track_outcome = mock.Mock()
+        mock_track_outcome_aggregated = mock.Mock()
         with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
-            with self.feature("organizations:event-attachments"):
-                manager.save(self.project.id, cache_key=cache_key, has_attachments=True)
+            with mock.patch(
+                "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+                mock_track_outcome_aggregated,
+            ):
+                with self.feature("organizations:event-attachments"):
+                    manager.save(self.project.id, cache_key=cache_key, attachments=[a1, a3])
 
-        assert mock_track_outcome.call_count == 3
+        # Event outcome goes through aggregator (1 call), attachments through direct track_outcome (2 calls)
+        assert mock_track_outcome_aggregated.call_count == 1
+        assert mock_track_outcome.call_count == 2
+
+        # Event outcome through aggregator
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["outcome"] == Outcome.ACCEPTED
+        assert mock_track_outcome_aggregated.mock_calls[0].kwargs["category"] == DataCategory.ERROR
 
         # First outcome is the rejection of the minidump
         o = mock_track_outcome.mock_calls[0]
@@ -2289,11 +2656,6 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         assert o.kwargs["outcome"] == Outcome.ACCEPTED
         assert o.kwargs["category"] == DataCategory.ATTACHMENT
         assert o.kwargs["quantity"] == 5
-
-        # Last outcome is the event
-        o = mock_track_outcome.mock_calls[2]
-        assert o.kwargs["outcome"] == Outcome.ACCEPTED
-        assert o.kwargs["category"] == DataCategory.ERROR
 
     def test_transaction_outcome_accepted(self) -> None:
         """
@@ -2323,21 +2685,24 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         )
         manager.normalize()
 
-        mock_track_outcome = mock.Mock()
-        with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
+        mock_track_outcome_aggregated = mock.Mock()
+        with mock.patch(
+            "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+            mock_track_outcome_aggregated,
+        ):
             with self.feature({"organizations:transaction-metrics-extraction": False}):
                 manager.save(self.project.id)
 
         assert_mock_called_once_with_partial(
-            mock_track_outcome, outcome=Outcome.ACCEPTED, category=DataCategory.TRANSACTION
+            mock_track_outcome_aggregated,
+            outcome=Outcome.ACCEPTED,
+            category=DataCategory.TRANSACTION,
         )
 
     def test_transaction_indexed_outcome_accepted(self) -> None:
         """
         With metrics extraction, we count the number of accepted transaction
-        events in the TRANSACTION_INDEXED data category. The TRANSACTION data
-        category contains the number of metrics from
-        ``billing_metrics_consumer``.
+        events in the TRANSACTION_INDEXED data category.
         """
 
         timestamp = before_now(minutes=5).isoformat()
@@ -2361,13 +2726,18 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         )
         manager.normalize()
 
-        mock_track_outcome = mock.Mock()
-        with mock.patch("sentry.event_manager.track_outcome", mock_track_outcome):
+        mock_track_outcome_aggregated = mock.Mock()
+        with mock.patch(
+            "sentry.event_manager.outcome_aggregator.track_outcome_aggregated",
+            mock_track_outcome_aggregated,
+        ):
             with self.feature("organizations:transaction-metrics-extraction"):
                 manager.save(self.project.id)
 
         assert_mock_called_once_with_partial(
-            mock_track_outcome, outcome=Outcome.ACCEPTED, category=DataCategory.TRANSACTION_INDEXED
+            mock_track_outcome_aggregated,
+            outcome=Outcome.ACCEPTED,
+            category=DataCategory.TRANSACTION_INDEXED,
         )
 
     def test_invalid_checksum_gets_hashed(self) -> None:
@@ -2445,9 +2815,9 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         Regression test to ensure that grouping in-app enhancements work in
         principle.
         """
-        from sentry.grouping.enhancer import Enhancements
+        from sentry.grouping.enhancer import EnhancementsConfig
 
-        enhancements_str = Enhancements.from_rules_text(
+        enhancements_str = EnhancementsConfig.from_rules_text(
             """
             function:foo category=bar
             function:foo2 category=bar
@@ -2521,9 +2891,9 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         Regression test to ensure categories are applied consistently and don't
         produce hash mismatches.
         """
-        from sentry.grouping.enhancer import Enhancements
+        from sentry.grouping.enhancer import EnhancementsConfig
 
-        enhancements_str = Enhancements.from_rules_text(
+        enhancements_str = EnhancementsConfig.from_rules_text(
             """
             function:foo category=foo_like
             category:foo_like -group
@@ -2571,210 +2941,208 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_perf_issue_creation(self) -> None:
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            event = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view"))
+        event = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view"))
+        )
+        data = event.data
+        assert event.get_event_type() == "transaction"
+        assert event.transaction == "/books/"
+        assert data["span_grouping_config"]["id"] == "default:2022-10-27"
+        span_hashes = [span["hash"] for span in data["spans"]]
+        assert span_hashes == [
+            "0f43fb6f6e01ca52",
+            "3dc5dd68b38e1730",
+            "424c6ae1641f0f0e",
+            "d5da18d7274b34a1",
+            "ac72fc0a4f5fe381",
+            "ac1468d8e11a0553",
+            "d8681423cab4275f",
+            "e853d2eb7fb9ebb0",
+            "6a992d5529f459a4",
+            "b640a0ce465fa2a4",
+            "a3605e201eaf6c45",
+            "061710eb39a66089",
+            "c031296784b22ea9",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+            "d74ed7012596c3fb",
+        ]
+        assert event.group
+        group = event.group
+        assert group is not None
+        assert group.title == "N+1 Query"
+        assert (
+            group.message
+            == "/books/ N+1 Query SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
+        )
+        assert group.culprit == "/books/"
+        assert group.get_event_type() == "transaction"
+        description = "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
+        assert group.get_event_metadata() == {
+            "location": "/books/",
+            "title": "N+1 Query",
+            "value": description,
+            "initial_priority": PriorityLevel.LOW,
+        }
+        assert (
+            event.search_message
+            == "/books/ N+1 Query SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
+        )
+        assert group.location() == "/books/"
+        assert group.level == 40
+        assert group.issue_category == GroupCategory.DB_QUERY
+        assert group.issue_type == PerformanceNPlusOneGroupType
+        assert isinstance(event, GroupEvent)
+        assert event.occurrence
+        assert event.occurrence.evidence_display == [
+            IssueEvidence(
+                name="Offending Spans",
+                value="db - SELECT `books_author`.`id`, `books_author`.`name` "
+                "FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
+                important=True,
             )
-            data = event.data
-            assert event.get_event_type() == "transaction"
-            assert event.transaction == "/books/"
-            assert data["span_grouping_config"]["id"] == "default:2022-10-27"
-            span_hashes = [span["hash"] for span in data["spans"]]
-            assert span_hashes == [
-                "0f43fb6f6e01ca52",
-                "3dc5dd68b38e1730",
-                "424c6ae1641f0f0e",
-                "d5da18d7274b34a1",
-                "ac72fc0a4f5fe381",
-                "ac1468d8e11a0553",
-                "d8681423cab4275f",
-                "e853d2eb7fb9ebb0",
-                "6a992d5529f459a4",
-                "b640a0ce465fa2a4",
-                "a3605e201eaf6c45",
-                "061710eb39a66089",
-                "c031296784b22ea9",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-                "d74ed7012596c3fb",
-            ]
-            assert event.group
-            group = event.group
-            assert group is not None
-            assert group.title == "N+1 Query"
-            assert (
-                group.message
-                == "/books/ N+1 Query SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
-            )
-            assert group.culprit == "/books/"
-            assert group.get_event_type() == "transaction"
-            description = "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
-            assert group.get_event_metadata() == {
-                "location": "/books/",
-                "title": "N+1 Query",
-                "value": description,
-                "initial_priority": PriorityLevel.LOW,
-            }
-            assert (
-                event.search_message
-                == "/books/ N+1 Query SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21"
-            )
-            assert group.location() == "/books/"
-            assert group.level == 40
-            assert group.issue_category == GroupCategory.PERFORMANCE
-            assert group.issue_type == PerformanceNPlusOneGroupType
-            assert event.occurrence
-            assert event.occurrence.evidence_display == [
-                IssueEvidence(
-                    name="Offending Spans",
-                    value="db - SELECT `books_author`.`id`, `books_author`.`name` "
-                    "FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
-                    important=True,
-                )
-            ]
-            assert event.occurrence.evidence_data == {
-                "transaction_name": "/books/",
-                "op": "db",
-                "parent_span_ids": ["8dd7a5869a4f4583"],
-                "parent_span": "django.view - index",
-                "cause_span_ids": ["9179e43ae844b174"],
-                "offender_span_ids": [
-                    "b8be6138369491dd",
-                    "b2d4826e7b618f1b",
-                    "b3fdeea42536dbf1",
-                    "b409e78a092e642f",
-                    "86d2ede57bbf48d4",
-                    "8e554c84cdc9731e",
-                    "94d6230f3f910e12",
-                    "a210b87a2191ceb6",
-                    "88a5ccaf25b9bd8f",
-                    "bb32cf50fc56b296",
-                ],
-                "repeating_spans": "db - SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
-                "repeating_spans_compact": "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
-                "num_repeating_spans": "10",
-            }
+        ]
+        assert event.occurrence.evidence_data == {
+            "transaction_name": "/books/",
+            "op": "db",
+            "parent_span_ids": ["8dd7a5869a4f4583"],
+            "parent_span": "django.view - index",
+            "cause_span_ids": ["9179e43ae844b174"],
+            "offender_span_ids": [
+                "b8be6138369491dd",
+                "b2d4826e7b618f1b",
+                "b3fdeea42536dbf1",
+                "b409e78a092e642f",
+                "86d2ede57bbf48d4",
+                "8e554c84cdc9731e",
+                "94d6230f3f910e12",
+                "a210b87a2191ceb6",
+                "88a5ccaf25b9bd8f",
+                "bb32cf50fc56b296",
+            ],
+            "repeating_spans": "db - SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
+            "repeating_spans_compact": "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
+            "num_repeating_spans": "10",
+        }
 
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_perf_issue_update(self) -> None:
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            event = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view"))
+        event = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view"))
+        )
+        group = event.group
+        assert group is not None
+        assert group.issue_category == GroupCategory.DB_QUERY
+        assert group.issue_type == PerformanceNPlusOneGroupType
+        group.data["metadata"] = {
+            "location": "hi",
+            "title": "lol",
+        }
+        group.culprit = "wat"
+        group.message = "nope"
+        group.save()
+        assert group.location() == "hi"
+        assert group.title == "lol"
+
+        with self.tasks():
+            self.create_performance_issue(
+                event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view"))
             )
-            group = event.group
-            assert group is not None
-            assert group.issue_category == GroupCategory.PERFORMANCE
-            assert group.issue_type == PerformanceNPlusOneGroupType
-            group.data["metadata"] = {
-                "location": "hi",
-                "title": "lol",
-            }
-            group.culprit = "wat"
-            group.message = "nope"
-            group.save()
-            assert group.location() == "hi"
-            assert group.title == "lol"
 
-            with self.tasks():
-                self.create_performance_issue(
-                    event_data=make_event(**get_event("n-plus-one-in-django-index-view"))
-                )
+        # Make sure the original group is updated via buffers
+        group.refresh_from_db()
+        assert group.title == "N+1 Query"
 
-            # Make sure the original group is updated via buffers
-            group.refresh_from_db()
-            assert group.title == "N+1 Query"
-
-            assert group.get_event_metadata() == {
-                "location": "/books/",
-                "title": "N+1 Query",
-                "value": "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
-                "initial_priority": PriorityLevel.LOW,
-            }
-            assert group.location() == "/books/"
-            assert group.message == "nope"
-            assert group.culprit == "/books/"
+        assert group.get_event_metadata() == {
+            "location": "/books/",
+            "title": "N+1 Query",
+            "value": "SELECT `books_author`.`id`, `books_author`.`name` FROM `books_author` WHERE `books_author`.`id` = %s LIMIT 21",
+            "initial_priority": PriorityLevel.LOW,
+        }
+        assert group.location() == "/books/"
+        assert group.message == "nope"
+        assert group.culprit == "/books/"
 
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_error_issue_no_associate_perf_event(self) -> None:
         """Test that you can't associate a performance event with an error issue"""
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            event = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view"))
-            )
-            assert event.group is not None
+        event = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view"))
+        )
+        assert event.group is not None
 
-            # sneakily make the group type wrong
-            group = event.group
-            assert group is not None
-            group.type = ErrorGroupType.type_id
-            group.save()
-            event = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view"))
-            )
+        # sneakily make the group type wrong
+        group = event.group
+        assert group is not None
+        group.type = ErrorGroupType.type_id
+        group.save()
+        event = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view"))
+        )
 
-            assert event.group is None
+        assert event.group is None
 
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_perf_issue_no_associate_error_event(self) -> None:
         """Test that you can't associate an error event with a performance issue"""
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            manager = EventManager(make_event())
-            manager.normalize()
-            event = manager.save(self.project.id)
-            assert len(event.groups) == 1
+        manager = EventManager(make_event())
+        manager.normalize()
+        event = manager.save(self.project.id)
+        assert len(event.groups) == 1
 
-            # sneakily make the group type wrong
-            group = event.group
-            assert group is not None
-            group.type = PerformanceNPlusOneGroupType.type_id
-            group.save()
-            manager = EventManager(make_event())
-            manager.normalize()
-            event = manager.save(self.project.id)
+        # sneakily make the group type wrong
+        group = event.group
+        assert group is not None
+        group.type = PerformanceNPlusOneGroupType.type_id
+        group.save()
+        manager = EventManager(make_event())
+        manager.normalize()
+        event = manager.save(self.project.id)
 
-            assert not event.group
+        assert not event.group
 
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_perf_issue_creation_ignored(self) -> None:
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            event = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view")),
-                noise_limit=2,
-            )
-            assert event.get_event_type() == "transaction"
-            assert event.group is None
+        event = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view")),
+            noise_limit=2,
+        )
+        assert event.get_event_type() == "transaction"
+        assert event.group is None
 
     @override_options({"performance.issues.all.problem-detection": 1.0})
     @override_options({"performance.issues.n_plus_one_db.problem-creation": 1.0})
     def test_perf_issue_creation_over_ignored_threshold(self) -> None:
-        with mock.patch("sentry_sdk.tracing.Span.containing_transaction"):
-            event_1 = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view")), noise_limit=3
-            )
-            event_2 = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view")), noise_limit=3
-            )
-            event_3 = self.create_performance_issue(
-                event_data=make_event(**get_event("n-plus-one-in-django-index-view")), noise_limit=3
-            )
-            assert event_1.get_event_type() == "transaction"
-            assert event_2.get_event_type() == "transaction"
-            assert event_3.get_event_type() == "transaction"
-            # only the third occurrence of the hash should create the group
-            assert event_1.group is None
-            assert event_2.group is None
-            assert event_3.group is not None
+        event_1 = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view")),
+            noise_limit=3,
+        )
+        event_2 = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view")),
+            noise_limit=3,
+        )
+        event_3 = self.create_performance_issue(
+            event_data=make_event(**get_event("n-plus-one-db/n-plus-one-in-django-index-view")),
+            noise_limit=3,
+        )
+        assert event_1.get_event_type() == "transaction"
+        assert event_2.get_event_type() == "transaction"
+        assert event_3.get_event_type() == "transaction"
+        # only the third occurrence of the hash should create the group
+        assert event_1.group is None
+        assert event_2.group is None
+        assert event_3.group is not None
 
     @override_options(
         {
@@ -2784,9 +3152,9 @@ class EventManagerTest(TestCase, SnubaTestCase, EventManagerTestMixin, Performan
         }
     )
     def test_perf_issue_slow_db_issue_is_created(self) -> None:
-        def attempt_to_generate_slow_db_issue() -> Event:
+        def attempt_to_generate_slow_db_issue() -> GroupEvent:
             return self.create_performance_issue(
-                event_data=make_event(**get_event("slow-db-spans")),
+                event_data=make_event(**get_event("slow-db/slow-db-spans")),
                 issue_type=PerformanceSlowDBQueryGroupType,
             )
 
@@ -3278,7 +3646,7 @@ class ReleaseIssueTest(TestCase):
         )
 
 
-@apply_feature_flag_on_cls("organizations:dynamic-sampling")
+@with_feature("organizations:dynamic-sampling")
 class DSLatestReleaseBoostTest(TestCase):
     def setUp(self) -> None:
         self.environment1 = Environment.get_or_create(self.project, "prod")
@@ -3359,7 +3727,7 @@ class DSLatestReleaseBoostTest(TestCase):
             f"ds::r:{release_2.id}:e:prod": str(ts),
             f"ds::r:{release_3.id}:e:dev": str(ts),
         }
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_1.id,
                 timestamp=ts,
@@ -3424,7 +3792,7 @@ class DSLatestReleaseBoostTest(TestCase):
         assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {
             f"ds::r:{release_2.id}:e:{self.environment1.name}": str(ts),
         }
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_2.id,
                 timestamp=ts,
@@ -3457,7 +3825,7 @@ class DSLatestReleaseBoostTest(TestCase):
         assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {
             f"ds::r:{release.id}:e:{self.environment1.name}": str(ts_1)
         }
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release.id,
                 timestamp=ts_1,
@@ -3491,9 +3859,7 @@ class DSLatestReleaseBoostTest(TestCase):
                 f"ds::r:{release.id}:e:{self.environment1.name}": str(ts_1),
                 f"ds::r:{release.id}:e:{self.environment2.name}": str(ts_2),
             }
-            assert ProjectBoostedReleases(
-                project_id=project.id
-            ).get_extended_boosted_releases() == [
+            assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
                 ExtendedBoostedRelease(
                     id=release.id,
                     timestamp=ts_1,
@@ -3531,9 +3897,7 @@ class DSLatestReleaseBoostTest(TestCase):
                 f"ds::r:{release.id}:e:{self.environment2.name}": str(ts_2),
                 f"ds::r:{release.id}": str(ts_3),
             }
-            assert ProjectBoostedReleases(
-                project_id=project.id
-            ).get_extended_boosted_releases() == [
+            assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
                 ExtendedBoostedRelease(
                     id=release.id,
                     timestamp=ts_1,
@@ -3578,7 +3942,7 @@ class DSLatestReleaseBoostTest(TestCase):
             )
 
         assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {}
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == []
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == []
 
     @freeze_time("2022-11-03 10:00:00")
     def test_release_not_boosted_with_deleted_release_after_event_received(self) -> None:
@@ -3619,7 +3983,7 @@ class DSLatestReleaseBoostTest(TestCase):
         }
         # We expect to not see the release 2 because it will not be in the database anymore, thus we mark it as
         # expired.
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_1.id,
                 timestamp=ts,
@@ -3664,7 +4028,7 @@ class DSLatestReleaseBoostTest(TestCase):
             ts,
         )
 
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_1.id,
                 timestamp=ts,
@@ -3705,7 +4069,7 @@ class DSLatestReleaseBoostTest(TestCase):
         ts = timezone.now().timestamp()
 
         # We want to test with multiple platforms.
-        for platform in ("python", "java", None):
+        for platform in ("python", "java"):
             project = self.create_project(platform=platform)
 
             for index, (release_version, environment) in enumerate(
@@ -3752,9 +4116,7 @@ class DSLatestReleaseBoostTest(TestCase):
             assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {
                 f"ds::r:{release_3.id}:e:{self.environment1.name}": str(ts)
             }
-            assert ProjectBoostedReleases(
-                project_id=project.id
-            ).get_extended_boosted_releases() == [
+            assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
                 ExtendedBoostedRelease(
                     id=release_3.id,
                     timestamp=ts,
@@ -3834,7 +4196,7 @@ class DSLatestReleaseBoostTest(TestCase):
             f"ds::r:{release_2.id}": str(ts - 1),
             f"ds::r:{release_3.id}:e:{self.environment1.name}": str(ts),
         }
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_2.id,
                 timestamp=ts - 1,
@@ -3903,7 +4265,7 @@ class DSLatestReleaseBoostTest(TestCase):
             f"ds::r:{release_1.id}:e:{self.environment2.name}": str(ts),
             f"ds::r:{release_1.id}": str(ts),
         }
-        assert ProjectBoostedReleases(project_id=project.id).get_extended_boosted_releases() == [
+        assert ProjectBoostedReleases(project).get_extended_boosted_releases() == [
             ExtendedBoostedRelease(
                 id=release_1.id,
                 timestamp=ts,
@@ -3922,10 +4284,87 @@ class DSLatestReleaseBoostTest(TestCase):
             ),
         ]
 
+    @freeze_time("2022-11-03 10:00:00")
+    def test_boost_release_sets_expiry_on_latest_release_date(self) -> None:
+        """The project latest release date expires, so a dead project does not keep a key forever."""
+        project = self.create_project(platform="python")
+        release = Release.get_or_create(project=project, version="1.0", date_added=timezone.now())
 
-class TestSaveGroupHashAndGroup(TransactionTestCase):
-    def test(self) -> None:
+        self.make_release_transaction(
+            release_version=release.version,
+            environment_name=self.environment1.name,
+            project_id=project.id,
+            checksum="a" * 32,
+            timestamp=self.timestamp,
+        )
+
+        cache_key = f"ds::p:{project.id}:latest_release"
+        assert self.redis_client.get(cache_key) is not None
+
+        lifetime_secs = LatestReleaseBias.LATEST_RELEASE_TIMEOUT_SECS
+        ttl = self.redis_client.ttl(cache_key)
+        assert ttl > 0
+        assert ttl <= lifetime_secs
+        # A fresh write gets the full lifetime, so the key must not be near the end of it.
+        assert ttl > lifetime_secs - 60
+
+    @freeze_time("2022-11-03 10:00:00")
+    def test_boost_release_skips_release_older_than_the_key_lifetime(self) -> None:
+        """A release too old to be an adoption is not boosted, even with no date key present."""
+        project = self.create_project(platform="python")
+        stale_date = timezone.now() - timedelta(
+            seconds=LatestReleaseBias.LATEST_RELEASE_TIMEOUT_SECS + 1
+        )
+        stale_release = Release.get_or_create(project=project, version="1.0", date_added=stale_date)
+
+        self.make_release_transaction(
+            release_version=stale_release.version,
+            environment_name=self.environment1.name,
+            project_id=project.id,
+            checksum="a" * 32,
+            timestamp=self.timestamp,
+        )
+
+        assert self.redis_client.get(f"ds::p:{project.id}:latest_release") is None
+        assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {}
+
+    @freeze_time("2022-11-03 10:00:00")
+    def test_boost_release_skips_stale_releases_after_the_key_expires(self) -> None:
+        """Losing the date key must not let a run of old releases each take a boost."""
+        ts = timezone.now().timestamp()
+
+        project = self.create_project(platform="python")
+        stale_1 = Release.get_or_create(
+            project=project, version="1.0", date_added=timezone.now() - timedelta(days=200)
+        )
+        stale_2 = Release.get_or_create(
+            project=project, version="2.0", date_added=timezone.now() - timedelta(days=100)
+        )
+        current = Release.get_or_create(project=project, version="3.0", date_added=timezone.now())
+
+        # The date key is absent, as it would be after the expiry fired on a project that stopped
+        # shipping. The two old releases must not be read as a new latest release.
+        for release in (stale_1, stale_2, current):
+            self.make_release_transaction(
+                release_version=release.version,
+                environment_name=self.environment1.name,
+                project_id=project.id,
+                checksum="a" * 32,
+                timestamp=self.timestamp,
+            )
+
+        assert self.redis_client.hgetall(f"ds::p:{project.id}:boosted_releases") == {
+            f"ds::r:{current.id}:e:{self.environment1.name}": str(ts),
+        }
+        assert self.redis_client.get(f"ds::p:{project.id}:latest_release") == str(
+            float(current.date_added.timestamp())
+        )
+
+
+class TestSaveGroupHashAndGroup(TestCase):
+    def test_simple(self) -> None:
         perf_data = load_data("transaction-n-plus-one", timestamp=before_now(minutes=10))
+        perf_data["event_id"] = "a" * 32
         event = _get_event_instance(perf_data, project_id=self.project.id)
         group_hash = "some_group"
         group, created, _ = save_grouphash_and_group(self.project, event, group_hash)
@@ -4048,3 +4487,291 @@ def test_cogs_event_manager(
     # We cannot assert for exact length because manager save method adds some extra fields. So we
     # assert that the length is at least greater than the expected length.
     assert formatted["amount"] >= expected_len
+
+
+class EventProcessingErrorAnalyticsTest(TestCase, SnubaTestCase):
+    """
+    Unit tests for processing error analytics recording.
+
+    These tests use store_event() which goes through the full EventManager flow.
+    Errors can come from:
+    1. Normalization (validation errors like invalid_data, future_timestamp)
+    2. Symbolication (js_*, native_*, proguard_* errors)
+    """
+
+    @mock.patch("sentry.event_manager.random.random")
+    def test_validation_errors_recorded_to_analytics(self, mock_random: mock.MagicMock) -> None:
+        """Test that validation errors from normalization are also recorded."""
+        mock_random.return_value = 0.001
+        with mock.patch.object(analytics, "record", wraps=analytics.record) as spy_analytics_record:
+            # Create an event with a future timestamp, which produces a validation error
+            future = timezone.now() + timedelta(minutes=10)
+            event = self.store_event(
+                data=make_event(
+                    platform="python",
+                    timestamp=future.isoformat(),
+                ),
+                project_id=self.project.id,
+                assert_no_errors=False,
+            )
+            recorded_events = [
+                call[0][0]
+                for call in spy_analytics_record.call_args_list
+                if isinstance(call[0][0], EventProcessingErrorRecorded)
+            ]
+            expected_events = [
+                EventProcessingErrorRecorded(
+                    organization_id=self.project.organization_id,
+                    project_id=self.project.id,
+                    event_id=event.event_id,
+                    group_id=event.group_id,
+                    error_type="future_timestamp",
+                    platform="python",
+                    sample_rate=1.0,
+                    name="timestamp",
+                    value=None,
+                ),
+            ]
+            assert recorded_events == expected_events
+
+    @mock.patch("sentry.event_manager.random.random")
+    def test_processing_errors_recorded_at_one_percent_for_older_orgs(
+        self, mock_random: mock.MagicMock
+    ) -> None:
+        """Orgs older than 30 days record at 1% sample rate, surfaced on the analytics event."""
+        self.organization.date_added = timezone.now() - timedelta(days=60)
+        self.organization.save()
+        mock_random.return_value = 0.001
+        with mock.patch.object(analytics, "record", wraps=analytics.record) as spy_analytics_record:
+            future = timezone.now() + timedelta(minutes=10)
+            event = self.store_event(
+                data=make_event(
+                    platform="python",
+                    timestamp=future.isoformat(),
+                ),
+                project_id=self.project.id,
+                assert_no_errors=False,
+            )
+            recorded_events = [
+                call[0][0]
+                for call in spy_analytics_record.call_args_list
+                if isinstance(call[0][0], EventProcessingErrorRecorded)
+            ]
+            assert recorded_events == [
+                EventProcessingErrorRecorded(
+                    organization_id=self.project.organization_id,
+                    project_id=self.project.id,
+                    event_id=event.event_id,
+                    group_id=event.group_id,
+                    error_type="future_timestamp",
+                    platform="python",
+                    sample_rate=0.01,
+                    name="timestamp",
+                    value=None,
+                ),
+            ]
+
+    @mock.patch("sentry.event_manager.random.random")
+    def test_processing_errors_not_recorded_when_not_sampled(
+        self, mock_random: mock.MagicMock
+    ) -> None:
+        """Test that processing errors are not recorded when the random draw is above the sample rate."""
+        # Age the org past the 30-day full-sample window so the rate is 1%, then 0.5 fails the check.
+        self.organization.date_added = timezone.now() - timedelta(days=60)
+        self.organization.save()
+        mock_random.return_value = 0.5
+        with mock.patch.object(analytics, "record", wraps=analytics.record) as spy_analytics_record:
+            # Create an event with a future timestamp, which produces a validation error
+            future = timezone.now() + timedelta(minutes=10)
+            self.store_event(
+                data=make_event(
+                    platform="python",
+                    timestamp=future.isoformat(),
+                ),
+                project_id=self.project.id,
+                assert_no_errors=False,
+            )
+            processing_error_calls = [
+                call
+                for call in spy_analytics_record.call_args_list
+                if isinstance(call[0][0], EventProcessingErrorRecorded)
+            ]
+            assert len(processing_error_calls) == 0
+
+    @mock.patch("sentry.event_manager.random.random")
+    def test_processing_errors_not_recorded_when_no_errors(
+        self, mock_random: mock.MagicMock
+    ) -> None:
+        """Test that analytics is not recorded when there are no processing errors."""
+        mock_random.return_value = 0.001
+        with mock.patch.object(analytics, "record", wraps=analytics.record) as spy_analytics_record:
+            self.store_event(
+                data=make_event(platform="python"),
+                project_id=self.project.id,
+            )
+            processing_error_calls = [
+                call
+                for call in spy_analytics_record.call_args_list
+                if isinstance(call[0][0], EventProcessingErrorRecorded)
+            ]
+            assert len(processing_error_calls) == 0
+
+
+class SaveAttachmentTest(TestCase):
+    def test_rate_limit_skipped_when_stored_id_set(self) -> None:
+        from sentry.event_manager import save_attachment
+
+        stored_id = "test-stored-id"
+        attachment = CachedAttachment(
+            name="test.txt",
+            stored_id=stored_id,
+            size=100,
+        )
+
+        mock_putfile = mock.MagicMock()
+        mock_putfile.return_value.content_type = "text/plain"
+        mock_putfile.return_value.size = 100
+        mock_putfile.return_value.sha1 = "abc"
+        mock_putfile.return_value.blob_path = None
+
+        with (
+            mock.patch(
+                "sentry.ratelimits.backend.is_limited_with_value",
+                return_value=(True, 0, 0),
+            ) as mock_rate_limit,
+            mock.patch("sentry.models.eventattachment.EventAttachment.putfile", mock_putfile),
+            mock.patch("sentry.models.eventattachment.EventAttachment.objects.create"),
+        ):
+            save_attachment(
+                cache_key=None,
+                attachment=attachment,
+                project=self.project,
+                event_id="a" * 32,
+            )
+
+        mock_rate_limit.assert_not_called()
+        mock_putfile.assert_called_once()
+
+
+class SavePendingAttachmentsTest(TestCase):
+    """
+    Promotion of `PendingEventAttachment` rows must happen exactly once, even though two
+    callers can race for the same rows: the same `event_id` can be saved twice, and any
+    sweep that retries promotion for rows missed at ingest time is a second promoter by
+    construction. Promoting twice would show the attachment twice and bill it twice.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.event_id = "a" * 32
+        self.pending = PendingEventAttachment.objects.create(
+            project_id=self.project.id,
+            event_id=self.event_id,
+            type="event.attachment",
+            name="foo.txt",
+            content_type="text/plain",
+            size=5,
+            sha1="abc",
+            blob_path=":hello",
+            date_expires=timezone.now() + timedelta(hours=1),
+            date_expires_retention=timezone.now() + timedelta(days=66),
+        )
+
+    def promote(self, group_id: int | None = None) -> mock.MagicMock:
+        from sentry.event_manager import save_pending_attachments
+
+        with (
+            self.feature("projects:defer-attachment-storage"),
+            mock.patch("sentry.event_manager.track_outcome") as track,
+        ):
+            save_pending_attachments(
+                project=self.project,
+                event_id=self.event_id,
+                group_id=group_id if group_id is not None else self.group.id,
+                source="test",
+            )
+        return track
+
+    def test_promotes_only_once_when_called_twice(self) -> None:
+        first = self.promote()
+        second = self.promote()
+
+        # The first caller claimed the row; the second found it already gone.
+        (attachment,) = EventAttachment.objects.filter(project_id=self.project.id)
+        assert attachment.event_id == self.event_id
+        assert attachment.group_id == self.group.id
+        assert not PendingEventAttachment.objects.exists()
+
+        assert first.call_count == 1
+        assert first.mock_calls[0].kwargs["outcome"] == Outcome.ACCEPTED
+        assert first.mock_calls[0].kwargs["category"] == DataCategory.ATTACHMENT
+        # Crucially, the second caller does not bill the attachment again.
+        assert second.call_count == 0
+
+    def test_claims_rows_for_update(self) -> None:
+        with CaptureQueriesContext(
+            connections[router.db_for_write(PendingEventAttachment)]
+        ) as queries:
+            self.promote()
+
+        claims = [
+            q["sql"]
+            for q in queries.captured_queries
+            if "sentry_pendingeventattachment" in q["sql"] and "FOR UPDATE" in q["sql"]
+        ]
+        assert len(claims) == 1, [q["sql"] for q in queries.captured_queries]
+
+    def test_nothing_is_claimed_if_the_insert_fails(self) -> None:
+        with pytest.raises(OperationalError):
+            with mock.patch.object(
+                EventAttachment.objects, "bulk_create", side_effect=OperationalError("nope")
+            ):
+                self.promote()
+
+        # The whole promotion rolls back as one unit, so the row stays claimable by a
+        # retry instead of being dropped with its blob still in storage.
+        assert PendingEventAttachment.objects.filter(id=self.pending.id).exists()
+        assert not EventAttachment.objects.filter(project_id=self.project.id).exists()
+
+    def test_no_query_without_the_feature(self) -> None:
+        from sentry.event_manager import save_pending_attachments
+
+        with CaptureQueriesContext(
+            connections[router.db_for_write(PendingEventAttachment)]
+        ) as queries:
+            save_pending_attachments(
+                project=self.project,
+                event_id=self.event_id,
+                group_id=self.group.id,
+                source="test",
+            )
+
+        assert not [
+            q for q in queries.captured_queries if "sentry_pendingeventattachment" in q["sql"]
+        ]
+        assert PendingEventAttachment.objects.filter(id=self.pending.id).exists()
+
+    def test_probe_does_not_open_a_transaction_when_there_is_nothing_to_promote(self) -> None:
+        from sentry.event_manager import save_pending_attachments
+
+        PendingEventAttachment.objects.all().delete()
+
+        with CaptureQueriesContext(
+            connections[router.db_for_write(PendingEventAttachment)]
+        ) as queries:
+            with self.feature("projects:defer-attachment-storage"):
+                save_pending_attachments(
+                    project=self.project,
+                    event_id=self.event_id,
+                    group_id=self.group.id,
+                    source="test",
+                )
+
+        # A single unlocked probe, and no `FOR UPDATE` claim behind it.
+        pending_queries = [
+            q["sql"]
+            for q in queries.captured_queries
+            if "sentry_pendingeventattachment" in q["sql"]
+        ]
+        assert len(pending_queries) == 1
+        assert "FOR UPDATE" not in pending_queries[0]

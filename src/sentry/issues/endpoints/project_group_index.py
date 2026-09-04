@@ -1,38 +1,52 @@
 import functools
+import logging
 
+import sentry_sdk
+from drf_spectacular.utils import extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import analytics, eventstore
+from sentry import analytics
+from sentry.analytics.events.project_issue_searched import ProjectIssueSearchEvent
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectEventPermission
 from sentry.api.helpers.environments import get_environment_func
 from sentry.api.helpers.group_index import (
-    delete_groups,
-    get_by_short_id,
+    get_by_short_ids,
     prep_search,
+    schedule_tasks_to_delete_groups,
     track_slo_response,
     update_groups_with_search_fn,
 )
 from sentry.api.helpers.group_index.validators import ValidationError
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.group_stream import StreamGroupSerializer
+from sentry.apidocs.constants import RESPONSE_BAD_REQUEST, RESPONSE_FORBIDDEN
+from sentry.apidocs.parameters import (
+    CursorQueryParam,
+    GlobalParams,
+    IssueParams,
+    VisibilityParams,
+)
+from sentry.exceptions import InvalidSearchQuery
 from sentry.models.environment import Environment
-from sentry.models.group import QUERY_STATUS_LOOKUP, Group, GroupStatus
+from sentry.models.group import Group
 from sentry.models.grouphash import GroupHash
 from sentry.models.project import Project
-from sentry.search.events.constants import EQUALITY_OPERATORS
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.services import eventstore
 from sentry.signals import advanced_search
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 from sentry.utils.validators import normalize_event_id
 
 ERR_INVALID_STATS_PERIOD = "Invalid stats_period. Valid choices are '', '24h', and '14d'"
 ERR_HASHES_AND_OTHER_QUERY = "Cannot use 'hashes' with 'query'"
+logger = logging.getLogger(__name__)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ProjectGroupIndexEndpoint(ProjectEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -43,19 +57,45 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
     permission_classes = (ProjectEventPermission,)
     enforce_rate_limit = True
 
-    rate_limits = {
-        "GET": {
-            RateLimitCategory.IP: RateLimit(limit=5, window=1),
-            RateLimitCategory.USER: RateLimit(limit=5, window=1),
-            RateLimitCategory.ORGANIZATION: RateLimit(limit=5, window=1),
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "GET": {
+                RateLimitCategory.IP: RateLimit(limit=5, window=1),
+                RateLimitCategory.USER: RateLimit(limit=5, window=1),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=5, window=1),
+            }
         }
-    }
+    )
 
+    @extend_schema(
+        operation_id="listProjectIssues",
+        summary="List a Project's Issues",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            GlobalParams.ENVIRONMENT,
+            IssueParams.PROJECT_GROUP_STATS_PERIOD,
+            CursorQueryParam,
+            VisibilityParams.PER_PAGE,
+            IssueParams.PROJECT_VIEW_SORT,
+            IssueParams.LIMIT,
+            IssueParams.DEFAULT_QUERY,
+            IssueParams.GROUP_INDEX_COLLAPSE,
+            IssueParams.SHORT_ID_LOOKUP,
+        ],
+        responses={
+            400: RESPONSE_BAD_REQUEST,
+            403: RESPONSE_FORBIDDEN,
+        },
+    )
     @track_slo_response("workflow")
     def get(self, request: Request, project: Project) -> Response:
         """
         List a Project's Issues
         ```````````````````````
+        **Deprecated**: This endpoint has been replaced with the [Organization
+        Issues endpoint](/api/events/list-an-organizations-issues/) which
+        supports filtering on project and additional functionality.
 
         Return a list of issues (groups) bound to a project.  All parameters are
         supplied as query string parameters.
@@ -66,10 +106,11 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
 
         The ``statsPeriod`` parameter can be used to select the timeline
         stats which should be present. Possible values are: ``""`` (disable),
-        ``"24h"``, ``"14d"``
+        ``"24h"``, ``"14d"``. Defaults to ``"24h"``.
 
         :qparam string statsPeriod: an optional stat period (can be one of
-                                    ``"24h"``, ``"14d"``, and ``""``).
+                                    ``"24h"``, ``"14d"``, and ``""``),
+                                    defaults to ``"24h"``.
         :qparam bool shortIdLookup: if this is set to true then short IDs are
                                     looked up by this function as well.  This
                                     can cause the return value of the function
@@ -121,25 +162,26 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
             return Response(serialized_groups)
 
         if query:
-            matching_group = None
+            matching_groups: list[Group] = []
             matching_event = None
             event_id = normalize_event_id(query)
             if event_id:
                 # check to see if we've got an event ID
                 try:
-                    matching_group = Group.objects.from_event_id(project, event_id)
+                    matching_groups = [Group.objects.from_event_id(project, event_id)]
                 except Group.DoesNotExist:
                     pass
                 else:
                     matching_event = eventstore.backend.get_event_by_id(project.id, event_id)
-            elif matching_group is None:
-                matching_group = get_by_short_id(
-                    project.organization_id, request.GET.get("shortIdLookup", "0"), query
+            else:
+                matching_groups = get_by_short_ids(
+                    project.organization_id,
+                    request.GET.get("shortIdLookup", "0"),
+                    query,
+                    project_ids=[project.id],
                 )
-                if matching_group is not None and matching_group.project_id != project.id:
-                    matching_group = None
 
-            if matching_group is not None:
+            if matching_groups:
                 matching_event_environment = None
 
                 try:
@@ -149,40 +191,26 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                 except Environment.DoesNotExist:
                     pass
 
-                serialized_groups = serialize([matching_group], request.user, serializer)
+                serialized_groups = serialize(matching_groups, request.user, serializer)
                 matching_event_id = getattr(matching_event, "event_id", None)
                 if matching_event_id:
-                    serialized_groups[0]["matchingEventId"] = getattr(
-                        matching_event, "event_id", None
-                    )
+                    serialized_groups[0]["matchingEventId"] = matching_event_id
                 if matching_event_environment:
                     serialized_groups[0]["matchingEventEnvironment"] = matching_event_environment
 
                 response = Response(serialized_groups)
-
-                response["X-Sentry-Direct-Hit"] = "1"
+                if len(matching_groups) == 1:
+                    response["X-Sentry-Direct-Hit"] = "1"
                 return response
 
         try:
             cursor_result, query_kwargs = prep_search(request, project, {"count_hits": True})
-        except ValidationError as exc:
+        except (ValidationError, InvalidSearchQuery) as exc:
             return Response({"detail": str(exc)}, status=400)
 
         results = list(cursor_result)
 
         context = serialize(results, request.user, serializer)
-
-        # HACK: remove auto resolved entries
-        # TODO: We should try to integrate this into the search backend, since
-        # this can cause us to arbitrarily return fewer results than requested.
-        status = [
-            search_filter
-            for search_filter in query_kwargs.get("search_filters", [])
-            if search_filter.key.name == "status" and search_filter.operator in EQUALITY_OPERATORS
-        ]
-        if status and (GroupStatus.UNRESOLVED in status[0].value.raw_value):
-            status_labels = {QUERY_STATUS_LOOKUP[s] for s in status[0].value.raw_value}
-            context = [r for r in context if "status" not in r or r["status"] in status_labels]
 
         response = Response(context)
 
@@ -190,13 +218,17 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
 
         if results and query:
             advanced_search.send(project=project, sender=request.user)
-            analytics.record(
-                "project_issue.searched",
-                user_id=request.user.id,
-                organization_id=project.organization_id,
-                project_id=project.id,
-                query=query,
-            )
+            try:
+                analytics.record(
+                    ProjectIssueSearchEvent(
+                        user_id=request.user.id,
+                        organization_id=project.organization_id,
+                        project_id=project.id,
+                        query=query,
+                    )
+                )
+            except Exception as e:
+                sentry_sdk.capture_exception(e)
 
         return response
 
@@ -299,4 +331,10 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
         :auth: required
         """
         search_fn = functools.partial(prep_search, request, project)
-        return delete_groups(request, [project], project.organization_id, search_fn)
+        try:
+            return schedule_tasks_to_delete_groups(
+                request, [project], project.organization_id, search_fn
+            )
+        except Exception:
+            logger.exception("Error deleting groups")
+            return Response({"detail": "Error deleting groups"}, status=500)

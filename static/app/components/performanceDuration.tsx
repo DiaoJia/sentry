@@ -1,5 +1,5 @@
-import Duration from 'sentry/components/duration';
-import {defined} from 'sentry/utils';
+import {Duration} from 'sentry/components/duration';
+import {defined} from 'sentry/utils/defined';
 
 interface DurationProps {
   abbreviation?: boolean;
@@ -27,7 +27,7 @@ function isNanoseconds(props: PerformanceDurationProps): props is NanosecondsPro
   return defined((props as NanosecondsProps).nanoseconds);
 }
 
-function PerformanceDuration(props: PerformanceDurationProps) {
+export function PerformanceDuration(props: PerformanceDurationProps) {
   const normalizedSeconds = isNanoseconds(props)
     ? props.nanoseconds / 1_000_000_000
     : isMilliseconds(props)
@@ -42,5 +42,3 @@ function PerformanceDuration(props: PerformanceDurationProps) {
     />
   );
 }
-
-export default PerformanceDuration;

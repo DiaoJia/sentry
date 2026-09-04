@@ -2,14 +2,15 @@ import 'echarts/lib/component/tooltip';
 
 import type {Theme} from '@emotion/react';
 import {useTheme} from '@emotion/react';
-import type {TooltipComponentFormatterCallback, TooltipComponentOption} from 'echarts';
+import type {TooltipComponentFormatterCallback} from 'echarts';
+import type {CallbackDataParams} from 'echarts/types/dist/shared';
 import moment from 'moment-timezone';
 
-import type BaseChart from 'sentry/components/charts/baseChart';
+import type {BaseChart, BaseChartProps} from 'sentry/components/charts/baseChart';
 import {truncationFormatter} from 'sentry/components/charts/utils';
 import {t} from 'sentry/locale';
 import type {DataPoint} from 'sentry/types/echarts';
-import toArray from 'sentry/utils/array/toArray';
+import {toArray} from 'sentry/utils/array/toArray';
 import {getFormattedDate, getTimeFormat} from 'sentry/utils/dates';
 
 export const CHART_TOOLTIP_VIEWPORT_OFFSET = 20;
@@ -76,7 +77,7 @@ function defaultMarkerFormatter(value: string) {
 
 function getSeriesValue(series: any, offset: number) {
   if (!series.data) {
-    return undefined;
+    return;
   }
   if (Array.isArray(series.data)) {
     return series.data[offset];
@@ -85,7 +86,7 @@ function getSeriesValue(series: any, offset: number) {
     return series.data.value[offset];
   }
 
-  return undefined;
+  return;
 }
 
 type NeededChartProps = 'isGroupedByDate' | 'showTimeInTooltip' | 'utc' | 'bucketSize';
@@ -118,6 +119,12 @@ export type FormatterOptions = Pick<
      */
     limit?: number;
     /**
+     * Extra HTML appended to the series block, e.g. a legend for abbreviated series
+     * names. Receives the names of the series in the tooltip. Called on each tooltip
+     * render, so it can render a React tree to a string.
+     */
+    renderSeriesDetails?: (seriesNames: string[]) => string;
+    /**
      * If true does not display sublabels with a value of 0.
      */
     skipZeroValuedSubLabels?: boolean;
@@ -141,6 +148,7 @@ export function getFormatter({
   subLabels = [],
   addSecondsToTimeFormat = false,
   limit,
+  renderSeriesDetails,
   skipZeroValuedSubLabels,
 }: FormatterOptions): TooltipComponentFormatterCallback<any> {
   const getFilter = (seriesParam: any) => {
@@ -203,14 +211,12 @@ export function getFormatter({
       ].join('');
     }
 
-    let seriesParams = toArray(seriesParamsOrParam);
+    let seriesParams: CallbackDataParams[] = toArray(seriesParamsOrParam);
 
     // If axis, timestamp comes from axis, otherwise for a single item it is defined in the data attribute.
     // The data attribute is usually a list of [name, value] but can also be an object of {name, value} when
     // there is item specific formatting being used.
-    const timestamp = Array.isArray(seriesParamsOrParam)
-      ? seriesParams[0].value[0]
-      : getSeriesValue(seriesParams[0], 0);
+    const timestamp = getSeriesValue(seriesParams[0], 0);
 
     const date =
       seriesParams.length &&
@@ -226,17 +232,22 @@ export function getFormatter({
 
     if (limit) {
       const originalLength = seriesParams.length;
-      seriesParams = seriesParams.sort((a, b) => b.value[1] - a.value[1]).slice(0, limit);
+      seriesParams = seriesParams
+        .sort((a, b) => getSeriesValue(b, 1) - getSeriesValue(a, 1))
+        .slice(0, limit);
       if (originalLength > limit) {
+        // Not a real series, only the fields the rendering below reads are set.
         seriesParams.push({
           seriesName: `+${originalLength - limit} more`,
           value: '',
           color: 'transparent',
-        });
+        } as CallbackDataParams);
       }
     }
 
-    const {series, total} = seriesParams.filter(getFilter).reduce(
+    const visibleSeriesParams = seriesParams.filter(getFilter);
+
+    const {series, total} = visibleSeriesParams.reduce<{series: string[]; total: number}>(
       (acc, serie) => {
         const formattedLabel = nameFormatter(
           truncationFormatter(serie.seriesName ?? '', truncate),
@@ -245,7 +256,11 @@ export function getFormatter({
 
         const value = valueFormatter(getSeriesValue(serie, 1), serie.seriesName, serie);
 
-        const marker = markerFormatter(serie.marker ?? '', serie.seriesName);
+        // `marker` is HTML in the default render mode, an object in rich text mode.
+        const marker = markerFormatter(
+          typeof serie.marker === 'string' ? serie.marker : '',
+          serie.seriesName
+        );
 
         const filteredSubLabels = subLabels.filter(
           subLabel => subLabel.parentLabel === serie.seriesName
@@ -296,9 +311,13 @@ export function getFormatter({
       }
     );
 
+    const seriesDetails =
+      renderSeriesDetails?.(visibleSeriesParams.map(serie => serie.seriesName ?? '')) ??
+      '';
+
     if (subLabels.length > 0) {
       return [
-        `<div class="tooltip-series">${series.join('')}</div>`,
+        `<div class="tooltip-series">${series.join('')}${seriesDetails}</div>`,
         '<div class="tooltip-footer">',
         `<div><strong>${t('Date')}:</strong> ${date}</div>`,
         `<div><strong>${t('Total')}:</strong> ${valueFormatter(total)}</div>`,
@@ -308,7 +327,7 @@ export function getFormatter({
     }
 
     return [
-      `<div class="tooltip-series">${series.join('')}</div>`,
+      `<div class="tooltip-series">${series.join('')}${seriesDetails}</div>`,
       '<div class="tooltip-footer tooltip-footer-centered">',
       date,
       '</div>',
@@ -342,13 +361,14 @@ export function computeChartTooltip(
     nameFormatter,
     markerFormatter,
     hideDelay,
+    renderSeriesDetails,
     subLabels,
     chartId,
     skipZeroValuedSubLabels,
     ...props
   }: Props,
   theme: Theme
-): TooltipComponentOption {
+): BaseChartProps['tooltip'] {
   formatter =
     formatter ||
     getFormatter({
@@ -363,6 +383,7 @@ export function computeChartTooltip(
       valueFormatter,
       nameFormatter,
       markerFormatter,
+      renderSeriesDetails,
       subLabels,
       skipZeroValuedSubLabels,
     });
@@ -370,9 +391,9 @@ export function computeChartTooltip(
   return {
     show: true,
     trigger: 'item',
-    backgroundColor: `${theme.backgroundElevated}`,
+    backgroundColor: theme.tokens.background.primary,
     borderWidth: 0,
-    extraCssText: `box-shadow: 0 0 0 1px ${theme.translucentBorder}, ${theme.dropShadowHeavy}`,
+    extraCssText: `box-shadow: 0 0 0 1px ${theme.tokens.border.transparent.neutral.muted}, ${theme.shadow.high}; z-index: ${theme.zIndex.tooltip} !important;`,
     transitionDuration: 0,
     padding: 0,
     className: 'tooltip-container',
@@ -389,16 +410,17 @@ export function computeChartTooltip(
      */
     position(pos, _params, dom, _rec, size) {
       // Types seem to be broken on dom
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       dom = dom as HTMLDivElement;
       // Center the tooltip slightly above the cursor.
       const [tipWidth, tipHeight] = size.contentSize;
 
       let parentNode: Element = document.body;
-      if (dom.parentNode instanceof Element) {
+      if (dom?.parentNode instanceof Element) {
         parentNode = dom.parentNode;
       }
 
-      const chartElement: Element =
+      const chartElement =
         props.appendToBody && chartId
           ? (document.getElementById(chartId) ?? parentNode)
           : parentNode;
@@ -427,18 +449,26 @@ export function computeChartTooltip(
         arrowPosition = '50%';
       }
 
-      const arrow = dom.querySelector<HTMLDivElement>('.tooltip-arrow');
+      // Prefer rendering the tooltip above the cursor.
+      let topPos = Number(pos[1]) - tipHeight - 20;
+      let arrowOnTop = false;
+      // When the tooltip is too tall to fit above the cursor (e.g. a group-by
+      // chart with many series), render it below the cursor instead of pinning
+      // it to the top edge of the window, which detaches it from the chart.
+      if (topPos + chartBoundingRect.top < CHART_TOOLTIP_VIEWPORT_OFFSET) {
+        topPos = Number(pos[1]) + 20;
+        arrowOnTop = true;
+      }
+
+      const arrow = dom?.querySelector<HTMLDivElement>('.tooltip-arrow');
       if (arrow) {
         arrow.style.left = arrowPosition;
+        arrow.classList.toggle('arrow-top', arrowOnTop);
       }
 
       return {
         left: leftPos,
-        top: Math.max(
-          Number(pos[1]) - tipHeight - 20,
-          // avoid tooltip from being cut off by the top edge of the window
-          CHART_TOOLTIP_VIEWPORT_OFFSET - chartBoundingRect.top
-        ),
+        top: topPos,
       };
     },
     formatter,
@@ -446,7 +476,7 @@ export function computeChartTooltip(
   };
 }
 
-export function ChartTooltip(props: Props = {}): TooltipComponentOption {
+export function ChartTooltip(props: Props = {}): BaseChartProps['tooltip'] {
   const theme = useTheme();
   return computeChartTooltip(props, theme);
 }

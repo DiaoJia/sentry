@@ -1,6 +1,5 @@
 import type {Theme} from '@emotion/react';
 import type {XAXisComponentOption} from 'echarts';
-import type {TimeAxisLabelFormatterOption} from 'echarts/types/src/coord/axisCommonTypes';
 import merge from 'lodash/merge';
 
 import type {BaseChartProps} from 'sentry/components/charts/baseChart';
@@ -20,7 +19,7 @@ type HelperProps =
 export type XAxisProps = BaseChartProps['xAxis'] &
   Pick<BaseChartProps, HelperProps> & {theme: Theme; addSecondsToTimeFormat?: boolean};
 
-function XAxis({
+export function XAxis({
   isGroupedByDate,
   useShortDate,
   useMultilineDate,
@@ -38,7 +37,7 @@ function XAxis({
     const showDate = firstItem ? true : !computeShortInterval({start, end, period});
 
     if (isGroupedByDate) {
-      const dateFormat = useShortDate ? 'MMM Do' : `MMM D`;
+      const dateFormat = useShortDate ? 'MMM Do' : 'MMM D';
       const dateString = getFormattedDate(value, dateFormat, {local: !utc});
 
       const timeFormat = getTimeFormat({seconds: addSecondsToTimeFormat});
@@ -53,7 +52,7 @@ function XAxis({
       return truncationFormatter(value as string, props.truncate);
     }
 
-    return undefined;
+    return '';
   };
 
   const defaults: XAXisComponentOption = {
@@ -61,12 +60,12 @@ function XAxis({
     splitNumber: 4,
     axisLine: {
       lineStyle: {
-        color: theme.chartLabel,
+        color: theme.tokens.content.secondary,
       },
     },
     axisTick: {
       lineStyle: {
-        color: theme.chartLabel,
+        color: theme.tokens.content.secondary,
       },
     },
     splitLine: {
@@ -74,8 +73,8 @@ function XAxis({
     },
     axisLabel: {
       hideOverlap: true,
-      color: theme.chartLabel,
-      fontFamily: theme.text.family,
+      color: theme.tokens.content.secondary,
+      fontFamily: theme.font.family.sans,
       margin: 12,
 
       // This was default with ChartZoom, we are making it default for all charts now
@@ -83,7 +82,7 @@ function XAxis({
       showMaxLabel: false,
       showMinLabel: false,
 
-      formatter: AxisLabelFormatter as TimeAxisLabelFormatterOption,
+      formatter: AxisLabelFormatter,
     },
     axisPointer: {
       show: true,
@@ -100,5 +99,3 @@ function XAxis({
 
   return merge(defaults, props);
 }
-
-export default XAxis;

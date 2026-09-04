@@ -10,38 +10,40 @@ import {
 } from 'sentry/components/events/eventCustomPerformanceMetrics';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {
   DURATION_UNITS,
   FIELD_FORMATTERS,
   SIZE_UNITS,
 } from 'sentry/utils/discover/fieldRenderers';
 import {NumberContainer} from 'sentry/utils/discover/styles';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import {isCustomMeasurement} from 'sentry/views/dashboards/utils';
 import {
-  type SectionCardKeyValueList,
   TraceDrawerComponents,
+  type SectionCardKeyValueList,
 } from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
 import {TraceDrawerActionValueKind} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
-import type {TraceTreeNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode';
+import type {SpanNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/spanNode';
 
 export function hasSpanMeasurements(span: TraceTree.Span) {
   return !!span.measurements && Object.keys(span.measurements).length > 0;
 }
 
-function Measurements({
+export function Measurements({
   node,
   location,
   organization,
 }: {
   location: Location;
-  node: TraceTreeNode<TraceTree.Span>;
+  node: SpanNode;
   organization: Organization;
 }) {
+  const navigate = useNavigate();
   const theme = useTheme();
   const {measurements} = node.value;
-  const measurementNames: string[] = useMemo(() => {
+  const measurementNames = useMemo(() => {
     return Object.keys(measurements ?? {})
       .filter(name => isCustomMeasurement(`measurements.${name}`))
       .filter(isNotMarkMeasurement)
@@ -61,7 +63,7 @@ function Measurements({
           ? FIELD_FORMATTERS[fieldType].renderFunc(
               name,
               {[name]: renderValue},
-              {location, organization, unit, theme}
+              {location, navigate, organization, unit, theme}
             )
           : renderValue;
 
@@ -93,7 +95,15 @@ function Measurements({
       }
     }
     return result;
-  }, [measurements, measurementNames, location, organization, projectID, theme]);
+  }, [
+    measurements,
+    measurementNames,
+    location,
+    navigate,
+    organization,
+    projectID,
+    theme,
+  ]);
 
   if (measurementNames.length < 1) {
     return null;
@@ -115,5 +125,3 @@ const Wrapper = styled('div')`
     text-align: left;
   }
 `;
-
-export default Measurements;

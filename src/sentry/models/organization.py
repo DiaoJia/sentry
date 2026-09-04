@@ -5,6 +5,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import models, router, transaction
 from django.db.models.functions.text import Upper
 from django.urls import NoReverseMatch, reverse
@@ -12,7 +13,7 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 
 from bitfield import TypedClassBitField
-from sentry import roles
+from sentry import options, roles
 from sentry.app import env
 from sentry.backup.dependencies import PrimaryKeyMap
 from sentry.backup.helpers import ImportFlags
@@ -22,14 +23,14 @@ from sentry.constants import (
     EVENTS_MEMBER_ADMIN_DEFAULT,
     RESERVED_ORGANIZATION_SLUGS,
 )
-from sentry.db.models import BoundedPositiveIntegerField, region_silo_model, sane_repr
+from sentry.db.models import BoundedPositiveIntegerField, cell_silo_model, sane_repr
 from sentry.db.models.fields.slug import SentryOrgSlugField
 from sentry.db.models.indexes import IndexWithPostgresNameLimits
 from sentry.db.models.manager.base import BaseManager
 from sentry.db.models.manager.base_query_set import BaseQuerySet
 from sentry.db.models.utils import slugify_instance
 from sentry.db.postgres.transactions import in_test_hide_transaction_boundary
-from sentry.hybridcloud.outbox.base import ReplicatedRegionModel
+from sentry.hybridcloud.outbox.base import ReplicatedCellModel
 from sentry.hybridcloud.outbox.category import OutboxCategory
 from sentry.hybridcloud.services.organization_mapping import organization_mapping_service
 from sentry.locks import locks
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
 NON_MEMBER_SCOPES = frozenset(["org:write", "project:write", "team:write"])
 ORGANIZATION_NAME_MAX_LENGTH = 64
+ORGANIZATION_DEFAULT_OWNER_CACHE_KEY = "org.default_owner_id:{org_id}"
 
 
 class OrganizationStatus(IntEnum):
@@ -62,7 +64,7 @@ class OrganizationStatus(IntEnum):
     # alias for OrganizationStatus.ACTIVE
     VISIBLE = 0
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @property
@@ -144,14 +146,14 @@ class OrganizationManager(BaseManager["Organization"]):
 
 
 @snowflake_id_model
-@region_silo_model
-class Organization(ReplicatedRegionModel):
+@cell_silo_model
+class Organization(ReplicatedCellModel):
     """
     An organization represents a group of individuals which maintain ownership of projects.
     """
 
     category = OutboxCategory.ORGANIZATION_UPDATE
-    replication_version = 4
+    replication_version = 5
 
     __relocation_scope__ = RelocationScope.Organization
     name = models.CharField(max_length=ORGANIZATION_NAME_MAX_LENGTH)
@@ -192,7 +194,9 @@ class Organization(ReplicatedRegionModel):
         # Require and enforce email verification for all members. (deprecated, not in use)
         require_email_verification: bool
 
-        # Enable codecov integration.
+        # Previously enabled the Codecov integration. (deprecated, not in use)
+        # Retained to preserve bitfield ordering; removing this slot would shift
+        # every subsequent flag bit.
         codecov_access: bool
 
         # Disable org-members from creating new projects
@@ -210,6 +214,8 @@ class Organization(ReplicatedRegionModel):
 
     # Not persisted. Getsentry fills this in in post-save hooks and we use it for synchronizing data across silos.
     customer_id: str | None = None
+    # Cached value for default_owner_id property
+    _default_owner_id: int | None
 
     class Meta:
         app_label = "sentry"
@@ -231,7 +237,7 @@ class Organization(ReplicatedRegionModel):
 
         return cls.objects.filter(status=OrganizationStatus.ACTIVE)[0]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.name} ({self.slug})"
 
     snowflake_redis_key = "organization_snowflake_key"
@@ -273,9 +279,9 @@ class Organization(ReplicatedRegionModel):
         from sentry.hybridcloud.services.organization_mapping.service import (
             organization_mapping_service,
         )
-        from sentry.types.region import get_local_region
+        from sentry.types.cell import get_local_cell
 
-        update = update_organization_mapping_from_instance(self, get_local_region())
+        update = update_organization_mapping_from_instance(self, get_local_cell())
         organization_mapping_service.upsert(organization_id=self.id, update=update)
 
     @classmethod
@@ -331,13 +337,30 @@ class Organization(ReplicatedRegionModel):
         Similar to get_default_owner but won't raise a key error
         if there is no owner. Used for analytics primarily.
         """
-        if not hasattr(self, "_default_owner_id"):
-            owner_ids = self.get_members_with_org_roles(roles=[roles.get_top_dog().id]).values_list(
-                "user_id", flat=True
-            )
-            if len(owner_ids) == 0:
-                return None
+        if hasattr(self, "_default_owner_id"):
+            return self._default_owner_id
+
+        cache_key = ORGANIZATION_DEFAULT_OWNER_CACHE_KEY.format(org_id=self.id)
+        cached_value = cache.get(cache_key)
+
+        if cached_value is not None:
+            # Use sentinel (-1) for "no owner" case
+            self._default_owner_id = None if cached_value == -1 else cached_value
+            return self._default_owner_id
+
+        owner_ids = self.get_members_with_org_roles(roles=[roles.get_top_dog().id]).values_list(
+            "user_id", flat=True
+        )
+
+        cache_ttl = options.get("organization.default-owner-id-cache-ttl")
+
+        if len(owner_ids) == 0:
+            self._default_owner_id = None
+            cache.set(cache_key, -1, timeout=cache_ttl)
+        else:
             self._default_owner_id = owner_ids[0]
+            cache.set(cache_key, self._default_owner_id, timeout=cache_ttl)
+
         return self._default_owner_id
 
     @classmethod
@@ -518,7 +541,9 @@ class Organization(ReplicatedRegionModel):
     def get_option(
         self, key: str, default: Any | None = None, validate: Callable[[object], bool] | None = None
     ) -> Any:
-        return self.option_manager.get_value(self, key, default, validate)
+        from sentry.models.options.organization_option import get_option
+
+        return get_option(self.id, key, default, validate)
 
     def update_option(self, key: str, value: Any) -> bool:
         return self.option_manager.set_value(self, key, value)

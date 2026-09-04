@@ -1,15 +1,16 @@
 import styled from '@emotion/styled';
 
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {
   getMappedThreadState,
   ThreadStates,
 } from 'sentry/components/events/interfaces/threads/threadSelector/threadStates';
 import {getCurrentThread} from 'sentry/components/events/interfaces/utils';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {t, tct} from 'sentry/locale';
 import type {EntryException, Event, Frame, Lock, Thread} from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
 type SuspectFrame = {
   module: string | RegExp;
@@ -73,7 +74,7 @@ const CULPRIT_FRAMES: SuspectFrame[] = [
     ),
   },
   {
-    module: /^android\.app\.SharedPreferencesImpl\$EditorImpl\$[0-9]/,
+    module: /^android\.app\.SharedPreferencesImpl\$EditorImpl\$\d/,
     functions: ['run'],
     offendingThreadStates: [
       ThreadStates.WAITING,
@@ -297,5 +298,5 @@ export function analyzeFrameForRootCause(
 }
 
 const Bold = styled('span')`
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;

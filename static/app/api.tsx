@@ -10,16 +10,27 @@ import {
   SUDO_REQUIRED,
   SUPERUSER_REQUIRED,
 } from 'sentry/constants/apiErrorCodes';
-import controlsilopatterns from 'sentry/data/controlsiloUrlPatterns';
+import type {ApiResult, ResponseMeta} from 'sentry/types/api';
 import {metric} from 'sentry/utils/analytics';
-import {browserHistory} from 'sentry/utils/browserHistory';
+import {isSimilarOrigin} from 'sentry/utils/api/isSimilarOrigin';
+import {resolveHostname} from 'sentry/utils/api/resolveHostname';
 import {isDemoModeActive} from 'sentry/utils/demoMode';
-import getCsrfToken from 'sentry/utils/getCsrfToken';
+import {getCsrfToken} from 'sentry/utils/getCsrfToken';
 import {uniqueId} from 'sentry/utils/guid';
-import RequestError from 'sentry/utils/requestError/requestError';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 import {sanitizePath} from 'sentry/utils/requestError/sanitizePath';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
 
-import ConfigStore from './stores/configStore';
+/**
+ * `api.tsx` is consumed outside React, so it can't use the `useNavigate` hook.
+ * The app's bootstrap calls `setApiNavigate` once to install a navigate
+ * function the auth-error handler can use.
+ */
+let apiNavigate: ReactRouter3Navigate | null = null;
+
+export function setApiNavigate(navigate: ReactRouter3Navigate) {
+  apiNavigate = navigate;
+}
 
 export class Request {
   /**
@@ -49,35 +60,6 @@ export class Request {
   }
 }
 
-export type ApiResult<Data = any> = [
-  data: Data,
-  statusText: string | undefined,
-  resp: ResponseMeta | undefined,
-];
-
-export type ResponseMeta<R = any> = {
-  /**
-   * Get a header value from the response
-   */
-  getResponseHeader: (header: string) => string | null;
-  /**
-   * The response body decoded from json
-   */
-  responseJSON: R;
-  /**
-   * The string value of the response
-   */
-  responseText: string;
-  /**
-   * The response status code
-   */
-  status: Response['status'];
-  /**
-   * The response status code text
-   */
-  statusText: Response['statusText'];
-};
-
 /**
  * Check if the requested method does not require CSRF tokens
  */
@@ -87,57 +69,27 @@ function csrfSafeMethod(method?: string): boolean {
 }
 
 /**
- * Check if we a request is going to the same or similar origin.
- * similar origins are those that share an ancestor. Example `sentry.sentry.io` and `us.sentry.io`
- * are similar origins, but sentry.sentry.io and sentry.example.io are not.
- */
-export function isSimilarOrigin(target: string, origin: string): boolean {
-  const targetUrl = new URL(target, origin);
-  const originUrl = new URL(origin);
-  // If one of the domains is a child of the other.
-  if (
-    originUrl.hostname.endsWith(targetUrl.hostname) ||
-    targetUrl.hostname.endsWith(originUrl.hostname)
-  ) {
-    return true;
-  }
-  // Check if the target and origin are on sibiling subdomains.
-  const targetHost = targetUrl.hostname.split('.');
-  const originHost = originUrl.hostname.split('.');
-
-  // Remove the subdomains. If don't have at least 2 segments we aren't subdomains.
-  targetHost.shift();
-  originHost.shift();
-  if (targetHost.length < 2 || originHost.length < 2) {
-    return false;
-  }
-  return targetHost.join('.') === originHost.join('.');
-}
-
-// TODO: Need better way of identifying anonymous pages that don't trigger redirect
-const ALLOWED_ANON_PAGES = [
-  /^\/accept\//,
-  /^\/share\//,
-  /^\/auth\/login\//,
-  /^\/join-request\//,
-  /^\/unsubscribe\//,
-];
-
-/**
  * Return true if we should skip calling the normal error handler
  */
-const globalErrorHandlers: Array<
-  (resp: ResponseMeta, options: RequestOptions) => boolean
-> = [];
+export type ApiErrorHandler = (
+  response: ResponseMeta,
+  options: Readonly<RequestOptions>
+) => boolean;
+
+const globalErrorHandlers = new Set<ApiErrorHandler>();
+
+export function registerApiErrorHandler(handler: ApiErrorHandler) {
+  globalErrorHandlers.add(handler);
+
+  return () => {
+    globalErrorHandlers.delete(handler);
+  };
+}
 
 export const initApiClientErrorHandling = () =>
-  globalErrorHandlers.push((resp: ResponseMeta, options: RequestOptions) => {
-    const pageAllowsAnon = ALLOWED_ANON_PAGES.find(regex =>
-      regex.test(window.location.pathname)
-    );
-
+  registerApiErrorHandler((resp: ResponseMeta, options: RequestOptions) => {
     // Ignore error unless it is a 401
-    if (!resp || resp.status !== 401 || pageAllowsAnon) {
+    if (resp?.status !== 401) {
       return false;
     }
     if (resp && options.allowAuthError && resp.status === 401) {
@@ -167,7 +119,7 @@ export const initApiClientErrorHandling = () =>
     }
 
     if (code === 'member-disabled-over-limit') {
-      browserHistory.replace(extra.next);
+      apiNavigate?.(extra.next, {replace: true});
       return true;
     }
 
@@ -177,7 +129,7 @@ export const initApiClientErrorHandling = () =>
     }
 
     if (EXPERIMENTAL_SPA) {
-      browserHistory.replace('/auth/login/');
+      apiNavigate?.('/auth/login/', {replace: true});
     } else {
       window.location.reload();
     }
@@ -237,9 +189,6 @@ export function hasProjectBeenRenamed(response: ResponseMeta) {
   return true;
 }
 
-// TODO(ts): move this somewhere
-export type APIRequestMethod = 'POST' | 'GET' | 'DELETE' | 'PUT';
-
 type FunctionCallback<Args extends any[] = any[]> = (...args: Args) => void;
 
 export type RequestCallbacks = {
@@ -279,7 +228,7 @@ export type RequestOptions = RequestCallbacks & {
   /**
    * The HTTP method to use when making the API request
    */
-  method?: APIRequestMethod;
+  method?: 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT';
   /**
    * Because of the async nature of API requests, errors will happen outside of
    * the stack that initated the request. a preservedError can be passed to
@@ -351,19 +300,19 @@ export class Client {
     return (...args: T) => {
       const req = this.activeRequests[id];
 
-      if (cleanup === true) {
+      if (cleanup) {
         delete this.activeRequests[id];
       }
 
       if (!req?.alive) {
-        return undefined;
+        return;
       }
 
       // Check if API response is a 302 -- means project slug was renamed and user
       // needs to be redirected
       // @ts-expect-error TS(2556): A spread argument must either have a tuple type or... Remove this comment to see the full error message
       if (hasProjectBeenRenamed(...args)) {
-        return undefined;
+        return;
       }
 
       // Call success callback
@@ -420,7 +369,8 @@ export class Client {
   /**
    * Initiate a request to the backend API.
    *
-   * Consider using `requestPromise` for the async Promise version of this method.
+   * @deprecated Use `useApiQuery` or `useMutation` with `fetchDataQuery` and `fetchMutation` instead.
+   * See https://develop.sentry.dev/frontend/network-requests/ for more.
    */
   request(path: string, options: Readonly<RequestOptions> = {}): Request {
     const method = options.method || (options.data ? 'POST' : 'GET');
@@ -533,6 +483,11 @@ export class Client {
     fetchRequest
       .then(
         async response => {
+          if (response === undefined) {
+            // For some reason, response is undefined? Throw to the error path.
+            throw new Error('Response is undefined');
+          }
+
           // The Response's body can only be resolved/used at most once.
           // So we clone the response so we can resolve the body content as text content.
           // Response objects need to be cloned before its body can be used.
@@ -547,7 +502,7 @@ export class Client {
           // Try to get text out of the response no matter the status
           try {
             responseText = await response.text();
-          } catch (error) {
+          } catch (error: any) {
             twoHundredErrorReason = 'Failed awaiting response.text()';
             ok = false;
             if (error.name === 'AbortError') {
@@ -566,7 +521,7 @@ export class Client {
           if (status !== 204 && !isStatus3XX) {
             try {
               responseJSON = JSON.parse(responseText);
-            } catch (error) {
+            } catch (error: any) {
               twoHundredErrorReason = 'Failed trying to parse responseText';
               if (error.name === 'AbortError') {
                 ok = false;
@@ -629,9 +584,9 @@ export class Client {
               });
             }
 
-            const shouldSkipErrorHandler = globalErrorHandlers
-              .map(handler => handler(responseMeta, options))
-              .some(Boolean);
+            const shouldSkipErrorHandler = Array.from(globalErrorHandlers, handler =>
+              handler(responseMeta, options)
+            ).some(Boolean);
 
             if (!shouldSkipErrorHandler) {
               errorHandler(responseMeta, statusText, errorReason);
@@ -645,10 +600,13 @@ export class Client {
           // Not related to errors in responses
         }
       )
-      .catch(error => {
+      .catch((error: Error) => {
         // eslint-disable-next-line no-console
         console.error(error);
-        Sentry.captureException(error);
+
+        if (error?.name !== 'AbortError' && error?.message !== 'Response is undefined') {
+          Sentry.captureException(error);
+        }
       });
 
     const request = new Request(fetchRequest, aborter);
@@ -657,6 +615,12 @@ export class Client {
     return request;
   }
 
+  /**
+   * Initiate a request to the backend API.
+   *
+   * @deprecated Use `useApiQuery` or `useMutation` with `fetchDataQuery` and `fetchMutation` instead.
+   * See https://develop.sentry.dev/frontend/network-requests/ for more.
+   */
   requestPromise<IncludeAllArgsType extends boolean>(
     path: string,
     {
@@ -698,67 +662,4 @@ export class Client {
       })
     );
   }
-}
-
-export function resolveHostname(path: string, hostname?: string): string {
-  const configLinks = ConfigStore.get('links');
-  const systemFeatures = ConfigStore.get('features');
-
-  hostname = hostname ?? '';
-  if (!hostname && systemFeatures.has('system:multi-region')) {
-    // /_admin/ is special: since it doesn't update OrganizationStore, it's
-    // commonly the case that requests will be made for data which does not
-    // exist in the same region as the one in configLinks.regionUrl. Because of
-    // this we want to explicitly default those requests to be proxied through
-    // the control silo which can handle region resolution in exchange for a
-    // bit of latency.
-    const isAdmin = window.location.pathname.startsWith('/_admin/');
-    const isControlSilo = detectControlSiloPath(path);
-    if (!isAdmin && !isControlSilo && configLinks.regionUrl) {
-      hostname = configLinks.regionUrl;
-    }
-    if (isControlSilo && configLinks.sentryUrl) {
-      hostname = configLinks.sentryUrl;
-    }
-  }
-
-  // If we're making a request to the applications' root
-  // domain, we can drop the domain as webpack devserver will add one.
-  // TODO(hybridcloud) This can likely be removed when sentry.types.region.Region.to_url()
-  // loses the monolith mode condition.
-  if (window.__SENTRY_DEV_UI && hostname === configLinks.sentryUrl) {
-    hostname = '';
-  }
-
-  // When running as pnpm dev-ui we can't spread requests across domains because
-  // of CORS. Instead we extract the subdomain from the hostname
-  // and prepend the URL with `/region/$name` so that webpack-devserver proxy
-  // can route requests to the regions.
-  if (hostname && window.__SENTRY_DEV_UI) {
-    const domainpattern = /https?\:\/\/([^.]*)\.sentry\.io/;
-    const domainmatch = hostname.match(domainpattern);
-    if (domainmatch) {
-      hostname = '';
-      path = `/region/${domainmatch[1]}${path}`;
-    }
-  }
-  if (hostname) {
-    path = `${hostname}${path}`;
-  }
-
-  return path;
-}
-
-function detectControlSiloPath(path: string): boolean {
-  // We sometimes include querystrings in paths.
-  // Using URL() to avoid handrolling URL parsing
-  const url = new URL(path, 'https://sentry.io');
-  path = url.pathname;
-  path = path.startsWith('/') ? path.substring(1) : path;
-  for (const pattern of controlsilopatterns) {
-    if (pattern.test(path)) {
-      return true;
-    }
-  }
-  return false;
 }

@@ -5,20 +5,20 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry import features
-from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import NoProjects, OrganizationEventsV2EndpointBase
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases import NoProjects, OrganizationEventsEndpointBase
 from sentry.api.paginator import GenericOffsetPaginator
 from sentry.api.utils import reformat_timestamp_ms_to_isoformat
 from sentry.models.organization import Organization
-from sentry.snuba.dataset import Dataset
+from sentry.replays.permissions import has_replay_permission
 
 
-@region_silo_endpoint
-class OrganizationReplayEventsMetaEndpoint(OrganizationEventsV2EndpointBase):
-    """The generic Events endpoints require that the `organizations:global-views` feature
+@cell_silo_endpoint
+class OrganizationReplayEventsMetaEndpoint(OrganizationEventsEndpointBase):
+    """The generic Events endpoints require that the cross-project selection feature
     be enabled before they return across multiple projects.
+
 
     This endpoint is purpose built for the Session Replay product which intentionally
     requests data across multiple transactions, and therefore potentially multiple projects.
@@ -27,7 +27,6 @@ class OrganizationReplayEventsMetaEndpoint(OrganizationEventsV2EndpointBase):
     This endpoint offers a narrow interface specific to the requirements of `useReplayData.tsx`
     """
 
-    owner = ApiOwner.REPLAY
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
@@ -35,32 +34,32 @@ class OrganizationReplayEventsMetaEndpoint(OrganizationEventsV2EndpointBase):
     def get_field_list(
         self, organization: Organization, request: Request, param_name: str = "field"
     ) -> list[str]:
-
         fields = [
             "error.type",
-            "error.value",  # Deprecated, use title instead. See replayDataUtils.tsx
             "id",
             "issue.id",
             "issue",
             "timestamp",
             "title",
+            "level",
+            "timestamp_ms",
         ]
-        dataset_label = request.GET.get("dataset", Dataset.Discover.value)
-        if dataset_label == Dataset.Discover.value:
-            fields.append("timestamp_ms")
 
         return fields
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not features.has("organizations:session-replay", organization, actor=request.user):
             return Response(status=404)
 
+        if not has_replay_permission(request, organization):
+            return Response(status=403)
+
         try:
-            snuba_params = self.get_snuba_params(request, organization, check_global_views=False)
+            snuba_params = self.get_snuba_params(request, organization)
         except NoProjects:
             return Response({"count": 0})
 
-        dataset = self.get_dataset(request)
+        dataset = self.get_dataset(request, organization)
 
         def data_fn(offset, limit):
             query_details = {
@@ -106,7 +105,7 @@ class OrganizationReplayEventsMetaEndpoint(OrganizationEventsV2EndpointBase):
             request, organization, project_ids, results, standard_meta, dataset
         )
         for event in results["data"]:
-            if "timestamp_ms" in event and event["timestamp_ms"] is not None:
+            if "timestamp_ms" in event and event["timestamp_ms"]:
                 event["timestamp"] = reformat_timestamp_ms_to_isoformat(event["timestamp_ms"])
 
             if "timestamp_ms" in event:

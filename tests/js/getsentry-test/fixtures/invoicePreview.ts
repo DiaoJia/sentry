@@ -1,14 +1,11 @@
 import type {PreviewData} from 'getsentry/types';
-import {InvoiceItemType} from 'getsentry/types';
 
 export function InvoicePreviewFixture(params: Partial<PreviewData> = {}): PreviewData {
   return {
     atPeriodEnd: false,
-    balanceChange: 0,
     proratedAmount: 8900,
     billedAmount: 8900,
     creditApplied: 0,
-    newBalance: 0,
     effectiveAt: '2020-06-08T05:01:02.304299Z',
     previewToken: '1:2020-06-08T05:01:02',
     invoiceItems: [
@@ -18,7 +15,7 @@ export function InvoicePreviewFixture(params: Partial<PreviewData> = {}): Previe
         description: 'Subscription to Business',
         period_end: '2020-07-07',
         period_start: '2020-06-08',
-        type: InvoiceItemType.SUBSCRIPTION,
+        type: 'subscription',
       },
       {
         amount: 0,
@@ -26,7 +23,7 @@ export function InvoicePreviewFixture(params: Partial<PreviewData> = {}): Previe
         description: '50,000 prepaid errors',
         period_end: '2020-07-07',
         period_start: '2020-06-08',
-        type: InvoiceItemType.RESERVED_ERRORS,
+        type: 'reserved_errors',
       },
       {
         amount: 0,
@@ -34,7 +31,7 @@ export function InvoicePreviewFixture(params: Partial<PreviewData> = {}): Previe
         description: '150,000 prepaid transactions',
         period_end: '2020-07-07',
         period_start: '2020-06-08',
-        type: InvoiceItemType.RESERVED_TRANSACTIONS,
+        type: 'reserved_transactions',
       },
       {
         amount: 0,
@@ -42,7 +39,7 @@ export function InvoicePreviewFixture(params: Partial<PreviewData> = {}): Previe
         description: '5 GB prepaid attachments',
         period_end: '2020-07-07',
         period_start: '2020-06-08',
-        type: InvoiceItemType.RESERVED_ATTACHMENTS,
+        type: 'reserved_attachments',
       },
     ],
     ...params,

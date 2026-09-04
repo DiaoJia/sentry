@@ -1,25 +1,41 @@
-import {createContext, Fragment, useContext, useState} from 'react';
+import {createContext, Fragment, useContext} from 'react';
 import styled from '@emotion/styled';
 import {uuid4} from '@sentry/core';
 
-import {Button} from 'sentry/components/core/button';
-import AutomationBuilderInputField from 'sentry/components/workflowEngine/form/automationBuilderInputField';
+import {Button} from '@sentry/scraps/button';
+import type {SelectValue} from '@sentry/scraps/select';
+
+import {AutomationBuilderInput} from 'sentry/components/workflowEngine/form/automationBuilderInput';
 import {RowLine} from 'sentry/components/workflowEngine/form/automationBuilderRowLine';
-import AutomationBuilderSelectField from 'sentry/components/workflowEngine/form/automationBuilderSelectField';
+import {AutomationBuilderSelect} from 'sentry/components/workflowEngine/form/automationBuilderSelect';
 import {PurpleTextButton} from 'sentry/components/workflowEngine/ui/purpleTextButton';
 import {IconAdd, IconDelete} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {DataConditionType} from 'sentry/types/workflowEngine/dataConditions';
 import {
-  Attributes,
+  DataConditionType,
+  type AttributeSubfilter,
+  type Subfilter,
+  type TagSubfilter,
+} from 'sentry/types/workflowEngine/dataConditions';
+import {
+  Attribute,
   MatchType,
 } from 'sentry/views/automations/components/actionFilters/constants';
+import {useAutomationBuilderErrorContext} from 'sentry/views/automations/components/automationBuilderErrorContext';
 import {useDataConditionNodeContext} from 'sentry/views/automations/components/dataConditionNodes';
 
+function isAttributeSubfilter(subfilter: Subfilter): subfilter is AttributeSubfilter {
+  return 'attribute' in subfilter;
+}
+
+function isTagSubfilter(subfilter: Subfilter): subfilter is TagSubfilter {
+  return 'key' in subfilter;
+}
+
 interface SubfilterProps {
-  onUpdate: (comparison: Record<string, any>) => void;
-  subfilter: Record<string, any>;
+  onUpdate: (comparison: Subfilter) => void;
+  removeError: () => void;
+  subfilter: Subfilter;
   subfilter_id: string;
 }
 
@@ -35,6 +51,7 @@ function useSubfilterContext(): SubfilterProps {
 
 export function SubfiltersList() {
   const {condition, condition_id, onUpdate} = useDataConditionNodeContext();
+  const {removeError} = useAutomationBuilderErrorContext();
 
   const subfilters = condition.comparison.filters || [];
   const subfilterCount = subfilters.length;
@@ -45,41 +62,40 @@ export function SubfiltersList() {
       {
         id: uuid4(),
         match: MatchType.EQUAL,
+        value: '',
       },
     ];
-    onUpdate({filters: newSubfilters});
+    onUpdate({comparison: {...condition.comparison, filters: newSubfilters}});
   }
 
   function removeSubfilter(id: string) {
     const newSubfilters = subfilters.filter(
-      (subfilter: Record<string, any>) => subfilter.id !== id
+      (subfilter: Subfilter) => subfilter.id !== id
     );
-    onUpdate({filters: newSubfilters});
+    onUpdate({comparison: {...condition.comparison, filters: newSubfilters}});
   }
 
-  function updateSubfilter(id: string, comparison: Record<string, any>) {
-    const newSubfilters = subfilters.map((subfilter: Record<string, any>) => {
+  function updateSubfilter(id: string, newSubfilter: Subfilter) {
+    const newSubfilters = subfilters.map((subfilter: Subfilter) => {
       if (subfilter.id === id) {
-        return {
-          ...subfilter,
-          ...comparison,
-        };
+        return newSubfilter;
       }
       return subfilter;
     });
-    onUpdate({filters: newSubfilters});
+    onUpdate({comparison: {...condition.comparison, filters: newSubfilters}});
   }
 
   return (
     <div>
       <div>
-        {subfilters.map((subfilter: Record<string, any>, i: number) => {
+        {subfilters.map((subfilter: Subfilter, i: number) => {
           return (
             <SubfilterContext.Provider
               value={{
                 subfilter,
                 subfilter_id: `${condition_id}.comparison.filters.${subfilter.id}`,
-                onUpdate: comparison => updateSubfilter(subfilter.id, comparison),
+                onUpdate: newSubfilter => updateSubfilter(subfilter.id, newSubfilter),
+                removeError: () => removeError(condition.id),
               }}
               key={subfilter.id}
             >
@@ -92,7 +108,12 @@ export function SubfiltersList() {
           );
         })}
       </div>
-      <PurpleTextButton borderless icon={<IconAdd />} size="xs" onClick={addSubfilter}>
+      <PurpleTextButton
+        variant="transparent"
+        icon={<IconAdd />}
+        size="xs"
+        onClick={addSubfilter}
+      >
         {t('Sub-filter')}
       </PurpleTextButton>
     </div>
@@ -116,7 +137,7 @@ function SubfilterRow({onRemove, isFirstRow, isLastRow}: SubfilterRowProps) {
           aria-label={t('Delete Subfilter')}
           size="sm"
           icon={<IconDelete />}
-          borderless
+          variant="transparent"
           onClick={onRemove}
         />
       </StyledRowLine>
@@ -145,72 +166,87 @@ function Branch({lastChild}: BranchProps) {
 }
 
 function ComparisonTypeField() {
-  const {subfilter, subfilter_id} = useSubfilterContext();
-  const [type, setType] = useState<DataConditionType | undefined>(undefined);
+  const {subfilter, subfilter_id, onUpdate} = useSubfilterContext();
 
-  if (!type) {
+  if (isAttributeSubfilter(subfilter) || isTagSubfilter(subfilter)) {
     return (
-      <AutomationBuilderSelectField
-        name={`${subfilter_id}.type`}
-        value={subfilter.type}
-        placeholder={t('Select value type')}
-        options={[
-          {
-            label: t('Attribute'),
-            value: DataConditionType.EVENT_ATTRIBUTE,
-          },
-          {
-            label: t('Tag'),
-            value: DataConditionType.TAGGED_EVENT,
-          },
-        ]}
-        onChange={(value: DataConditionType) => {
-          setType(value);
-        }}
-      />
+      <Fragment>
+        {isAttributeSubfilter(subfilter) ? <AttributeField /> : <KeyField />}
+        <MatchField />
+        <ValueField />
+      </Fragment>
     );
   }
-
   return (
-    <Fragment>
-      {type === DataConditionType.EVENT_ATTRIBUTE ? <AttributeField /> : <KeyField />}
-      <MatchField />
-      <ValueField />
-    </Fragment>
-  );
-}
-
-function AttributeField() {
-  const {subfilter, subfilter_id, onUpdate} = useSubfilterContext();
-  return (
-    <AutomationBuilderSelectField
-      name={`${subfilter_id}.attribute`}
-      placeholder={t('Select attribute')}
-      value={subfilter.attribute}
-      options={Object.values(Attributes).map(attribute => ({
-        value: attribute,
-        label: attribute,
-      }))}
-      onChange={(value: string) => {
+    <AutomationBuilderSelect
+      name={`${subfilter_id}.type`}
+      aria-label={t('Comparison type')}
+      value=""
+      placeholder={t('Select value type')}
+      options={[
+        {
+          label: t('Attribute'),
+          value: DataConditionType.EVENT_ATTRIBUTE,
+        },
+        {
+          label: t('Tag'),
+          value: DataConditionType.TAGGED_EVENT,
+        },
+      ]}
+      onChange={(option: SelectValue<DataConditionType>) => {
         onUpdate({
-          attribute: value,
+          id: subfilter.id,
+          match: subfilter.match,
+          value: subfilter.value,
+          ...(option.value === DataConditionType.EVENT_ATTRIBUTE
+            ? {attribute: Attribute.MESSAGE}
+            : {key: ''}),
         });
       }}
     />
   );
 }
 
-function KeyField() {
+function AttributeField() {
   const {subfilter, subfilter_id, onUpdate} = useSubfilterContext();
+
+  if (!isAttributeSubfilter(subfilter)) {
+    return null;
+  }
+
   return (
-    <AutomationBuilderInputField
+    <AutomationBuilderSelect
+      name={`${subfilter_id}.attribute`}
+      aria-label={t('Attribute')}
+      placeholder={t('Select attribute')}
+      value={subfilter.attribute}
+      options={Object.values(Attribute).map(attribute => ({
+        value: attribute,
+        label: attribute,
+      }))}
+      onChange={(option: SelectValue<Attribute>) => {
+        onUpdate({...subfilter, attribute: option.value});
+      }}
+    />
+  );
+}
+
+function KeyField() {
+  const {subfilter, subfilter_id, onUpdate, removeError} = useSubfilterContext();
+
+  if (!isTagSubfilter(subfilter)) {
+    return null;
+  }
+
+  return (
+    <AutomationBuilderInput
       name={`${subfilter_id}.key`}
-      placeholder={t('Enter tag')}
+      aria-label={t('Tag')}
+      placeholder={t('tag')}
       value={subfilter.key}
-      onChange={(value: string) => {
-        onUpdate({
-          key: value,
-        });
+      onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+        onUpdate({...subfilter, key: e.target.value});
+        removeError();
       }}
     />
   );
@@ -219,9 +255,10 @@ function KeyField() {
 function MatchField() {
   const {subfilter, subfilter_id, onUpdate} = useSubfilterContext();
   return (
-    <AutomationBuilderSelectField
+    <AutomationBuilderSelect
       name={`${subfilter_id}.match`}
-      value={subfilter.match}
+      aria-label={t('Match type')}
+      value={subfilter.match ?? ''}
       options={[
         {
           label: 'is',
@@ -232,34 +269,30 @@ function MatchField() {
           value: MatchType.NOT_EQUAL,
         },
       ]}
-      onChange={(value: MatchType) => {
-        onUpdate({match: value});
+      onChange={(option: SelectValue<MatchType>) => {
+        onUpdate({...subfilter, match: option.value});
       }}
     />
   );
 }
 
 function ValueField() {
-  const {subfilter, subfilter_id, onUpdate} = useSubfilterContext();
+  const {subfilter, subfilter_id, onUpdate, removeError} = useSubfilterContext();
   return (
-    <AutomationBuilderInputField
+    <AutomationBuilderInput
       name={`${subfilter_id}.value`}
+      aria-label={t('Value')}
       placeholder={t('value')}
-      value={`${subfilter.value}`}
-      onChange={(value: string) => {
-        onUpdate({
-          value,
-        });
+      value={subfilter.value ?? ''}
+      onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+        onUpdate({...subfilter, value: e.target.value});
+        removeError();
       }}
     />
   );
 }
 
-export function SubfilterDetailsList({
-  subfilters,
-}: {
-  subfilters: Array<Record<string, any>>;
-}) {
+export function SubfilterDetailsList({subfilters}: {subfilters: Subfilter[]}) {
   return (
     <DetailsListWrapper>
       {subfilters.map((subfilter, index) => (
@@ -271,18 +304,42 @@ export function SubfilterDetailsList({
   );
 }
 
-function SubfilterDetails({subfilter}: {subfilter: Record<string, any>}) {
+function SubfilterDetails({subfilter}: {subfilter: Subfilter}) {
   return tct('[item] [match] [value]', {
-    item: subfilter.attribute ?? subfilter.key,
+    item: isAttributeSubfilter(subfilter)
+      ? subfilter.attribute
+      : isTagSubfilter(subfilter)
+        ? subfilter.key
+        : '',
     match: subfilter.match === MatchType.EQUAL ? t('is') : t('is not'),
-    value: subfilter.value,
+    value: subfilter.value ?? '',
   });
+}
+
+export function validateSubfilters(subfilters: Subfilter[]): string | undefined {
+  for (const subfilter of subfilters) {
+    const isMissingAttributeOrTag =
+      !isAttributeSubfilter(subfilter) && !isTagSubfilter(subfilter);
+    const missingAttribute = isAttributeSubfilter(subfilter) && !subfilter.attribute;
+    const missingKey = isTagSubfilter(subfilter) && !subfilter.key;
+
+    if (
+      isMissingAttributeOrTag ||
+      missingAttribute ||
+      missingKey ||
+      !subfilter.match ||
+      !subfilter.value
+    ) {
+      return t('Ensure all subfilters are filled in.');
+    }
+  }
+  return undefined;
 }
 
 const RowWrapper = styled('div')`
   display: flex;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 
   :first-child {
     margin-top: 3px;
@@ -306,6 +363,6 @@ const StyledRowLine = styled(RowLine)`
 const DetailsListWrapper = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(1)};
-  padding: ${space(1)} 0 0 ${space(2)};
+  gap: ${p => p.theme.space.md};
+  padding: ${p => p.theme.space.md} 0 0 ${p => p.theme.space.xl};
 `;

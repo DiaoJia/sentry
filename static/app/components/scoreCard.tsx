@@ -1,19 +1,18 @@
 import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import Panel from 'sentry/components/panels/panel';
-import QuestionTooltip from 'sentry/components/questionTooltip';
-import TextOverflow from 'sentry/components/textOverflow';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
+import {Flex, type FlexProps} from '@sentry/scraps/layout';
+
+import {Panel} from 'sentry/components/panels/panel';
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {TextOverflow} from 'sentry/components/textOverflow';
+import {defined} from 'sentry/utils/defined';
 
 type ScoreCardProps = {
   title: React.ReactNode;
   className?: string;
   help?: React.ReactNode;
-  isEstimate?: boolean;
   isTooltipHoverable?: boolean;
-  renderOpenButton?: () => React.ReactNode;
   score?: React.ReactNode;
   trend?: React.ReactNode;
   trendStatus?: 'good' | 'bad';
@@ -26,14 +25,13 @@ export function ScoreCard({
   trend,
   trendStatus,
   className,
-  renderOpenButton,
   isTooltipHoverable,
 }: ScoreCardProps) {
   const displayScore = score ?? '\u2014';
 
   return (
     <ScorePanel className={className}>
-      <HeaderWrapper>
+      <Flex wrap="wrap" align="center" justify="between">
         <HeaderTitle>
           <Title>{title}</Title>
           {help && (
@@ -45,8 +43,7 @@ export function ScoreCard({
             />
           )}
         </HeaderTitle>
-        {renderOpenButton?.()}
-      </HeaderWrapper>
+      </Flex>
 
       <ScoreWrapper>
         <Score>{displayScore}</Score>
@@ -63,11 +60,11 @@ export function ScoreCard({
 function getTrendColor(p: TrendProps & {theme: Theme}) {
   switch (p.trendStatus) {
     case 'good':
-      return p.theme.successText;
+      return p.theme.tokens.content.success;
     case 'bad':
-      return p.theme.errorText;
+      return p.theme.tokens.content.danger;
     default:
-      return p.theme.subText;
+      return p.theme.tokens.content.secondary;
   }
 }
 
@@ -75,44 +72,38 @@ export const ScorePanel = styled(Panel)`
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: ${space(2)} ${space(3)};
+  padding: ${p => p.theme.space.xl} ${p => p.theme.space['2xl']};
   min-height: 96px;
 `;
 
 const HeaderTitle = styled('div')`
   display: inline-grid;
   grid-auto-flow: column;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
   width: fit-content;
 `;
 
 export const Title = styled('div')`
-  font-size: ${p => p.theme.fontSize.lg};
-  color: ${p => p.theme.headingColor};
-  ${p => p.theme.overflowEllipsis};
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-size: ${p => p.theme.font.size.lg};
+  color: ${p => p.theme.tokens.content.primary};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
-const HeaderWrapper = styled('div')`
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-`;
-
-export const ScoreWrapper = styled('div')`
-  display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  max-width: 100%;
-`;
+export const ScoreWrapper = styled((props: FlexProps) => {
+  return <Flex align="baseline" maxWidth="100%" {...props} />;
+})``;
 
 export const Score = styled('span')`
   flex-shrink: 1;
   font-size: 32px;
   line-height: 1;
-  color: ${p => p.theme.headingColor};
+  color: ${p => p.theme.tokens.content.primary};
   white-space: nowrap;
 `;
 
@@ -120,7 +111,7 @@ type TrendProps = {trendStatus: ScoreCardProps['trendStatus']};
 
 export const Trend = styled('div')<TrendProps>`
   color: ${getTrendColor};
-  margin-left: ${space(1)};
+  margin-left: ${p => p.theme.space.md};
   line-height: 1;
   overflow: hidden;
 `;

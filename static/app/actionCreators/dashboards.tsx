@@ -1,34 +1,48 @@
+import type {QueryClient} from '@tanstack/react-query';
 import omit from 'lodash/omit';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import {ALL_ACCESS_PROJECTS} from 'sentry/constants/pageFilters';
+import {ALL_ACCESS_PROJECTS} from 'sentry/components/pageFilters/constants';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
 import {t} from 'sentry/locale';
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
 import type {PageFilters} from 'sentry/types/core';
-import {defined} from 'sentry/utils';
+import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
 import {TOP_N} from 'sentry/utils/discover/types';
-import type {QueryClient} from 'sentry/utils/queryClient';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {getStarredDashboardsQueryKey} from 'sentry/views/dashboards/hooks/useGetStarredDashboards';
 import {
+  DashboardFilter,
+  DisplayType,
+  MAX_CATEGORICAL_BAR_LIMIT,
   type DashboardDetails,
   type DashboardListItem,
-  DisplayType,
   type Widget,
 } from 'sentry/views/dashboards/types';
 import {flattenErrors} from 'sentry/views/dashboards/utils';
 import {getResultsLimit} from 'sentry/views/dashboards/widgetBuilder/utils';
 
-export function fetchDashboards(api: Client, orgSlug: string) {
+export function fetchDashboards(
+  api: Client,
+  orgSlug: string,
+  query?: {filter?: DashboardFilter}
+) {
   const promise: Promise<DashboardListItem[]> = api.requestPromise(
-    `/organizations/${orgSlug}/dashboards/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/', {
+      path: {organizationIdOrSlug: orgSlug},
+    }),
     {
       method: 'GET',
-      query: {sort: 'myDashboardsAndRecentlyViewed'},
+      query: {sort: 'myDashboardsAndRecentlyViewed', ...query},
     }
   );
 
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
@@ -44,20 +58,20 @@ export function fetchDashboards(api: Client, orgSlug: string) {
 export function createDashboard(
   api: Client,
   orgSlug: string,
-  newDashboard: DashboardDetails,
-  duplicate?: boolean
+  newDashboard: DashboardDetails
 ): Promise<DashboardDetails> {
   const {title, widgets, projects, environment, period, start, end, filters, utc} =
     newDashboard;
 
   const promise: Promise<DashboardDetails> = api.requestPromise(
-    `/organizations/${orgSlug}/dashboards/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/', {
+      path: {organizationIdOrSlug: orgSlug},
+    }),
     {
       method: 'POST',
       data: {
         title,
         widgets: widgets.map(widget => omit(widget, ['tempId'])).map(_enforceWidgetLimit),
-        duplicate,
         projects,
         environment,
         period,
@@ -74,7 +88,8 @@ export function createDashboard(
   );
 
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
@@ -87,13 +102,50 @@ export function createDashboard(
   return promise;
 }
 
+export function validateDashboard(
+  orgSlug: string,
+  dashboard: DashboardDetails
+): Promise<void> {
+  const {title, widgets, projects, environment, period, start, end, filters, utc} =
+    dashboard;
+
+  const url = getApiUrl('/organizations/$organizationIdOrSlug/dashboards/', {
+    path: {organizationIdOrSlug: orgSlug},
+  });
+
+  return fetchMutation({
+    url,
+    method: 'POST',
+    data: {
+      title,
+      widgets: widgets.map(widget => omit(widget, ['tempId'])),
+      projects,
+      environment,
+      period,
+      start,
+      end,
+      filters,
+      utc,
+    },
+    options: {
+      query: {
+        validateOnly: '1',
+        project: projects,
+        environment,
+      },
+    },
+  });
+}
+
 export function updateDashboardVisit(
   api: Client,
   orgId: string,
   dashboardId: string | string[]
 ): Promise<void> {
   const promise = api.requestPromise(
-    `/organizations/${orgId}/dashboards/${dashboardId}/visit/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/$dashboardId/visit/', {
+      path: {organizationIdOrSlug: orgId, dashboardId: String(dashboardId)},
+    }),
     {
       method: 'POST',
     }
@@ -105,29 +157,35 @@ export function updateDashboardVisit(
 export async function updateDashboardFavorite(
   api: Client,
   queryClient: QueryClient,
-  orgId: string,
+  organization: Organization,
   dashboardId: string | string[],
   isFavorited: boolean
 ): Promise<void> {
   try {
     await api.requestPromise(
-      `/organizations/${orgId}/dashboards/${dashboardId}/favorite/`,
+      getApiUrl(
+        '/organizations/$organizationIdOrSlug/dashboards/$dashboardId/favorite/',
+        {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            dashboardId: String(dashboardId),
+          },
+        }
+      ),
       {
         method: 'PUT',
         data: {
-          isFavorited,
+          shouldFavorite: isFavorited,
         },
       }
     );
     queryClient.invalidateQueries({
-      queryKey: [
-        `/organizations/${orgId}/dashboards/`,
-        {query: {filter: 'onlyFavorites'}},
-      ],
+      queryKey: getStarredDashboardsQueryKey(organization),
     });
     addSuccessMessage(isFavorited ? t('Added as favorite') : t('Removed as favorite'));
   } catch (response) {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
       addErrorMessage(errors[Object.keys(errors)[0]!]! as string);
@@ -146,14 +204,17 @@ export function fetchDashboard(
   dashboardId: string
 ): Promise<DashboardDetails> {
   const promise: Promise<DashboardDetails> = api.requestPromise(
-    `/organizations/${orgId}/dashboards/${dashboardId}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/$dashboardId/', {
+      path: {organizationIdOrSlug: orgId, dashboardId},
+    }),
     {
       method: 'GET',
     }
   );
 
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
@@ -165,16 +226,26 @@ export function fetchDashboard(
   return promise;
 }
 
+// The backend rejects a save whose payload references widgets or queries that
+// are no longer on the dashboard. This happens when the dashboard changed after
+// this page loaded — a save from another tab, a Seer edit, or a restored
+// revision deletes the existing rows and recreates them with new ids, leaving
+// this page holding ids that no longer exist. The raw messages read like a
+// permissions problem and don't tell the user that reloading fixes it.
+const STALE_DASHBOARD_ERRORS = [
+  'You cannot update widgets that are not part of this dashboard.',
+  'You cannot use a query not owned by this widget',
+];
+
 export function updateDashboard(
-  api: Client,
   orgId: string,
-  dashboard: DashboardDetails
+  dashboard: DashboardDetails,
+  {revisionSource}: {revisionSource?: string} = {}
 ): Promise<DashboardDetails> {
   const {title, widgets, projects, environment, period, start, end, filters, utc} =
     dashboard;
-  const data = {
+  const data: Partial<DashboardDetails> & {revisionSource?: string} = {
     title,
-    widgets: widgets.map(widget => omit(widget, ['tempId'])).map(_enforceWidgetLimit),
     projects,
     environment,
     period,
@@ -183,28 +254,46 @@ export function updateDashboard(
     filters,
     utc,
   };
+  if (revisionSource) {
+    data.revisionSource = revisionSource;
+  }
+  if (widgets) {
+    data.widgets = widgets
+      .map(widget => omit(widget, ['tempId']))
+      .map(_enforceWidgetLimit);
+  }
 
-  const promise: Promise<DashboardDetails> = api.requestPromise(
-    `/organizations/${orgId}/dashboards/${dashboard.id}/`,
-    {
-      method: 'PUT',
-      data,
+  const promise = fetchMutation<DashboardDetails>({
+    url: getApiUrl('/organizations/$organizationIdOrSlug/dashboards/$dashboardId/', {
+      path: {organizationIdOrSlug: orgId, dashboardId: dashboard.id},
+    }),
+    method: 'PUT',
+    data,
+    options: {
       query: {
         project: projects,
         environment,
       },
-    }
-  );
+    },
+  });
 
   // We let the callers of `updateDashboard` handle adding a success message, so
   // that it can be more specific than just "Dashboard updated," but do the
   // error-handling here, since it doesn't depend on the caller's context
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
-      addErrorMessage(errors[Object.keys(errors)[0]!] as string);
+      const error = errors[Object.keys(errors)[0]!] as string;
+      addErrorMessage(
+        STALE_DASHBOARD_ERRORS.includes(error)
+          ? t(
+              'This dashboard may have been updated somewhere else. Refresh the page and try again.'
+            )
+          : error
+      );
     } else {
       addErrorMessage(t('Unable to update dashboard'));
     }
@@ -215,18 +304,28 @@ export function updateDashboard(
 
 export function deleteDashboard(
   api: Client,
-  orgId: string,
-  dashboardId: string
+  dashboardId: string,
+  queryClient: QueryClient,
+  organization: Organization
 ): Promise<undefined> {
   const promise: Promise<undefined> = api.requestPromise(
-    `/organizations/${orgId}/dashboards/${dashboardId}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/$dashboardId/', {
+      path: {organizationIdOrSlug: organization.slug, dashboardId},
+    }),
     {
       method: 'DELETE',
     }
   );
 
+  promise.then(() => {
+    queryClient.invalidateQueries({
+      queryKey: getStarredDashboardsQueryKey(organization),
+    });
+  });
+
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
@@ -245,7 +344,9 @@ export function validateWidgetRequest(
   selection: PageFilters
 ) {
   return [
-    `/organizations/${orgId}/dashboards/widgets/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/widgets/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
     {
       method: 'POST',
       data: widget,
@@ -270,7 +371,9 @@ export function updateDashboardPermissions(
     permissions,
   };
   const promise: Promise<DashboardDetails> = api.requestPromise(
-    `/organizations/${orgId}/dashboards/${dashboard.id}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/dashboards/$dashboardId/', {
+      path: {organizationIdOrSlug: orgId, dashboardId: dashboard.id},
+    }),
     {
       method: 'PUT',
       data,
@@ -278,7 +381,8 @@ export function updateDashboardPermissions(
   );
 
   promise.catch(response => {
-    const errorResponse = response?.responseJSON ?? null;
+    const errorResponse =
+      response instanceof RequestError ? response?.responseJSON : null;
 
     if (errorResponse) {
       const errors = flattenErrors(errorResponse, {});
@@ -303,34 +407,59 @@ export function validateWidget(
 }
 
 /**
- * Enforces a limit on the widget if it is a chart and has a grouping
+ * Enforces valid limits on widgets before saving to the backend.
  *
- * This ensures that widgets from previously created dashboards will have
- * a limit applied properly when editing old dashboards that did not have
- * this validation in place.
+ * - TABLE and BIG_NUMBER widgets should never have limits — clear any stale ones.
+ * - Chart widgets with grouping must have a limit, capped to the display type's max.
+ *
+ * Uses `null` (not `undefined`) so the value survives JSON.stringify and
+ * reaches the backend, which will clear the stale DB value.
  */
 function _enforceWidgetLimit(widget: Widget) {
-  if (
-    widget.displayType === DisplayType.TABLE ||
-    widget.displayType === DisplayType.BIG_NUMBER
-  ) {
+  if (!DISPLAY_TYPES_WITH_LIMITS.has(widget.displayType)) {
+    return {...widget, limit: null};
+  }
+
+  if (widget.queries.length === 0) {
     return widget;
   }
 
+  let maxLimit: number;
+  if (widget.displayType === DisplayType.CATEGORICAL_BAR) {
+    maxLimit = MAX_CATEGORICAL_BAR_LIMIT;
+  } else {
+    maxLimit = getResultsLimit(
+      widget.queries.length,
+      widget.queries[0]!.aggregates.length
+    );
+  }
+
   const hasColumns = widget.queries.some(query => query.columns.length > 0);
+
   if (hasColumns && !defined(widget.limit)) {
     // The default we historically assign for charts with a grouping is 5,
     // continue using that default unless there are conditions which make 5
     // too large to automatically apply.
-    const maxLimit = getResultsLimit(
-      widget.queries.length,
-      widget.queries[0]!.aggregates.length
-    );
     return {
       ...widget,
       limit: Math.min(maxLimit, TOP_N),
     };
   }
 
+  if (hasColumns && defined(widget.limit) && widget.limit > maxLimit) {
+    return {...widget, limit: maxLimit};
+  }
+
   return widget;
 }
+
+// Chart types where `limit` controls the Top N grouping cap.
+// Other display types either fetch their own data (see `widgetFetchesOwnData`)
+// or don't use limits (TABLE, BIG_NUMBER, WHEEL, DETAILS).
+const DISPLAY_TYPES_WITH_LIMITS = new Set([
+  DisplayType.AREA,
+  DisplayType.BAR,
+  DisplayType.LINE,
+  DisplayType.TOP_N,
+  DisplayType.CATEGORICAL_BAR,
+]);

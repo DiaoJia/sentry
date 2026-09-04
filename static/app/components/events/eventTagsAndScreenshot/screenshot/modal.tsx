@@ -1,28 +1,27 @@
 import type {ComponentProps} from 'react';
-import {Fragment, useCallback, useMemo, useState} from 'react';
+import {Fragment, useState} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {useHotkeys} from '@sentry/scraps/hotkey';
+import {Stack, Grid} from '@sentry/scraps/layout';
+
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
+import {Confirm} from 'sentry/components/confirm';
 import {DateTime} from 'sentry/components/dateTime';
-import ImageViewer from 'sentry/components/events/attachmentViewers/imageViewer';
-import {getImageAttachmentRenderer} from 'sentry/components/events/attachmentViewers/previewAttachmentTypes';
+import {ImageViewer} from 'sentry/components/events/attachmentViewers/imageViewer';
+import {webmMimeTypes} from 'sentry/components/events/attachmentViewers/previewAttachmentTypes';
+import {VideoViewer} from 'sentry/components/events/attachmentViewers/videoViewer';
 import {KeyValueData} from 'sentry/components/keyValueData';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {EventAttachment} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
 import {formatBytesBase2} from 'sentry/utils/bytes/formatBytesBase2';
-import {useHotkeys} from 'sentry/utils/useHotkeys';
-import useOrganization from 'sentry/utils/useOrganization';
+import {defined} from 'sentry/utils/defined';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-import ScreenshotPagination from './screenshotPagination';
+import {ScreenshotPagination} from './screenshotPagination';
 
 interface ScreenshotModalProps extends ModalRenderProps {
   downloadUrl: string;
@@ -44,7 +43,7 @@ interface ScreenshotModalProps extends ModalRenderProps {
   onDownload?: () => void;
 }
 
-export default function ScreenshotModal({
+export function ScreenshotModal({
   eventAttachment,
   attachments = [],
   projectSlug,
@@ -60,31 +59,24 @@ export default function ScreenshotModal({
 
   const screenshots = attachments.filter(({name}) => name.includes('screenshot'));
 
-  const [currentEventAttachment, setCurrentAttachment] =
-    useState<EventAttachment>(eventAttachment);
+  const [currentEventAttachment, setCurrentAttachment] = useState(eventAttachment);
 
   const currentAttachmentIndex = screenshots.findIndex(
     attachment => attachment.id === currentEventAttachment.id
   );
-  const paginateItems = useCallback(
-    (delta: number) => {
-      if (screenshots.length) {
-        const newIndex = currentAttachmentIndex + delta;
-        if (newIndex >= 0 && newIndex < screenshots.length) {
-          setCurrentAttachment(screenshots[newIndex]!);
-        }
+  const paginateItems = (delta: number) => {
+    if (screenshots.length) {
+      const newIndex = currentAttachmentIndex + delta;
+      if (newIndex >= 0 && newIndex < screenshots.length) {
+        setCurrentAttachment(screenshots[newIndex]!);
       }
-    },
-    [screenshots, currentAttachmentIndex]
-  );
+    }
+  };
 
-  const paginateHotkeys = useMemo(() => {
-    return [
-      {match: 'right', callback: () => paginateItems(1)},
-      {match: 'left', callback: () => paginateItems(-1)},
-    ];
-  }, [paginateItems]);
-  useHotkeys(paginateHotkeys);
+  useHotkeys([
+    {match: 'right', callback: () => paginateItems(1)},
+    {match: 'left', callback: () => paginateItems(-1)},
+  ]);
 
   const {dateCreated, size, mimetype} = currentEventAttachment;
 
@@ -106,8 +98,9 @@ export default function ScreenshotModal({
     };
   }
 
-  const AttachmentComponent =
-    getImageAttachmentRenderer(currentEventAttachment) ?? ImageViewer;
+  const AttachmentComponent = webmMimeTypes.includes(currentEventAttachment.mimetype)
+    ? VideoViewer
+    : ImageViewer;
 
   return (
     <Fragment>
@@ -115,7 +108,7 @@ export default function ScreenshotModal({
         <h5>{t('Screenshot')}</h5>
       </Header>
       <Body>
-        <Flex direction="column" gap={space(1.5)}>
+        <Stack gap="lg">
           {defined(paginationProps) && <ScreenshotPagination {...paginationProps} />}
           <AttachmentComponentWrapper>
             <AttachmentComponent
@@ -159,10 +152,10 @@ export default function ScreenshotModal({
               },
             ]}
           />
-        </Flex>
+        </Stack>
       </Body>
       <Footer>
-        <ButtonBar gap={1}>
+        <Grid flow="column" align="center" gap="md">
           {onDelete && (
             <Confirm
               confirmText={t('Delete')}
@@ -170,13 +163,13 @@ export default function ScreenshotModal({
               priority="danger"
               onConfirm={onDelete}
             >
-              <Button priority="danger">{t('Delete')}</Button>
+              <Button variant="danger">{t('Delete')}</Button>
             </Confirm>
           )}
           <LinkButton onClick={onDownload} href={downloadUrl}>
             {t('Download')}
           </LinkButton>
-        </ButtonBar>
+        </Grid>
       </Footer>
     </Fragment>
   );
@@ -187,9 +180,10 @@ const AttachmentComponentWrapper = styled('div')`
   & > video {
     max-width: 100%;
     max-height: calc(100vh - 300px);
-    width: auto;
+    width: 100%;
     height: auto;
     object-fit: contain;
+    border-radius: ${p => p.theme.radius.md};
   }
 `;
 

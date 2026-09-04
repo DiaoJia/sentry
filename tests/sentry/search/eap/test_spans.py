@@ -1,7 +1,21 @@
-import os
 from datetime import datetime
+from unittest import mock
 
 import pytest
+from sentry_conventions.attributes import (
+    ATTRIBUTE_METADATA,
+    ATTRIBUTE_NAMES,
+    ApplyScrubbing,
+    ApplyScrubbingInfo,
+    AttributeMetadata,
+    AttributeType,
+    DeprecationInfo,
+    DeprecationStatus,
+    Visibility,
+)
+from sentry_protos.snuba.v1.attribute_conditional_aggregation_pb2 import (
+    AttributeConditionalAggregation,
+)
 from sentry_protos.snuba.v1.endpoint_trace_item_table_pb2 import (
     AggregationAndFilter,
     AggregationComparisonFilter,
@@ -15,34 +29,121 @@ from sentry_protos.snuba.v1.trace_item_attribute_pb2 import (
     ExtrapolationMode,
     Function,
     IntArray,
+    RankedBy,
     StrArray,
     VirtualColumnContext,
 )
 from sentry_protos.snuba.v1.trace_item_filter_pb2 import (
     AndFilter,
     ComparisonFilter,
+    ExistsFilter,
+    NotFilter,
     OrFilter,
     TraceItemFilter,
 )
 
 from sentry.exceptions import InvalidSearchQuery
+from sentry.search.eap import utils as eap_utils
+from sentry.search.eap.columns import ResolvedAttribute
+from sentry.search.eap.occurrences.definitions import OCCURRENCE_DEFINITIONS
 from sentry.search.eap.resolver import SearchResolver
+from sentry.search.eap.spans.attributes import (
+    SPAN_ATTRIBUTE_DEFINITIONS,
+    SPAN_INTERNAL_TO_SECONDARY_ALIASES_MAPPING,
+    SPANS_INTERNAL_TO_PUBLIC_ALIAS_MAPPINGS,
+    SPANS_REPLACEMENT_MAP,
+    _update_attribute_definitions_with_deprecations,
+)
 from sentry.search.eap.spans.definitions import SPAN_DEFINITIONS
-from sentry.search.eap.spans.sentry_conventions import SENTRY_CONVENTIONS_DIRECTORY
-from sentry.search.eap.types import SearchResolverConfig
+from sentry.search.eap.trace_metrics.definitions import TRACE_METRICS_DEFINITIONS
+from sentry.search.eap.types import FieldsACL, SearchResolverConfig, SupportedTraceItemType
+from sentry.search.eap.utils import can_expose_attribute_to_api
 from sentry.search.events.types import SnubaParams
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.datetime import freeze_time
-from sentry.utils import json
+from sentry.utils.snuba import SPAN_EAP_COLUMN_MAP
+
+
+class AttributeVisibilityTest(TestCase):
+    def test_public_convention_attribute_visible_to_everyone(self) -> None:
+        assert can_expose_attribute_to_api(
+            ATTRIBUTE_NAMES.SENTRY_ENVIRONMENT, SupportedTraceItemType.SPANS
+        )
+
+    def test_internal_convention_attribute_hidden_unless_included(self) -> None:
+        assert not can_expose_attribute_to_api(
+            ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT, SupportedTraceItemType.SPANS
+        )
+        assert can_expose_attribute_to_api(
+            ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT,
+            SupportedTraceItemType.SPANS,
+            include_internal=True,
+        )
+
+    def test_internal_convention_public_alias_is_hidden(self) -> None:
+        with mock.patch.dict(
+            eap_utils.PUBLIC_ALIAS_TO_INTERNAL_MAPPING[SupportedTraceItemType.SPANS],
+            {
+                "public.alias": ResolvedAttribute(
+                    public_alias="public.alias",
+                    internal_name=ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT,
+                    search_type="string",
+                )
+            },
+        ):
+            assert not can_expose_attribute_to_api("public.alias", SupportedTraceItemType.SPANS)
+
+    def test_internal_convention_translated_public_alias_is_hidden(self) -> None:
+        with mock.patch.dict(
+            eap_utils.INTERNAL_TO_PUBLIC_ALIAS_MAPPINGS[SupportedTraceItemType.SPANS]["string"],
+            {ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT: "public.alias"},
+        ):
+            assert not can_expose_attribute_to_api(
+                ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT, SupportedTraceItemType.SPANS
+            )
+
+    def test_internal_convention_replacement_is_hidden(self) -> None:
+        with mock.patch.dict(
+            eap_utils.SENTRY_CONVENTIONS_REPLACEMENT_MAPPINGS[SupportedTraceItemType.SPANS],
+            {"deprecated.attr": ATTRIBUTE_NAMES.SENTRY_DSC_ENVIRONMENT},
+        ):
+            assert not can_expose_attribute_to_api("deprecated.attr", SupportedTraceItemType.SPANS)
+
+    def test_public_convention_deprecated_alias_visible_to_everyone(self) -> None:
+        aliases = ATTRIBUTE_METADATA[ATTRIBUTE_NAMES.SENTRY_ENVIRONMENT].aliases
+
+        assert aliases is not None
+        assert can_expose_attribute_to_api(aliases[0], SupportedTraceItemType.SPANS)
+
+    def test_stripped_internal_prefix_alias_is_hidden(self) -> None:
+        assert not can_expose_attribute_to_api(
+            "_internal.normalized_description", SupportedTraceItemType.SPANS
+        )
+        assert can_expose_attribute_to_api(
+            "_internal.normalized_description",
+            SupportedTraceItemType.SPANS,
+            include_internal=True,
+        )
+
+    def test_stripped_dsc_convention_alias_is_hidden(self) -> None:
+        assert not can_expose_attribute_to_api(
+            ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix("sentry."),
+            SupportedTraceItemType.SPANS,
+        )
+        assert can_expose_attribute_to_api(
+            ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix("sentry."),
+            SupportedTraceItemType.SPANS,
+            include_internal=True,
+        )
 
 
 class SearchResolverQueryTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.resolver = SearchResolver(
             params=SnubaParams(), config=SearchResolverConfig(), definitions=SPAN_DEFINITIONS
         )
 
-    def test_simple_query(self):
+    def test_simple_query(self) -> None:
         where, having, _ = self.resolver.resolve_query("span.description:foo")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -53,7 +154,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_negation(self):
+    def test_negation(self) -> None:
         where, having, _ = self.resolver.resolve_query("!span.description:foo")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -64,7 +165,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_numeric_query(self):
+    def test_numeric_query(self) -> None:
         where, having, _ = self.resolver.resolve_query("ai.total_tokens.used:123")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -75,7 +176,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_in_filter(self):
+    def test_in_filter(self) -> None:
         where, having, _ = self.resolver.resolve_query("span.description:[foo,bar,baz]")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -86,8 +187,8 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_uuid_validation(self):
-        where, having, _ = self.resolver.resolve_query(f"id:{'f'*16}")
+    def test_uuid_validation(self) -> None:
+        where, having, _ = self.resolver.resolve_query(f"id:{'f' * 16}")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
                 key=AttributeKey(name="sentry.item_id", type=AttributeKey.Type.TYPE_STRING),
@@ -97,11 +198,11 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_invalid_uuid_validation(self):
+    def test_invalid_uuid_validation(self) -> None:
         with pytest.raises(InvalidSearchQuery):
             self.resolver.resolve_query("id:hello")
 
-    def test_not_in_filter(self):
+    def test_not_in_filter(self) -> None:
         where, having, _ = self.resolver.resolve_query("!span.description:[foo,bar,baz]")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -112,7 +213,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_in_numeric_filter(self):
+    def test_in_numeric_filter(self) -> None:
         where, having, _ = self.resolver.resolve_query("ai.total_tokens.used:[123,456,789]")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -123,7 +224,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_greater_than_numeric_filter(self):
+    def test_greater_than_numeric_filter(self) -> None:
         where, having, _ = self.resolver.resolve_query("ai.total_tokens.used:>123")
         assert where == TraceItemFilter(
             comparison_filter=ComparisonFilter(
@@ -134,7 +235,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_timestamp_relative_filter(self):
+    def test_timestamp_relative_filter(self) -> None:
         with freeze_time("2018-12-11 10:20:00"):
             where, having, _ = self.resolver.resolve_query("timestamp:-24h")
             assert where == TraceItemFilter(
@@ -148,7 +249,7 @@ class SearchResolverQueryTest(TestCase):
             )
             assert having is None
 
-    def test_query_with_and(self):
+    def test_query_with_and(self) -> None:
         where, having, _ = self.resolver.resolve_query("span.description:foo span.op:bar")
         assert where == TraceItemFilter(
             and_filter=AndFilter(
@@ -174,7 +275,7 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_query_with_or(self):
+    def test_query_with_or(self) -> None:
         where, having, _ = self.resolver.resolve_query("span.description:foo or span.op:bar")
         assert where == TraceItemFilter(
             or_filter=OrFilter(
@@ -200,7 +301,109 @@ class SearchResolverQueryTest(TestCase):
         )
         assert having is None
 
-    def test_query_with_or_and_brackets(self):
+    def test_has_in_filter_multi_key(self) -> None:
+        """Multi-key has:[key1,key2] (event_search has_in_filter) resolves to OR of (exists + != '')."""
+        where, having, _ = self.resolver.resolve_query("has:[span.description,span.op]")
+        desc_key = AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING)
+        op_key = AttributeKey(name="sentry.op", type=AttributeKey.Type.TYPE_STRING)
+        assert where == TraceItemFilter(
+            or_filter=OrFilter(
+                filters=[
+                    TraceItemFilter(
+                        and_filter=AndFilter(
+                            filters=[
+                                TraceItemFilter(
+                                    exists_filter=ExistsFilter(key=desc_key),
+                                ),
+                                TraceItemFilter(
+                                    comparison_filter=ComparisonFilter(
+                                        key=desc_key,
+                                        op=ComparisonFilter.OP_NOT_EQUALS,
+                                        value=AttributeValue(val_str=""),
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                    TraceItemFilter(
+                        and_filter=AndFilter(
+                            filters=[
+                                TraceItemFilter(
+                                    exists_filter=ExistsFilter(key=op_key),
+                                ),
+                                TraceItemFilter(
+                                    comparison_filter=ComparisonFilter(
+                                        key=op_key,
+                                        op=ComparisonFilter.OP_NOT_EQUALS,
+                                        value=AttributeValue(val_str=""),
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                ]
+            )
+        )
+        assert having is None
+
+    def test_not_has_in_filter_multi_key(self) -> None:
+        """Negated multi-key !has:[key1,key2] resolves to AND of (not-exists OR = '')."""
+        where, having, _ = self.resolver.resolve_query("!has:[span.description,span.op]")
+        desc_key = AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING)
+        op_key = AttributeKey(name="sentry.op", type=AttributeKey.Type.TYPE_STRING)
+        assert where == TraceItemFilter(
+            and_filter=AndFilter(
+                filters=[
+                    TraceItemFilter(
+                        or_filter=OrFilter(
+                            filters=[
+                                TraceItemFilter(
+                                    not_filter=NotFilter(
+                                        filters=[
+                                            TraceItemFilter(
+                                                exists_filter=ExistsFilter(key=desc_key),
+                                            )
+                                        ]
+                                    )
+                                ),
+                                TraceItemFilter(
+                                    comparison_filter=ComparisonFilter(
+                                        key=desc_key,
+                                        op=ComparisonFilter.OP_EQUALS,
+                                        value=AttributeValue(val_str=""),
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                    TraceItemFilter(
+                        or_filter=OrFilter(
+                            filters=[
+                                TraceItemFilter(
+                                    not_filter=NotFilter(
+                                        filters=[
+                                            TraceItemFilter(
+                                                exists_filter=ExistsFilter(key=op_key),
+                                            )
+                                        ]
+                                    )
+                                ),
+                                TraceItemFilter(
+                                    comparison_filter=ComparisonFilter(
+                                        key=op_key,
+                                        op=ComparisonFilter.OP_EQUALS,
+                                        value=AttributeValue(val_str=""),
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                ]
+            )
+        )
+        assert having is None
+
+    def test_query_with_or_and_brackets(self) -> None:
         where, having, _ = self.resolver.resolve_query(
             "(span.description:123 and span.op:345) or (span.description:foo and span.op:bar)"
         )
@@ -261,17 +464,17 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
-    def test_empty_query(self):
+    def test_empty_query(self) -> None:
         where, having, _ = self.resolver.resolve_query("")
         assert where is None
         assert having is None
 
-    def test_none_query(self):
+    def test_none_query(self) -> None:
         where, having, _ = self.resolver.resolve_query(None)
         assert where is None
         assert having is None
 
-    def test_simple_aggregate_query(self):
+    def test_simple_aggregate_query(self) -> None:
         operators = [
             ("", AggregationComparisonFilter.OP_EQUALS),
             (">", AggregationComparisonFilter.OP_GREATER_THAN),
@@ -286,9 +489,7 @@ class SearchResolverQueryTest(TestCase):
                 comparison_filter=AggregationComparisonFilter(
                     aggregation=AttributeAggregation(
                         aggregate=Function.FUNCTION_COUNT,
-                        key=AttributeKey(
-                            name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE
-                        ),
+                        key=AttributeKey(name="sentry.project_id", type=AttributeKey.Type.TYPE_INT),
                         label="count()",
                         extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
                     ),
@@ -297,7 +498,7 @@ class SearchResolverQueryTest(TestCase):
                 )
             )
 
-    def test_simple_negation_aggregate_query(self):
+    def test_simple_negation_aggregate_query(self) -> None:
         operators = [
             ("", AggregationComparisonFilter.OP_NOT_EQUALS),
             (">", AggregationComparisonFilter.OP_LESS_THAN_OR_EQUALS),
@@ -312,9 +513,7 @@ class SearchResolverQueryTest(TestCase):
                 comparison_filter=AggregationComparisonFilter(
                     aggregation=AttributeAggregation(
                         aggregate=Function.FUNCTION_COUNT,
-                        key=AttributeKey(
-                            name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE
-                        ),
+                        key=AttributeKey(name="sentry.project_id", type=AttributeKey.Type.TYPE_INT),
                         label="count()",
                         extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
                     ),
@@ -323,7 +522,7 @@ class SearchResolverQueryTest(TestCase):
                 )
             )
 
-    def test_aggregate_query_on_custom_attributes(self):
+    def test_aggregate_query_on_custom_attributes(self) -> None:
         where, having, _ = self.resolver.resolve_query("avg(tags[foo,number]):>1000")
         assert where is None
         assert having == AggregationFilter(
@@ -339,7 +538,46 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
-    def test_aggregate_query_on_attributes_with_units(self):
+    def test_query_hides_internal_api_attributes_in_where(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+        hidden_attribute = f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]"
+
+        with pytest.raises(InvalidSearchQuery, match="Could not parse"):
+            resolver.resolve_query(f"{hidden_attribute}:foo")
+
+    def test_query_hides_internal_api_attributes_in_having(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+        hidden_attribute = f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]"
+
+        with pytest.raises(InvalidSearchQuery, match="Could not parse"):
+            resolver.resolve_query(f"count_unique({hidden_attribute}):>0")
+
+    def test_query_hides_internal_api_attributes_in_if_subquery(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=TRACE_METRICS_DEFINITIONS,
+        )
+        hidden_attribute = f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]"
+
+        with pytest.raises(InvalidSearchQuery, match="Could not parse"):
+            resolver.resolve_query(f"count_if(`{hidden_attribute}:foo`, value):>0")
+
+    def test_aggregate_query_on_attributes_with_units(self) -> None:
         for value in ["1000", "1s", "1000ms"]:
             where, having, _ = self.resolver.resolve_query(f"avg(measurements.lcp):>{value}")
             assert where is None
@@ -356,7 +594,7 @@ class SearchResolverQueryTest(TestCase):
                 )
             )
 
-    def test_aggregate_query_with_multiple_conditions(self):
+    def test_aggregate_query_with_multiple_conditions(self) -> None:
         where, having, _ = self.resolver.resolve_query("count():>1 avg(measurements.lcp):>3000")
         assert where is None
         assert having == AggregationFilter(
@@ -367,7 +605,7 @@ class SearchResolverQueryTest(TestCase):
                             aggregation=AttributeAggregation(
                                 aggregate=Function.FUNCTION_COUNT,
                                 key=AttributeKey(
-                                    name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE
+                                    name="sentry.project_id", type=AttributeKey.Type.TYPE_INT
                                 ),
                                 label="count()",
                                 extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
@@ -392,7 +630,7 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
-    def test_aggregate_query_with_multiple_conditions_explicit_and(self):
+    def test_aggregate_query_with_multiple_conditions_explicit_and(self) -> None:
         where, having, _ = self.resolver.resolve_query("count():>1 AND avg(measurements.lcp):>3000")
         assert where is None
         assert having == AggregationFilter(
@@ -403,7 +641,7 @@ class SearchResolverQueryTest(TestCase):
                             aggregation=AttributeAggregation(
                                 aggregate=Function.FUNCTION_COUNT,
                                 key=AttributeKey(
-                                    name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE
+                                    name="sentry.project_id", type=AttributeKey.Type.TYPE_INT
                                 ),
                                 label="count()",
                                 extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
@@ -428,7 +666,7 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
-    def test_aggregate_query_with_multiple_conditions_explicit_or(self):
+    def test_aggregate_query_with_multiple_conditions_explicit_or(self) -> None:
         where, having, _ = self.resolver.resolve_query("count():>1 or avg(measurements.lcp):>3000")
         assert where is None
         assert having == AggregationFilter(
@@ -439,7 +677,7 @@ class SearchResolverQueryTest(TestCase):
                             aggregation=AttributeAggregation(
                                 aggregate=Function.FUNCTION_COUNT,
                                 key=AttributeKey(
-                                    name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE
+                                    name="sentry.project_id", type=AttributeKey.Type.TYPE_INT
                                 ),
                                 label="count()",
                                 extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
@@ -464,7 +702,7 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
-    def test_aggregate_query_with_multiple_conditions_nested(self):
+    def test_aggregate_query_with_multiple_conditions_nested(self) -> None:
         where, having, _ = self.resolver.resolve_query(
             "(count():>1 AND avg(http.response_content_length):>3000) OR (count():>1 AND avg(measurements.lcp):>3000)"
         )
@@ -480,8 +718,8 @@ class SearchResolverQueryTest(TestCase):
                                         aggregation=AttributeAggregation(
                                             aggregate=Function.FUNCTION_COUNT,
                                             key=AttributeKey(
-                                                name="sentry.duration_ms",
-                                                type=AttributeKey.Type.TYPE_DOUBLE,
+                                                name="sentry.project_id",
+                                                type=AttributeKey.Type.TYPE_INT,
                                             ),
                                             label="count()",
                                             extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
@@ -516,8 +754,8 @@ class SearchResolverQueryTest(TestCase):
                                         aggregation=AttributeAggregation(
                                             aggregate=Function.FUNCTION_COUNT,
                                             key=AttributeKey(
-                                                name="sentry.duration_ms",
-                                                type=AttributeKey.Type.TYPE_DOUBLE,
+                                                name="sentry.project_id",
+                                                type=AttributeKey.Type.TYPE_INT,
                                             ),
                                             label="count()",
                                             extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
@@ -547,9 +785,88 @@ class SearchResolverQueryTest(TestCase):
             )
         )
 
+    def test_cache_update_for_issues(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(organization=self.organization, projects=[self.project]),
+            config=SearchResolverConfig(),
+            definitions=OCCURRENCE_DEFINITIONS,
+        )
+        group1 = self.create_group(project=self.project)
+        group2 = self.create_group(project=self.project)
+        resolver.resolve_query(f"issue:{group1.qualified_short_id}")
+        project_id = group1.project_id
+        assert project_id in resolver.qualified_short_id_to_group_id_cache
+        assert len(resolver.qualified_short_id_to_group_id_cache[project_id]) == 1
+        assert (
+            group1.qualified_short_id in resolver.qualified_short_id_to_group_id_cache[project_id]
+        )
+
+        resolver.resolve_query(f"issue:{group2.qualified_short_id}")
+        assert len(resolver.qualified_short_id_to_group_id_cache[project_id]) == 2
+        assert (
+            group2.qualified_short_id in resolver.qualified_short_id_to_group_id_cache[project_id]
+        )
+
+    def test_has_trace(self) -> None:
+        where, having, _ = self.resolver.resolve_query("has:trace")
+        trace_key = AttributeKey(name="sentry.trace_id", type=AttributeKey.Type.TYPE_STRING)
+        assert where == TraceItemFilter(
+            and_filter=AndFilter(
+                filters=[
+                    TraceItemFilter(
+                        exists_filter=ExistsFilter(key=trace_key),
+                    ),
+                ]
+            )
+        )
+        assert having is None
+
+    def test_not_has_trace(self) -> None:
+        where, having, _ = self.resolver.resolve_query("!has:trace")
+        trace_key = AttributeKey(name="sentry.trace_id", type=AttributeKey.Type.TYPE_STRING)
+        assert where == TraceItemFilter(
+            or_filter=OrFilter(
+                filters=[
+                    TraceItemFilter(
+                        not_filter=NotFilter(
+                            filters=[
+                                TraceItemFilter(
+                                    exists_filter=ExistsFilter(key=trace_key),
+                                )
+                            ]
+                        )
+                    ),
+                ]
+            )
+        )
+        assert having is None
+
+    def test_has_parent_span(self) -> None:
+        where, having, _ = self.resolver.resolve_query("has:parent_span")
+        parent_span_key = AttributeKey(
+            name="sentry.parent_span_id", type=AttributeKey.Type.TYPE_STRING
+        )
+        assert where == TraceItemFilter(
+            and_filter=AndFilter(
+                filters=[
+                    TraceItemFilter(
+                        exists_filter=ExistsFilter(key=parent_span_key),
+                    ),
+                    TraceItemFilter(
+                        comparison_filter=ComparisonFilter(
+                            key=parent_span_key,
+                            op=ComparisonFilter.OP_NOT_EQUALS,
+                            value=AttributeValue(val_str=""),
+                        )
+                    ),
+                ]
+            )
+        )
+        assert having is None
+
 
 class SearchResolverColumnTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.project = self.create_project(name="test")
         self.resolver = SearchResolver(
@@ -558,59 +875,139 @@ class SearchResolverColumnTest(TestCase):
             definitions=SPAN_DEFINITIONS,
         )
 
-    def test_simple_op_field(self):
+    def test_simple_op_field(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("span.op")
         assert resolved_column.proto_definition == AttributeKey(
             name="sentry.op", type=AttributeKey.Type.TYPE_STRING
         )
         assert virtual_context is None
 
-    def test_project_field(self):
+    def test_project_field(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("project")
         assert resolved_column.proto_definition == AttributeKey(
             name="project", type=AttributeKey.Type.TYPE_STRING
         )
         assert virtual_context is not None
-        assert virtual_context.constructor(self.resolver.params) == VirtualColumnContext(
+        assert virtual_context.constructor(
+            self.resolver.params, self.resolver
+        ) == VirtualColumnContext(
             from_column_name="sentry.project_id",
             to_column_name="project",
             value_map={str(self.project.id): self.project.slug},
         )
 
-    def test_project_slug_field(self):
+    def test_project_slug_field(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("project.slug")
         assert resolved_column.proto_definition == AttributeKey(
             name="project.slug", type=AttributeKey.Type.TYPE_STRING
         )
         assert virtual_context is not None
-        assert virtual_context.constructor(self.resolver.params) == VirtualColumnContext(
+        assert virtual_context.constructor(
+            self.resolver.params, self.resolver
+        ) == VirtualColumnContext(
             from_column_name="sentry.project_id",
             to_column_name="project.slug",
             value_map={str(self.project.id): self.project.slug},
         )
 
-    def test_simple_tag(self):
+    def test_simple_tag(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("tags[foo]")
         assert resolved_column.proto_definition == AttributeKey(
             name="foo", type=AttributeKey.Type.TYPE_STRING
         )
         assert virtual_context is None
 
-    def test_simple_string_tag(self):
+    def test_simple_string_tag(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("tags[foo, string]")
         assert resolved_column.proto_definition == AttributeKey(
             name="foo", type=AttributeKey.Type.TYPE_STRING
         )
         assert virtual_context is None
 
-    def test_simple_number_tag(self):
+    def test_simple_number_tag(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("tags[foo, number]")
         assert resolved_column.proto_definition == AttributeKey(
             name="foo", type=AttributeKey.Type.TYPE_DOUBLE
         )
         assert virtual_context is None
 
-    def test_sum_function(self):
+    def test_resolve_columns_hides_internal_api_attributes(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+
+        resolved_columns, resolved_contexts = resolver.resolve_columns(
+            [
+                "span.op",
+                f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]",
+            ]
+        )
+
+        assert [column.public_alias for column in resolved_columns] == ["span.op"]
+        assert resolved_contexts == [None]
+
+    def test_resolve_columns_hides_functions_with_internal_api_attributes(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+        hidden_attribute = f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]"
+
+        resolved_columns, resolved_contexts = resolver.resolve_columns(
+            ["span.op", f"count_unique({hidden_attribute})"]
+        )
+
+        assert [column.public_alias for column in resolved_columns] == ["span.op"]
+        assert resolved_contexts == [None]
+
+    def test_resolve_equations_hides_internal_api_attributes(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+        hidden_attribute = f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]"
+
+        resolved_equations, resolved_contexts = resolver.resolve_equations(
+            [f"count_unique({hidden_attribute}) / count()", "count() / 1"]
+        )
+
+        assert [column.public_alias for column in resolved_equations] == ["equation|count() / 1"]
+        assert resolved_contexts == []
+
+    def test_resolve_columns_includes_internal_api_attributes_when_configured(self) -> None:
+        resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(
+                api_attribute_visibility_item_type=SupportedTraceItemType.SPANS,
+                api_attribute_visibility_include_internal=True,
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+
+        resolved_columns, resolved_contexts = resolver.resolve_columns(
+            [
+                "span.op",
+                f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]",
+            ]
+        )
+
+        assert [column.public_alias for column in resolved_columns] == [
+            "span.op",
+            f"tags[{ATTRIBUTE_NAMES.SENTRY_DSC_TRACE_ID.removeprefix('sentry.')}]",
+        ]
+        assert resolved_contexts == [None, None]
+
+    def test_sum_function(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("sum(span.self_time)")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_SUM,
@@ -620,7 +1017,7 @@ class SearchResolverColumnTest(TestCase):
         )
         assert virtual_context is None
 
-    def test_sum_default_argument(self):
+    def test_sum_default_argument(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("sum()")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_SUM,
@@ -630,7 +1027,7 @@ class SearchResolverColumnTest(TestCase):
         )
         assert virtual_context is None
 
-    def test_function_alias(self):
+    def test_function_alias(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("sum() as test")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_SUM,
@@ -640,11 +1037,11 @@ class SearchResolverColumnTest(TestCase):
         )
         assert virtual_context is None
 
-    def test_count(self):
+    def test_count(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("count()")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_COUNT,
-            key=AttributeKey(name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE),
+            key=AttributeKey(name="sentry.project_id", type=AttributeKey.Type.TYPE_INT),
             label="count()",
             extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
         )
@@ -652,13 +1049,13 @@ class SearchResolverColumnTest(TestCase):
         resolved_column, virtual_context = self.resolver.resolve_column("count(span.duration)")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_COUNT,
-            key=AttributeKey(name="sentry.duration_ms", type=AttributeKey.Type.TYPE_DOUBLE),
+            key=AttributeKey(name="sentry.project_id", type=AttributeKey.Type.TYPE_INT),
             label="count(span.duration)",
             extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
         )
         assert virtual_context is None
 
-    def test_p50(self):
+    def test_p50(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("p50()")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_P50,
@@ -668,7 +1065,7 @@ class SearchResolverColumnTest(TestCase):
         )
         assert virtual_context is None
 
-    def test_count_unique(self):
+    def test_count_unique(self) -> None:
         resolved_column, virtual_context = self.resolver.resolve_column("count_unique(span.action)")
         assert resolved_column.proto_definition == AttributeAggregation(
             aggregate=Function.FUNCTION_UNIQ,
@@ -678,7 +1075,31 @@ class SearchResolverColumnTest(TestCase):
         )
         assert virtual_context is None
 
-    def test_resolver_cache_attribute(self):
+    def test_max_timestamp(self) -> None:
+        resolved_column, virtual_context = self.resolver.resolve_column("max(timestamp)")
+        assert resolved_column.proto_definition == AttributeAggregation(
+            aggregate=Function.FUNCTION_MAX,
+            key=AttributeKey(name="sentry.timestamp", type=AttributeKey.Type.TYPE_DOUBLE),
+            label="max(timestamp)",
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+        )
+        assert virtual_context is None
+
+    def test_min_timestamp(self) -> None:
+        resolved_column, virtual_context = self.resolver.resolve_column("min(timestamp)")
+        assert resolved_column.proto_definition == AttributeAggregation(
+            aggregate=Function.FUNCTION_MIN,
+            key=AttributeKey(name="sentry.timestamp", type=AttributeKey.Type.TYPE_DOUBLE),
+            label="min(timestamp)",
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+        )
+        assert virtual_context is None
+
+    def test_max_string_field_raises(self) -> None:
+        with pytest.raises(InvalidSearchQuery):
+            self.resolver.resolve_column("max(span.description)")
+
+    def test_resolver_cache_attribute(self) -> None:
         self.resolver.resolve_columns(["span.op"])
         assert "span.op" in self.resolver._resolved_attribute_cache
 
@@ -690,7 +1111,7 @@ class SearchResolverColumnTest(TestCase):
         resolved_column, virtual_context = self.resolver.resolve_column("span.op")
         assert (resolved_column, virtual_context) == (project_column, project_context)
 
-    def test_resolver_cache_function(self):
+    def test_resolver_cache_function(self) -> None:
         self.resolver.resolve_columns(["count()"])
         assert "count()" in self.resolver._resolved_function_cache
 
@@ -700,11 +1121,425 @@ class SearchResolverColumnTest(TestCase):
         resolved_column, virtual_context = self.resolver.resolve_column("count()")
         assert (resolved_column, virtual_context) == (p95_column, p95_context)
 
+    def test_first_function(self) -> None:
+        # first isn't allowed in the default acl
+        with pytest.raises(
+            InvalidSearchQuery, match="The function first is not allowed for this query"
+        ):
+            resolved_column, _ = self.resolver.resolve_column("first(span.description, timestamp)")
+        # Enable first
+        self.resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(fields_acl=FieldsACL(functions={"first", "first_if"})),
+            definitions=SPAN_DEFINITIONS,
+        )
+        function = "first(span.description, timestamp)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
 
-def test_loads_deprecated_attrs_json():
-    with open(os.path.join(SENTRY_CONVENTIONS_DIRECTORY, "deprecated_attributes.json"), "rb") as f:
-        deprecated_attrs = json.loads(f.read())["attributes"]
+        assert resolved_column.proto_definition == AttributeAggregation(
+            aggregate=Function.FUNCTION_FIRST,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            label=function,
+            ranked_by=RankedBy(
+                key=AttributeKey(name="sentry.timestamp", type=AttributeKey.TYPE_DOUBLE)
+            ),
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+        )
 
-    attribute = deprecated_attrs[0]
-    assert attribute["key"]
-    assert attribute["deprecation"]
+        function = "first_if(`span.description:foo`, span.description, timestamp)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
+
+        assert resolved_column.proto_definition == AttributeConditionalAggregation(
+            aggregate=Function.FUNCTION_FIRST,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            filter=TraceItemFilter(
+                comparison_filter=ComparisonFilter(
+                    key=AttributeKey(
+                        name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING
+                    ),
+                    op=ComparisonFilter.OP_EQUALS,
+                    value=AttributeValue(val_str="foo"),
+                )
+            ),
+            label=function,
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+            ranked_by=RankedBy(
+                key=AttributeKey(name="sentry.timestamp", type=AttributeKey.TYPE_DOUBLE)
+            ),
+        )
+
+    def test_last_function(self) -> None:
+        # last isn't allowed in the default acl
+        with pytest.raises(
+            InvalidSearchQuery, match="The function last is not allowed for this query"
+        ):
+            resolved_column, _ = self.resolver.resolve_column("last(span.description, timestamp)")
+        # Enable last
+        self.resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(fields_acl=FieldsACL(functions={"last", "last_if"})),
+            definitions=SPAN_DEFINITIONS,
+        )
+        function = "last(span.description, timestamp)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
+
+        assert resolved_column.proto_definition == AttributeAggregation(
+            aggregate=Function.FUNCTION_LAST,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            label=function,
+            ranked_by=RankedBy(
+                key=AttributeKey(name="sentry.timestamp", type=AttributeKey.TYPE_DOUBLE)
+            ),
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+        )
+
+        function = "last_if(`span.description:foo`, span.description, timestamp)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
+
+        assert resolved_column.proto_definition == AttributeConditionalAggregation(
+            aggregate=Function.FUNCTION_LAST,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            filter=TraceItemFilter(
+                comparison_filter=ComparisonFilter(
+                    key=AttributeKey(
+                        name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING
+                    ),
+                    op=ComparisonFilter.OP_EQUALS,
+                    value=AttributeValue(val_str="foo"),
+                )
+            ),
+            label=function,
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+            ranked_by=RankedBy(
+                key=AttributeKey(name="sentry.timestamp", type=AttributeKey.TYPE_DOUBLE)
+            ),
+        )
+
+    def test_collect_unique(self) -> None:
+        # collect_unique isn't allowed in the default acl
+        with pytest.raises(
+            InvalidSearchQuery, match="The function collect_unique is not allowed for this query"
+        ):
+            resolved_column, _ = self.resolver.resolve_column("collect_unique(span.description)")
+        # Enable collect_unique
+        self.resolver = SearchResolver(
+            params=SnubaParams(projects=[self.project]),
+            config=SearchResolverConfig(
+                fields_acl=FieldsACL(functions={"collect_unique", "collect_unique_if"}),
+            ),
+            definitions=SPAN_DEFINITIONS,
+        )
+        function = "collect_unique(span.description)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
+
+        assert resolved_column.proto_definition == AttributeAggregation(
+            aggregate=Function.FUNCTION_COLLECT_UNIQUE,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            label=function,
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_NONE,
+        )
+
+        function = "collect_unique_if(`span.description:foo`, span.description)"
+        resolved_column, _ = self.resolver.resolve_column(function)
+        assert function in self.resolver._resolved_function_cache
+
+        assert resolved_column.proto_definition == AttributeConditionalAggregation(
+            aggregate=Function.FUNCTION_COLLECT_UNIQUE,
+            key=AttributeKey(name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING),
+            filter=TraceItemFilter(
+                comparison_filter=ComparisonFilter(
+                    key=AttributeKey(
+                        name="sentry.raw_description", type=AttributeKey.Type.TYPE_STRING
+                    ),
+                    op=ComparisonFilter.OP_EQUALS,
+                    value=AttributeValue(val_str="foo"),
+                )
+            ),
+            label=function,
+            extrapolation_mode=ExtrapolationMode.EXTRAPOLATION_MODE_NONE,
+        )
+
+
+def _make_deprecated_metadata(
+    attr_type: AttributeType,
+    replacement: str,
+    status: DeprecationStatus = DeprecationStatus.BACKFILL,
+    keys: tuple[str, ...] = (),
+) -> AttributeMetadata:
+    return AttributeMetadata(
+        brief="",
+        type=attr_type,
+        keys=keys,
+        apply_scrubbing=ApplyScrubbingInfo(key=ApplyScrubbing.NEVER),
+        is_in_otel=False,
+        visibility=Visibility.PUBLIC,
+        deprecation=DeprecationInfo(replacement=replacement, status=status),
+    )
+
+
+def test_reasoning_level_attribute_is_queryable() -> None:
+    attr = SPAN_ATTRIBUTE_DEFINITIONS["gen_ai.request.reasoning.level"]
+
+    assert attr.public_alias == "gen_ai.request.reasoning.level"
+    assert attr.internal_name == "gen_ai.request.reasoning.level"
+    assert attr.search_type == "string"
+    assert (
+        SPAN_EAP_COLUMN_MAP["gen_ai.request.reasoning.level"]
+        == "attr_str[gen_ai.request.reasoning.level]"
+    )
+
+
+def test_backfilled_deprecated_attributes_resolve_to_replacement() -> None:
+    deprecated_attr = SPAN_ATTRIBUTE_DEFINITIONS["http.response_content_length"]
+    replacement_attr = SPAN_ATTRIBUTE_DEFINITIONS["http.response.body.size"]
+
+    assert deprecated_attr.internal_name == "http.response_content_length"
+    assert deprecated_attr.search_type == "byte"
+    assert deprecated_attr.deprecation_status == "backfill"
+    assert deprecated_attr.replacement == "http.response.body.size"
+    assert replacement_attr.internal_name == "http.response.body.size"
+    assert replacement_attr.search_type == "byte"
+    assert SPANS_REPLACEMENT_MAP["http.response_content_length"] == "http.response.body.size"
+
+
+def test_deprecated_attribute_internal_alias_preserves_existing_search_type() -> None:
+    attribute_definitions = {
+        "mobile.total_frames": SPAN_ATTRIBUTE_DEFINITIONS["mobile.total_frames"],
+    }
+    mobile_total_frames_attr = attribute_definitions["mobile.total_frames"]
+
+    assert mobile_total_frames_attr.public_alias == "mobile.total_frames"
+    assert mobile_total_frames_attr.internal_name == "frames.total"
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "frames.total": _make_deprecated_metadata(
+                AttributeType.INTEGER, "app.vitals.frames.total.count"
+            )
+        },
+    )
+
+    deprecated_internal_attr = attribute_definitions["mobile.total_frames"]
+    replacement_attr = attribute_definitions["app.vitals.frames.total.count"]
+
+    assert "frames.total" not in attribute_definitions
+    assert deprecated_internal_attr.public_alias == "mobile.total_frames"
+    assert deprecated_internal_attr.internal_name == "frames.total"
+    assert deprecated_internal_attr.search_type == "number"
+    assert deprecated_internal_attr.deprecation_status == "backfill"
+    assert deprecated_internal_attr.replacement == "app.vitals.frames.total.count"
+    assert replacement_attr.public_alias == "app.vitals.frames.total.count"
+    assert replacement_attr.internal_name == "app.vitals.frames.total.count"
+    assert replacement_attr.search_type == "number"
+
+
+def test_deprecated_attribute_internal_name_match_does_not_expose_internal_alias() -> None:
+    attribute_definitions = {
+        "measurements.fcp": SPAN_ATTRIBUTE_DEFINITIONS["measurements.fcp"],
+    }
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {"fcp": _make_deprecated_metadata(AttributeType.DOUBLE, "browser.web_vital.fcp.value")},
+    )
+
+    deprecated_attr = attribute_definitions["measurements.fcp"]
+    replacement_attr = attribute_definitions["browser.web_vital.fcp.value"]
+
+    assert "fcp" not in attribute_definitions
+    assert deprecated_attr.public_alias == "measurements.fcp"
+    assert deprecated_attr.internal_name == "fcp"
+    assert deprecated_attr.search_type == "millisecond"
+    assert deprecated_attr.deprecation_status == "backfill"
+    assert deprecated_attr.replacement == "browser.web_vital.fcp.value"
+    assert replacement_attr.public_alias == "browser.web_vital.fcp.value"
+    assert replacement_attr.internal_name == "browser.web_vital.fcp.value"
+    assert replacement_attr.search_type == "millisecond"
+
+
+def test_deprecated_attribute_replacement_does_not_inherit_secondary_alias() -> None:
+    attribute_definitions = {
+        "span.system": ResolvedAttribute(
+            public_alias="span.system",
+            internal_name="db.system",
+            search_type="string",
+            secondary_alias=True,
+        ),
+    }
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {"db.system": _make_deprecated_metadata(AttributeType.STRING, "db.system.name")},
+    )
+
+    deprecated_attr = attribute_definitions["span.system"]
+    replacement_attr = attribute_definitions["db.system.name"]
+
+    assert "db.system" not in attribute_definitions
+    assert deprecated_attr.public_alias == "span.system"
+    assert deprecated_attr.internal_name == "db.system"
+    assert deprecated_attr.secondary_alias is True
+    assert deprecated_attr.deprecation_status == "backfill"
+    assert deprecated_attr.replacement == "db.system.name"
+    assert replacement_attr.public_alias == "db.system.name"
+    assert replacement_attr.internal_name == "db.system.name"
+    assert replacement_attr.search_type == "string"
+    assert replacement_attr.secondary_alias is False
+    assert replacement_attr.deprecation_status is None
+    assert replacement_attr.replacement is None
+
+
+def test_deprecated_attribute_loaded_replacement_is_primary_alias() -> None:
+    replacement_attr = SPAN_ATTRIBUTE_DEFINITIONS["db.system.name"]
+
+    assert replacement_attr.secondary_alias is False
+    assert SPANS_INTERNAL_TO_PUBLIC_ALIAS_MAPPINGS["string"]["db.system.name"] == "db.system.name"
+    assert SPAN_INTERNAL_TO_SECONDARY_ALIASES_MAPPING.get("db.system.name") is None
+
+
+def test_deprecated_attribute_does_not_overwrite_existing_replacement() -> None:
+    attribute_definitions = {
+        "mobile.total_frames": SPAN_ATTRIBUTE_DEFINITIONS["mobile.total_frames"],
+        "app.vitals.frames.total.count": ResolvedAttribute(
+            public_alias="app.vitals.frames.total.count",
+            internal_name="app.vitals.frames.total.count",
+            search_type="integer",
+        ),
+    }
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "frames.total": _make_deprecated_metadata(
+                AttributeType.DOUBLE, "app.vitals.frames.total.count"
+            )
+        },
+    )
+
+    deprecated_internal_attr = attribute_definitions["mobile.total_frames"]
+    replacement_attr = attribute_definitions["app.vitals.frames.total.count"]
+
+    assert "frames.total" not in attribute_definitions
+    assert deprecated_internal_attr.public_alias == "mobile.total_frames"
+    assert deprecated_internal_attr.internal_name == "frames.total"
+    assert deprecated_internal_attr.search_type == "number"
+    assert deprecated_internal_attr.deprecation_status == "backfill"
+    assert deprecated_internal_attr.replacement == "app.vitals.frames.total.count"
+    assert replacement_attr.public_alias == "app.vitals.frames.total.count"
+    assert replacement_attr.internal_name == "app.vitals.frames.total.count"
+    assert replacement_attr.search_type == "integer"
+    assert replacement_attr.deprecation_status is None
+    assert replacement_attr.replacement is None
+
+
+def test_deprecated_attribute_replacement_does_not_shadow_existing_internal_name() -> None:
+    attribute_definitions = {
+        "environment": ResolvedAttribute(
+            public_alias="environment",
+            internal_name="sentry.environment",
+            search_type="string",
+        ),
+    }
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "resource.deployment.environment": _make_deprecated_metadata(
+                AttributeType.STRING, "sentry.environment"
+            ),
+            "resource.deployment.environment.name": _make_deprecated_metadata(
+                AttributeType.STRING, "sentry.environment"
+            ),
+        },
+    )
+
+    assert "sentry.environment" not in attribute_definitions
+    assert attribute_definitions["environment"].public_alias == "environment"
+    assert attribute_definitions["environment"].internal_name == "sentry.environment"
+
+    assert (
+        attribute_definitions["resource.deployment.environment"].replacement == "sentry.environment"
+    )
+    assert (
+        attribute_definitions["resource.deployment.environment.name"].replacement
+        == "sentry.environment"
+    )
+
+
+def test_deprecated_attribute_normalizes_supported_convention_attribute_types() -> None:
+    attribute_definitions: dict[str, ResolvedAttribute] = {}
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "old_string": _make_deprecated_metadata(AttributeType.STRING, "new_string"),
+            "old_boolean": _make_deprecated_metadata(AttributeType.BOOLEAN, "new_boolean"),
+            "old_integer": _make_deprecated_metadata(AttributeType.INTEGER, "new_integer"),
+            "old_double": _make_deprecated_metadata(AttributeType.DOUBLE, "new_double"),
+        },
+    )
+
+    assert attribute_definitions["old_string"].search_type == "string"
+    assert attribute_definitions["new_string"].search_type == "string"
+
+    assert attribute_definitions["old_boolean"].search_type == "boolean"
+    assert attribute_definitions["new_boolean"].search_type == "boolean"
+
+    assert attribute_definitions["old_integer"].search_type == "integer"
+    assert attribute_definitions["new_integer"].search_type == "integer"
+
+    assert attribute_definitions["old_double"].search_type == "number"
+    assert attribute_definitions["new_double"].search_type == "number"
+
+
+def test_normalize_deprecated_attributes_resolve_to_replacement() -> None:
+    attribute_definitions: dict[str, ResolvedAttribute] = {}
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "old_attr": _make_deprecated_metadata(
+                AttributeType.STRING, "new_attr", status=DeprecationStatus.NORMALIZE
+            ),
+        },
+    )
+
+    assert "old_attr" in attribute_definitions
+    assert attribute_definitions["old_attr"].replacement == "new_attr"
+    assert attribute_definitions["old_attr"].deprecation_status == "normalize"
+    assert "new_attr" in attribute_definitions
+    assert attribute_definitions["new_attr"].search_type == "string"
+
+
+def test_normalize_deprecated_attribute_preserves_existing_definition() -> None:
+    attribute_definitions = {
+        "gen_ai.request.messages": ResolvedAttribute(
+            public_alias="gen_ai.request.messages",
+            internal_name="gen_ai.request.messages",
+            search_type="string",
+        ),
+    }
+
+    _update_attribute_definitions_with_deprecations(
+        attribute_definitions,
+        {
+            "gen_ai.request.messages": _make_deprecated_metadata(
+                AttributeType.STRING, "gen_ai.input.messages", status=DeprecationStatus.NORMALIZE
+            ),
+        },
+    )
+
+    deprecated_attr = attribute_definitions["gen_ai.request.messages"]
+    replacement_attr = attribute_definitions["gen_ai.input.messages"]
+
+    assert deprecated_attr.replacement == "gen_ai.input.messages"
+    assert deprecated_attr.deprecation_status == "normalize"
+    assert replacement_attr.public_alias == "gen_ai.input.messages"
+    assert replacement_attr.internal_name == "gen_ai.input.messages"
+    assert replacement_attr.search_type == "string"

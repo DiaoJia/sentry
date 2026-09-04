@@ -32,6 +32,7 @@ from sentry.snuba.metrics_performance import query as metrics_query
 from sentry.snuba.query_sources import QuerySource
 from sentry.utils import snuba
 from sentry.utils.dates import parse_timestamp
+from sentry.utils.tracing import trace
 
 logger = logging.getLogger("sentry.tasks.split_discover_query_dataset")
 
@@ -62,20 +63,23 @@ def _save_split_decision_for_widget(
     widget: DashboardWidget,
     split_decision: int | None,
     dataset_source: DatasetSourcesTypes | None,
-):
+) -> None:
     if split_decision is not None:
         widget.discover_widget_split = split_decision
     if dataset_source is not None:
         widget.dataset_source = dataset_source.value
+    if widget.widget_type is None:
+        widget.widget_type = DashboardWidgetTypes.DISCOVER
 
     widget.save()
 
 
-@sentry_sdk.trace
+@trace
 def _get_and_save_split_decision_for_dashboard_widget(
     widget_query: DashboardWidgetQuery, dry_run: bool
 ) -> tuple[int, bool]:
     sentry_sdk.set_tag("dry_run", dry_run)
+    sentry_sdk.set_attribute("dry_run", dry_run)
 
     widget: DashboardWidget = widget_query.widget
     dashboard: Dashboard = widget.dashboard
@@ -99,6 +103,9 @@ def _get_and_save_split_decision_for_dashboard_widget(
                     "org_slug": dashboard.organization.slug,
                 },
             )
+            sentry_sdk.set_attribute("dashboard.dashboard_id", dashboard.id)
+            sentry_sdk.set_attribute("dashboard.widget_id", widget.id)
+            sentry_sdk.set_attribute("dashboard.org_slug", dashboard.organization.slug)
             sentry_sdk.capture_message(
                 "No projects found in organization for dashboard, defaulting to errors dataset"
             )

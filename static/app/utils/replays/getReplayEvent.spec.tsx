@@ -5,7 +5,7 @@ import {
   getNextReplayFrame,
   getPrevReplayFrame,
 } from 'sentry/utils/replays/getReplayEvent';
-import hydrateBreadcrumbs from 'sentry/utils/replays/hydrateBreadcrumbs';
+import {hydrateBreadcrumbs} from 'sentry/utils/replays/hydrateBreadcrumbs';
 
 const frames = hydrateBreadcrumbs(
   ReplayRecordFixture({
@@ -89,7 +89,6 @@ describe('getNextReplayFrame', () => {
     const result = getNextReplayFrame({
       frames,
       targetOffsetMs: exactTime,
-      allowExact: false,
     });
 
     expect(result).toEqual(frames[2]);
@@ -159,7 +158,6 @@ describe('getPrevReplayFrame', () => {
     const result = getPrevReplayFrame({
       frames,
       targetOffsetMs: exactTime,
-      allowExact: false,
     });
 
     expect(result).toEqual(frames[0]);

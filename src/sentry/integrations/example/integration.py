@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
-from django.http import HttpResponse
 from django.http.request import HttpRequest
-from django.http.response import HttpResponseBase
+from rest_framework.fields import CharField
 
+from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
 from sentry.integrations.base import (
     FeatureDescription,
     IntegrationData,
@@ -18,35 +18,51 @@ from sentry.integrations.mixins import ResolveSyncAction
 from sentry.integrations.mixins.issues import IssueSyncIntegration
 from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.models.integration import Integration
-from sentry.integrations.pipeline_types import IntegrationPipelineT, IntegrationPipelineViewT
-from sentry.integrations.services.integration.serial import serialize_integration
+from sentry.integrations.pipeline import IntegrationPipeline
 from sentry.integrations.services.repository.model import RpcRepository
 from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
-from sentry.integrations.source_code_management.repository import RepositoryIntegration
+from sentry.integrations.source_code_management.repository import (
+    RepositoryInfo,
+    RepositoryIntegration,
+)
 from sentry.models.repository import Repository
 from sentry.organizations.services.organization.model import RpcOrganization
-from sentry.plugins.migrator import Migrator
+from sentry.pipeline.types import PipelineStepResult
+from sentry.pipeline.views.base import ApiPipelineSteps
 from sentry.shared_integrations.exceptions import IntegrationError
 from sentry.users.services.user import RpcUser
 from sentry.users.services.user.service import user_service
 
 
-class ExampleSetupView(IntegrationPipelineViewT):
-    TEMPLATE = """
-        <form method="POST">
-            <p>This is an example integration configuration page.</p>
-            <p><label>Integration Name:</label></p>
-            <p><input type="name" name="name" /></p>
-            <p><input type="submit" value="Continue" /></p>
-        </form>
-    """
+class ExampleSetupSerializer(CamelSnakeSerializer):
+    """Validates the POST data submitted during the setup step. CamelSnakeSerializer
+    automatically converts between camelCase (frontend) and snake_case (backend)."""
 
-    def dispatch(self, request: HttpRequest, pipeline: IntegrationPipelineT) -> HttpResponseBase:
-        if "name" in request.POST:
-            pipeline.bind_state("name", request.POST["name"])
-            return pipeline.next_step()
+    name = CharField(required=True)
 
-        return HttpResponse(self.TEMPLATE)
+
+class ExampleSetupApiStep:
+    """Example API pipeline step demonstrating the integration setup pattern. Each step
+    exposes initial data via get_step_data (GET) and accepts validated input via
+    handle_post (POST). The frontend renders the form and calls the pipeline API
+    endpoint."""
+
+    step_name = "setup"
+
+    def get_step_data(self, pipeline: IntegrationPipeline, request: HttpRequest) -> dict[str, Any]:
+        return {}
+
+    def get_serializer_cls(self) -> type:
+        return ExampleSetupSerializer
+
+    def handle_post(
+        self,
+        validated_data: dict[str, str],
+        pipeline: IntegrationPipeline,
+        request: HttpRequest,
+    ) -> PipelineStepResult:
+        pipeline.bind_state("name", validated_data["name"])
+        return PipelineStepResult.advance()
 
 
 DESCRIPTION = """
@@ -84,7 +100,7 @@ class ExampleIntegration(RepositoryIntegration, SourceCodeIssueIntegration, Issu
     def get_client(self):
         pass
 
-    def get_issue_url(self, key):
+    def get_issue_url(self, key) -> str:
         return f"https://example/issues/{key}"
 
     def create_comment(self, issue_id, user_id, group_note):
@@ -145,11 +161,16 @@ class ExampleIntegration(RepositoryIntegration, SourceCodeIssueIntegration, Issu
             "description": "This is a test external issue description",
         }
 
-    def get_repositories(self, query: str | None = None) -> list[dict[str, Any]]:
-        return [{"name": "repo", "identifier": "user/repo"}]
-
-    def get_unmigratable_repositories(self):
-        return []
+    def get_repositories(
+        self,
+        query: str | None = None,
+        page_number_limit: int | None = None,
+        accessible_only: bool = False,
+        use_cache: bool = False,
+        raise_on_page_limit: bool = False,
+        parallel: bool = False,
+    ) -> list[RepositoryInfo]:
+        return [{"name": "repo", "identifier": "user/repo", "external_id": "1"}]
 
     def sync_assignee_outbound(
         self,
@@ -172,7 +193,7 @@ class ExampleIntegration(RepositoryIntegration, SourceCodeIssueIntegration, Issu
             should_unresolve=category != "done",
         )
 
-    def get_issue_display_name(self, external_issue):
+    def get_issue_display_name(self, external_issue) -> str:
         return f"display name: {external_issue.key}"
 
     def get_stacktrace_link(
@@ -218,8 +239,8 @@ class ExampleIntegrationProvider(IntegrationProvider):
         ]
     )
 
-    def get_pipeline_views(self) -> Sequence[IntegrationPipelineViewT]:
-        return [ExampleSetupView()]
+    def get_pipeline_api_steps(self) -> ApiPipelineSteps[IntegrationPipeline]:
+        return [ExampleSetupApiStep()]
 
     def get_config(self):
         return [{"name": "name", "label": "Name", "type": "text", "required": True}]
@@ -231,10 +252,10 @@ class ExampleIntegrationProvider(IntegrationProvider):
         *,
         extra: dict[str, Any],
     ) -> None:
-        Migrator(integration=serialize_integration(integration), organization=organization).run()
+        pass
 
     def build_integration(self, state: Mapping[str, Any]) -> IntegrationData:
-        return {"external_id": state["name"]}
+        return {"external_id": state.get("name", "example")}
 
     def setup(self):
         """

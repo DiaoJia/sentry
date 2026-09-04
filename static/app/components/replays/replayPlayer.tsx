@@ -2,19 +2,19 @@ import {Fragment, useCallback, useEffect, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import {useResizeObserver} from '@react-aria/utils';
 
-import NegativeSpaceContainer from 'sentry/components/container/negativeSpaceContainer';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import BufferingOverlay from 'sentry/components/replays/player/bufferingOverlay';
-import FastForwardBadge from 'sentry/components/replays/player/fastForwardBadge';
+import {NegativeSpaceContainer} from 'sentry/components/container/negativeSpaceContainer';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {BufferingOverlay} from 'sentry/components/replays/player/bufferingOverlay';
+import {FastForwardBadge} from 'sentry/components/replays/player/fastForwardBadge';
 import {
   baseReplayerCss,
   sentryReplayerCss,
 } from 'sentry/components/replays/player/styles';
 import {useReplayContext} from 'sentry/components/replays/replayContext';
+import {useReplayPlayerSize} from 'sentry/utils/replays/playback/providers/replayPlayerSizeContext';
+import {useReplayReader} from 'sentry/utils/replays/playback/providers/replayReaderProvider';
 
-import UnmaskAlert from './unmaskAlert';
-
-type Dimensions = ReturnType<typeof useReplayContext>['dimensions'];
+import {UnmaskAlert} from './unmaskAlert';
 
 interface Props {
   className?: string;
@@ -45,16 +45,15 @@ function BasePlayerRoot({
   isPreview = false,
   inspectable,
 }: Props) {
+  const replay = useReplayReader();
   const {
     dimensions: videoDimensions,
     fastForwardSpeed,
     setRoot,
-    isBuffering,
     isVideoBuffering,
     isFetching,
     isFinished,
     isVideoReplay,
-    replay,
   } = useReplayContext();
 
   const sdkOptions = replay?.getSDKOptions();
@@ -68,7 +67,7 @@ function BasePlayerRoot({
   const windowEl = useRef<HTMLDivElement>(null);
   const viewEl = useRef<HTMLDivElement>(null);
 
-  const [windowDimensions, setWindowDimensions] = useState<Dimensions>({
+  const [windowDimensions, setWindowDimensions] = useState({
     width: 0,
     height: 0,
   });
@@ -107,11 +106,13 @@ function BasePlayerRoot({
   useResizeObserver({ref: windowEl, onResize: updateWindowDimensions});
   // If your browser doesn't have ResizeObserver then set the size once.
   useEffect(() => {
-    if (typeof window.ResizeObserver !== 'undefined') {
+    if (window.ResizeObserver !== undefined) {
       return;
     }
     updateWindowDimensions();
   }, [updateWindowDimensions]);
+
+  const [, setViewSize] = useReplayPlayerSize();
 
   // Update the scale of the view whenever dimensions have changed.
   useEffect(() => {
@@ -124,6 +125,11 @@ function BasePlayerRoot({
         1.5
       );
       if (scale) {
+        setViewSize({
+          width: windowDimensions.width,
+          height: windowDimensions.height,
+          scale,
+        });
         // @ts-expect-error TS(7015): Element implicitly has an 'any' type because index... Remove this comment to see the full error message
         viewEl.current.style['transform-origin'] = 'top left';
         viewEl.current.style.transform = `scale(${scale})`;
@@ -131,7 +137,7 @@ function BasePlayerRoot({
         viewEl.current.style.height = `${videoDimensions.height * scale}px`;
       }
     }
-  }, [windowDimensions, videoDimensions]);
+  }, [windowDimensions, videoDimensions, setViewSize]);
 
   return (
     <Fragment>
@@ -143,7 +149,7 @@ function BasePlayerRoot({
       <StyledNegativeSpaceContainer ref={windowEl} className="sentry-block">
         <div ref={viewEl} className={className} data-inspectable={inspectable} />
         {fastForwardSpeed ? <PositionedFastForward speed={fastForwardSpeed} /> : null}
-        {isBuffering || isVideoBuffering ? <PositionedBuffering /> : null}
+        {isVideoBuffering ? <PositionedBuffering /> : null}
         {isPreview || isVideoReplay || isFetching || !hasDefaultMaskSettings ? null : (
           <UnmaskAlert />
         )}
@@ -171,7 +177,7 @@ const PositionedLoadingIndicator = styled(LoadingIndicator)`
   position: absolute;
 `;
 
-const SentryPlayerRoot = styled(BasePlayerRoot)`
+export const SentryPlayerRoot = styled(BasePlayerRoot)`
   /* Base styles, to make the Replayer instance work */
   ${baseReplayerCss}
   /* Sentry-specific styles for the player */
@@ -214,5 +220,3 @@ const StyledNegativeSpaceContainer = styled(NegativeSpaceContainer)`
   width: 100%;
   height: 100%;
 `;
-
-export default SentryPlayerRoot;

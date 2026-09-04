@@ -1,32 +1,27 @@
-import type {ReactNode} from 'react';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 
-import {act, renderHook, waitFor} from 'sentry-test/reactTestingLibrary';
+import {act, renderHookWithProviders, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
-import useProjects from 'sentry/utils/useProjects';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {useProjects} from 'sentry/utils/useProjects';
 
 const org = OrganizationFixture();
-function TestContext({children}: {children?: ReactNode}) {
-  return <OrganizationContext value={org}>{children}</OrganizationContext>;
-}
 
-describe('useProjects', function () {
+describe('useProjects', () => {
   const mockProjects = [ProjectFixture()];
 
-  it('provides projects from the team store', function () {
-    act(() => void ProjectsStore.loadInitialData(mockProjects));
+  it('provides projects from the team store', () => {
+    act(() => ProjectsStore.loadInitialData(mockProjects));
 
-    const {result} = renderHook(useProjects, {wrapper: TestContext});
+    const {result} = renderHookWithProviders(useProjects, {organization: org});
     const {projects} = result.current;
 
     expect(projects).toEqual(mockProjects);
   });
 
-  it('loads more projects when using onSearch', async function () {
-    act(() => void ProjectsStore.loadInitialData(mockProjects));
+  it('loads more projects when using onSearch', async () => {
+    act(() => ProjectsStore.loadInitialData(mockProjects));
 
     const newProject3 = ProjectFixture({id: '3', slug: 'test-project3'});
     const newProject4 = ProjectFixture({id: '4', slug: 'test-project4'});
@@ -37,9 +32,7 @@ describe('useProjects', function () {
       body: [newProject3, newProject4],
     });
 
-    const {result} = renderHook(useProjects, {
-      wrapper: TestContext,
-    });
+    const {result} = renderHookWithProviders(useProjects, {organization: org});
     const {onSearch} = result.current;
 
     // Works with append
@@ -62,8 +55,8 @@ describe('useProjects', function () {
     expect(result.current.projects).toEqual([...mockProjects, newProject3, newProject4]);
   });
 
-  it('provides only the specified slugs', async function () {
-    act(() => void ProjectsStore.loadInitialData(mockProjects));
+  it('provides only the specified slugs', async () => {
+    act(() => ProjectsStore.loadInitialData(mockProjects));
 
     const projectFoo = ProjectFixture({id: '3', slug: 'foo'});
     const mockRequest = MockApiClient.addMockResponse({
@@ -72,9 +65,9 @@ describe('useProjects', function () {
       body: [projectFoo],
     });
 
-    const {result} = renderHook(useProjects, {
+    const {result} = renderHookWithProviders(useProjects, {
+      organization: org,
       initialProps: {slugs: ['foo']},
-      wrapper: TestContext,
     });
 
     expect(result.current.initiallyLoaded).toBe(false);
@@ -86,12 +79,12 @@ describe('useProjects', function () {
     expect(projects).toEqual(expect.arrayContaining([projectFoo]));
   });
 
-  it('only loads slugs when needed', function () {
-    act(() => void ProjectsStore.loadInitialData(mockProjects));
+  it('only loads slugs when needed', () => {
+    act(() => ProjectsStore.loadInitialData(mockProjects));
 
-    const {result} = renderHook(useProjects, {
+    const {result} = renderHookWithProviders(useProjects, {
+      organization: org,
       initialProps: {slugs: [mockProjects[0]!.slug]},
-      wrapper: TestContext,
     });
 
     const {projects, initiallyLoaded} = result.current;

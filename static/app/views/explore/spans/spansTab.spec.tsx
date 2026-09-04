@@ -1,34 +1,41 @@
-import {initializeOrg} from 'sentry-test/initializeOrg';
-import {render, screen, userEvent, within} from 'sentry-test/reactTestingLibrary';
+import type {ReactNode} from 'react';
+import {AutofixSetupFixture} from 'sentry-fixture/autofixSetupFixture';
+import {ProjectFixture} from 'sentry-fixture/project';
 
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import type {TagCollection} from 'sentry/types/group';
-import {trackAnalytics} from 'sentry/utils/analytics';
-import {FieldKind} from 'sentry/utils/fields';
+import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
-  PageParamsProvider,
-  useExploreFields,
-  useExploreGroupBys,
-} from 'sentry/views/explore/contexts/pageParamsContext';
-import * as spanTagsModule from 'sentry/views/explore/contexts/spanTagsContext';
-import {TraceItemAttributeProvider} from 'sentry/views/explore/contexts/traceItemAttributeContext';
+  render,
+  screen,
+  userEvent,
+  waitFor,
+  within,
+} from 'sentry-test/reactTestingLibrary';
+
+import {ALL_ACCESS_PROJECTS} from 'sentry/components/pageFilters/constants';
+import type {DatePageFilterProps} from 'sentry/components/pageFilters/date/datePageFilter';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import type {Project} from 'sentry/types/project';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
+import {
+  useQueryParamsAggregateFields,
+  useQueryParamsAggregateSortBys,
+  useQueryParamsFields,
+  useQueryParamsGroupBys,
+} from 'sentry/views/explore/queryParams/context';
+import {SpansQueryParamsProvider} from 'sentry/views/explore/spans/spansQueryParamsProvider';
 import {SpansTabContent} from 'sentry/views/explore/spans/spansTab';
-import {TraceItemDataset} from 'sentry/views/explore/types';
-import type {PickableDays} from 'sentry/views/explore/utils';
+import type {EventValidationData} from 'sentry/views/explore/utils/validateEventParamsOptions';
+import {useLLMContext} from 'sentry/views/seerExplorer/contexts/llmContext';
+
+function Wrapper({children}: {children: ReactNode}) {
+  return <SpansQueryParamsProvider>{children}</SpansQueryParamsProvider>;
+}
 
 jest.mock('sentry/utils/analytics');
 
-const mockStringTags: TagCollection = {
-  stringTag1: {key: 'stringTag1', kind: FieldKind.TAG, name: 'stringTag1'},
-  stringTag2: {key: 'stringTag2', kind: FieldKind.TAG, name: 'stringTag2'},
-};
-
-const mockNumberTags: TagCollection = {
-  numberTag1: {key: 'numberTag1', kind: FieldKind.MEASUREMENT, name: 'numberTag1'},
-  numberTag2: {key: 'numberTag2', kind: FieldKind.MEASUREMENT, name: 'numberTag2'},
-};
-
-const datePageFilterProps: PickableDays = {
+const datePageFilterProps: DatePageFilterProps = {
   defaultPeriod: '7d' as const,
   maxPickableDays: 7,
   relativeOptions: ({arbitraryOptions}) => ({
@@ -39,35 +46,64 @@ const datePageFilterProps: PickableDays = {
   }),
 };
 
-describe('SpansTabContent', function () {
-  const {organization, project} = initializeOrg();
+const invalidAttributeValidationBody: EventValidationData = {
+  dataset: [],
+  environment: [],
+  field: [
+    {
+      attrType: null,
+      error: 'unknown attribute',
+      name: 'invalid.attribute',
+      valid: false,
+    },
+  ],
+  orderby: [],
+  projects: [],
+  query: {error: null, fields: [], valid: true},
+  valid: false,
+};
 
-  beforeEach(function () {
+describe('SpansTabContent', () => {
+  const {organization, project} = initializeOrg({
+    organization: {
+      features: ['gen-ai-features'],
+    },
+  });
+
+  function setProjects(projects: Project[], selectedProjectIds?: number[]) {
+    ProjectsStore.loadInitialData(projects);
+    PageFiltersStore.onInitializeUrlState({
+      projects: selectedProjectIds ?? projects.map(p => parseInt(p.id, 10)),
+      environments: [],
+      datetime: {period: '7d', start: null, end: null, utc: null},
+    });
+  }
+
+  function makeProject(params: Partial<Project>) {
+    return ProjectFixture({
+      organization: {id: organization.id, slug: organization.slug},
+      ...params,
+    });
+  }
+
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
 
     // without this the `CompactSelect` component errors with a bunch of async updates
     jest.spyOn(console, 'error').mockImplementation();
 
     PageFiltersStore.init();
-    PageFiltersStore.onInitializeUrlState(
-      {
-        projects: [project].map(p => parseInt(p.id, 10)),
-        environments: [],
-        datetime: {period: '7d', start: null, end: null, utc: null},
-      },
-      new Set()
-    );
+    setProjects([project]);
     MockApiClient.addMockResponse({
-      url: `/subscriptions/${organization.slug}/`,
+      url: `/customers/${organization.slug}/`,
       method: 'GET',
       body: {},
     });
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/recent-searches/`,
       method: 'GET',
-      body: {},
+      body: [],
     });
-
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/spans/fields/`,
       method: 'GET',
@@ -79,25 +115,48 @@ describe('SpansTabContent', function () {
       body: {},
     });
     MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/events-stats/`,
+      url: `/organizations/${organization.slug}/events-timeseries/`,
       method: 'GET',
-      body: {},
+      body: {
+        timeSeries: [],
+      },
     });
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/traces/`,
       method: 'GET',
       body: {},
     });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/seer/setup-check/`,
+      body: AutofixSetupFixture({}),
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/trace-items/attributes/`,
+      method: 'GET',
+      body: [],
+      match: [MockApiClient.matchQuery({attributeType: 'number'})],
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/trace-items/attributes/`,
+      method: 'GET',
+      body: [
+        {
+          key: 'project',
+          name: 'project',
+          attributeSource: {source_type: 'sentry'},
+        },
+      ],
+      match: [MockApiClient.matchQuery({attributeType: 'string'})],
+    });
   });
 
-  it('should fire analytics once per change', async function () {
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <SpansTabContent datePageFilterProps={datePageFilterProps} />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>,
-      {organization}
+  it('should fire analytics once per change', async () => {
+    const {router} = render(
+      <SpansTabContent datePageFilterProps={datePageFilterProps} />,
+      {
+        organization,
+        additionalWrapper: Wrapper,
+      }
     );
 
     await screen.findByText(/No spans found/);
@@ -107,44 +166,184 @@ describe('SpansTabContent', function () {
       expect.objectContaining({result_mode: 'span samples'})
     );
 
-    (trackAnalytics as jest.Mock).mockClear();
+    const tableResponse = Promise.withResolvers<void>();
+    const tableRequest = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/`,
+      method: 'GET',
+      match: [
+        MockApiClient.matchQuery({query: 'span.op:http'}),
+        (_url, options) => options.query?.field?.includes('id'),
+      ],
+      asyncDelay: tableResponse.promise,
+      body: {
+        data: [{id: 'aaaaaaaaaaaaaaaa', timestamp: '2024-01-01T00:00:00+00:00'}],
+        meta: {dataScanned: 'full', fields: {id: 'string'}},
+      },
+    });
+
+    jest.mocked(trackAnalytics).mockClear();
+    router.navigate(
+      `/organizations/${organization.slug}/explore/traces/?query=span.op%3Ahttp`
+    );
+    await waitFor(() => expect(tableRequest).toHaveBeenCalledTimes(1));
+    const getMetadataCalls = () =>
+      jest
+        .mocked(trackAnalytics)
+        .mock.calls.filter(([eventKey]) => eventKey === 'trace.explorer.metadata');
+    expect(getMetadataCalls()).toHaveLength(0);
+
+    tableResponse.resolve();
+    await waitFor(() => expect(getMetadataCalls()).toHaveLength(1));
+    expect(trackAnalytics).toHaveBeenCalledWith(
+      'trace.explorer.metadata',
+      expect.objectContaining({
+        dataScanned: 'full',
+        result_length: 1,
+        result_mode: 'span samples',
+      })
+    );
+
+    jest.mocked(trackAnalytics).mockClear();
     await userEvent.click(await screen.findByText('Trace Samples'));
 
     await screen.findByText(/No trace results found/);
-    expect(trackAnalytics).toHaveBeenCalledTimes(1);
+    expect(trackAnalytics).toHaveBeenCalledTimes(2);
+    expect(trackAnalytics).toHaveBeenCalledWith(
+      'trace.explorer.table_tab_changed',
+      expect.objectContaining({tab: 'trace'})
+    );
     expect(trackAnalytics).toHaveBeenCalledWith(
       'trace.explorer.metadata',
       expect.objectContaining({result_mode: 'trace samples'})
     );
 
-    (trackAnalytics as jest.Mock).mockClear();
+    jest.mocked(trackAnalytics).mockClear();
     await userEvent.click(await screen.findByRole('tab', {name: 'Aggregates'}));
 
     await screen.findByText(/No spans found/);
-    expect(trackAnalytics).toHaveBeenCalledTimes(1);
+    expect(trackAnalytics).toHaveBeenCalledTimes(2);
+    expect(trackAnalytics).toHaveBeenCalledWith(
+      'trace.explorer.table_tab_changed',
+      expect.objectContaining({tab: 'aggregate'})
+    );
     expect(trackAnalytics).toHaveBeenCalledWith(
       'trace.explorer.metadata',
       expect.objectContaining({result_mode: 'aggregates'})
     );
   });
 
-  it('inserts group bys from aggregate mode as fields in samples mode', async function () {
-    let fields: string[] = [];
-    let groupBys: string[] = [];
+  it('publishes the aggregate sort to the LLM context in aggregate mode', async () => {
+    let getLLMContext: ReturnType<typeof useLLMContext>['getLLMContext'] | undefined;
     function Component() {
-      fields = useExploreFields();
-      groupBys = useExploreGroupBys();
+      ({getLLMContext} = useLLMContext());
       return <SpansTabContent datePageFilterProps={datePageFilterProps} />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>,
-      {organization}
+    render(<Component />, {organization, additionalWrapper: Wrapper});
+
+    await userEvent.click(await screen.findByRole('tab', {name: 'Aggregates'}));
+    await screen.findByText(/No spans found/);
+
+    await waitFor(() => {
+      const node = getLLMContext!().nodes.find(n => n.nodeType === 'traces-explorer');
+      const data = node?.data as Record<string, unknown>;
+      expect(data.activeTab).toBe('aggregate');
+      expect(data.sortBys).toEqual(['-count(span.duration)']);
+      expect(data.projectIds).toEqual(expect.any(Array));
+      expect(data.projectSlugs).toEqual(expect.any(Array));
+      expect(data.isAllProjects).toEqual(expect.any(Boolean));
+      expect(data.projectSelectionMode).toEqual(expect.any(String));
+      expect(data.projectSelectionInstruction).toEqual(expect.any(String));
+    });
+  });
+
+  it('removes invalid selected columns and sorts after validation', async () => {
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/validate/`,
+      method: 'GET',
+      body: invalidAttributeValidationBody,
+    });
+
+    const {router} = render(
+      <SpansTabContent datePageFilterProps={datePageFilterProps} />,
+      {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {
+              field: ['span.name', 'invalid.attribute'],
+              sort: 'invalid.attribute',
+            },
+          },
+        },
+      }
     );
+
+    await waitFor(() => {
+      expect(router.location.query.field).toBe('span.name');
+      expect(router.location.query.sort).toBeUndefined();
+    });
+  });
+
+  it('removes invalid aggregate columns and sorts after validation', async () => {
+    let aggregateFields: ReturnType<typeof useQueryParamsAggregateFields> = [];
+    let aggregateSortBys: ReturnType<typeof useQueryParamsAggregateSortBys> = [];
+    function Component() {
+      aggregateFields = useQueryParamsAggregateFields();
+      aggregateSortBys = useQueryParamsAggregateSortBys();
+      return <SpansTabContent datePageFilterProps={datePageFilterProps} />;
+    }
+
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/validate/`,
+      method: 'GET',
+      body: invalidAttributeValidationBody,
+    });
+
+    render(<Component />, {
+      organization,
+      additionalWrapper: Wrapper,
+      initialRouterConfig: {
+        location: {
+          pathname: '/organizations/org-slug/explore/traces/',
+          query: {
+            mode: Mode.AGGREGATE,
+            aggregateField: [
+              JSON.stringify({groupBy: 'invalid.attribute'}),
+              JSON.stringify({groupBy: 'span.op'}),
+              JSON.stringify({yAxes: ['count(span.duration)']}),
+            ],
+            aggregateSort: 'invalid.attribute',
+          },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(aggregateFields).not.toContainEqual({
+        groupBy: 'invalid.attribute',
+      });
+      expect(aggregateSortBys).toEqual([
+        {
+          field: 'count(span.duration)',
+          kind: 'desc',
+        },
+      ]);
+    });
+  });
+
+  it('inserts group bys from aggregate mode as fields in samples mode', async () => {
+    let fields: readonly string[] = [];
+    let groupBys: readonly string[] = [];
+    function Component() {
+      fields = useQueryParamsFields();
+      groupBys = useQueryParamsGroupBys();
+      return <SpansTabContent datePageFilterProps={datePageFilterProps} />;
+    }
+
+    render(<Component />, {organization, additionalWrapper: Wrapper});
 
     const samples = screen.getByRole('tab', {name: 'Span Samples'});
     const aggregates = screen.getByRole('tab', {name: 'Aggregates'});
@@ -152,7 +351,7 @@ describe('SpansTabContent', function () {
 
     expect(fields).toEqual([
       'id',
-      'span.op',
+      'span.name',
       'span.description',
       'span.duration',
       'transaction',
@@ -162,7 +361,10 @@ describe('SpansTabContent', function () {
 
     // Add a group by, and leave one unselected
     await userEvent.click(aggregates);
-    await userEvent.click(within(groupBy).getByRole('button', {name: '\u2014'}));
+
+    const editorColumn = screen.getAllByTestId('editor-column')[0]!;
+
+    await userEvent.click(within(editorColumn).getByRole('button', {name: '\u2014'}));
     await userEvent.click(within(groupBy).getByRole('option', {name: 'project'}));
 
     expect(groupBys).toEqual(['project']);
@@ -172,85 +374,694 @@ describe('SpansTabContent', function () {
     await userEvent.click(samples);
     expect(fields).toEqual([
       'id',
-      'span.op',
+      'span.name',
       'span.description',
       'span.duration',
       'transaction',
       'timestamp',
       'project',
     ]);
+  }, 20_000);
+
+  it('opens toolbar when switching to aggregates tab', async () => {
+    render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+      organization,
+      additionalWrapper: Wrapper,
+    });
+
+    // by default the toolbar should be visible
+    expect(screen.getByTestId('explore-span-toolbar')).toBeInTheDocument();
+    expect(screen.getByLabelText('Collapse sidebar')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Expand sidebar')).not.toBeInTheDocument();
+
+    // collapse the toolbar
+    await userEvent.click(screen.getByLabelText('Collapse sidebar'));
+    expect(screen.queryByTestId('explore-span-toolbar')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();
+
+    // switching to the aggregates tab should expand the toolbar
+    await userEvent.click(await screen.findByRole('tab', {name: 'Aggregates'}));
+    expect(screen.getByTestId('explore-span-toolbar')).toBeInTheDocument();
+    expect(screen.getByLabelText('Collapse sidebar')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Expand sidebar')).not.toBeInTheDocument();
+
+    // collapse the toolbar
+    await userEvent.click(screen.getByLabelText('Collapse sidebar'));
+    expect(screen.queryByTestId('explore-span-toolbar')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();
+
+    // switching to the span samples tab should NOT expand the toolbar
+    await userEvent.click(await screen.findByRole('tab', {name: 'Span Samples'}));
+    expect(screen.queryByTestId('explore-span-toolbar')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();
   });
 
-  describe('schema hints', function () {
-    let spies: jest.SpyInstance[];
-
-    beforeEach(function () {
-      const useSpanTagsSpy = jest
-        .spyOn(spanTagsModule, 'useTraceItemTags')
-        .mockImplementation(type => {
-          switch (type) {
-            case 'number':
-              return {tags: mockNumberTags, isLoading: false};
-            case 'string':
-              return {tags: mockStringTags, isLoading: false};
-            default:
-              return {tags: {}, isLoading: false};
-          }
-        });
-
-      // Mock getBoundingClientRect for container
-      const getBoundingClientRectSpy = jest
-        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-        .mockImplementation(function (this: HTMLElement) {
-          // Mock individual hint items
-          if (this.hasAttribute('data-type')) {
-            return {
-              width: 200,
-              right: 200,
-              left: 0,
-              top: 0,
-              bottom: 100,
-              height: 100,
-              x: 0,
-              y: 0,
-              toJSON: () => {},
-            };
-          }
-          return {
-            width: 1000,
-            right: 1000,
-            left: 0,
-            top: 0,
-            bottom: 100,
-            height: 100,
-            x: 0,
-            y: 0,
-            toJSON: () => {},
-          };
-        });
-
-      // Mock clientWidth before rendering to display hints
-      const clientWidthGetSpy = jest
-        .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
-        .mockReturnValue(1000);
-
-      spies = [useSpanTagsSpy, getBoundingClientRectSpy, clientWidthGetSpy];
-    });
-
-    afterEach(function () {
-      spies.forEach(spy => spy.mockRestore());
-    });
-
-    it('should show hints', function () {
+  describe('case sensitivity', () => {
+    it('renders the case sensitivity toggle', () => {
       render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
         organization,
+        additionalWrapper: Wrapper,
       });
 
-      expect(screen.getByText('stringTag1')).toBeInTheDocument();
-      expect(screen.getByText('stringTag2')).toBeInTheDocument();
-      expect(screen.getByText('numberTag1')).toBeInTheDocument();
-      expect(screen.getByText('numberTag2')).toBeInTheDocument();
-      expect(screen.getByText('See full list')).toBeInTheDocument();
+      const caseSensitivityToggle = screen.getByRole('button', {
+        name: 'Ignore case',
+      });
+      expect(caseSensitivityToggle).toBeInTheDocument();
+    });
+
+    it('toggles case sensitivity', async () => {
+      const {router} = render(
+        <SpansTabContent datePageFilterProps={datePageFilterProps} />,
+        {organization, additionalWrapper: Wrapper}
+      );
+
+      const caseSensitivityToggle = screen.getByRole('button', {
+        name: 'Ignore case',
+      });
+      expect(caseSensitivityToggle).toBeInTheDocument();
+      await userEvent.click(caseSensitivityToggle);
+
+      expect(caseSensitivityToggle).toHaveAttribute('aria-pressed', 'true');
+      expect(router.location.query.caseInsensitive).toBe('1');
+    });
+
+    it('appends case sensitive to the query', async () => {
+      const eventsMock = MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/events/`,
+        method: 'GET',
+        body: {},
+      });
+      const eventsTimeSeriesMock = MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/events-timeseries/`,
+        method: 'GET',
+        body: {
+          timeSeries: [],
+        },
+      });
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      const caseSensitivityToggle = screen.getByRole('button', {
+        name: 'Ignore case',
+      });
+      expect(caseSensitivityToggle).toBeInTheDocument();
+      await userEvent.click(caseSensitivityToggle);
+
+      await waitFor(() =>
+        expect(eventsMock).toHaveBeenCalledWith(
+          `/organizations/${organization.slug}/events/`,
+          expect.objectContaining({
+            query: expect.objectContaining({caseInsensitive: '1'}),
+          })
+        )
+      );
+
+      await waitFor(() =>
+        expect(eventsTimeSeriesMock).toHaveBeenCalledWith(
+          `/organizations/${organization.slug}/events-timeseries/`,
+          expect.objectContaining({
+            query: expect.objectContaining({caseInsensitive: 1}),
+          })
+        )
+      );
+    });
+  });
+
+  describe('Ask Seer', () => {
+    describe('when the AI features are disabled', () => {
+      it('does not display the Ask Seer combobox', async () => {
+        render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+          organization: {...organization, features: []},
+          additionalWrapper: Wrapper,
+        });
+
+        const input = screen.getByRole('combobox');
+        await userEvent.click(input);
+
+        expect(screen.queryByText(/Ask AI to build your query/)).not.toBeInTheDocument();
+      });
+    });
+
+    it('brings along the query', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      const input = screen.getByRole('combobox');
+      await userEvent.click(input);
+      await userEvent.type(input, 'span.duration:>10ms{enter}');
+
+      // re-open the combobox
+      await userEvent.click(input);
+      const askSeer = await screen.findByText(/Ask AI to build your query/);
+      await userEvent.click(askSeer);
+
+      const askSeerInput = screen.getByRole('combobox', {
+        name: 'Ask Seer with Natural Language',
+      });
+
+      await waitFor(() => {
+        expect(askSeerInput).toHaveValue('span.duration is greater than 10ms ');
+      });
+    });
+
+    it('brings along the user input', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      const input = screen.getByRole('combobox');
+      await userEvent.click(input);
+      await userEvent.type(input, ' random');
+
+      const askSeer = await screen.findByText(/Ask AI to build your query/);
+      await userEvent.click(askSeer);
+
+      const askSeerInput = screen.getByRole('combobox', {
+        name: 'Ask Seer with Natural Language',
+      });
+
+      await waitFor(() => {
+        expect(askSeerInput).toHaveValue('random ');
+      });
+    });
+
+    it('brings along only the query and the user input', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      const input = screen.getByRole('combobox');
+      await userEvent.click(input);
+      await userEvent.paste('span.duration:>10ms');
+      await userEvent.keyboard('{Enter}');
+
+      await userEvent.click(input);
+      await userEvent.paste(' random');
+
+      const askSeer = await screen.findByText(/Ask AI to build your query/);
+      await userEvent.click(askSeer);
+
+      const askSeerInput = screen.getByRole('combobox', {
+        name: 'Ask Seer with Natural Language',
+      });
+
+      await waitFor(() => {
+        expect(askSeerInput).toHaveValue('span.duration is greater than 10ms random ');
+      });
+    });
+  });
+
+  describe('cross events', () => {
+    it('displays only spans when the selected project has no cross-event data', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      expect(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      ).toBeInTheDocument();
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Spans'})).toBeInTheDocument();
+      expect(screen.queryByRole('menuitemradio', {name: 'Logs'})).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Application Metrics'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('displays logs in the add dropdown and row selector when the selected project has logs', async () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {crossEvents: JSON.stringify([{query: '', type: 'spans'}])},
+          },
+        },
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Logs'})).toBeInTheDocument();
+
+      await userEvent.keyboard('{Escape}');
+      await userEvent.click(screen.getByRole('button', {name: /Spans/}));
+
+      expect(screen.getByRole('option', {name: 'Logs'})).toBeInTheDocument();
+    });
+
+    it('hides the metrics option when tracemetrics is enabled but the selected project has no trace metrics', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features, 'tracemetrics-enabled'],
+        },
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Application Metrics'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('displays the metrics option when tracemetrics is enabled and the selected project has trace metrics', async () => {
+      const metricsProject = makeProject({
+        id: '3',
+        slug: 'metrics-project',
+        hasTraceMetrics: true,
+      });
+      setProjects([metricsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features, 'tracemetrics-enabled'],
+        },
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(
+        screen.getByRole('menuitemradio', {name: 'Application Metrics'})
+      ).toBeInTheDocument();
+    });
+
+    it('displays a dataset option when any selected project has that data type', async () => {
+      const spansOnlyProject = makeProject({
+        id: '3',
+        slug: 'spans-only-project',
+        hasLogs: false,
+      });
+      const logsProject = makeProject({id: '4', slug: 'logs-project', hasLogs: true});
+      setProjects([spansOnlyProject, logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Logs'})).toBeInTheDocument();
+    });
+
+    it('hides dataset options for unselected projects', async () => {
+      const spansOnlyProject = makeProject({
+        id: '3',
+        slug: 'spans-only-project',
+        hasLogs: false,
+      });
+      const logsProject = makeProject({id: '4', slug: 'logs-project', hasLogs: true});
+      setProjects([spansOnlyProject, logsProject], [parseInt(spansOnlyProject.id, 10)]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.queryByRole('menuitemradio', {name: 'Logs'})).not.toBeInTheDocument();
+    });
+
+    it('displays dataset options for all projects', async () => {
+      const spansOnlyProject = makeProject({
+        id: '3',
+        slug: 'spans-only-project',
+        hasLogs: false,
+      });
+      const logsProject = makeProject({id: '4', slug: 'logs-project', hasLogs: true});
+      setProjects([spansOnlyProject, logsProject], [ALL_ACCESS_PROJECTS]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Logs'})).toBeInTheDocument();
+    });
+
+    it('hides dataset options from non-member projects when My Projects is selected', async () => {
+      const spansOnlyProject = makeProject({
+        id: '3',
+        slug: 'spans-only-project',
+        hasLogs: false,
+        hasTraceMetrics: false,
+        isMember: true,
+      });
+      const logsAndMetricsProject = makeProject({
+        id: '4',
+        slug: 'logs-and-metrics-project',
+        hasLogs: true,
+        hasTraceMetrics: true,
+        isMember: false,
+      });
+      setProjects([spansOnlyProject, logsAndMetricsProject], []);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features, 'tracemetrics-enabled'],
+        },
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.queryByRole('menuitemradio', {name: 'Logs'})).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Application Metrics'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('adds a cross event query', async () => {
+      const {router} = render(
+        <SpansTabContent datePageFilterProps={datePageFilterProps} />,
+        {organization, additionalWrapper: Wrapper}
+      );
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Spans'})).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('menuitemradio', {name: 'Spans'}));
+
+      await waitFor(() =>
+        expect(router.location.query.crossEvents).toEqual(
+          JSON.stringify([{query: '', type: 'spans'}])
+        )
+      );
+
+      expect(trackAnalytics).toHaveBeenCalledWith(
+        'trace.explorer.cross_event_added',
+        expect.objectContaining({type: 'spans'})
+      );
+    });
+
+    it('disables dropdown when there are 2 cross events', () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {
+              crossEvents: JSON.stringify([
+                {query: '', type: 'spans'},
+                {query: '', type: 'logs'},
+              ]),
+            },
+          },
+        },
+      });
+
+      expect(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      ).toBeDisabled();
+    });
+
+    it('adds a cross event search bar when cross event added', async () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+      });
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+
+      expect(screen.getByRole('menuitemradio', {name: 'Logs'})).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('menuitemradio', {name: 'Logs'}));
+
+      expect(
+        screen.getByPlaceholderText('Search for logs, users, tags, and more')
+      ).toBeInTheDocument();
+    });
+
+    it('can remove a cross event query', async () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {crossEvents: JSON.stringify([{query: '', type: 'logs'}])},
+          },
+        },
+      });
+
+      expect(
+        await screen.findByPlaceholderText('Search for logs, users, tags, and more')
+      ).toBeInTheDocument();
+
+      await userEvent.click(screen.getByLabelText('Remove cross event search for logs'));
+
+      expect(
+        screen.queryByPlaceholderText('Search for logs, users, tags, and more')
+      ).not.toBeInTheDocument();
+
+      expect(trackAnalytics).toHaveBeenCalledWith(
+        'trace.explorer.cross_event_removed',
+        expect.objectContaining({type: 'logs'})
+      );
+    });
+
+    it('changes the cross event search bar when dataset changed', async () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {crossEvents: JSON.stringify([{query: '', type: 'spans'}])},
+          },
+        },
+      });
+
+      await userEvent.click(screen.getByRole('button', {name: /Spans/}));
+      await userEvent.click(screen.getByRole('option', {name: 'Logs'}));
+
+      expect(
+        screen.getByPlaceholderText('Search for logs, users, tags, and more')
+      ).toBeInTheDocument();
+
+      expect(trackAnalytics).toHaveBeenCalledWith(
+        'trace.explorer.cross_event_changed',
+        expect.objectContaining({new_type: 'logs', old_type: 'spans'})
+      );
+    });
+
+    it('renders disabled cross event search bar when the limit is reached', () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization,
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {
+              crossEvents: JSON.stringify([
+                {query: '', type: 'spans'},
+                {query: '', type: 'logs'},
+                {query: '', type: 'logs'},
+              ]),
+            },
+          },
+        },
+      });
+
+      expect(screen.getAllByTestId('search-query-builder').pop()).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      );
+    });
+
+    it('disables Attribute Breakdowns tab when cross events are present', () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features],
+        },
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {crossEvents: JSON.stringify([{query: '', type: 'logs'}])},
+          },
+        },
+      });
+
+      const attributeBreakdownsTab = screen.getByRole('tab', {
+        name: /Attribute Breakdowns/,
+      });
+      expect(attributeBreakdownsTab).toHaveAttribute('aria-disabled', 'true');
+    });
+
+    it('disables Trace Samples tab when cross events are present', async () => {
+      const logsProject = makeProject({id: '3', slug: 'logs-project', hasLogs: true});
+      setProjects([logsProject]);
+
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features],
+        },
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {
+              crossEvents: JSON.stringify([{query: '', type: 'logs'}]),
+              table: 'trace',
+            },
+          },
+        },
+      });
+
+      const traceSamplesTab = screen.getByRole('tab', {name: 'Trace Samples'});
+      expect(traceSamplesTab).toHaveAttribute('aria-disabled', 'true');
+      expect(traceSamplesTab).toBeVisible();
+
+      await userEvent.hover(traceSamplesTab);
+      expect(
+        await screen.findByText(
+          'Trace samples do not yet work with Cross-Event queries. Use the Spans tab instead.'
+        )
+      ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByRole('tab', {name: 'Span Samples'})).toHaveAttribute(
+          'aria-selected',
+          'true'
+        );
+      });
+    });
+
+    it('switches from Attribute Breakdowns to Span tab when cross event is added', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features],
+        },
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {table: 'attribute_breakdowns'},
+          },
+        },
+      });
+
+      // Initially on Attribute Breakdowns tab
+      expect(screen.getByRole('tab', {name: /Attribute Breakdowns/})).toHaveAttribute(
+        'aria-selected',
+        'true'
+      );
+
+      // Add a cross event
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+      await userEvent.click(screen.getByRole('menuitemradio', {name: 'Spans'}));
+
+      // Should switch to Span tab
+      await waitFor(() => {
+        expect(screen.getByRole('tab', {name: 'Span Samples'})).toHaveAttribute(
+          'aria-selected',
+          'true'
+        );
+      });
+    });
+
+    it('switches from Trace Samples to Span tab when cross event is added', async () => {
+      render(<SpansTabContent datePageFilterProps={datePageFilterProps} />, {
+        organization: {
+          ...organization,
+          features: [...organization.features],
+        },
+        additionalWrapper: Wrapper,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/explore/traces/',
+            query: {table: 'trace'},
+          },
+        },
+      });
+
+      expect(screen.getByRole('tab', {name: 'Trace Samples'})).toHaveAttribute(
+        'aria-selected',
+        'true'
+      );
+
+      await userEvent.click(
+        screen.getByRole('button', {name: 'Add a cross event query'})
+      );
+      await userEvent.click(screen.getByRole('menuitemradio', {name: 'Spans'}));
+
+      await waitFor(() => {
+        expect(screen.getByRole('tab', {name: 'Span Samples'})).toHaveAttribute(
+          'aria-selected',
+          'true'
+        );
+      });
     });
   });
 });

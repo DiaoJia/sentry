@@ -2,15 +2,15 @@ import {render} from 'sentry-test/reactTestingLibrary';
 
 import {RouteAnalyticsContext} from 'sentry/views/routeAnalyticsContextProvider';
 
-import useRouteAnalyticsParams from './useRouteAnalyticsParams';
+import {useRouteAnalyticsParams} from './useRouteAnalyticsParams';
 
 function TestComponent() {
   useRouteAnalyticsParams({foo: 'bar'});
   return <div>hi</div>;
 }
 
-describe('useRouteAnalyticsParams', function () {
-  it('calls setRouteAnalyticsParams', function () {
+describe('useRouteAnalyticsParams', () => {
+  it('calls setRouteAnalyticsParams', () => {
     const setRouteAnalyticsParams = jest.fn();
     const getComponent = (extraContext?: Record<string, any>) => (
       <RouteAnalyticsContext

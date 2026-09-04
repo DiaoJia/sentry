@@ -58,7 +58,7 @@ export class FlamegraphChart {
   };
 
   static MIN_RENDERABLE_POINTS = 2;
-  static Empty = new FlamegraphChart(Rect.Empty(), [], [[0, 0, 0, 0]]);
+  static Empty = new FlamegraphChart(Rect.empty(), [], [[0, 0, 0, 0]]);
 
   constructor(
     configSpace: Rect,
@@ -95,7 +95,8 @@ export class FlamegraphChart {
         name: measurement.name,
         lineColor: colorComponentsToRGBA(colors[j]!),
         fillColor: colorComponentsToRGBA(colors[j]!),
-        points: new Array(measurement?.values?.length ?? 0).fill(0),
+        // @ts-expect-error -- TODO: Figure out how to resolve this types mismatch?
+        points: Array.from({length: measurement?.values?.length ?? 0}).fill(0),
       };
 
       if (

@@ -1,24 +1,30 @@
 import {useEffect, useMemo} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {DrawerHeader} from 'sentry/components/globalDrawer/components';
+import {DrawerHeader} from '@sentry/scraps/drawer';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import type {
   GridColumnHeader,
   GridColumnOrder,
   GridColumnSortBy,
-} from 'sentry/components/gridEditable';
-import GridEditable, {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
+} from 'sentry/components/tables/gridEditable';
+import {COL_WIDTH_UNDEFINED, GridEditable} from 'sentry/components/tables/gridEditable';
 import {t, tct} from 'sentry/locale';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import getDuration from 'sentry/utils/duration/getDuration';
+import {getDuration} from 'sentry/utils/duration/getDuration';
 import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
 import {PageAlert, PageAlertProvider} from 'sentry/utils/performance/contexts/pageAlert';
 import {decodeList} from 'sentry/utils/queryString';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {DashboardFilters} from 'sentry/views/dashboards/types';
+import {WidgetType} from 'sentry/views/dashboards/types';
+import {getLinkedDashboardUrl} from 'sentry/views/dashboards/utils/getLinkedDashboardUrl';
+import {PrebuiltDashboardId} from 'sentry/views/dashboards/utils/prebuiltConfigs';
+import {useGetPrebuiltDashboard} from 'sentry/views/dashboards/utils/usePopulateLinkedDashboards';
 import {WebVitalStatusLineChart} from 'sentry/views/insights/browser/webVitals/components/charts/webVitalStatusLineChart';
 import {PerformanceBadge} from 'sentry/views/insights/browser/webVitals/components/performanceBadge';
 import {WebVitalDescription} from 'sentry/views/insights/browser/webVitals/components/webVitalDescription';
@@ -32,15 +38,13 @@ import type {
   RowWithScoreAndOpportunity,
   WebVitals,
 } from 'sentry/views/insights/browser/webVitals/types';
-import decodeBrowserTypes from 'sentry/views/insights/browser/webVitals/utils/queryParameterDecoders/browserType';
-import {SampleDrawerBody} from 'sentry/views/insights/common/components/sampleDrawerBody';
-import {useInsightsEap} from 'sentry/views/insights/common/utils/useEap';
-import {useModuleURL} from 'sentry/views/insights/common/utils/useModuleURL';
+import {decode as decodeBrowserTypes} from 'sentry/views/insights/browser/webVitals/utils/queryParameterDecoders/browserType';
 import {
-  ModuleName,
-  SpanIndexedField,
-  type SubregionCode,
-} from 'sentry/views/insights/types';
+  SampleDrawerBody,
+  SampleDrawerContainer,
+} from 'sentry/views/insights/common/components/sampleDrawerBody';
+import {useModuleURL} from 'sentry/views/insights/common/utils/useModuleURL';
+import {ModuleName, SpanFields, type SubregionCode} from 'sentry/views/insights/types';
 
 type Column = GridColumnHeader;
 
@@ -56,16 +60,24 @@ const sort: GridColumnSortBy<keyof Row> = {key: 'count()', order: 'desc'};
 
 const MAX_ROWS = 10;
 
-export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
+export function WebVitalsDetailPanel({
+  webVital,
+  dashboardFilters,
+}: {
+  webVital: WebVitals | null;
+  dashboardFilters?: DashboardFilters;
+}) {
   const location = useLocation();
   const organization = useOrganization();
   const moduleUrl = useModuleURL(ModuleName.VITAL);
-  const browserTypes = decodeBrowserTypes(location.query[SpanIndexedField.BROWSER_NAME]);
+  const browserTypes = decodeBrowserTypes(location.query[SpanFields.BROWSER_NAME]);
   const subregions = decodeList(
-    location.query[SpanIndexedField.USER_GEO_SUBREGION]
+    location.query[SpanFields.USER_GEO_SUBREGION]
   ) as SubregionCode[];
 
-  const useEap = useInsightsEap();
+  const {dashboard: linkedWebVitalsSummaryDashboard} = useGetPrebuiltDashboard(
+    dashboardFilters === undefined ? undefined : PrebuiltDashboardId.WEB_VITALS_SUMMARY
+  );
 
   const {data: projectData} = useProjectRawWebVitalsQuery({browserTypes, subregions});
   const {data: projectScoresData} = useProjectWebVitalsScoresQuery({
@@ -97,11 +109,8 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
     if (!data) {
       return [];
     }
-    const sumWeights = useEap
-      ? 1
-      : webVital
-        ? projectScoresData?.[0]?.[`sum(measurements.score.weight.${webVital})`] || 0
-        : 0;
+    const sumWeights = 1;
+
     return data
       .map(row => ({
         ...row,
@@ -117,7 +126,7 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
         return b.opportunity - a.opportunity;
       })
       .slice(0, MAX_ROWS);
-  }, [data, projectScoresData, webVital, useEap]);
+  }, [data]);
 
   useEffect(() => {
     if (webVital !== null) {
@@ -142,6 +151,7 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
       return (
         <Tooltip
           isHoverable
+          showUnderline
           title={
             <span>
               {tct(
@@ -155,7 +165,7 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
             </span>
           }
         >
-          <OpportunityHeader>{col.name}</OpportunityHeader>
+          {col.name}
         </Tooltip>
       );
     }
@@ -193,19 +203,39 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
       return <AlignRight>{value}</AlignRight>;
     }
     if (key === 'transaction') {
+      const linkedDashboardUrl =
+        dashboardFilters !== undefined && linkedWebVitalsSummaryDashboard?.id
+          ? getLinkedDashboardUrl({
+              linkedDashboard: {
+                dashboardId: linkedWebVitalsSummaryDashboard.id,
+                field: SpanFields.TRANSACTION,
+                additionalGlobalFilterDatasetTargets: [WidgetType.ISSUE],
+              },
+              organizationSlug: organization.slug,
+              field: 'transaction',
+              value: row.transaction,
+              widgetType: WidgetType.SPANS,
+              dashboardFilters,
+              locationQuery: location.query,
+              projectIdOverride: String(row['project.id']),
+            })
+          : undefined;
+
       return (
         <NoOverflow>
           <Link
-            to={{
-              ...location,
-              pathname: `${moduleUrl}/overview/`,
-              query: {
-                ...location.query,
-                transaction: row.transaction,
-                webVital,
-                project: row['project.id'],
-              },
-            }}
+            to={
+              linkedDashboardUrl || {
+                ...location,
+                pathname: `${moduleUrl}/overview/`,
+                query: {
+                  ...location.query,
+                  transaction: row.transaction,
+                  webVital,
+                  project: row['project.id'],
+                },
+              }
+            }
           >
             {row.transaction}
           </Link>
@@ -228,46 +258,50 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
 
   return (
     <PageAlertProvider>
-      <DrawerHeader />
+      <SampleDrawerContainer>
+        <DrawerHeader />
 
-      <SampleDrawerBody>
-        {webVital && (
-          <WebVitalDescription
-            value={
-              webVitalValue === undefined
-                ? undefined
-                : webVital === 'cls'
-                  ? webVitalValue?.toFixed(2)
-                  : getDuration(webVitalValue / 1000, 2, true)
-            }
-            webVital={webVital}
-            score={webVitalScore}
-          />
-        )}
-        <ChartContainer>
+        <SampleDrawerBody>
           {webVital && (
-            <WebVitalStatusLineChart
+            <WebVitalDescription
+              value={
+                webVitalValue === undefined
+                  ? undefined
+                  : webVital === 'cls'
+                    ? webVitalValue?.toFixed(2)
+                    : getDuration(webVitalValue / 1000, 2, true)
+              }
               webVital={webVital}
-              browserTypes={browserTypes}
-              subregions={subregions}
+              score={webVitalScore}
             />
           )}
-        </ChartContainer>
+          <ChartContainer>
+            {webVital && (
+              <WebVitalStatusLineChart
+                webVital={webVital}
+                browserTypes={browserTypes}
+                subregions={subregions}
+              />
+            )}
+          </ChartContainer>
 
-        <TableContainer>
-          <GridEditable
-            data={dataByOpportunity}
-            isLoading={isPending}
-            columnOrder={columnOrder}
-            columnSortBy={[sort]}
-            grid={{
-              renderHeadCell,
-              renderBodyCell,
-            }}
-          />
-        </TableContainer>
-        <PageAlert />
-      </SampleDrawerBody>
+          <TableContainer>
+            <GridEditable
+              data={dataByOpportunity}
+              isLoading={isPending}
+              columnOrder={columnOrder}
+              grid={{
+                getColumnSort: column => ({
+                  direction: column.key === sort.key ? sort.order : undefined,
+                }),
+                renderHeadCell,
+                renderBodyCell,
+              }}
+            />
+          </TableContainer>
+          <PageAlert />
+        </SampleDrawerBody>
+      </SampleDrawerContainer>
     </PageAlertProvider>
   );
 }
@@ -275,15 +309,15 @@ export function WebVitalsDetailPanel({webVital}: {webVital: WebVitals | null}) {
 const mapWebVitalToColumn = (webVital?: WebVitals | null) => {
   switch (webVital) {
     case 'lcp':
-      return 'p75(measurements.lcp)';
+      return `p75(${SpanFields.BROWSER_WEB_VITAL_LCP_VALUE})`;
     case 'fcp':
-      return 'p75(measurements.fcp)';
+      return `p75(${SpanFields.BROWSER_WEB_VITAL_FCP_VALUE})`;
     case 'cls':
-      return 'p75(measurements.cls)';
+      return `p75(${SpanFields.BROWSER_WEB_VITAL_CLS_VALUE})`;
     case 'ttfb':
-      return 'p75(measurements.ttfb)';
+      return `p75(${SpanFields.BROWSER_WEB_VITAL_TTFB_VALUE})`;
     case 'inp':
-      return 'p75(measurements.inp)';
+      return `p75(${SpanFields.BROWSER_WEB_VITAL_INP_VALUE})`;
     default:
       return 'count()';
   }
@@ -297,21 +331,21 @@ const NoOverflow = styled('span')`
 const AlignRight = styled('span')<{color?: string}>`
   text-align: right;
   width: 100%;
-  ${p => (p.color ? `color: ${p.color};` : '')}
+  ${p =>
+    p.color
+      ? css`
+          color: ${p.color};
+        `
+      : ''}
 `;
 
 const ChartContainer = styled('div')`
   position: relative;
-  flex: 1;
 `;
 
 const AlignCenter = styled('span')`
   text-align: center;
   width: 100%;
-`;
-
-const OpportunityHeader = styled('span')`
-  ${p => p.theme.tooltipUnderline()};
 `;
 
 const TableContainer = styled('div')`

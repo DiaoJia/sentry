@@ -7,13 +7,14 @@ import threading
 from collections.abc import Generator, Iterable, Mapping
 from typing import Any, Self
 
-import sentry_sdk
+import psycopg2.errors
 from django import db
 from django.db import DatabaseError, OperationalError, connections, models, router, transaction
 from django.db.models import Count, Max, Min
 from django.db.models.functions import Now
 from django.db.transaction import Atomic
 from django.utils import timezone
+from sentry_sdk.traces import StreamedSpan
 from sentry_sdk.tracing import Span
 
 from sentry import options
@@ -21,10 +22,9 @@ from sentry.backup.scopes import RelocationScope
 from sentry.db.models import (
     BoundedBigIntegerField,
     BoundedPositiveIntegerField,
-    JSONField,
     Model,
+    cell_silo_model,
     control_silo_model,
-    region_silo_model,
     sane_repr,
 )
 from sentry.db.postgres.transactions import (
@@ -33,11 +33,13 @@ from sentry.db.postgres.transactions import (
     in_test_assert_no_transaction,
 )
 from sentry.hybridcloud.outbox.category import OutboxCategory, OutboxScope
-from sentry.hybridcloud.outbox.signals import process_control_outbox, process_region_outbox
-from sentry.hybridcloud.rpc import REGION_NAME_LENGTH
+from sentry.hybridcloud.outbox.signals import process_cell_outbox, process_control_outbox
+from sentry.hybridcloud.rpc import CELL_NAME_LENGTH
 from sentry.silo.base import SiloMode
 from sentry.silo.safety import unguarded_write
 from sentry.utils import metrics
+from sentry.utils.env import in_test_environment
+from sentry.utils.tracing import set_span_data, set_span_tag, start_span
 
 THE_PAST = datetime.datetime(2016, 8, 1, 0, 0, 0, 0, tzinfo=datetime.UTC)
 
@@ -140,7 +142,7 @@ class OutboxBase(Model):
         except OperationalError as e:
             # If concurrent locking is happening on the table, gracefully pass and allow
             # that work to process.
-            if "LockNotAvailable" in str(e):
+            if isinstance(e.__cause__, psycopg2.errors.LockNotAvailable):
                 return None
             else:
                 raise
@@ -172,8 +174,8 @@ class OutboxBase(Model):
     category = BoundedPositiveIntegerField(choices=OutboxCategory.as_choices(), null=False)
     object_identifier = BoundedBigIntegerField(null=False)
 
-    # payload is used for webhook payloads.
-    payload: models.Field[dict[str, Any] | None, dict[str, Any] | None] = JSONField(null=True)
+    # payload is used for outboxes that need to snapshot state like provisioning and audit logs.
+    payload = models.JSONField(null=True)
 
     # The point at which this object was scheduled, used as a diff from scheduled_for to determine the intended delay.
     scheduled_from = models.DateTimeField(null=False, default=timezone.now)
@@ -199,11 +201,23 @@ class OutboxBase(Model):
             )
 
         if _outbox_context.flushing_enabled:
-            transaction.on_commit(lambda: self.drain_shard(), using=router.db_for_write(type(self)))
+            transaction.on_commit(
+                self._drain_shard_with_metrics, using=router.db_for_write(type(self))
+            )
 
         tags = {"category": OutboxCategory(self.category).name}
         metrics.incr("outbox.saved", 1, tags=tags)
         super().save(*args, **kwargs)
+
+    def _drain_shard_with_metrics(self) -> None:
+        with metrics.timer(
+            "outbox.sync_shard_drain.duration",
+            tags={
+                "category": OutboxCategory(self.category).name,
+                "outbox_name": self._meta.label,
+            },
+        ):
+            self.drain_shard()
 
     @contextlib.contextmanager
     def process_shard(self, latest_shard_row: OutboxBase | None) -> Generator[OutboxBase | None]:
@@ -218,7 +232,7 @@ class OutboxBase(Model):
                     .first()
                 )
             except OperationalError as e:
-                if "LockNotAvailable" in str(e):
+                if isinstance(e.__cause__, psycopg2.errors.LockNotAvailable):
                     # If a non task flush process is running already, allow it to proceed without contention.
                     next_shard_row = None
                 else:
@@ -286,13 +300,15 @@ class OutboxBase(Model):
                 tags=tags,
             )
 
-    def _set_span_data_for_coalesced_message(self, span: Span, message: OutboxBase) -> None:
+    def _set_span_data_for_coalesced_message(
+        self, span: Span | StreamedSpan, message: OutboxBase
+    ) -> None:
         tag_for_outbox = OutboxScope.get_tag_name(message.shard_scope)
-        span.set_tag(tag_for_outbox, message.shard_identifier)
-        span.set_data("outbox_id", message.id)
-        span.set_data("outbox_shard_id", message.shard_identifier)
-        span.set_tag("outbox_category", OutboxCategory(message.category).name)
-        span.set_tag("outbox_scope", OutboxScope(message.shard_scope).name)
+        set_span_tag(span, tag_for_outbox, message.shard_identifier)
+        set_span_data(span, "outbox_id", message.id)
+        set_span_data(span, "outbox_shard_id", message.shard_identifier)
+        set_span_tag(span, "outbox_category", OutboxCategory(message.category).name)
+        set_span_tag(span, "outbox_scope", OutboxScope(message.shard_scope).name)
 
     def process(self, is_synchronous_flush: bool) -> bool:
         with self.process_coalesced(is_synchronous_flush=is_synchronous_flush) as coalesced:
@@ -305,16 +321,29 @@ class OutboxBase(Model):
                             "synchronous": int(is_synchronous_flush),
                         },
                     ),
-                    sentry_sdk.start_span(op="outbox.process") as span,
+                    start_span(op="outbox.process", name="outbox.process") as span,
                 ):
                     self._set_span_data_for_coalesced_message(span=span, message=coalesced)
                     try:
                         coalesced.send_signal()
                     except Exception as e:
-                        raise OutboxFlushError(
-                            f"Could not flush shard category={coalesced.category} ({OutboxCategory(coalesced.category).name})",
-                            coalesced,
-                        ) from e
+                        category_number = coalesced.category
+                        category_name = OutboxCategory(category_number).name
+                        error_message = (
+                            f"Could not flush shard category={category_number} ({category_name})"
+                        )
+
+                        if in_test_environment():
+                            orig_error = f"{type(e).__name__}: {e}"
+                            error_message += (
+                                "\n\nNOTE: This error is the last in a chain. If you are seeing "
+                                + "this while running tests, your real problem is likely the error "
+                                + "causing this flush error:"
+                                + f"\n\n\t{orig_error}\n\n"
+                                + "Scroll up to that error for details."
+                            )
+
+                        raise OutboxFlushError(error_message, coalesced) from e
 
                 return True
         return False
@@ -383,25 +412,17 @@ class OutboxBase(Model):
         if limit is not None:
             base_depth_query = base_depth_query[0:limit]
 
-        aggregated_shard_information = list()
-        for shard_row in base_depth_query:
-            shard_information = {
-                shard_column: shard_row[shard_column] for shard_column in cls.sharding_columns
-            }
-            shard_information["depth"] = shard_row["depth"]
-            aggregated_shard_information.append(shard_information)
-
-        return aggregated_shard_information
+        return list(base_depth_query)
 
     @classmethod
     def get_total_outbox_count(cls) -> int:
         return cls.objects.count()
 
 
-# Outboxes bound from region silo -> control silo
-class RegionOutboxBase(OutboxBase):
+# Outboxes bound from cell silo -> control silo
+class CellOutboxBase(OutboxBase):
     def send_signal(self) -> None:
-        process_region_outbox.send(
+        process_cell_outbox.send(
             sender=OutboxCategory(self.category),
             payload=self.payload,
             object_identifier=self.object_identifier,
@@ -418,8 +439,8 @@ class RegionOutboxBase(OutboxBase):
     __repr__ = sane_repr("payload", *coalesced_columns)
 
 
-@region_silo_model
-class RegionOutbox(RegionOutboxBase):
+@cell_silo_model
+class CellOutbox(CellOutboxBase):
     class Meta:
         app_label = "sentry"
         db_table = "sentry_regionoutbox"
@@ -443,24 +464,24 @@ class RegionOutbox(RegionOutboxBase):
         )
 
 
-# Outboxes bound from control silo -> region silo
+# Outboxes bound from control silo -> cell silo
 class ControlOutboxBase(OutboxBase):
-    sharding_columns = ("region_name", "shard_scope", "shard_identifier")
+    sharding_columns = ("cell_name", "shard_scope", "shard_identifier")
     coalesced_columns = (
-        "region_name",
+        "cell_name",
         "shard_scope",
         "shard_identifier",
         "category",
         "object_identifier",
     )
 
-    region_name = models.CharField(max_length=REGION_NAME_LENGTH)
+    cell_name = models.CharField(max_length=CELL_NAME_LENGTH, db_column="region_name")
 
     def send_signal(self) -> None:
         process_control_outbox.send(
             sender=OutboxCategory(self.category),
             payload=self.payload,
-            region_name=self.region_name,
+            cell_name=self.cell_name,
             object_identifier=self.object_identifier,
             shard_identifier=self.shard_identifier,
             shard_scope=self.shard_scope,
@@ -482,7 +503,7 @@ class ControlOutbox(ControlOutboxBase):
         indexes = (
             models.Index(
                 fields=(
-                    "region_name",
+                    "cell_name",
                     "shard_scope",
                     "shard_identifier",
                     "category",
@@ -491,23 +512,23 @@ class ControlOutbox(ControlOutboxBase):
             ),
             models.Index(
                 fields=(
-                    "region_name",
+                    "cell_name",
                     "shard_scope",
                     "shard_identifier",
                     "scheduled_for",
                 )
             ),
-            models.Index(fields=("region_name", "shard_scope", "shard_identifier", "id")),
+            models.Index(fields=("cell_name", "shard_scope", "shard_identifier", "id")),
         )
 
 
 def outbox_silo_modes() -> list[SiloMode]:
     cur = SiloMode.get_current_mode()
     result: list[SiloMode] = []
-    if cur != SiloMode.REGION:
+    if cur != SiloMode.CELL:
         result.append(SiloMode.CONTROL)
     if cur != SiloMode.CONTROL:
-        result.append(SiloMode.REGION)
+        result.append(SiloMode.CELL)
     return result
 
 

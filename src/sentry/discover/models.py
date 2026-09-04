@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from django.db import models, router, transaction
 from django.db.models import Q, UniqueConstraint
@@ -9,8 +9,8 @@ from django.utils import timezone
 
 from sentry import features
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, Model, region_silo_model, sane_repr
-from sentry.db.models.fields import JSONField
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
+from sentry.db.models.base import DefaultFieldsModel
 from sentry.db.models.fields.bounded import BoundedBigIntegerField, BoundedPositiveIntegerField
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 from sentry.db.models.manager.base import BaseManager
@@ -66,20 +66,20 @@ class DatasetSourcesTypes(Enum):
         return tuple((source.value, source.name.lower()) for source in cls)
 
 
-@region_silo_model
+@cell_silo_model
 class DiscoverSavedQueryProject(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
     project = FlexibleForeignKey("sentry.Project")
-    discover_saved_query = FlexibleForeignKey("sentry.DiscoverSavedQuery")
+    discover_saved_query = FlexibleForeignKey("discover.DiscoverSavedQuery")
 
     class Meta:
-        app_label = "sentry"
+        app_label = "discover"
         db_table = "sentry_discoversavedqueryproject"
         unique_together = (("project", "discover_saved_query"),)
 
 
-@region_silo_model
+@cell_silo_model
 class DiscoverSavedQuery(Model):
     """
     A saved Discover query
@@ -91,7 +91,7 @@ class DiscoverSavedQuery(Model):
     organization = FlexibleForeignKey("sentry.Organization")
     created_by_id = HybridCloudForeignKey("sentry.User", null=True, on_delete="SET_NULL")
     name = models.CharField(max_length=255)
-    query: models.Field[dict[str, Any], dict[str, Any]] = JSONField()
+    query = models.JSONField()
     version = models.IntegerField(null=True)
     date_created = models.DateTimeField(auto_now_add=True)
     date_updated = models.DateTimeField(auto_now=True)
@@ -108,9 +108,15 @@ class DiscoverSavedQuery(Model):
         default=DatasetSourcesTypes.UNKNOWN.value,
         db_default=DatasetSourcesTypes.UNKNOWN.value,
     )
+    # This field is used for the discover transactions -> explore migration.
+    # Migrated discover transactions queries will have this reference along with DISCOVER_TRANSACTIONS as the dataset
+    # in the ExploreSavedQuery.
+    explore_query = FlexibleForeignKey(
+        "explore.ExploreSavedQuery", null=True, on_delete=models.SET_NULL
+    )
 
     class Meta:
-        app_label = "sentry"
+        app_label = "discover"
         db_table = "sentry_discoversavedquery"
         constraints = [
             UniqueConstraint(
@@ -189,7 +195,7 @@ class TeamKeyTransactionModelManager(BaseManager["TeamKeyTransaction"]):
         )
 
 
-@region_silo_model
+@cell_silo_model
 class TeamKeyTransaction(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -205,3 +211,48 @@ class TeamKeyTransaction(Model):
         app_label = "sentry"
         db_table = "sentry_performanceteamkeytransaction"
         unique_together = (("project_team", "transaction"),)
+
+
+@cell_silo_model
+class DiscoverSavedQueryStarred(DefaultFieldsModel):
+    __relocation_scope__ = RelocationScope.Excluded
+
+    user_id = HybridCloudForeignKey("sentry.User", on_delete="CASCADE")
+    organization = FlexibleForeignKey("sentry.Organization")
+    discover_saved_query = FlexibleForeignKey("discover.DiscoverSavedQuery")
+
+    position = models.PositiveSmallIntegerField(null=True, db_default=None)
+    starred = models.BooleanField(db_default=True)
+
+    class Meta:
+        app_label = "discover"
+        db_table = "sentry_discoversavedquerystarred"
+        constraints = [
+            # A position appears at most once in an organization user's list, starred or not.
+            UniqueConstraint(
+                fields=["user_id", "organization_id", "position"],
+                name="sentry_discoversavedquerystarred_unique_query_per_org_user",
+                deferrable=models.Deferrable.DEFERRED,
+            ),
+        ]
+
+
+@cell_silo_model
+class DiscoverSavedQueryLastVisited(DefaultFieldsModel):
+    __relocation_scope__ = RelocationScope.Excluded
+
+    user_id = HybridCloudForeignKey("sentry.User", on_delete="CASCADE")
+    organization = FlexibleForeignKey("sentry.Organization")
+    discover_saved_query = FlexibleForeignKey("discover.DiscoverSavedQuery")
+
+    last_visited = models.DateTimeField(null=False, default=timezone.now)
+
+    class Meta:
+        app_label = "discover"
+        db_table = "sentry_discoversavedquerylastvisited"
+        constraints = [
+            UniqueConstraint(
+                fields=["user_id", "organization_id", "discover_saved_query_id"],
+                name="sentry_disc_savedquery_lastvisited_uniq",
+            )
+        ]

@@ -1,4 +1,5 @@
-import {RouterFixture} from 'sentry-fixture/routerFixture';
+import {AutofixSetupFixture} from 'sentry-fixture/autofixSetupFixture';
+import {TimeSeriesFixture} from 'sentry-fixture/timeSeries';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
@@ -9,45 +10,50 @@ import {
   within,
 } from 'sentry-test/reactTestingLibrary';
 
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import {PageParamsProvider} from 'sentry/views/explore/contexts/pageParamsContext';
-import {TraceItemAttributeProvider} from 'sentry/views/explore/contexts/traceItemAttributeContext';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {useGetSavedQueries} from 'sentry/views/explore/hooks/useGetSavedQueries';
 import {MultiQueryModeContent} from 'sentry/views/explore/multiQueryMode/content';
 import {useReadQueriesFromLocation} from 'sentry/views/explore/multiQueryMode/locationUtils';
-import {TraceItemDataset} from 'sentry/views/explore/types';
 
 jest.mock('sentry/components/lazyRender', () => ({
   LazyRender: ({children}: {children: React.ReactNode}) => children,
 }));
 
-describe('MultiQueryModeContent', function () {
+describe('MultiQueryModeContent', () => {
   const {organization, project} = initializeOrg();
   let eventsRequest: any;
-  let eventsStatsRequest: any;
+  let eventsTimeSeriesRequest: any;
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
 
     PageFiltersStore.init();
-    PageFiltersStore.onInitializeUrlState(
-      {
-        projects: [project].map(p => parseInt(p.id, 10)),
-        environments: [],
-        datetime: {
-          period: '7d',
-          start: null,
-          end: null,
-          utc: null,
-        },
+    PageFiltersStore.onInitializeUrlState({
+      projects: [project].map(p => parseInt(p.id, 10)),
+      environments: [],
+      datetime: {
+        period: '7d',
+        start: null,
+        end: null,
+        utc: null,
       },
-      new Set()
-    );
+    });
+
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/seer/setup-check/`,
+      body: AutofixSetupFixture({}),
+    });
 
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/trace-items/attributes/`,
       method: 'GET',
-      body: [{key: 'span.op', name: 'span.op'}],
+      body: [
+        {attributeType: 'string', key: 'span.op', name: 'span.op'},
+        {attributeType: 'number', key: 'span.duration', name: 'span.duration'},
+        {attributeType: 'number', key: 'span.self_time', name: 'span.self_time'},
+      ],
     });
+
     eventsRequest = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/events/`,
       method: 'GET',
@@ -64,20 +70,11 @@ describe('MultiQueryModeContent', function () {
         ],
       },
     });
-    eventsStatsRequest = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/events-stats/`,
+    eventsTimeSeriesRequest = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events-timeseries/`,
       method: 'GET',
       body: {
-        'count(span.duration)': {
-          data: [
-            [1672531200, [{count: 5}]],
-            [1672542000, [{count: 10}]],
-            [1672552800, [{count: 15}]],
-          ],
-          order: 0,
-          start: 1672531200,
-          end: 1672552800,
-        },
+        timeSeries: [TimeSeriesFixture()],
       },
     });
     MockApiClient.addMockResponse({
@@ -86,43 +83,35 @@ describe('MultiQueryModeContent', function () {
       body: [],
     });
     MockApiClient.addMockResponse({
-      url: `/subscriptions/${organization.slug}/`,
+      url: `/organizations/${organization.slug}/recent-searches/`,
+      method: 'POST',
+    });
+    MockApiClient.addMockResponse({
+      url: `/customers/${organization.slug}/`,
       method: 'GET',
       body: [],
     });
   });
 
-  it('disables changing fields for count', async function () {
+  it('disables changing fields for count', async () => {
     function Component() {
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
     expect(within(section).getByRole('button', {name: 'spans'})).toBeDisabled();
   });
 
-  it('changes to count(span.duration) when using count', async function () {
+  it('changes to count(span.duration) when using count', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
 
@@ -180,18 +169,12 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('disables changing fields for epm', async function () {
+  it('disables changing fields for epm', async () => {
     function Component() {
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
     await userEvent.click(within(section).getByRole('button', {name: 'count'}));
@@ -199,20 +182,14 @@ describe('MultiQueryModeContent', function () {
     expect(within(section).getByRole('button', {name: 'spans'})).toBeDisabled();
   });
 
-  it('changes to epm() when using epm', async function () {
+  it('changes to epm() when using epm', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
 
@@ -270,20 +247,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('changes to failure_rate() when using failure_rate', async function () {
+  it('changes to failure_rate() when using failure_rate', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
 
@@ -341,18 +312,12 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('disables changing fields for failure_rate', async function () {
+  it('disables changing fields for failure_rate', async () => {
     function Component() {
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
     await userEvent.click(within(section).getByRole('button', {name: 'count'}));
@@ -360,20 +325,14 @@ describe('MultiQueryModeContent', function () {
     expect(within(section).getByRole('button', {name: 'spans'})).toBeDisabled();
   });
 
-  it('defaults count_unique argument to span.op', async function () {
+  it('defaults count_unique argument to span.op', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     const section = await screen.findByTestId('section-visualize-0');
 
@@ -449,20 +408,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('updates visualization and outdated sorts', async function () {
+  it('updates visualization and outdated sorts', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(await screen.findByRole('button', {name: 'Bar'})).toBeInTheDocument();
 
@@ -503,20 +456,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('explicitly selecting visualization persists it', async function () {
+  it('explicitly selecting visualization persists it', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     await userEvent.click(await screen.findByRole('button', {name: 'Bar'}));
     await userEvent.click(screen.getByRole('option', {name: 'Area'}));
@@ -545,20 +492,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('updates sorts', async function () {
+  it('updates sorts', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -593,20 +534,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('updates group bys and outdated sorts', async function () {
+  it('updates group bys and outdated sorts', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -641,20 +576,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('allows changing a query', async function () {
+  it('allows changing a query', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -692,20 +621,56 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('allows adding a query', async function () {
+  it('allows changing case insensitivity', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
+
+    expect(queries).toEqual([
+      {
+        yAxes: ['count(span.duration)'],
+        sortBys: [
+          {
+            field: 'timestamp',
+            kind: 'desc',
+          },
+        ],
+        fields: ['id', 'span.duration', 'timestamp'],
+        groupBys: [],
+        query: '',
+      },
+    ]);
+
+    await userEvent.click(screen.getByLabelText('Ignore case'));
+    expect(queries).toEqual([
+      {
+        caseInsensitive: '1',
+        yAxes: ['count(span.duration)'],
+        sortBys: [
+          {
+            field: 'timestamp',
+            kind: 'desc',
+          },
+        ],
+        fields: ['id', 'span.duration', 'timestamp'],
+        groupBys: [],
+        query: '',
+      },
+    ]);
+  });
+
+  it('allows adding a query', async () => {
+    let queries: any;
+    function Component() {
+      queries = useReadQueriesFromLocation();
+      return <MultiQueryModeContent />;
+    }
+
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -752,20 +717,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('allows duplicating a query', async function () {
+  it('allows duplicating a query', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -819,20 +778,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('allows deleting a query', async function () {
+  it('allows deleting a query', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -929,20 +882,14 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('calls events and stats APIs', async function () {
+  it('calls events and stats APIs', async () => {
     let queries: any;
     function Component() {
       queries = useReadQueriesFromLocation();
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -964,21 +911,25 @@ describe('MultiQueryModeContent', function () {
     await userEvent.click(within(section).getByRole('option', {name: 'span.op'}));
 
     await waitFor(() =>
-      expect(eventsStatsRequest).toHaveBeenNthCalledWith(
+      expect(eventsTimeSeriesRequest).toHaveBeenNthCalledWith(
         1,
-        `/organizations/${organization.slug}/events-stats/`,
+        `/organizations/${organization.slug}/events-timeseries/`,
         expect.objectContaining({
           query: expect.objectContaining({
             dataset: 'spans',
-            field: [],
-            interval: '3h',
-            orderby: undefined,
-            project: ['2'],
-            query: '!transaction.span_id:00',
-            referrer: 'api.explorer.stats',
+            disableAggregateExtrapolation: '0',
+            environment: [],
+            excludeOther: 0,
+            groupBy: [],
+            interval: '30m',
+            partial: 1,
+            project: [2],
+            query: '',
+            referrer: 'api.explore.spans-timeseries',
+            sampling: 'NORMAL',
+            sort: '-timestamp',
             statsPeriod: '7d',
-            topEvents: undefined,
-            yAxis: 'count(span.duration)',
+            yAxis: ['count(span.duration)'],
           }),
         })
       )
@@ -1001,7 +952,7 @@ describe('MultiQueryModeContent', function () {
             ],
             per_page: 10,
             project: ['2'],
-            query: '!transaction.span_id:00',
+            query: '',
             referrer: 'api.explore.multi-query-spans-table',
             sort: '-timestamp',
             statsPeriod: '7d',
@@ -1012,23 +963,26 @@ describe('MultiQueryModeContent', function () {
 
     // group by requests
     await waitFor(() =>
-      expect(eventsStatsRequest).toHaveBeenNthCalledWith(
+      expect(eventsTimeSeriesRequest).toHaveBeenNthCalledWith(
         2,
-        `/organizations/${organization.slug}/events-stats/`,
+        `/organizations/${organization.slug}/events-timeseries/`,
         expect.objectContaining({
           query: expect.objectContaining({
             dataset: 'spans',
+            disableAggregateExtrapolation: '0',
+            environment: [],
             excludeOther: 0,
-            field: ['span.op', 'count(span.duration)'],
-            interval: '3h',
-            orderby: '-count_span_duration',
-            project: ['2'],
-            query: '!transaction.span_id:00',
-            referrer: 'api.explorer.stats',
+            groupBy: ['span.op'],
+            interval: '30m',
+            partial: 1,
+            project: [2],
+            query: '',
+            referrer: 'api.explore.spans-timeseries',
+            sampling: 'NORMAL',
             sort: '-count_span_duration',
             statsPeriod: '7d',
-            topEvents: '5',
-            yAxis: 'count(span.duration)',
+            topEvents: 9,
+            yAxis: ['count(span.duration)'],
           }),
         })
       )
@@ -1044,7 +998,7 @@ describe('MultiQueryModeContent', function () {
             field: ['span.op', 'count(span.duration)'],
             per_page: 10,
             project: ['2'],
-            query: '!transaction.span_id:00',
+            query: '',
             referrer: 'api.explore.multi-query-spans-table',
             sort: '-count_span_duration',
             statsPeriod: '7d',
@@ -1054,7 +1008,7 @@ describe('MultiQueryModeContent', function () {
     );
   });
 
-  it('unstacking group by puts you in sample mode', async function () {
+  it('unstacking group by puts you in sample mode', async () => {
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/events/`,
       method: 'GET',
@@ -1083,13 +1037,7 @@ describe('MultiQueryModeContent', function () {
       return <MultiQueryModeContent />;
     }
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <Component />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>
-    );
+    render(<Component />);
 
     expect(queries).toEqual([
       {
@@ -1130,59 +1078,50 @@ describe('MultiQueryModeContent', function () {
     ]);
   });
 
-  it('sets interval correctly', async function () {
-    const router = RouterFixture({
-      location: {
-        pathname: '/traces/compare',
-        query: {
-          queries: [
-            '{"groupBys":[],"query":"","sortBys":["-timestamp"],"yAxes":["avg(span.duration)"]}',
-          ],
+  it('sets interval correctly', async () => {
+    const {router} = render(<MultiQueryModeContent />, {
+      organization,
+      initialRouterConfig: {
+        location: {
+          pathname: '/traces/compare',
+          query: {
+            queries:
+              '{"groupBys":[],"query":"","sortBys":["-timestamp"],"yAxes":["avg(span.duration)"]}',
+          },
         },
       },
     });
 
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <MultiQueryModeContent />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>,
-      {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      }
-    );
-
     const section = screen.getByTestId('section-visualization-0');
     expect(
-      await within(section).findByRole('button', {name: '3 hours'})
+      await within(section).findByRole('button', {name: '30 minutes'})
     ).toBeInTheDocument();
-    await userEvent.click(within(section).getByRole('button', {name: '3 hours'}));
-    await userEvent.click(within(section).getByRole('option', {name: '30 minutes'}));
-    expect(router.push).toHaveBeenCalledWith({
-      pathname: '/traces/compare',
-      query: expect.objectContaining({
-        interval: '30m',
-        queries: [
+    await userEvent.click(within(section).getByRole('button', {name: '30 minutes'}));
+    await userEvent.click(within(section).getByRole('option', {name: '3 hours'}));
+    expect(router.location.pathname).toBe('/traces/compare');
+    expect(router.location.query).toEqual(
+      expect.objectContaining({
+        interval: '3h',
+        queries:
           '{"groupBys":[],"query":"","sortBys":["-timestamp"],"yAxes":["avg(span.duration)"]}',
-        ],
-      }),
-    });
+      })
+    );
   });
 
-  it('renders a save query button', async function () {
+  it('renders a save query button', async () => {
     render(<MultiQueryModeContent />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(await screen.findByLabelText('Save')).toBeInTheDocument();
     await userEvent.click(screen.getByLabelText('Save'));
-    expect(await screen.findByText('A New Query')).toBeInTheDocument();
+    expect(await screen.findByText('New Query')).toBeInTheDocument();
   });
 
-  it('highlights save button when query has changes', async function () {
+  it('clears the save highlight and refreshes saved queries after updating', async () => {
+    const listRequest = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/explore/saved/`,
+      body: [],
+    });
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/explore/saved/123/`,
       method: 'GET',
@@ -1207,36 +1146,72 @@ describe('MultiQueryModeContent', function () {
         environment: [],
       },
     });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/seer/setup-check/`,
+      body: AutofixSetupFixture({}),
+    });
 
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/explore/saved/123/visit/`,
       method: 'POST',
     });
-    const router = RouterFixture({
-      location: {
-        pathname: '/traces/compare',
-        query: {
-          queries: [
-            '{"groupBys":[],"query":"","sortBys":["-timestamp"],"yAxes":["avg(span.duration)"]}',
-          ],
-          id: '123',
+
+    function Component() {
+      useGetSavedQueries({});
+      return <MultiQueryModeContent />;
+    }
+
+    render(<Component />, {
+      organization,
+      initialRouterConfig: {
+        location: {
+          pathname: '/traces/compare',
+          query: {
+            queries:
+              '{"groupBys":[],"query":"","sortBys":["-timestamp"],"yAxes":["avg(span.duration)"]}',
+            id: '123',
+            project: project.id,
+            statsPeriod: '7d',
+          },
         },
       },
     });
-
-    render(
-      <PageParamsProvider>
-        <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-          <MultiQueryModeContent />
-        </TraceItemAttributeProvider>
-      </PageParamsProvider>,
-      {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      }
-    );
     // No good way to check for highlighted css, so we just check for the text
     expect(await screen.findByText('Save')).toBeInTheDocument();
+    await waitFor(() => expect(listRequest).toHaveBeenCalledTimes(1));
+
+    const updatedQuery = {
+      id: '123',
+      query: [
+        {
+          query: '',
+          fields: ['id', 'span.duration', 'timestamp'],
+          groupby: [],
+          orderby: '-timestamp',
+          visualize: [{yAxes: ['avg(span.duration)']}],
+          mode: 'samples',
+        },
+      ],
+      range: '7d',
+      projects: [Number(project.id)],
+      environment: [],
+    };
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/explore/saved/123/`,
+      method: 'PUT',
+      body: updatedQuery,
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/explore/saved/123/`,
+      body: updatedQuery,
+    });
+
+    await userEvent.click(screen.getByRole('button', {name: 'Save'}));
+    await userEvent.click(
+      await screen.findByRole('menuitemradio', {name: 'Existing Query'})
+    );
+
+    expect(await screen.findByText('Save as…')).toBeInTheDocument();
+    await waitFor(() => expect(listRequest).toHaveBeenCalledTimes(2));
   });
 });

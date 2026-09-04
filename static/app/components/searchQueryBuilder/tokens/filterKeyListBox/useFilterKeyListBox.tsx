@@ -3,7 +3,10 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import type {ComboBoxState} from '@react-stately/combobox';
 import type {Node} from '@react-types/shared';
 
-import {useSearchQueryBuilder} from 'sentry/components/searchQueryBuilder/context';
+import {
+  useSearchQueryBuilderConfig,
+  useSearchQueryBuilderState,
+} from 'sentry/components/searchQueryBuilder/context';
 import type {CustomComboboxMenu} from 'sentry/components/searchQueryBuilder/tokens/combobox';
 import {FilterKeyListBox} from 'sentry/components/searchQueryBuilder/tokens/filterKeyListBox';
 import type {
@@ -16,10 +19,13 @@ import {useRecentSearchFilters} from 'sentry/components/searchQueryBuilder/token
 import {
   ALL_CATEGORY,
   ALL_CATEGORY_VALUE,
+  createLogicFilterItem,
   createRecentFilterItem,
   createRecentFilterOptionKey,
   createRecentQueryItem,
   createSection,
+  LOGIC_CATEGORY,
+  LOGIC_CATEGORY_VALUE,
   RECENT_SEARCH_CATEGORY,
   RECENT_SEARCH_CATEGORY_VALUE,
 } from 'sentry/components/searchQueryBuilder/tokens/filterKeyListBox/utils';
@@ -28,8 +34,8 @@ import type {FieldDefinitionGetter} from 'sentry/components/searchQueryBuilder/t
 import type {Token, TokenResult} from 'sentry/components/searchSyntax/parser';
 import {getKeyName} from 'sentry/components/searchSyntax/utils';
 import type {RecentSearch, TagCollection} from 'sentry/types/group';
-import clamp from 'sentry/utils/number/clamp';
-import usePrevious from 'sentry/utils/usePrevious';
+import {clamp} from 'sentry/utils/number/clamp';
+import {usePrevious} from 'sentry/utils/usePrevious';
 
 const MAX_OPTIONS_WITHOUT_SEARCH = 100;
 const MAX_OPTIONS_WITH_SEARCH = 8;
@@ -72,7 +78,7 @@ function findNextMatchingItem(
   predicate: (item: Node<FilterKeyItem>) => boolean,
   direction: 'after' | 'before'
 ): Node<FilterKeyItem> | null {
-  let nextItem: Node<FilterKeyItem> | null = item;
+  let nextItem = item;
 
   do {
     const nextKey = direction === 'after' ? nextItem?.nextKey : nextItem?.prevKey;
@@ -83,16 +89,18 @@ function findNextMatchingItem(
 }
 
 function useFilterKeyItems() {
-  const {filterKeySections, getFieldDefinition, filterKeys} = useSearchQueryBuilder();
+  const {filterKeySections, getFieldDefinition, filterKeys} =
+    useSearchQueryBuilderConfig();
 
   const sectionedItems = useMemo(() => {
     const flatFilterKeys = Object.keys(filterKeys);
 
     const categorizedItems = filterKeySections
       .flatMap(section => section.children)
-      .reduce<
-        Record<string, boolean>
-      >((acc, nextFilterKey) => ({...acc, [nextFilterKey]: true}), {});
+      .reduce<Record<string, boolean>>(function reduceKeys(acc, nextFilterKey) {
+        acc[nextFilterKey] = true;
+        return acc;
+      }, {});
 
     const uncategorizedFilterKeys = flatFilterKeys.filter(
       filterKey => !categorizedItems[filterKey]
@@ -125,8 +133,8 @@ function useFilterKeySections({
 }: {
   recentSearches: RecentSearch[] | undefined;
 }) {
-  const {filterKeySections, query} = useSearchQueryBuilder();
-
+  const {query} = useSearchQueryBuilderState();
+  const {filterKeySections, disallowLogicalOperators} = useSearchQueryBuilderConfig();
   const sections = useMemo<Section[]>(() => {
     const definedSections = filterKeySections.map(section => ({
       value: section.value,
@@ -138,31 +146,57 @@ function useFilterKeySections({
     }
 
     if (recentSearches?.length && !query) {
-      return [RECENT_SEARCH_CATEGORY, ALL_CATEGORY, ...definedSections];
+      const recentSearchesSections: Section[] = [
+        RECENT_SEARCH_CATEGORY,
+        ALL_CATEGORY,
+        ...definedSections,
+      ];
+
+      if (!disallowLogicalOperators) {
+        recentSearchesSections.push(LOGIC_CATEGORY);
+      }
+      return recentSearchesSections;
     }
 
-    return [ALL_CATEGORY, ...definedSections];
-  }, [filterKeySections, query, recentSearches?.length]);
+    const customSections: Section[] = [ALL_CATEGORY, ...definedSections];
+    if (!disallowLogicalOperators) {
+      customSections.push(LOGIC_CATEGORY);
+    }
 
-  const [selectedSection, setSelectedSection] = useState<string>(
-    sections[0]?.value ?? ''
-  );
+    return customSections;
+  }, [disallowLogicalOperators, filterKeySections, query, recentSearches?.length]);
+
+  const [selectedSection, setSelectedSection] = useState(sections[0]?.value ?? '');
 
   const numSections = sections.length;
   const previousNumSections = usePrevious(numSections);
   useEffect(() => {
     if (previousNumSections !== numSections) {
+      // eslint-disable-next-line react-you-might-not-need-an-effect/no-derived-state
       setSelectedSection(sections[0]!.value);
     }
   }, [numSections, previousNumSections, sections]);
 
   return {sections, selectedSection, setSelectedSection};
 }
-export function useFilterKeyListBox({filterValue}: {filterValue: string}) {
-  const {filterKeys, getFieldDefinition} = useSearchQueryBuilder();
+
+const logicFilterItems = [
+  createLogicFilterItem({value: 'AND'}),
+  createLogicFilterItem({value: 'OR'}),
+  createLogicFilterItem({value: '('}),
+  createLogicFilterItem({value: ')'}),
+];
+
+interface UseFilterKeyListBoxArgs {
+  filterValue: string;
+}
+
+export function useFilterKeyListBox({filterValue}: UseFilterKeyListBoxArgs) {
+  const {filterKeys, getFieldDefinition, disallowLogicalOperators} =
+    useSearchQueryBuilderConfig();
   const {sectionedItems} = useFilterKeyItems();
-  const recentFilters = useRecentSearchFilters();
   const {data: recentSearches} = useRecentSearches();
+  const recentFilters = useRecentSearchFilters(recentSearches);
   const {sections, selectedSection, setSelectedSection} = useFilterKeySections({
     recentSearches,
   });
@@ -181,6 +215,10 @@ export function useFilterKeyListBox({filterValue}: {filterValue: string}) {
       ];
     }
 
+    if (!disallowLogicalOperators && selectedSection === LOGIC_CATEGORY_VALUE) {
+      return logicFilterItems;
+    }
+
     const filteredByCategory = sectionedItems.filter(item => {
       if (itemIsSection(item)) {
         if (selectedSection === ALL_CATEGORY_VALUE) {
@@ -194,6 +232,7 @@ export function useFilterKeyListBox({filterValue}: {filterValue: string}) {
 
     return [...recentFilterItems, ...filteredByCategory];
   }, [
+    disallowLogicalOperators,
     filterKeys,
     getFieldDefinition,
     recentFilters,

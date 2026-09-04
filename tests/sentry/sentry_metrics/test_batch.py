@@ -6,6 +6,7 @@ import pytest
 import sentry_kafka_schemas
 from arroyo.backends.kafka import KafkaPayload
 from arroyo.types import BrokerValue, Message, Partition, Topic, Value
+from django.test import override_settings
 
 from sentry.sentry_metrics.aggregation_option_registry import (
     AggregationOption,
@@ -26,7 +27,7 @@ from sentry.sentry_metrics.consumers.indexer.tags_validator import (
 )
 from sentry.sentry_metrics.indexer.base import FetchType, FetchTypeExt, Metadata
 from sentry.sentry_metrics.use_case_id_registry import UseCaseID
-from sentry.snuba.metrics.naming_layer.mri import SessionMRI, TransactionMRI
+from sentry.snuba.metrics.naming_layer.mri import SessionMRI
 from sentry.testutils.helpers.options import override_options
 from sentry.utils import json
 
@@ -234,7 +235,7 @@ def _get_string_indexer_log_records(caplog):
         ),
     ],
 )
-def test_extract_strings_with_rollout(should_index_tag_values, expected):
+def test_extract_strings_with_rollout(should_index_tag_values, expected) -> None:
     """
     Test that the indexer batch extracts the correct strings from the messages
     based on whether tag values should be indexed or not.
@@ -261,7 +262,7 @@ def test_extract_strings_with_rollout(should_index_tag_values, expected):
 
 
 @pytest.mark.django_db
-def test_extract_strings_with_multiple_use_case_ids():
+def test_extract_strings_with_multiple_use_case_ids() -> None:
     """
     Verify that the extract string method can handle payloads that has multiple
     (generic) uses cases
@@ -281,7 +282,7 @@ def test_extract_strings_with_multiple_use_case_ids():
     }
 
     distribution_payload = {
-        "name": "d:escalating_issues/duration@second",
+        "name": "d:profiles/duration@second",
         "tags": {
             "environment": "production",
             "session.status": "healthy",
@@ -295,7 +296,7 @@ def test_extract_strings_with_multiple_use_case_ids():
     }
 
     set_payload = {
-        "name": "s:escalating_issues/error@none",
+        "name": "s:profiles/error@none",
         "tags": {
             "environment": "production",
             "session.status": "errored",
@@ -311,8 +312,8 @@ def test_extract_strings_with_multiple_use_case_ids():
     outer_message = _construct_outer_message(
         [
             (counter_payload, [("namespace", b"spans")]),
-            (distribution_payload, [("namespace", b"escalating_issues")]),
-            (set_payload, [("namespace", b"escalating_issues")]),
+            (distribution_payload, [("namespace", b"profiles")]),
+            (set_payload, [("namespace", b"profiles")]),
         ]
     )
     batch = IndexerBatch(
@@ -334,14 +335,14 @@ def test_extract_strings_with_multiple_use_case_ids():
                 "init",
             }
         },
-        UseCaseID.ESCALATING_ISSUES: {
+        UseCaseID.PROFILES: {
             1: {
-                "d:escalating_issues/duration@second",
+                "d:profiles/duration@second",
                 "environment",
                 "production",
                 "session.status",
                 "healthy",
-                "s:escalating_issues/error@none",
+                "s:profiles/error@none",
                 "environment",
                 "production",
                 "session.status",
@@ -352,8 +353,8 @@ def test_extract_strings_with_multiple_use_case_ids():
 
 
 @pytest.mark.django_db
-@override_options({"sentry-metrics.indexer.disabled-namespaces": ["escalating_issues"]})
-def test_extract_strings_with_single_use_case_ids_blocked():
+@override_options({"sentry-metrics.indexer.disabled-namespaces": ["profiles"]})
+def test_extract_strings_with_single_use_case_ids_blocked() -> None:
     """
     Verify that the extract string method will work normally when a single use case ID is blocked
     """
@@ -372,7 +373,7 @@ def test_extract_strings_with_single_use_case_ids_blocked():
     }
 
     distribution_payload = {
-        "name": "d:escalating_issues/duration@second",
+        "name": "d:profiles/duration@second",
         "tags": {
             "environment": "production",
             "session.status": "healthy",
@@ -386,7 +387,7 @@ def test_extract_strings_with_single_use_case_ids_blocked():
     }
 
     set_payload = {
-        "name": "s:escalating_issues/error@none",
+        "name": "s:profiles/error@none",
         "tags": {
             "environment": "production",
             "session.status": "errored",
@@ -402,8 +403,8 @@ def test_extract_strings_with_single_use_case_ids_blocked():
     outer_message = _construct_outer_message(
         [
             (counter_payload, [("namespace", b"spans")]),
-            (distribution_payload, [("namespace", b"escalating_issues")]),
-            (set_payload, [("namespace", b"escalating_issues")]),
+            (distribution_payload, [("namespace", b"profiles")]),
+            (set_payload, [("namespace", b"profiles")]),
         ]
     )
     batch = IndexerBatch(
@@ -430,8 +431,8 @@ def test_extract_strings_with_single_use_case_ids_blocked():
 
 
 @pytest.mark.django_db
-@override_options({"sentry-metrics.indexer.disabled-namespaces": ["spans", "escalating_issues"]})
-def test_extract_strings_with_multiple_use_case_ids_blocked():
+@override_options({"sentry-metrics.indexer.disabled-namespaces": ["spans", "profiles"]})
+def test_extract_strings_with_multiple_use_case_ids_blocked() -> None:
     """
     Verify that the extract string method will work normally when multiple use case IDs are blocked
     """
@@ -449,7 +450,7 @@ def test_extract_strings_with_multiple_use_case_ids_blocked():
         "project_id": 3,
     }
     perf_distribution_payload = {
-        "name": TransactionMRI.MEASUREMENTS_FCP.value,
+        "name": "d:transactions/measurements.fcp@millisecond",
         "tags": {
             "environment": "production",
             "session.status": "healthy",
@@ -462,7 +463,7 @@ def test_extract_strings_with_multiple_use_case_ids_blocked():
         "project_id": 3,
     }
     custom_uc_set_payload = {
-        "name": "s:escalating_issues/error@none",
+        "name": "s:profiles/error@none",
         "tags": {
             "environment": "production",
             "session.status": "errored",
@@ -479,7 +480,7 @@ def test_extract_strings_with_multiple_use_case_ids_blocked():
         [
             (custom_uc_counter_payload, [("namespace", b"spans")]),
             (perf_distribution_payload, [("namespace", b"transactions")]),
-            (custom_uc_set_payload, [("namespace", b"escalating_issues")]),
+            (custom_uc_set_payload, [("namespace", b"profiles")]),
         ]
     )
     batch = IndexerBatch(
@@ -494,7 +495,7 @@ def test_extract_strings_with_multiple_use_case_ids_blocked():
     assert batch.extract_strings() == {
         UseCaseID.TRANSACTIONS: {
             1: {
-                TransactionMRI.MEASUREMENTS_FCP.value,
+                "d:transactions/measurements.fcp@millisecond",
                 "environment",
                 "production",
                 "session.status",
@@ -506,7 +507,7 @@ def test_extract_strings_with_multiple_use_case_ids_blocked():
 
 
 @pytest.mark.django_db
-def test_extract_strings_with_invalid_mri():
+def test_extract_strings_with_invalid_mri() -> None:
     """
     Verify that extract strings will drop payload that has invalid MRI in name field but continue processing the rest
     """
@@ -538,7 +539,7 @@ def test_extract_strings_with_invalid_mri():
     }
 
     distribution_payload = {
-        "name": "d:escalating_issues/duration@second",
+        "name": "d:profiles/duration@second",
         "tags": {
             "environment": "production",
             "session.status": "healthy",
@@ -552,7 +553,7 @@ def test_extract_strings_with_invalid_mri():
     }
 
     set_payload = {
-        "name": "s:escalating_issues/error@none",
+        "name": "s:profiles/error@none",
         "tags": {
             "environment": "production",
             "session.status": "errored",
@@ -569,8 +570,8 @@ def test_extract_strings_with_invalid_mri():
         [
             (bad_counter_payload, [("namespace", b"")]),
             (counter_payload, [("namespace", b"spans")]),
-            (distribution_payload, [("namespace", b"escalating_issues")]),
-            (set_payload, [("namespace", b"escalating_issues")]),
+            (distribution_payload, [("namespace", b"profiles")]),
+            (set_payload, [("namespace", b"profiles")]),
         ]
     )
     batch = IndexerBatch(
@@ -592,14 +593,14 @@ def test_extract_strings_with_invalid_mri():
                 "init",
             }
         },
-        UseCaseID.ESCALATING_ISSUES: {
+        UseCaseID.PROFILES: {
             1: {
-                "d:escalating_issues/duration@second",
+                "d:profiles/duration@second",
                 "environment",
                 "production",
                 "session.status",
                 "healthy",
-                "s:escalating_issues/error@none",
+                "s:profiles/error@none",
                 "environment",
                 "production",
                 "session.status",
@@ -611,7 +612,7 @@ def test_extract_strings_with_invalid_mri():
 
 
 @pytest.mark.django_db
-def test_extract_strings_with_multiple_use_case_ids_and_org_ids():
+def test_extract_strings_with_multiple_use_case_ids_and_org_ids() -> None:
     """
     Verify that the extract string method can handle payloads that has multiple
     (generic) uses cases and from different orgs
@@ -631,7 +632,7 @@ def test_extract_strings_with_multiple_use_case_ids_and_org_ids():
         "project_id": 3,
     }
     perf_distribution_payload = {
-        "name": TransactionMRI.MEASUREMENTS_FCP.value,
+        "name": "d:transactions/measurements.fcp@millisecond",
         "tags": {
             "environment": "production",
             "session.status": "healthy",
@@ -692,7 +693,7 @@ def test_extract_strings_with_multiple_use_case_ids_and_org_ids():
         },
         UseCaseID.TRANSACTIONS: {
             1: {
-                TransactionMRI.MEASUREMENTS_FCP.value,
+                "d:transactions/measurements.fcp@millisecond",
                 "environment",
                 "production",
                 "session.status",
@@ -704,8 +705,8 @@ def test_extract_strings_with_multiple_use_case_ids_and_org_ids():
 
 
 @pytest.mark.django_db
-def test_all_resolved(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_all_resolved(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -855,8 +856,8 @@ def test_all_resolved(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_all_resolved_with_routing_information(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_all_resolved_with_routing_information(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1011,7 +1012,8 @@ def test_all_resolved_with_routing_information(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_all_resolved_retention_days_honored(caplog, settings):
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_all_resolved_retention_days_honored(caplog) -> None:
     """
     Tests that the indexer batch honors the incoming retention_days values
     from Relay or falls back to 90.
@@ -1019,8 +1021,6 @@ def test_all_resolved_retention_days_honored(caplog, settings):
 
     distribution_payload_modified = distribution_payload.copy()
     distribution_payload_modified["retention_days"] = 30
-
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1169,7 +1169,8 @@ def test_all_resolved_retention_days_honored(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_batch_resolve_with_values_not_indexed(caplog, settings):
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_batch_resolve_with_values_not_indexed(caplog) -> None:
     """
     Tests that the indexer batch skips resolving tag values for indexing and
     sends the raw tag value to Snuba.
@@ -1179,7 +1180,6 @@ def test_batch_resolve_with_values_not_indexed(caplog, settings):
     different and mapping_meta is smaller. The payload also contains the
     version field to specify that the tag values are not indexed.
     """
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1321,8 +1321,8 @@ def test_batch_resolve_with_values_not_indexed(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_metric_id_rate_limited(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_metric_id_rate_limited(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1438,8 +1438,8 @@ def test_metric_id_rate_limited(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_tag_key_rate_limited(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_tag_key_rate_limited(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1532,8 +1532,8 @@ def test_tag_key_rate_limited(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_tag_value_rate_limited(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_tag_value_rate_limited(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1675,8 +1675,8 @@ def test_tag_value_rate_limited(caplog, settings):
 
 
 @pytest.mark.django_db
-def test_one_org_limited(caplog, settings):
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_one_org_limited(caplog) -> None:
     outer_message = _construct_outer_message(
         [
             (counter_payload, counter_headers),
@@ -1798,15 +1798,13 @@ def test_one_org_limited(caplog, settings):
     ]
 
 
-def test_aggregation_options():
-
+def test_aggregation_options() -> None:
     with override_options(
         {
             "sentry-metrics.10s-granularity": False,
             "sentry-metrics.drop-percentiles.per-use-case": ["transactions"],
         }
     ):
-
         assert get_aggregation_options("c:transactions/count@none") == {
             AggregationOption.DISABLE_PERCENTILES: TimeWindow.NINETY_DAYS
         }
@@ -1820,7 +1818,6 @@ def test_aggregation_options():
             "sentry-metrics.drop-percentiles.per-use-case": ["transactions"],
         }
     ):
-
         assert get_aggregation_options("c:transactions/count@none") == {
             AggregationOption.DISABLE_PERCENTILES: TimeWindow.NINETY_DAYS
         }
@@ -1834,7 +1831,6 @@ def test_aggregation_options():
             "sentry-metrics.drop-percentiles.per-use-case": ["transactions", "spans"],
         }
     ):
-
         assert get_aggregation_options("c:transactions/count@none") == {
             AggregationOption.DISABLE_PERCENTILES: TimeWindow.NINETY_DAYS
         }
@@ -1858,7 +1854,6 @@ def test_aggregation_options():
             "sentry-metrics.drop-percentiles.per-use-case": ["transactions"],
         }
     ):
-
         assert get_aggregation_options("d:transactions/measurements.fcp@millisecond") == {
             AggregationOption.HIST: TimeWindow.NINETY_DAYS
         }
@@ -1869,7 +1864,6 @@ def test_aggregation_options():
             "sentry-metrics.drop-percentiles.per-use-case": ["transactions", "spans"],
         }
     ):
-
         assert get_aggregation_options("d:transactions/measurements.fcp@millisecond") == {
             AggregationOption.HIST: TimeWindow.NINETY_DAYS
         }

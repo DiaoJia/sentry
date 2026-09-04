@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from functools import cached_property
 from typing import Any
 
@@ -16,9 +16,10 @@ from rest_framework.request import Request
 
 import sentry
 from sentry import features, options
-from sentry.api.utils import generate_region_url
+from sentry.api.utils import generate_locality_url
 from sentry.auth import superuser
 from sentry.auth.services.auth import AuthenticationContext
+from sentry.auth.staff import is_active_staff
 from sentry.auth.superuser import is_active_superuser
 from sentry.demo_mode.utils import is_demo_mode_enabled, is_demo_user
 from sentry.models.organizationmapping import OrganizationMapping
@@ -30,11 +31,16 @@ from sentry.organizations.services.organization import (
 )
 from sentry.projects.services.project_key import ProjectKeyRole, project_key_service
 from sentry.silo.base import SiloMode
-from sentry.types.region import (
-    Region,
-    RegionCategory,
-    find_all_multitenant_region_names,
-    get_region_by_name,
+from sentry.types.cell import (
+    Cell,
+    Locality,
+    find_all_cell_names,
+    find_all_multitenant_locality_names,
+    find_all_signup_locality_names,
+    get_cell_by_name,
+    get_global_directory,
+    get_locality_by_name,
+    get_locality_name_for_cell,
 )
 from sentry.users.models.user import User
 from sentry.users.services.user import UserSerializeType
@@ -121,8 +127,8 @@ def _get_public_dsn() -> str | None:
 
     result = cache.get(cache_key)
     if result is None:
-        key = project_key_service.get_project_key_by_region(
-            region_name=settings.SENTRY_MONOLITH_REGION,
+        key = project_key_service.get_project_key_by_cell(
+            cell_name=settings.SENTRY_FALLBACK_CELL,
             project_id=project_id,
             role=ProjectKeyRole.store,
         )
@@ -223,13 +229,10 @@ class _ClientConfig:
             yield "relocation:enabled"
         if features.has("system:multi-region"):
             yield "system:multi-region"
-        # TODO @athena: remove this feature flag after development is done
-        # this is a temporary hack to be able to used flagpole in a case where there's no organization
-        # availble on the frontend
         if self.last_org and features.has(
-            "organizations:scoped-partner-oauth", self.last_org, actor=self.user
+            "organizations:api-fetch-v2", self.last_org, actor=self.user
         ):
-            yield "system:scoped-partner-oauth"
+            yield "organizations:api-fetch-v2"
 
     @property
     def needs_upgrade(self) -> bool:
@@ -292,9 +295,11 @@ class _ClientConfig:
                 organization_mapping = OrganizationMapping.objects.get(
                     organization_id=self.last_org.id
                 )
-                region_url = generate_region_url(organization_mapping.region_name)
+                region_url = generate_locality_url(
+                    get_locality_name_for_cell(organization_mapping.cell_name)
+                )
             else:
-                region_url = generate_region_url()
+                region_url = generate_locality_url()
 
         yield "organizationUrl", organization_url
         yield "regionUrl", region_url
@@ -334,59 +339,77 @@ class _ClientConfig:
         return user_details
 
     @cached_property
-    def _member_region_names(self) -> frozenset[str]:
+    def _member_locality_names(self) -> frozenset[str]:
         # If the user is not authenticated they have no region membership
         if not self.user or not self.user.id:
             return frozenset()
 
-        region_names = user_service.get_member_region_names(user_id=self.user.id)
-        return frozenset(region_names)
-
-    @staticmethod
-    def _serialize_regions(
-        region_names: Iterable[str], display_order: Callable[[Region], Any]
-    ) -> list[Mapping[str, Any]]:
-        regions = [get_region_by_name(name) for name in region_names]
-        regions.sort(key=display_order)
-        return [region.api_serialize() for region in regions]
+        cell_names = user_service.get_member_cell_names(user_id=self.user.id)
+        directory = get_global_directory()
+        return frozenset(
+            loc.name
+            for name in cell_names
+            if (loc := directory.get_locality_for_cell(name)) is not None
+        )
 
     @property
-    def regions(self) -> list[Mapping[str, Any]]:
+    def localities(self) -> list[Mapping[str, Any]]:
         """
-        The regions available to the current user.
-
-        This will include *all* multi-tenant regions, and if the user
-        has membership on any single-tenant regions those will also be included.
+        The localities (formerly regions) that are visible to customers
         """
+        locality_names = find_all_multitenant_locality_names()
 
-        # Only expose visible regions.
-        # When new regions are added they can take some work to get working correctly.
-        # Before they are working we need ways to bring parts of the region online without
-        # exposing the region to customers.
-        region_names = find_all_multitenant_region_names()
-
-        if not region_names:
+        if not locality_names:
             return [{"name": "default", "url": options.get("system.url-prefix")}]
 
-        def region_display_order(region: Region) -> tuple[bool, bool, str]:
+        monolith_locality = get_locality_name_for_cell(settings.SENTRY_FALLBACK_CELL)
+
+        def region_display_order(region: Locality) -> tuple[bool, str]:
             return (
-                not region.is_historic_monolith_region(),  # default region comes first
-                region.category != RegionCategory.MULTI_TENANT,  # multi-tenants before single
+                region.name != monolith_locality,  # default locality comes first
                 region.name,  # then sort alphabetically
             )
 
-        # Show all visible multi-tenant regions to unauthenticated users as they could
-        # create a new account. Else, ensure all regions the current user is in are
-        # included as there could be single tenants or hidden regions.
-        unique_regions = set(region_names) | self._member_region_names
-        return self._serialize_regions(unique_regions, region_display_order)
+        localities = [get_locality_by_name(name) for name in locality_names]
+        localities.sort(key=region_display_order)
+
+        return [locality.api_serialize() for locality in localities]
 
     @property
-    def member_regions(self) -> list[Mapping[str, Any]]:
+    def signup_localities(self) -> list[str]:
         """
-        The regions the user has membership in. Includes single-tenant regions.
+        The locality names that are available to new orgs
         """
-        return self._serialize_regions(self._member_region_names, lambda r: r.name)
+        localities = find_all_signup_locality_names()
+        if not localities:
+            monolith_locality = get_locality_name_for_cell(settings.SENTRY_FALLBACK_CELL)
+            return [monolith_locality]
+        return localities
+
+    @property
+    def cells(self) -> list[Mapping[str, Any]]:
+        """
+        The list of cells available.
+
+        The cell list is only available with a staff/superuser session.
+        """
+        if not self.request or not (
+            is_active_staff(self.request) or is_active_superuser(self.request)
+        ):
+            return []
+
+        def cell_display_order(cell: Cell) -> tuple[bool, bool, str]:
+            return (
+                cell.name != settings.SENTRY_FALLBACK_CELL,  # default historical cell comes first
+                not cell.visible,  # visible cells first
+                cell.name,  # then sort alphabetically
+            )
+
+        cell_names = find_all_cell_names()
+        cells = [get_cell_by_name(name) for name in cell_names]
+        cells.sort(key=cell_display_order)
+
+        return [cell.api_serialize() for cell in cells]
 
     @property
     def should_preload_data(self) -> bool:
@@ -402,21 +425,16 @@ class _ClientConfig:
         # If the user is viewing the accept invitation user interface,
         # we should avoid preloading the data as they might not yet have access to it,
         # which could cause an error notification (403) to pop up in the user interface.
-        invite_route_names = (
-            "sentry-accept-invite",
-            "sentry-organization-accept-invite",
-        )
         if (
             self.request
             and self.request.resolver_match
-            and self.request.resolver_match.url_name in invite_route_names
+            and self.request.resolver_match.url_name == "sentry-organization-accept-invite"
         ):
             return False
 
         return True
 
     def get_context(self) -> Mapping[str, Any]:
-
         return {
             "initialTrace": self.tracing_data,
             "customerDomain": self.customer_domain,
@@ -450,6 +468,9 @@ class _ClientConfig:
             # organization is not in context
             "lastOrganization": self.last_org_slug,
             "languageCode": self.language_code,
+            "cells": self.cells,
+            "localities": self.localities,
+            "signupLocalities": self.signup_localities,
             "userIdentity": dict(self.user_identity),
             "csrfCookieName": settings.CSRF_COOKIE_NAME,
             "superUserCookieName": superuser.COOKIE_NAME,
@@ -468,9 +489,6 @@ class _ClientConfig:
                 "allowUrls": self.allow_list,
                 "tracePropagationTargets": settings.SENTRY_FRONTEND_TRACE_PROPAGATION_TARGETS or [],
             },
-            "memberRegions": self.member_regions,
-            "regions": self.regions,
-            "relocationConfig": {"selectableRegions": options.get("relocation.selectable-regions")},
             "demoMode": is_demo_mode_enabled() and is_demo_user(self.user),
             "enableAnalytics": settings.ENABLE_ANALYTICS,
             "validateSUForm": getattr(

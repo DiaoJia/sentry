@@ -1,4 +1,9 @@
 import {Fragment, useState} from 'react';
+import {useQuery, useMutation} from '@tanstack/react-query';
+
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
 
 import {
   addErrorMessage,
@@ -6,51 +11,55 @@ import {
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import {hasEveryAccess} from 'sentry/components/acl/access';
-import {Button} from 'sentry/components/core/button';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {IconAdd, IconFlag} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import type {Project, ProjectKey} from 'sentry/types/project';
-import {useApiQuery, useMutation} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import type {ProjectKey} from 'sentry/types/project';
+import {selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {projectKeysApiOptions} from 'sentry/utils/projectKeys';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {useApi} from 'sentry/utils/useApi';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
 import {useRoutes} from 'sentry/utils/useRoutes';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {RelayDsnOverrideAlert} from 'sentry/views/settings/project/projectKeys/relayDsnOverrideAlert';
 import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
+import {useProjectSettingsOutlet} from 'sentry/views/settings/project/projectSettingsLayout';
 
-import KeyRow from './keyRow';
+import {KeyRow} from './keyRow';
 
-type Props = {
-  project: Project;
-};
-
-function ProjectKeys({project}: Props) {
+export default function ProjectKeys() {
   const params = useParams<{projectId: string}>();
-  const {projectId} = params;
   const location = useLocation();
   const organization = useOrganization();
+  const {project} = useProjectSettingsOutlet();
   const api = useApi({persistInFlight: true});
   const routes = useRoutes();
 
   const [keyListState, setKeyListState] = useState<ProjectKey[] | undefined>(undefined);
 
   const {
-    data: fetchedKeyList,
+    data: keyListResponse,
     isPending,
     isError,
     refetch,
-    getResponseHeader,
-  } = useApiQuery<ProjectKey[]>([`/projects/${organization.slug}/${projectId}/keys/`], {
-    staleTime: 0,
+  } = useQuery({
+    ...projectKeysApiOptions({
+      orgSlug: organization.slug,
+      projSlug: project.slug,
+      query: {
+        cursor: decodeScalar(location.query.cursor),
+        per_page: 5,
+      },
+    }),
+    select: selectJsonWithHeaders,
   });
 
   /**
@@ -59,7 +68,13 @@ function ProjectKeys({project}: Props) {
   const handleRemoveKeyMutation = useMutation({
     mutationFn: (data: ProjectKey) => {
       return api.requestPromise(
-        `/projects/${organization.slug}/${projectId}/keys/${data.id}/`,
+        getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/keys/$keyId/', {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            projectIdOrSlug: project.slug,
+            keyId: data.id,
+          },
+        }),
         {
           method: 'DELETE',
         }
@@ -81,14 +96,20 @@ function ProjectKeys({project}: Props) {
   const handleToggleKeyMutation = useMutation({
     mutationFn: ({isActive, data}: {data: ProjectKey; isActive: boolean}) => {
       return api.requestPromise(
-        `/projects/${organization.slug}/${projectId}/keys/${data.id}/`,
+        getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/keys/$keyId/', {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            projectIdOrSlug: project.slug,
+            keyId: data.id,
+          },
+        }),
         {
           method: 'PUT',
           data: {isActive},
         }
       );
     },
-    onMutate: ({data}: {data: ProjectKey}) => {
+    onMutate: ({data}) => {
       addLoadingMessage(t('Saving changes\u2026'));
       setKeyListState(
         keyList.map(key => {
@@ -114,9 +135,15 @@ function ProjectKeys({project}: Props) {
 
   const handleCreateKeyMutation = useMutation({
     mutationFn: () => {
-      return api.requestPromise(`/projects/${organization.slug}/${projectId}/keys/`, {
-        method: 'POST',
-      });
+      return api.requestPromise(
+        getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/keys/', {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            projectIdOrSlug: project.slug,
+          },
+        }),
+        {method: 'POST'}
+      );
     },
     onSuccess: (updatedKey: ProjectKey) => {
       setKeyListState([...keyList, updatedKey]);
@@ -135,15 +162,14 @@ function ProjectKeys({project}: Props) {
     return <LoadingError onRetry={refetch} />;
   }
 
-  const keyList = keyListState ? keyListState : fetchedKeyList;
+  const keyList = keyListState ? keyListState : keyListResponse.json;
 
   const renderEmpty = () => {
     return (
       <Panel>
-        <EmptyMessage
-          icon={<IconFlag size="xl" />}
-          description={t('There are no keys active for this project.')}
-        />
+        <EmptyMessage icon={<IconFlag />}>
+          {t('There are no keys active for this project.')}
+        </EmptyMessage>
       </Panel>
     );
   };
@@ -157,8 +183,7 @@ function ProjectKeys({project}: Props) {
           <KeyRow
             hasWriteAccess={hasAccess}
             key={key.id}
-            orgId={organization.slug}
-            projectId={projectId}
+            projectId={project.slug}
             project={project}
             data={key}
             onToggle={(isActive, data) =>
@@ -170,7 +195,7 @@ function ProjectKeys({project}: Props) {
             params={params}
           />
         ))}
-        <Pagination pageLinks={getResponseHeader?.('Link')} />
+        <Pagination pageLinks={keyListResponse.headers.Link} />
       </Fragment>
     );
   };
@@ -186,18 +211,15 @@ function ProjectKeys({project}: Props) {
         action={
           <Button
             onClick={() => handleCreateKeyMutation.mutate()}
-            size="sm"
-            priority="primary"
-            icon={<IconAdd isCircled />}
+            size="md"
+            variant="primary"
+            icon={<IconAdd />}
             disabled={!hasAccess}
           >
             {t('Generate New Key')}
           </Button>
         }
-      />
-
-      <TextBlock>
-        {tct(
+        subtitle={tct(
           `To send data to Sentry you will need to configure an SDK with a client key
           (usually referred to as the [code:SENTRY_DSN] value). For more
           information on integrating Sentry with your application take a look at our
@@ -209,13 +231,12 @@ function ProjectKeys({project}: Props) {
             code: <code />,
           }
         )}
-      </TextBlock>
+      />
 
       <ProjectPermissionAlert project={project} />
+      <RelayDsnOverrideAlert />
 
       {isEmpty ? renderEmpty() : renderResults()}
     </div>
   );
 }
-
-export default ProjectKeys;

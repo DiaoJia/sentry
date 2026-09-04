@@ -12,18 +12,21 @@ import type {Token} from 'sentry/components/arithmeticBuilder/token';
 import {
   isTokenFreeText,
   isTokenFunction,
+  isTokenLiteral,
   isTokenOperator,
   isTokenParenthesis,
+  isTokenReference,
 } from 'sentry/components/arithmeticBuilder/token';
 import {ArithmeticTokenFreeText} from 'sentry/components/arithmeticBuilder/token/freeText';
 import {ArithmeticTokenFunction} from 'sentry/components/arithmeticBuilder/token/function';
+import {ArithmeticTokenLiteral} from 'sentry/components/arithmeticBuilder/token/literal';
 import {ArithmeticTokenOperator} from 'sentry/components/arithmeticBuilder/token/operator';
 import {ArithmeticTokenParenthesis} from 'sentry/components/arithmeticBuilder/token/parenthesis';
+import {ArithmeticBuilderTokenReference} from 'sentry/components/arithmeticBuilder/token/reference';
 import {computeNextAllowedTokenKinds} from 'sentry/components/arithmeticBuilder/validator';
 import {useGridList} from 'sentry/components/tokenizedInput/grid/useGridList';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
 interface TokenGridProps {
   tokens: Token[];
@@ -105,13 +108,13 @@ function GridList({showPlaceholder, ...props}: GridListProps) {
   useApplyFocusOverride(state);
 
   const nextAllowedTokenKindsAtIndex = useMemo(() => {
-    const tokens = [...state.collection].map(item => item.value);
+    const tokens = Array.from(state.collection, item => item.value);
     return computeNextAllowedTokenKinds(tokens);
   }, [state.collection]);
 
   return (
     <TokenGridWrapper {...gridProps} ref={ref}>
-      {[...state.collection].map((item, i) => {
+      {Array.from(state.collection, (item, i) => {
         const token = item.value;
 
         if (!defined(token)) {
@@ -132,6 +135,17 @@ function GridList({showPlaceholder, ...props}: GridListProps) {
         if (isTokenOperator(token)) {
           return (
             <ArithmeticTokenOperator
+              key={item.key}
+              item={item}
+              state={state}
+              token={token}
+            />
+          );
+        }
+
+        if (isTokenReference(token)) {
+          return (
+            <ArithmeticBuilderTokenReference
               key={item.key}
               item={item}
               state={state}
@@ -164,6 +178,17 @@ function GridList({showPlaceholder, ...props}: GridListProps) {
           );
         }
 
+        if (isTokenLiteral(token)) {
+          return (
+            <ArithmeticTokenLiteral
+              key={item.key}
+              item={item}
+              state={state}
+              token={token}
+            />
+          );
+        }
+
         Sentry.captureMessage(`Unknown token: ${token.kind}`);
         return null;
       })}
@@ -172,10 +197,10 @@ function GridList({showPlaceholder, ...props}: GridListProps) {
 }
 
 const TokenGridWrapper = styled('div')`
-  padding: ${space(0.75)};
+  padding: ${p => p.theme.space.sm};
   display: flex;
-  align-items: stretch;
-  row-gap: ${space(0.5)};
+  align-items: center;
+  row-gap: ${p => p.theme.space.xs};
   flex-wrap: wrap;
 
   &:focus {

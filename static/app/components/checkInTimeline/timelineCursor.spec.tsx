@@ -10,7 +10,6 @@ import {useTimelineCursor} from './timelineCursor';
 
 function TestComponent() {
   const {timelineCursor, cursorContainerRef} = useTimelineCursor<HTMLDivElement>({
-    enabled: true,
     labelText: p => p.toFixed(2),
   });
 
@@ -23,12 +22,12 @@ function TestComponent() {
   );
 }
 
-describe('TimelineCursor', function () {
+describe('TimelineCursor', () => {
   beforeEach(() => {
     document.elementsFromPoint = () => [];
   });
 
-  it('renders', async function () {
+  it('renders', async () => {
     render(<TestComponent />);
 
     const body = screen.getByTestId('body');

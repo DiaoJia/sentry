@@ -1,12 +1,12 @@
 import {Component} from 'react';
 import * as Sentry from '@sentry/react';
 
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import type {Organization} from 'sentry/types/organization';
-import getDisplayName from 'sentry/utils/getDisplayName';
-import useOrganization from 'sentry/utils/useOrganization';
+import {getDisplayName} from 'sentry/utils/getDisplayName';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 import type {Subscription} from 'getsentry/types';
 
 type InjectedSubscriptionProps = {
@@ -40,7 +40,7 @@ type State = {
  * If no organization ID can be determined, the subscription will be passed as
  * a `null` value.
  */
-function withSubscription<P extends InjectedSubscriptionProps>(
+export function withSubscription<P extends InjectedSubscriptionProps>(
   WrappedComponent: React.ComponentType<P>,
   {noLoader}: Options = {}
 ) {
@@ -59,6 +59,7 @@ function withSubscription<P extends InjectedSubscriptionProps>(
       const orgSlug = this.getOrgSlug();
 
       if (orgSlug === null) {
+        // oxlint-disable-next-line react/no-did-mount-set-state -- Legacy class lifecycle.
         this.setState({subscription: this.props.subscription});
       } else {
         SubscriptionStore.get(orgSlug, (subscription: Subscription) => {
@@ -83,12 +84,11 @@ function withSubscription<P extends InjectedSubscriptionProps>(
     private mounted = false;
 
     configureScopeWithSubscriptionData(subscription: Subscription) {
-      const {plan, planTier, totalMembers, planDetails} = subscription;
+      const {plan, totalMembers, planDetails} = subscription;
       Sentry.setTag('plan', plan);
       Sentry.setTag('plan.name', planDetails?.name);
       Sentry.setTag('plan.max_members', `${planDetails?.maxMembers}`);
       Sentry.setTag('plan.total_members', `${totalMembers}`);
-      Sentry.setTag('plan.tier', planTier);
     }
 
     onSubscriptionChange(subscription: Subscription) {
@@ -119,15 +119,13 @@ function withSubscription<P extends InjectedSubscriptionProps>(
       // Needed to solve type errors with DisabledDateRange hook.
       if (organization === undefined) {
         // TODO(any): HoC prop types not working w/ emotion https://github.com/emotion-js/emotion/issues/3261
-        return (
-          <WrappedComponent {...(otherProps as P as any)} subscription={subscription} />
-        );
+        return <WrappedComponent {...(otherProps as any)} subscription={subscription} />;
       }
 
       return (
         <WrappedComponent
           // TODO(any): HoC prop types not working w/ emotion https://github.com/emotion-js/emotion/issues/3261
-          {...(this.props as P as any)}
+          {...(this.props as any)}
           organization={organization}
           subscription={subscription}
         />
@@ -150,5 +148,3 @@ function withSubscription<P extends InjectedSubscriptionProps>(
 
   return WithSubscriptionWrapper;
 }
-
-export default withSubscription;

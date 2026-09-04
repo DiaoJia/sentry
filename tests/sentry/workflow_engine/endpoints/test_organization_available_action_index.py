@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sentry.constants import SentryAppStatus
 from sentry.integrations.models.organization_integration import OrganizationIntegration
@@ -8,24 +8,20 @@ from sentry.integrations.types import IntegrationProviderSlug
 from sentry.notifications.notification_action.action_handler_registry.base import (
     IntegrationActionHandler,
 )
-from sentry.plugins.base.manager import PluginManager
-from sentry.plugins.sentry_webhooks.plugin import WebHooksPlugin
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import APITestCase
-from sentry.testutils.silo import assume_test_silo_mode, region_silo_test
+from sentry.testutils.helpers import with_feature
+from sentry.testutils.silo import assume_test_silo_mode, cell_silo_test
 from sentry.utils.registry import Registry
 from sentry.workflow_engine.models.action import Action
 from sentry.workflow_engine.types import ActionHandler
-from sentry_plugins.pagerduty.plugin import PagerDutyPlugin
-from sentry_plugins.slack.plugin import SlackPlugin
-from sentry_plugins.trello.plugin import TrelloPlugin
 
 
-@region_silo_test
+@cell_silo_test
 class OrganizationAvailableActionAPITestCase(APITestCase):
     endpoint = "sentry-api-0-organization-available-action-index"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
 
@@ -36,19 +32,11 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
         )
         self.registry_patcher.start()
 
-        self.plugin_registry = PluginManager()
-        self.plugins_registry_patcher = patch(
-            "sentry.workflow_engine.processors.action.plugins",
-            new=self.plugin_registry,
-        )
-        self.plugins_registry_patcher.start()
-
     def tearDown(self) -> None:
         super().tearDown()
         self.registry_patcher.stop()
-        self.plugins_registry_patcher.stop()
 
-    def setup_email(self):
+    def setup_email(self) -> None:
         @self.registry.register(Action.Type.EMAIL)
         @dataclass(frozen=True)
         class EmailActionHandler(ActionHandler):
@@ -56,7 +44,7 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             config_schema = {}
             data_schema = {}
 
-    def setup_integrations(self):
+    def setup_integrations(self) -> None:
         @self.registry.register(Action.Type.SLACK)
         @dataclass(frozen=True)
         class SlackActionHandler(IntegrationActionHandler):
@@ -100,7 +88,7 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             config_schema = {}
             data_schema = {}
 
-    def setup_integrations_with_services(self):
+    def setup_integrations_with_services(self) -> None:
         @self.registry.register(Action.Type.PAGERDUTY)
         @dataclass(frozen=True)
         class PagerdutyActionHandler(IntegrationActionHandler):
@@ -173,7 +161,7 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             self.org_integration.config = {"team_table": [self.og_team]}
             self.org_integration.save()
 
-    def setup_sentry_apps(self):
+    def setup_sentry_apps(self) -> None:
         @self.registry.register(Action.Type.SENTRY_APP)
         @dataclass(frozen=True)
         class SentryAppActionHandler(ActionHandler):
@@ -205,6 +193,32 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             slug=self.sentry_app.slug, organization=self.organization
         )
 
+        # should not return sentry apps that are not alertable
+        self.not_alertable_sentry_app = self.create_sentry_app(
+            name="Not Alertable Sentry App",
+            organization=self.organization,
+            is_alertable=False,
+        )
+        self.not_alertable_sentry_app_installation = self.create_sentry_app_installation(
+            slug=self.not_alertable_sentry_app.slug, organization=self.organization
+        )
+
+        self.not_alertable_sentry_app = self.create_sentry_app(
+            name="Not Alertable Sentry App With Component",
+            organization=self.organization,
+            schema={
+                "elements": [
+                    self.sentry_app_settings_schema,
+                ]
+            },
+            is_alertable=False,
+        )
+        self.not_alertable_sentry_app_with_component_installation = (
+            self.create_sentry_app_installation(
+                slug=self.not_alertable_sentry_app.slug, organization=self.organization
+            )
+        )
+
         # should not return sentry apps that are not installed
         self.create_sentry_app(
             name="Bad Sentry App",
@@ -212,7 +226,7 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             is_alertable=True,
         )
 
-    def setup_webhooks(self):
+    def setup_webhooks(self) -> None:
         @self.registry.register(Action.Type.WEBHOOK)
         @dataclass(frozen=True)
         class WebhookActionHandler(ActionHandler):
@@ -220,25 +234,17 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             config_schema = {}
             data_schema = {}
 
-        self.plugin_registry.register(WebHooksPlugin)
-        self.webhooks_plugin = self.plugin_registry.get(WebHooksPlugin.slug)
-        self.webhooks_plugin.enable(self.project)
+        # Webhook services now only include alertable sentry apps without components
+        self.webhook_sentry_app = self.create_sentry_app(
+            name="Webhook Test App",
+            organization=self.organization,
+            is_alertable=True,
+        )
+        self.create_sentry_app_installation(
+            slug=self.webhook_sentry_app.slug, organization=self.organization
+        )
 
-        self.plugin_registry.register(SlackPlugin)
-        self.slack_plugin = self.plugin_registry.get(SlackPlugin.slug)
-        self.slack_plugin.enable(self.project)
-        # each plugin should only be returned once, even if it's enabled for multiple projects
-        self.slack_plugin.enable(self.create_project())
-
-        # non notification plugins should not be returned
-        self.plugin_registry.register(TrelloPlugin)
-        self.trello_plugin = self.plugin_registry.get(TrelloPlugin.slug)
-        self.trello_plugin.enable(self.project)
-
-        # plugins that are not enabled should not be returned
-        self.plugin_registry.register(PagerDutyPlugin)
-
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.setup_email()
 
         response = self.get_success_response(
@@ -255,7 +261,7 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             }
         ]
 
-    def test_simple_integrations(self):
+    def test_simple_integrations(self) -> None:
         self.setup_integrations()
 
         response = self.get_success_response(
@@ -286,7 +292,29 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
             },
         ]
 
-    def test_integrations_with_services(self):
+    @with_feature({"organizations:integrations-ticket-rules": False})
+    def test_does_not_return_ticket_actions_without_feature(self) -> None:
+        self.setup_integrations()
+
+        response = self.get_success_response(
+            self.organization.slug,
+            status_code=200,
+        )
+        assert len(response.data) == 1
+        assert response.data == [
+            # only notification actions are returned
+            {
+                "type": Action.Type.SLACK,
+                "handlerGroup": ActionHandler.Group.NOTIFICATION.value,
+                "configSchema": {},
+                "dataSchema": {},
+                "integrations": [
+                    {"id": str(self.slack_integration.id), "name": self.slack_integration.name}
+                ],
+            }
+        ]
+
+    def test_integrations_with_services(self) -> None:
         self.setup_integrations_with_services()
         response = self.get_success_response(
             self.organization.slug,
@@ -337,14 +365,16 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
         ]
 
     @patch("sentry.sentry_apps.components.SentryAppComponentPreparer.run")
-    def test_sentry_apps(self, mock_sentry_app_component_preparer):
+    def test_sentry_apps(self, mock_sentry_app_component_preparer: MagicMock) -> None:
         self.setup_sentry_apps()
 
         response = self.get_success_response(
             self.organization.slug,
             status_code=200,
         )
-        assert len(response.data) == 2
+
+        # should only return the sentry app with a component
+        assert len(response.data) == 1
         assert response.data == [
             {
                 "type": Action.Type.SENTRY_APP,
@@ -361,22 +391,31 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
                     "title": self.sentry_app_settings_schema["title"],
                 },
             },
-            {
-                "type": Action.Type.SENTRY_APP,
-                "handlerGroup": ActionHandler.Group.OTHER.value,
-                "configSchema": {},
-                "dataSchema": {},
-                "sentryApp": {
-                    "id": str(self.no_component_sentry_app.id),
-                    "name": self.no_component_sentry_app.name,
-                    "installationId": str(self.no_component_sentry_app_installation.id),
-                    "installationUuid": str(self.no_component_sentry_app_installation.uuid),
-                    "status": SentryAppStatus.as_str(self.no_component_sentry_app.status),
-                },
-            },
         ]
 
-    def test_webhooks(self):
+    @patch(
+        "sentry.workflow_engine.endpoints.organization_available_action_index.prepare_ui_component"
+    )
+    def test_sentry_apps_filters_failed_component_preparation(
+        self, mock_prepare_ui_component: MagicMock
+    ) -> None:
+        """Test that sentry apps whose components fail to prepare are filtered out"""
+        self.setup_sentry_apps()
+
+        # make prepare_ui_component return None to simulate a broken app
+        mock_prepare_ui_component.return_value = None
+
+        response = self.get_success_response(
+            self.organization.slug,
+            status_code=200,
+        )
+
+        # verify prepare_ui_component was called
+        assert mock_prepare_ui_component.called
+        # should return no sentry apps since component preparation failed
+        assert len(response.data) == 0
+
+    def test_webhooks(self) -> None:
         self.setup_webhooks()
 
         response = self.get_success_response(
@@ -391,34 +430,24 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
                 "configSchema": {},
                 "dataSchema": {},
                 "services": [
-                    {"slug": "slack", "name": "(Legacy) Slack"},
-                    {"slug": "webhooks", "name": "WebHooks"},
+                    {"slug": self.webhook_sentry_app.slug, "name": self.webhook_sentry_app.name},
                 ],
             }
         ]
 
     @patch("sentry.sentry_apps.components.SentryAppComponentPreparer.run")
-    def test_actions_sorting(self, mock_sentry_app_component_preparer):
-
+    def test_actions_sorting(self, mock_sentry_app_component_preparer: MagicMock) -> None:
         self.setup_sentry_apps()
         self.setup_integrations()
         self.setup_integrations_with_services()
         self.setup_webhooks()
         self.setup_email()
 
-        @self.registry.register(Action.Type.PLUGIN)
-        @dataclass(frozen=True)
-        class PluginActionHandler(ActionHandler):
-            group = ActionHandler.Group.OTHER
-
-            config_schema = {}
-            data_schema = {}
-
         response = self.get_success_response(
             self.organization.slug,
             status_code=200,
         )
-        assert len(response.data) == 9
+        assert len(response.data) == 7
         assert response.data == [
             # notification actions, sorted alphabetically with email first
             {
@@ -437,20 +466,21 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
                 ],
             },
             # other actions, non sentry app actions first then sentry apps sorted alphabetically by name
-            {
-                "type": Action.Type.PLUGIN,
-                "handlerGroup": ActionHandler.Group.OTHER.value,
-                "configSchema": {},
-                "dataSchema": {},
-            },
+            # webhook action should include sentry apps without components
             {
                 "type": Action.Type.WEBHOOK,
                 "handlerGroup": ActionHandler.Group.OTHER.value,
                 "configSchema": {},
                 "dataSchema": {},
                 "services": [
-                    {"slug": "slack", "name": "(Legacy) Slack"},
-                    {"slug": "webhooks", "name": "WebHooks"},
+                    {
+                        "slug": self.no_component_sentry_app.slug,
+                        "name": self.no_component_sentry_app.name,
+                    },
+                    {
+                        "slug": self.webhook_sentry_app.slug,
+                        "name": self.webhook_sentry_app.name,
+                    },
                 ],
             },
             {
@@ -466,19 +496,6 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
                     "status": SentryAppStatus.as_str(self.sentry_app.status),
                     "settings": self.sentry_app_settings_schema["settings"],
                     "title": self.sentry_app_settings_schema["title"],
-                },
-            },
-            {
-                "type": Action.Type.SENTRY_APP,
-                "handlerGroup": ActionHandler.Group.OTHER.value,
-                "configSchema": {},
-                "dataSchema": {},
-                "sentryApp": {
-                    "id": str(self.no_component_sentry_app.id),
-                    "name": self.no_component_sentry_app.name,
-                    "installationId": str(self.no_component_sentry_app_installation.id),
-                    "installationUuid": str(self.no_component_sentry_app_installation.uuid),
-                    "status": SentryAppStatus.as_str(self.no_component_sentry_app.status),
                 },
             },
             # ticket creation actions, sorted alphabetically
@@ -532,3 +549,17 @@ class OrganizationAvailableActionAPITestCase(APITestCase):
                 ],
             },
         ]
+
+    def test_plugin_not_in_available_actions(self) -> None:
+        @self.registry.register(Action.Type.PLUGIN)
+        @dataclass(frozen=True)
+        class PluginActionHandler(ActionHandler):
+            group = ActionHandler.Group.OTHER
+            config_schema = {}
+            data_schema = {}
+
+        response = self.get_success_response(
+            self.organization.slug,
+            status_code=200,
+        )
+        assert len(response.data) == 0

@@ -1,8 +1,8 @@
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import PerformanceScoreRingWithTooltips from 'sentry/views/insights/browser/webVitals/components/performanceScoreRingWithTooltips';
+import {PerformanceScoreRingWithTooltips} from 'sentry/views/insights/browser/webVitals/components/performanceScoreRingWithTooltips';
 
-describe('PerformanceScoreRingWithTooltips', function () {
+describe('PerformanceScoreRingWithTooltips', () => {
   it('renders segment labels', async () => {
     const projectScore = {
       lcpScore: 74,
@@ -14,8 +14,6 @@ describe('PerformanceScoreRingWithTooltips', function () {
     };
     render(
       <PerformanceScoreRingWithTooltips
-        width={220}
-        height={200}
         projectScore={projectScore}
         ringBackgroundColors={['#444674', '#895289', '#d6567f', '#f38150', '#f2b712']}
         ringSegmentColors={['#444674', '#895289', '#d6567f', '#f38150', '#f2b712']}
@@ -40,8 +38,6 @@ describe('PerformanceScoreRingWithTooltips', function () {
     };
     render(
       <PerformanceScoreRingWithTooltips
-        width={220}
-        height={200}
         projectScore={projectScore}
         ringBackgroundColors={['#444674', '#895289', '#d6567f', '#f38150', '#f2b712']}
         ringSegmentColors={['#444674', '#895289', '#d6567f', '#f38150', '#f2b712']}

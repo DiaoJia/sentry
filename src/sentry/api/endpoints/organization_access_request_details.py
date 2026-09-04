@@ -8,10 +8,11 @@ from rest_framework.response import Response
 from sentry import audit_log
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.serializers import serialize
+from sentry.models.organization import Organization
 from sentry.models.organizationaccessrequest import OrganizationAccessRequest
 from sentry.models.organizationmember import OrganizationMember
 from sentry.models.organizationmemberteam import OrganizationMemberTeam
@@ -49,13 +50,13 @@ class AccessRequestSerializer(serializers.Serializer):
     isApproved = serializers.BooleanField()
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationAccessRequestDetailsEndpoint(OrganizationEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
         "PUT": ApiPublishStatus.PRIVATE,
     }
-    owner = ApiOwner.ENTERPRISE
+    owner = ApiOwner.FOUNDATIONS
     permission_classes = (AccessRequestPermission,)
 
     # TODO(dcramer): this should go onto AccessRequestPermission
@@ -74,7 +75,7 @@ class OrganizationAccessRequestDetailsEndpoint(OrganizationEndpoint):
             return True
         return False
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         """
         Get a list of requests to join org/team.
         If any requests are redundant (user already joined the team), they are not returned.
@@ -112,7 +113,7 @@ class OrganizationAccessRequestDetailsEndpoint(OrganizationEndpoint):
 
         return Response(serialize(valid_access_requests, request.user))
 
-    def put(self, request: Request, organization, request_id) -> Response:
+    def put(self, request: Request, organization: Organization, request_id: int) -> Response:
         """
         Approve or deny a request
 

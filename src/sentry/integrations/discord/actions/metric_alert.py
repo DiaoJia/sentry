@@ -4,8 +4,6 @@ import sentry_sdk
 
 from sentry import features
 from sentry.incidents.charts import build_metric_alert_chart
-from sentry.incidents.endpoints.serializers.alert_rule import AlertRuleSerializerResponse
-from sentry.incidents.endpoints.serializers.incident import DetailedIncidentSerializerResponse
 from sentry.incidents.typings.metric_detector import (
     AlertContext,
     MetricIssueContext,
@@ -24,6 +22,9 @@ from sentry.integrations.messaging.metrics import (
 )
 from sentry.models.organization import Organization
 from sentry.shared_integrations.exceptions import ApiError
+from sentry.workflow_engine.endpoints.serializers.detector_serializer import (
+    DetectorSerializerResponse,
+)
 
 from ..utils import logger
 
@@ -34,25 +35,19 @@ def send_incident_alert_notification(
     notification_context: NotificationContext,
     metric_issue_context: MetricIssueContext,
     open_period_context: OpenPeriodContext,
-    alert_rule_serialized_response: AlertRuleSerializerResponse | None,
-    incident_serialized_response: DetailedIncidentSerializerResponse | None,
+    detector_serialized_response: DetectorSerializerResponse | None = None,
     notification_uuid: str | None = None,
 ) -> bool:
     chart_url = None
-    if (
-        features.has("organizations:metric-alert-chartcuterie", organization)
-        and alert_rule_serialized_response
-        and incident_serialized_response
-    ):
+    if features.has("organizations:metric-alert-chartcuterie", organization):
         try:
             chart_url = build_metric_alert_chart(
                 organization=organization,
-                alert_rule_serialized_response=alert_rule_serialized_response,
                 snuba_query=metric_issue_context.snuba_query,
                 alert_context=alert_context,
                 open_period_context=open_period_context,
-                selected_incident_serialized=incident_serialized_response,
                 subscription=metric_issue_context.subscription,
+                detector_serialized_response=detector_serialized_response,
             )
         except Exception as e:
             sentry_sdk.capture_exception(e)

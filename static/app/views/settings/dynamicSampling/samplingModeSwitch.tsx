@@ -1,11 +1,11 @@
-import styled from '@emotion/styled';
+import {InfoText} from '@sentry/scraps/info';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Switch} from '@sentry/scraps/switch';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
-import {Switch} from 'sentry/components/core/switch';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {openSamplingModeSwitchModal} from 'sentry/views/settings/dynamicSampling/samplingModeSwitchModal';
 import {useHasDynamicSamplingWriteAccess} from 'sentry/views/settings/dynamicSampling/utils/access';
 
@@ -28,8 +28,9 @@ export function SamplingModeSwitch({initialTargetRate}: Props) {
   };
 
   return (
-    <Wrapper>
-      <Tooltip
+    <Flex as="label" align="center" gap="md" marginBottom="0">
+      <InfoText
+        variant="inherit"
         title={tct(
           'Manually specify the percentage of incoming traffic that should be stored for each project. [link:Read the docs]',
           {
@@ -38,10 +39,9 @@ export function SamplingModeSwitch({initialTargetRate}: Props) {
             ),
           }
         )}
-        showUnderline
       >
         {t('Advanced Mode')}
-      </Tooltip>
+      </InfoText>
       <Tooltip
         disabled={hasAccess}
         title={t('You do not have permission to change this setting.')}
@@ -53,13 +53,6 @@ export function SamplingModeSwitch({initialTargetRate}: Props) {
           checked={samplingMode === 'project'}
         />
       </Tooltip>
-    </Wrapper>
+    </Flex>
   );
 }
-
-const Wrapper = styled('label')`
-  display: flex;
-  align-items: center;
-  gap: ${space(1)};
-  margin-bottom: 0;
-`;

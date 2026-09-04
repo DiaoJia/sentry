@@ -1,3 +1,5 @@
+import logging
+
 from sentry.incidents.action_handlers import email_users
 from sentry.incidents.models.incident import TriggerStatus
 from sentry.incidents.typings.metric_detector import (
@@ -14,8 +16,7 @@ from sentry.models.project import Project
 from sentry.models.team import Team
 from sentry.notifications.models.notificationaction import ActionTarget
 from sentry.notifications.notification_action.metric_alert_registry.handlers.utils import (
-    get_alert_rule_serializer,
-    get_detailed_incident_serializer,
+    get_detector_serializer,
 )
 from sentry.notifications.notification_action.registry import metric_alert_handler_registry
 from sentry.notifications.notification_action.types import BaseMetricAlertHandler
@@ -24,6 +25,8 @@ from sentry.notifications.utils.participants import get_notification_recipients
 from sentry.types.actor import Actor, ActorType
 from sentry.utils.email import get_email_addresses
 from sentry.workflow_engine.models import Action, Detector
+
+logger = logging.getLogger(__name__)
 
 
 @metric_alert_handler_registry.register(Action.Type.EMAIL)
@@ -40,7 +43,6 @@ class EmailMetricAlertHandler(BaseMetricAlertHandler):
         organization: Organization,
         project: Project,
     ) -> None:
-
         detector = Detector.objects.get(id=alert_context.action_identifier_id)
         if not detector:
             raise ValueError("Detector not found")
@@ -49,8 +51,7 @@ class EmailMetricAlertHandler(BaseMetricAlertHandler):
         if not open_period:
             raise ValueError("Open period not found")
 
-        alert_rule_serialized_response = get_alert_rule_serializer(detector)
-        incident_serialized_response = get_detailed_incident_serializer(open_period)
+        detector_serialized_response = get_detector_serializer(detector)
 
         recipients = list(
             get_email_addresses(
@@ -60,13 +61,18 @@ class EmailMetricAlertHandler(BaseMetricAlertHandler):
 
         targets = [(user_id, email) for user_id, email in recipients]
 
+        logger.info(
+            "notification_action.execute_via_metric_alert_handler.email",
+            extra={
+                "action_id": alert_context.action_identifier_id,
+            },
+        )
         # TODO(iamrajjoshi): Add analytics
         email_users(
             metric_issue_context=metric_issue_context,
             open_period_context=open_period_context,
             alert_context=alert_context,
-            alert_rule_serialized_response=alert_rule_serialized_response,
-            incident_serialized_response=incident_serialized_response,
+            detector_serialized_response=detector_serialized_response,
             trigger_status=trigger_status,
             targets=targets,
             project=project,
@@ -125,7 +131,10 @@ def get_target(
 
     elif notification_context.target_type == ActionTarget.TEAM:
         try:
-            return Team.objects.get(id=int(notification_context.target_identifier))
+            return Team.objects.get(
+                id=int(notification_context.target_identifier),
+                organization=organization,
+            )
         except Team.DoesNotExist:
             pass
 

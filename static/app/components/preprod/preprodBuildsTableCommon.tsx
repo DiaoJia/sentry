@@ -1,0 +1,245 @@
+import {Fragment} from 'react';
+import {PlatformIcon} from 'platformicons';
+
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {InfoText} from '@sentry/scraps/info';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {FullRowLink} from 'sentry/components/preprod/preprodBuildsTableStyles';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
+import {IconCheckmark, IconCommit, IconNot} from 'sentry/icons';
+import {t, tn} from 'sentry/locale';
+import {InstallAppButton} from 'sentry/views/preprod/components/installAppButton';
+import {getDistributionErrorTooltip} from 'sentry/views/preprod/components/installDetailsContent';
+import {
+  getBuildNumber,
+  type BuildDetailsApiResponse,
+} from 'sentry/views/preprod/types/buildDetailsTypes';
+
+export function PreprodBuildsHeaderCells({
+  showProjectColumn,
+}: {
+  showProjectColumn: boolean;
+}) {
+  return (
+    <Fragment>
+      <SimpleTable.HeaderCell>{t('App')}</SimpleTable.HeaderCell>
+      {showProjectColumn && (
+        <SimpleTable.HeaderCell>{t('Project')}</SimpleTable.HeaderCell>
+      )}
+      <SimpleTable.HeaderCell>{t('Build')}</SimpleTable.HeaderCell>
+    </Fragment>
+  );
+}
+
+export function PreprodBuildsCreatedHeaderCell() {
+  return <SimpleTable.HeaderCell>{t('Created')}</SimpleTable.HeaderCell>;
+}
+
+interface PreprodBuildsRowCellsProps {
+  build: BuildDetailsApiResponse;
+  showInteraction: boolean;
+  showProjectColumn: boolean;
+  rowLink?: {to: string; onClick?: () => void};
+  showInstallGroups?: boolean;
+  showInstallabilityIndicator?: boolean;
+}
+
+const MAX_VISIBLE_INSTALL_GROUPS = 3;
+
+export function PreprodBuildsRowCells({
+  build,
+  rowLink,
+  showInteraction,
+  showProjectColumn,
+  showInstallGroups = false,
+  showInstallabilityIndicator = false,
+}: PreprodBuildsRowCellsProps) {
+  const buildNumber = getBuildNumber(build.app_info);
+  const installGroups = showInstallGroups
+    ? (build.distribution_info?.install_groups ?? [])
+    : [];
+  const visibleInstallGroups = installGroups.slice(0, MAX_VISIBLE_INSTALL_GROUPS);
+  const hiddenInstallGroups = installGroups.slice(MAX_VISIBLE_INSTALL_GROUPS);
+
+  return (
+    <Fragment>
+      {showInteraction && <InteractionStateLayer as="td" />}
+      <SimpleTable.RowCell justify="start">
+        {build.app_info?.name || build.app_info?.app_id ? (
+          <Stack gap="xs">
+            <Flex align="center" gap="2xs">
+              {build.app_info?.platform && (
+                <PlatformIcon platform={build.app_info.platform} />
+              )}
+              <Container paddingLeft="xs">
+                <Text size="lg" bold>
+                  {rowLink ? (
+                    <FullRowLink to={rowLink.to} onClick={rowLink.onClick}>
+                      {build.app_info?.name || '--'}
+                    </FullRowLink>
+                  ) : (
+                    build.app_info?.name || '--'
+                  )}
+                </Text>
+              </Container>
+              {(build.distribution_info?.is_installable ||
+                showInstallabilityIndicator) && (
+                <Flex align="center" position="relative">
+                  {build.distribution_info?.is_installable ? (
+                    <InstallAppButton
+                      projectId={build.project_slug}
+                      artifactId={build.id}
+                      platform={build.app_info.platform ?? null}
+                      source="builds_table"
+                      variant="icon"
+                    />
+                  ) : (
+                    <Tooltip
+                      title={getDistributionErrorTooltip(
+                        build.distribution_info?.error_code,
+                        build.distribution_info?.error_message
+                      )}
+                      skipWrapper
+                    >
+                      <span>
+                        <Button
+                          aria-label={t('Not installable')}
+                          icon={<IconNot variant="danger" size="xs" />}
+                          variant="transparent"
+                          size="zero"
+                          disabled
+                        />
+                      </span>
+                    </Tooltip>
+                  )}
+                </Flex>
+              )}
+            </Flex>
+            <Flex align="center" gap="xs">
+              <Text size="sm" variant="muted">
+                {build.app_info?.app_id || '--'}
+              </Text>
+              {build.app_info?.build_configuration && (
+                <Fragment>
+                  <Text size="sm" variant="muted">
+                    {' • '}
+                  </Text>
+                  <InfoText
+                    title={t('Build configuration')}
+                    size="sm"
+                    variant="muted"
+                    monospace
+                  >
+                    {build.app_info.build_configuration}
+                  </InfoText>
+                </Fragment>
+              )}
+            </Flex>
+          </Stack>
+        ) : null}
+      </SimpleTable.RowCell>
+
+      {showProjectColumn && (
+        <SimpleTable.RowCell justify="start">
+          <Text>{build.project_slug}</Text>
+        </SimpleTable.RowCell>
+      )}
+
+      <SimpleTable.RowCell justify="start" minWidth={0}>
+        <Stack gap="xs" minWidth={0} width="100%">
+          <Flex align="center" gap="xs">
+            {build.app_info?.version !== null && (
+              <Text size="lg" bold>
+                {build.app_info?.version}
+              </Text>
+            )}
+            {buildNumber && (
+              <Text size="lg" variant="muted">
+                ({buildNumber})
+              </Text>
+            )}
+            {build.state === 3 && <IconCheckmark size="sm" variant="success" />}
+          </Flex>
+          <Flex align="center" gap="xs" minWidth={0}>
+            <IconCommit size="xs" />
+            <Text size="sm" variant="muted" monospace>
+              {(build.vcs_info?.head_sha?.slice(0, 7) || '--').toUpperCase()}
+            </Text>
+            {build.vcs_info?.pr_number && (
+              <Fragment>
+                <Text size="sm" variant="muted">
+                  #{build.vcs_info?.pr_number}
+                </Text>
+              </Fragment>
+            )}
+            {build.vcs_info?.head_ref !== null && (
+              <Fragment>
+                <Text size="sm" variant="muted">
+                  –
+                </Text>
+                <Flex flex={1} minWidth={0} overflow="hidden">
+                  <InfoText
+                    title={build.vcs_info?.head_ref || undefined}
+                    mode="overflowOnly"
+                    size="sm"
+                    variant="muted"
+                  >
+                    {build.vcs_info?.head_ref || t('N/A')}
+                  </InfoText>
+                </Flex>
+              </Fragment>
+            )}
+          </Flex>
+          {visibleInstallGroups.length > 0 && (
+            <Flex align="center" gap="xs" wrap="wrap">
+              {visibleInstallGroups.map(group => (
+                <Tag
+                  key={group}
+                  style={{maxWidth: '100%', minWidth: 0}}
+                  title={group}
+                  variant="muted"
+                >
+                  <Text ellipsis variant="inherit">
+                    {group}
+                  </Text>
+                </Tag>
+              ))}
+              {hiddenInstallGroups.length > 0 && (
+                <Tooltip title={hiddenInstallGroups.join(', ')}>
+                  <Tag
+                    aria-label={tn(
+                      '%s more install group',
+                      '%s more install groups',
+                      hiddenInstallGroups.length
+                    )}
+                    variant="muted"
+                  >
+                    +{hiddenInstallGroups.length}
+                  </Tag>
+                </Tooltip>
+              )}
+            </Flex>
+          )}
+        </Stack>
+      </SimpleTable.RowCell>
+    </Fragment>
+  );
+}
+
+export function PreprodBuildsCreatedRowCell({build}: {build: BuildDetailsApiResponse}) {
+  return (
+    <SimpleTable.RowCell>
+      {build.app_info?.date_added ? (
+        <TimeSince date={build.app_info.date_added} unitStyle="short" />
+      ) : (
+        '-'
+      )}
+    </SimpleTable.RowCell>
+  );
+}

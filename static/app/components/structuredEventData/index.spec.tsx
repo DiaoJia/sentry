@@ -6,11 +6,11 @@ import {
   within,
 } from 'sentry-test/reactTestingLibrary';
 
-import StructuredEventData from 'sentry/components/structuredEventData';
+import {StructuredEventData} from 'sentry/components/structuredEventData';
 
-describe('StructuredEventData', function () {
-  describe('strings', function () {
-    it('should render urls w/ an additional <a> link', async function () {
+describe('StructuredEventData', () => {
+  describe('strings', () => {
+    it('should render urls w/ an additional <a> link', async () => {
       const URL = 'https://example.org/foo/bar/';
       renderGlobalModal();
       render(<StructuredEventData data={URL} />);
@@ -21,7 +21,7 @@ describe('StructuredEventData', function () {
       expect(screen.getByTestId('external-link-warning')).toBeInTheDocument();
     });
 
-    it('should not render urls if meta is present', function () {
+    it('should not render urls if meta is present', () => {
       const URL = 'https://example.org/foo/bar/super/long...';
       renderGlobalModal();
       const meta = {
@@ -41,7 +41,7 @@ describe('StructuredEventData', function () {
       expect(screen.queryByRole('link')).not.toBeInTheDocument();
     });
 
-    it('should render multiline strings correctly', function () {
+    it('should render multiline strings correctly', () => {
       const data = 'foo\nbar\nbaz';
       render(<StructuredEventData data={data} />);
 
@@ -51,15 +51,15 @@ describe('StructuredEventData', function () {
     });
   });
 
-  describe('boolean', function () {
-    it('should render boolean values correctly', function () {
+  describe('boolean', () => {
+    it('should render boolean values correctly', () => {
       render(<StructuredEventData data={false} />);
       expect(
         within(screen.getByTestId('value-boolean')).getByText('false')
       ).toBeInTheDocument();
     });
 
-    it('can customize how booleans are rendered', function () {
+    it('can customize how booleans are rendered', () => {
       render(
         <StructuredEventData
           data="bool_value_input"
@@ -75,15 +75,15 @@ describe('StructuredEventData', function () {
     });
   });
 
-  describe('null', function () {
-    it('should render null values correctly', function () {
-      render(<StructuredEventData data={null} />);
+  describe('null', () => {
+    it('should render null values correctly', () => {
+      render(<StructuredEventData />);
       expect(
         within(screen.getByTestId('value-null')).getByText('null')
       ).toBeInTheDocument();
     });
 
-    it('can customize how nulls are rendered', function () {
+    it('can customize how nulls are rendered', () => {
       render(
         <StructuredEventData
           data="null_value_input"
@@ -97,10 +97,34 @@ describe('StructuredEventData', function () {
         within(screen.getByTestId('value-null')).getByText('null_value_output')
       ).toBeInTheDocument();
     });
+
+    it('renders scrubbed null values as redacted instead of "null"', () => {
+      const meta = {
+        '': {
+          rem: [['project:0', 'x']],
+        },
+      };
+      render(<StructuredEventData meta={meta} withAnnotatedText />);
+      expect(screen.getByText(/redacted/)).toBeInTheDocument();
+      expect(screen.queryByText('null')).not.toBeInTheDocument();
+    });
+
+    it('preserves renderNull when meta has no annotations', () => {
+      render(
+        <StructuredEventData
+          config={{renderNull: () => 'None'}}
+          meta={{}}
+          withAnnotatedText
+        />
+      );
+      expect(
+        within(screen.getByTestId('value-null')).getByText('None')
+      ).toBeInTheDocument();
+    });
   });
 
-  describe('collpasible values', function () {
-    it('auto-collapses objects/arrays with more than 5 items', async function () {
+  describe('collpasible values', () => {
+    it('auto-collapses objects/arrays with more than 5 items', async () => {
       render(
         <StructuredEventData
           data={{
@@ -221,7 +245,7 @@ describe('StructuredEventData', function () {
     });
 
     it('auto-expands N levels when forceDefaultExpand=undefined maxDefaultDepth=N', () => {
-      render(<StructuredEventData data={data} maxDefaultDepth={2} />);
+      render(<StructuredEventData data={data} />);
 
       // String value, visible
       expect(screen.getByText('foo')).toBeInTheDocument();

@@ -84,7 +84,7 @@ class Actor(RpcModel):
         from sentry.organizations.services.organization import RpcTeam
         from sentry.users.models.user import User
 
-        result: list["Actor"] = []
+        result: list[Actor] = []
         grouped_by_type: MutableMapping[str, list[int]] = defaultdict(list)
         team_slugs: MutableMapping[int, str] = {}
         for obj in objects:
@@ -165,8 +165,14 @@ class Actor(RpcModel):
     @classmethod
     def from_identifier(cls, id: int | str) -> "Actor": ...
 
+    @overload
     @classmethod
-    def from_identifier(cls, id: str | int | None) -> "Actor | None":
+    def from_identifier(cls, id: int | str, organization_id: int) -> "Actor": ...
+
+    @classmethod
+    def from_identifier(
+        cls, id: str | int | None, organization_id: int | None = None
+    ) -> "Actor | None":
         """
         Parse an actor identifier into an Actor
 
@@ -174,10 +180,13 @@ class Actor(RpcModel):
             1231 -> look up User by id
             "1231" -> look up User by id
             "user:1231" -> look up User by id
+            "user:maiseythedog" -> look up user by username
             "team:1231" -> look up Team by id
+            "team:team-name" -> look up Team by name (must provide organization_id)
             "maiseythedog" -> look up User by username
             "maisey@dogsrule.com" -> look up User by primary email
         """
+        from sentry.models.team import Team
         from sentry.users.services.user.service import user_service
 
         if not id:
@@ -192,10 +201,25 @@ class Actor(RpcModel):
             return cls(id=int(id), actor_type=ActorType.USER)
 
         if id.startswith("user:"):
-            return cls(id=int(id[5:]), actor_type=ActorType.USER)
+            remainder = id[5:]
+            if remainder.isdigit():
+                return cls(id=int(remainder), actor_type=ActorType.USER)
+            # pass this on to get to the user lookup below
+            id = remainder
 
         if id.startswith("team:"):
-            return cls(id=int(id[5:]), actor_type=ActorType.TEAM)
+            remainder = id[5:]
+            if remainder.isdigit():
+                return cls(id=int(remainder), actor_type=ActorType.TEAM)
+
+            if organization_id is not None:
+                try:
+                    team = Team.objects.get(name=remainder, organization_id=organization_id)
+                    return cls(id=team.id, actor_type=ActorType.TEAM)
+                except Team.DoesNotExist:
+                    pass
+
+            raise cls.InvalidActor(f"Unable to resolve team name: {remainder}")
 
         try:
             user = user_service.get_by_username(username=id)[0]
@@ -273,18 +297,24 @@ class ActorOwned(Protocol):
 
 
 def parse_and_validate_actor(actor_identifier: str | None, organization_id: int) -> Actor | None:
-    from sentry.models.organizationmember import OrganizationMember
-    from sentry.models.team import Team
-
     if not actor_identifier:
         return None
 
     try:
-        actor = Actor.from_identifier(actor_identifier)
+        actor = Actor.from_identifier(actor_identifier, organization_id)
     except Exception:
         raise serializers.ValidationError(
             "Could not parse actor. Format should be `type:id` where type is `team` or `user`."
         )
+
+    validate_actor(actor, organization_id)
+    return actor
+
+
+def validate_actor(actor: Actor, organization_id: int) -> None:
+    from sentry.models.organizationmember import OrganizationMember
+    from sentry.models.team import Team
+
     try:
         obj = actor.resolve()
     except Actor.InvalidActor:
@@ -294,9 +324,10 @@ def parse_and_validate_actor(actor_identifier: str | None, organization_id: int)
         if obj.organization_id != organization_id:
             raise serializers.ValidationError("Team is not a member of this organization")
     elif isinstance(obj, RpcUser):
-        if not OrganizationMember.objects.filter(
+        membership = OrganizationMember.objects.filter(
             organization_id=organization_id, user_id=obj.id
-        ).exists():
+        ).first()
+        if not membership:
             raise serializers.ValidationError("User is not a member of this organization")
-
-    return actor
+        if not membership.user_is_active:
+            raise serializers.ValidationError("Cannot assign to a deactivated member")

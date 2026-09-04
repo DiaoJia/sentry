@@ -1,15 +1,16 @@
 import styled from '@emotion/styled';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {SentryAppAvatar} from 'sentry/components/core/avatar/sentryAppAvatar';
-import Link from 'sentry/components/links/link';
+import {SentryAppAvatar} from '@sentry/scraps/avatar';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+
 import {SentryAppPublishRequestModal} from 'sentry/components/modals/sentryAppPublishRequestModal/sentryAppPublishRequestModal';
-import PanelItem from 'sentry/components/panels/panelItem';
-import {space} from 'sentry/styles/space';
+import {PanelItem} from 'sentry/components/panels/panelItem';
 import type {SentryApp} from 'sentry/types/integrations';
 import type {Organization} from 'sentry/types/organization';
 
-import SentryApplicationRowButtons from './sentryApplicationRowButtons';
+import {SentryApplicationRowButtons} from './sentryApplicationRowButtons';
 
 interface Props {
   app: SentryApp;
@@ -18,12 +19,14 @@ interface Props {
   organization: Organization;
 }
 
-export default function SentryApplicationRow({
+export function SentryApplicationRow({
   app,
   organization,
   onPublishSubmission,
   onRemoveApp,
 }: Props) {
+  const {openModal} = useModal();
+
   const isInternal = app.status === 'internal';
 
   // no publishing for internal apps so hide the status on the developer
@@ -68,10 +71,6 @@ export default function SentryApplicationRow({
   );
 }
 
-const Flex = styled('div')`
-  display: flex;
-`;
-
 const Box = styled('div')``;
 
 const SentryAppItem = styled(PanelItem)`
@@ -112,7 +111,9 @@ const PublishStatus = styled(({status, ...props}: PublishStatusProps) => (
   </CenterFlex>
 ))`
   color: ${(props: PublishStatusProps) =>
-    props.status === 'published' ? props.theme.success : props.theme.gray300};
+    props.status === 'published'
+      ? props.theme.tokens.content.success
+      : props.theme.colors.gray400};
   font-weight: light;
-  margin-right: ${space(0.75)};
+  margin-right: ${p => p.theme.space.sm};
 `;

@@ -1,16 +1,13 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import orjson
 import pytest
 from slack_sdk.web import SlackResponse
 
 from sentry.integrations.types import EventLifecycleOutcome
-from sentry.silo.base import SiloMode
 from sentry.testutils.asserts import assert_slo_metric
 from sentry.testutils.cases import IntegratedApiTestCase
 from sentry.testutils.helpers import get_response_text
-from sentry.testutils.silo import assume_test_silo_mode
-from sentry.users.models.identity import Identity, IdentityStatus
 
 from . import BaseEventTest
 
@@ -56,6 +53,11 @@ MESSAGE_IM_BOT_EVENT = """{
 
 
 class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
+    """
+    Tests for legacy messages to bot that would be interpreted as commands.
+    This will be superceded by the explorer agentic workflow.
+    """
+
     def get_block_section_text(self, data):
         blocks = data["blocks"]
         return blocks[0]["text"]["text"], blocks[1]["text"]["text"]
@@ -76,13 +78,13 @@ class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
         ) as self.mock_post:
             yield
 
-    def test_identifying_channel_correctly(self):
+    def test_identifying_channel_correctly(self) -> None:
         event_data = orjson.loads(MESSAGE_IM_EVENT)
         self.post_webhook(event_data=event_data)
         data = self.mock_post.call_args[1]
         assert data.get("channel") == event_data["channel"]
 
-    def test_user_message_im_notification_platform(self):
+    def test_user_message_im_notification_platform(self) -> None:
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT))
         assert resp.status_code == 200, resp.content
 
@@ -95,13 +97,10 @@ class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
         )
 
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_user_message_link(self, mock_record):
+    def test_user_message_link(self, mock_record: MagicMock) -> None:
         """
         Test that when a user types in "link" to the DM we reply with the correct response.
         """
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            self.create_identity_provider(type="slack", external_id="TXXXXXXX1")
-
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT_LINK))
         assert resp.status_code == 200, resp.content
 
@@ -110,20 +109,12 @@ class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
 
         assert_slo_metric(mock_record, EventLifecycleOutcome.SUCCESS)
 
-    def test_user_message_already_linked_sdk(self):
+    def test_user_message_already_linked_sdk(self) -> None:
         """
         Test that when a user who has already linked their identity types in
         "link" to the DM we reply with the correct response.
         """
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            idp = self.create_identity_provider(type="slack", external_id="TXXXXXXX1")
-            Identity.objects.create(
-                external_id="UXXXXXXX1",
-                idp=idp,
-                user=self.user,
-                status=IdentityStatus.VALID,
-                scopes=[],
-            )
+        self.create_identity(user=self.user, identity_provider=self.idp, external_id="UXXXXXXX1")
 
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT_LINK))
         assert resp.status_code == 200, resp.content
@@ -131,19 +122,11 @@ class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
         data = self.mock_post.call_args[1]
         assert "You are already linked" in get_response_text(data)
 
-    def test_user_message_unlink(self):
+    def test_user_message_unlink(self) -> None:
         """
         Test that when a user types in "unlink" to the DM we reply with the correct response.
         """
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            idp = self.create_identity_provider(type="slack", external_id="TXXXXXXX1")
-            Identity.objects.create(
-                external_id="UXXXXXXX1",
-                idp=idp,
-                user=self.user,
-                status=IdentityStatus.VALID,
-                scopes=[],
-            )
+        self.create_identity(user=self.user, identity_provider=self.idp, external_id="UXXXXXXX1")
 
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT_UNLINK))
         assert resp.status_code == 200, resp.content
@@ -151,25 +134,22 @@ class MessageIMEventTest(BaseEventTest, IntegratedApiTestCase):
         data = self.mock_post.call_args[1]
         assert "Click here to unlink your identity" in get_response_text(data)
 
-    def test_user_message_already_unlinked(self):
+    def test_user_message_already_unlinked(self) -> None:
         """
         Test that when a user without an Identity types in "unlink" to the DM we
         reply with the correct response.
         """
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            self.create_identity_provider(type="slack", external_id="TXXXXXXX1")
-
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT_UNLINK))
         assert resp.status_code == 200, resp.content
 
         data = self.mock_post.call_args[1]
         assert "You do not have a linked identity to unlink" in get_response_text(data)
 
-    def test_bot_message_im(self):
+    def test_bot_message_im(self) -> None:
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_BOT_EVENT))
         assert resp.status_code == 200, resp.content
 
-    def test_user_message_im_no_text(self):
+    def test_user_message_im_no_text(self) -> None:
         resp = self.post_webhook(event_data=orjson.loads(MESSAGE_IM_EVENT_NO_TEXT))
         assert resp.status_code == 200, resp.content
         assert not self.mock_post.called

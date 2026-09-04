@@ -1,8 +1,82 @@
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import Literal, TypedDict
+
+from django.db.models import Prefetch, prefetch_related_objects
+
 from sentry.api.serializers import Serializer, register, serialize
 from sentry.api.serializers.models.release import get_users_for_authors
+from sentry.api.serializers.models.repository import RepositorySerializerResponse
+from sentry.api.serializers.release_details_types import Author
+from sentry.integrations.source_code_management.status_check import (
+    AggregateChecksStatus,
+    AggregateReviewStatus,
+    PullRequestStatusResult,
+)
 from sentry.models.commitauthor import CommitAuthor
-from sentry.models.pullrequest import PullRequest
+from sentry.models.pullrequest import (
+    PullRequest,
+    PullRequestAttribution,
+    PullRequestAttributionSignalType,
+    PullRequestLifecycleState,
+)
 from sentry.models.repository import Repository
+from sentry.pr_metrics.attribution import is_seer_attribution
+
+PullRequestStatus = Literal["merged", "open", "closed", "draft", "unknown"]
+
+
+def get_stored_pull_request_status(pull_request: PullRequest) -> PullRequestStatus | None:
+    if pull_request.state == PullRequestLifecycleState.MERGED:
+        return "merged"
+    if pull_request.state == PullRequestLifecycleState.CLOSED:
+        return "closed"
+    if pull_request.draft is True:
+        return "draft"
+    # `draft` is nullable for older rows, so only trust `open` when we know the PR
+    # is not a draft.
+    if pull_request.state == PullRequestLifecycleState.OPEN and pull_request.draft is False:
+        return "open"
+    return None
+
+
+class PullRequestSerializerResponse(TypedDict):
+    id: str
+    title: str | None
+    message: str | None
+    dateCreated: datetime
+    mergedAt: datetime | None
+    status: PullRequestStatus | None
+    repository: RepositorySerializerResponse
+    author: Author
+    externalUrl: str
+
+
+LinkedPullRequestAttributionAgent = Literal["cursor", "github_copilot", "claude_code", "unknown"]
+
+
+class LinkedPullRequestSeerAttributionResponse(TypedDict):
+    type: Literal["seer"]
+    id: Literal["seer"]
+    agent: LinkedPullRequestAttributionAgent | None
+
+
+LinkedPullRequestAttributionResponse = LinkedPullRequestSeerAttributionResponse
+
+
+DELEGATED_AGENT_BY_SIGNAL_TYPE: dict[str, LinkedPullRequestAttributionAgent] = {
+    PullRequestAttributionSignalType.SEER_DELEGATED_CURSOR: "cursor",
+    PullRequestAttributionSignalType.SEER_DELEGATED_GITHUB_COPILOT: "github_copilot",
+    PullRequestAttributionSignalType.SEER_DELEGATED_CLAUDE_CODE: "claude_code",
+    PullRequestAttributionSignalType.SEER_DELEGATED_UNKNOWN: "unknown",
+}
+
+
+class LinkedPullRequestResponse(PullRequestSerializerResponse):
+    attribution: LinkedPullRequestAttributionResponse | None
+    dateLinked: datetime
+    checksStatus: AggregateChecksStatus | None
+    reviewStatus: AggregateReviewStatus | None
 
 
 def get_users_for_pull_requests(item_list, user=None):
@@ -18,7 +92,7 @@ def get_users_for_pull_requests(item_list, user=None):
 
 
 @register(PullRequest)
-class PullRequestSerializer(Serializer):
+class PullRequestSerializer(Serializer[PullRequestSerializerResponse]):
     def get_attrs(self, item_list, user, **kwargs):
         users_by_author = get_users_for_pull_requests(item_list, user)
         repositories = list(Repository.objects.filter(id__in=[c.repository_id for c in item_list]))
@@ -39,13 +113,82 @@ class PullRequestSerializer(Serializer):
 
         return result
 
-    def serialize(self, obj, attrs, user, **kwargs):
+    def serialize(self, obj: PullRequest, attrs, user, **kwargs) -> PullRequestSerializerResponse:
         return {
             "id": obj.key,
             "title": obj.title,
             "message": obj.message,
             "dateCreated": obj.date_added,
+            "mergedAt": obj.merged_at,
+            "status": get_stored_pull_request_status(obj),
             "repository": attrs["repository"],
             "author": attrs["user"],
             "externalUrl": attrs["external_url"],
+        }
+
+
+def _serialize_attribution(
+    attributions: Sequence[PullRequestAttribution],
+) -> LinkedPullRequestAttributionResponse | None:
+    signal_types = {attribution.signal_type for attribution in attributions}
+    for signal_type, agent in DELEGATED_AGENT_BY_SIGNAL_TYPE.items():
+        if signal_type in signal_types:
+            return {
+                "type": "seer",
+                "id": "seer",
+                "agent": agent,
+            }
+
+    if not any(is_seer_attribution(attribution) for attribution in attributions):
+        return None
+
+    return {
+        "type": "seer",
+        "id": "seer",
+        "agent": None,
+    }
+
+
+class LinkedPullRequestSerializer(PullRequestSerializer):
+    """Serialize a pull request linked to a group.
+
+    The caller passes in the linked-at timestamp, status, and provider-reported checks
+    and review; this serializer maps them, along with the PR's Seer attribution, into
+    the response shape.
+    """
+
+    def __init__(
+        self,
+        *,
+        date_linked_by_pr_id: Mapping[int, datetime],
+        status_by_pr_id: Mapping[int, PullRequestStatus],
+        checks_and_review_by_pr_id: Mapping[int, PullRequestStatusResult],
+    ) -> None:
+        self.date_linked_by_pr_id = date_linked_by_pr_id
+        self.status_by_pr_id = status_by_pr_id
+        self.checks_and_review_by_pr_id = checks_and_review_by_pr_id
+
+    def get_attrs(self, item_list, user, **kwargs):
+        attrs = super().get_attrs(item_list, user)
+        prefetch_related_objects(
+            item_list,
+            Prefetch(
+                "pullrequestattribution_set",
+                queryset=PullRequestAttribution.objects.filter(is_valid=True),
+                to_attr="valid_attributions",
+            ),
+        )
+        for item in item_list:
+            attrs[item]["attribution"] = _serialize_attribution(item.valid_attributions)
+        return attrs
+
+    def serialize(self, obj: PullRequest, attrs, user, **kwargs) -> LinkedPullRequestResponse:
+        checks_and_review = self.checks_and_review_by_pr_id.get(obj.id, PullRequestStatusResult())
+        return {
+            **super().serialize(obj, attrs, user, **kwargs),
+            "attribution": attrs["attribution"],
+            "dateLinked": self.date_linked_by_pr_id[obj.id],
+            "status": self.status_by_pr_id[obj.id],
+            "checksStatus": checks_and_review.checks,
+            "reviewStatus": checks_and_review.review,
         }

@@ -1,20 +1,17 @@
-import {Fragment, useMemo, useRef} from 'react';
+import {Fragment, useMemo} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
-import type {Alignments} from 'sentry/components/gridEditable/sortLink';
-import {GridBodyCell, GridHeadCell} from 'sentry/components/gridEditable/styles';
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import {IconArrow} from 'sentry/icons/iconArrow';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {DataTable} from 'sentry/components/tables/dataTable';
 import {IconStack} from 'sentry/icons/iconStack';
 import {IconWarning} from 'sentry/icons/iconWarning';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Confidence} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
 import {
   fieldAlignment,
   parseFunction,
@@ -22,18 +19,11 @@ import {
 } from 'sentry/utils/discover/fields';
 import {prettifyTagKey} from 'sentry/utils/fields';
 import {useLocation} from 'sentry/utils/useLocation';
-import {
-  TableBody,
-  TableHead,
-  TableRow,
-  TableStatus,
-  useTableStyles,
-} from 'sentry/views/explore/components/table';
 import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
 import type {AggregatesTableResult} from 'sentry/views/explore/hooks/useExploreAggregatesTable';
 import type {SpansTableResult} from 'sentry/views/explore/hooks/useExploreSpansTable';
 import {TOP_EVENTS_LIMIT} from 'sentry/views/explore/hooks/useTopEvents';
+import {useSpanItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 import {Table} from 'sentry/views/explore/multiQueryMode/components/miniTable';
 import type {
   useMultiQueryTableAggregateMode,
@@ -41,15 +31,14 @@ import type {
 } from 'sentry/views/explore/multiQueryMode/hooks/useMultiQueryTable';
 import {
   getSamplesTargetAtIndex,
-  type ReadableExploreQueryParts,
   useReadQueriesFromLocation,
+  type ReadableExploreQueryParts,
 } from 'sentry/views/explore/multiQueryMode/locationUtils';
 import {MultiQueryFieldRenderer} from 'sentry/views/explore/tables/fieldRenderer';
 
-const TABLE_HEIGHT = 258;
+const TABLE_HEIGHT = '258px';
 
 interface MultiQueryTableBaseProps {
-  confidences: Confidence[];
   index: number;
   mode: Mode;
   query: ReadableExploreQueryParts;
@@ -88,21 +77,15 @@ function AggregatesTable({
   const location = useLocation();
   const queries = useReadQueriesFromLocation();
 
-  const topEvents = 5;
   const {result, eventView, fields} = aggregatesTableResult;
   const {sortBys} = queryParts;
   const meta = result.meta ?? {};
 
   const columns = useMemo(() => eventView.getColumns(), [eventView]);
 
-  const {tags: numberTags} = useTraceItemTags('number');
-  const {tags: stringTags} = useTraceItemTags('string');
-
-  const tableRef = useRef<HTMLTableElement>(null);
-  const {initialTableStyles} = useTableStyles(fields, tableRef, {
-    minimumColumnWidth: 50,
-    prefixColumnWidth: 'min-content',
-  });
+  const {attributes: numberTags} = useSpanItemAttributes({}, 'number');
+  const {attributes: stringTags} = useSpanItemAttributes({}, 'string');
+  const {attributes: booleanTags} = useSpanItemAttributes({}, 'boolean');
 
   const numberOfRowsNeedingColor = Math.min(result.data?.length ?? 0, TOP_EVENTS_LIMIT);
 
@@ -110,11 +93,17 @@ function AggregatesTable({
 
   return (
     <Fragment>
-      <Table ref={tableRef} style={initialTableStyles} scrollable height={TABLE_HEIGHT}>
-        <TableHead>
-          <TableRow>
+      <Table
+        fields={fields}
+        height={TABLE_HEIGHT}
+        minimumColumnWidth={50}
+        prefixColumnWidth="min-content"
+        scrollable
+      >
+        <DataTable.Head>
+          <DataTable.Row>
             <TableHeadCell isFirst={false}>
-              <TableHeadCellContent />
+              <Flex align="center" gap="xs" />
             </TableHeadCell>
             {fields.map((field, i) => {
               // Hide column names before alignment is determined
@@ -126,7 +115,8 @@ function AggregatesTable({
 
               const fieldType = meta.fields?.[field];
               const align = fieldAlignment(field, fieldType);
-              const tag = stringTags[field] ?? numberTags[field] ?? null;
+              const tag =
+                stringTags[field] ?? numberTags[field] ?? booleanTags[field] ?? null;
               if (tag) {
                 label = tag.name;
               }
@@ -139,49 +129,31 @@ function AggregatesTable({
               const direction = sortBys.find(s => s.field === field)?.kind;
 
               return (
-                <TableHeadCell align={align} key={i} isFirst={i === 0}>
-                  <TableHeadCellContent>
-                    <Tooltip showOnlyOnOverflow title={label}>
-                      {label}
-                    </Tooltip>
-                    {defined(direction) && (
-                      <IconArrow
-                        size="xs"
-                        direction={
-                          direction === 'desc'
-                            ? 'down'
-                            : direction === 'asc'
-                              ? 'up'
-                              : undefined
-                        }
-                      />
-                    )}
-                  </TableHeadCellContent>
+                <TableHeadCell align={align} key={i} isFirst={i === 0} sort={direction}>
+                  {label}
                 </TableHeadCell>
               );
             })}
-          </TableRow>
-        </TableHead>
-        <TableBody>
+          </DataTable.Row>
+        </DataTable.Head>
+        <DataTable.Body>
           {result.isPending ? (
-            <TableStatus>
+            <DataTable.Status>
               <LoadingIndicator />
-            </TableStatus>
+            </DataTable.Status>
           ) : result.isError ? (
-            <TableStatus>
-              <IconWarning data-test-id="error-indicator" color="gray300" size="lg" />
-            </TableStatus>
+            <DataTable.Status>
+              <IconWarning data-test-id="error-indicator" variant="muted" size="lg" />
+            </DataTable.Status>
           ) : result.isFetched && result.data?.length ? (
             result.data?.map((row, i) => {
               const target = getSamplesTargetAtIndex(index, [...queries], row, location);
               return (
-                <TableRow key={i}>
+                <DataTable.Row key={i}>
                   <TableBodyCell key={`samples-${i}`}>
-                    {topEvents && i < topEvents && (
-                      <TopResultsIndicator color={palette[i]!} />
-                    )}
+                    {i < TOP_EVENTS_LIMIT && <TopResultsIndicator color={palette[i]!} />}
                     <Tooltip title={t('View Samples')} containerDisplayMode="flex">
-                      <StyledLink to={target} data-test-id={'unstack-link'}>
+                      <StyledLink to={target} data-test-id="unstack-link">
                         <IconStack />
                       </StyledLink>
                     </Tooltip>
@@ -191,7 +163,7 @@ function AggregatesTable({
                       <TableBodyCell key={j}>
                         <MultiQueryFieldRenderer
                           index={index}
-                          column={columns[j]!}
+                          column={columns[j]}
                           data={row}
                           unit={meta?.units?.[field]}
                           meta={meta}
@@ -199,17 +171,17 @@ function AggregatesTable({
                       </TableBodyCell>
                     );
                   })}
-                </TableRow>
+                </DataTable.Row>
               );
             })
           ) : (
-            <TableStatus>
+            <DataTable.Status>
               <EmptyStateWarning>
                 <p>{t('No spans found')}</p>
               </EmptyStateWarning>
-            </TableStatus>
+            </DataTable.Status>
           )}
-        </TableBody>
+        </DataTable.Body>
       </Table>
     </Fragment>
   );
@@ -231,19 +203,20 @@ function SpansTable({spansTableResult, query: queryParts, index}: SampleTablePro
     [fields]
   );
 
-  const {tags: numberTags} = useTraceItemTags('number');
-  const {tags: stringTags} = useTraceItemTags('string');
-
-  const tableRef = useRef<HTMLTableElement>(null);
-  const {initialTableStyles} = useTableStyles(visibleFields, tableRef, {
-    minimumColumnWidth: 50,
-  });
+  const {attributes: numberTags} = useSpanItemAttributes({}, 'number');
+  const {attributes: stringTags} = useSpanItemAttributes({}, 'string');
+  const {attributes: booleanTags} = useSpanItemAttributes({}, 'boolean');
 
   return (
     <Fragment>
-      <Table ref={tableRef} style={initialTableStyles} scrollable height={TABLE_HEIGHT}>
-        <TableHead>
-          <TableRow>
+      <Table
+        fields={visibleFields}
+        height={TABLE_HEIGHT}
+        minimumColumnWidth={50}
+        scrollable
+      >
+        <DataTable.Head>
+          <DataTable.Row>
             {visibleFields.map((field, i) => {
               // Hide column names before alignment is determined
               if (result.isPending) {
@@ -252,53 +225,38 @@ function SpansTable({spansTableResult, query: queryParts, index}: SampleTablePro
 
               const fieldType = meta.fields?.[field];
               const align = fieldAlignment(field, fieldType);
-              const tag = stringTags[field] ?? numberTags[field] ?? null;
+              const tag =
+                stringTags[field] ?? numberTags[field] ?? booleanTags[field] ?? null;
 
               const direction = sortBys.find(s => s.field === field)?.kind;
               const label = tag?.name ?? prettifyTagKey(field);
 
               return (
-                <TableHeadCell align={align} key={i} isFirst={i === 0}>
-                  <TableHeadCellContent>
-                    <Tooltip showOnlyOnOverflow title={label}>
-                      {label}
-                    </Tooltip>
-                    {defined(direction) && (
-                      <IconArrow
-                        size="xs"
-                        direction={
-                          direction === 'desc'
-                            ? 'down'
-                            : direction === 'asc'
-                              ? 'up'
-                              : undefined
-                        }
-                      />
-                    )}
-                  </TableHeadCellContent>
+                <TableHeadCell align={align} key={i} isFirst={i === 0} sort={direction}>
+                  {label}
                 </TableHeadCell>
               );
             })}
-          </TableRow>
-        </TableHead>
-        <TableBody>
+          </DataTable.Row>
+        </DataTable.Head>
+        <DataTable.Body>
           {result.isPending ? (
-            <TableStatus>
+            <DataTable.Status>
               <LoadingIndicator />
-            </TableStatus>
+            </DataTable.Status>
           ) : result.isError ? (
-            <TableStatus>
-              <IconWarning data-test-id="error-indicator" color="gray300" size="lg" />
-            </TableStatus>
+            <DataTable.Status>
+              <IconWarning data-test-id="error-indicator" variant="muted" size="lg" />
+            </DataTable.Status>
           ) : result.isFetched && result.data?.length ? (
             result.data?.map((row, i) => (
-              <TableRow key={i}>
+              <DataTable.Row key={i}>
                 {visibleFields.map((field, j) => {
                   return (
                     <TableBodyCell key={j}>
                       <MultiQueryFieldRenderer
                         index={index}
-                        column={columnsFromEventView[j]!}
+                        column={columnsFromEventView[j]}
                         data={row}
                         unit={meta?.units?.[field]}
                         meta={meta}
@@ -306,16 +264,16 @@ function SpansTable({spansTableResult, query: queryParts, index}: SampleTablePro
                     </TableBodyCell>
                   );
                 })}
-              </TableRow>
+              </DataTable.Row>
             ))
           ) : (
-            <TableStatus>
+            <DataTable.Status>
               <EmptyStateWarning>
                 <p>{t('No spans found')}</p>
               </EmptyStateWarning>
-            </TableStatus>
+            </DataTable.Status>
           )}
-        </TableBody>
+        </DataTable.Body>
       </Table>
     </Fragment>
   );
@@ -335,19 +293,12 @@ const StyledLink = styled(Link)`
   display: flex;
 `;
 
-const TableBodyCell = styled(GridBodyCell)`
-  font-size: ${p => p.theme.fontSize.sm};
+const TableBodyCell = styled(DataTable.Cell)`
+  font-size: ${p => p.theme.font.size.sm};
   min-height: 12px;
 `;
 
-const TableHeadCell = styled(GridHeadCell)<{align?: Alignments}>`
-  ${p => p.align && `justify-content: ${p.align};`}
-  font-size: ${p => p.theme.fontSize.sm};
+const TableHeadCell = styled(DataTable.HeadCell)`
+  font-size: ${p => p.theme.font.size.sm};
   height: 33px;
-`;
-
-const TableHeadCellContent = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.5)};
 `;

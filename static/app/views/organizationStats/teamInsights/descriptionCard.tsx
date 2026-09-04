@@ -1,6 +1,5 @@
-import styled from '@emotion/styled';
-
-import {space} from 'sentry/styles/space';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
 
 type Props = {
   children: React.ReactNode;
@@ -8,53 +7,26 @@ type Props = {
   title: string;
 };
 
-function DescriptionCard({title, description, children}: Props) {
+export function DescriptionCard({title, description, children}: Props) {
   return (
-    <Wrapper>
-      <LeftPanel>
-        <Title>{title}</Title>
-        <Description>{description}</Description>
-      </LeftPanel>
-      <RightPanel>{children}</RightPanel>
-    </Wrapper>
+    <Flex
+      border="primary"
+      direction={{zero: 'column', '3xl': 'row'}}
+      marginBottom="2xl"
+      radius="md"
+    >
+      <Container
+        borderBottom={{zero: 'primary', '3xl': 'none'}}
+        borderRight={{zero: 'none', '3xl': 'primary'}}
+        maxWidth={{zero: 'none', '3xl': '250px'}}
+        padding="xl"
+      >
+        <Stack gap="xs">
+          <Text size="lg">{title}</Text>
+          <Text variant="muted">{description}</Text>
+        </Stack>
+      </Container>
+      <Container flexGrow={1}>{children}</Container>
+    </Flex>
   );
 }
-
-export default DescriptionCard;
-
-const Wrapper = styled('div')`
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
-  display: flex;
-  margin-bottom: ${space(3)};
-  flex-direction: column;
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    flex-direction: row;
-  }
-`;
-
-const LeftPanel = styled('div')`
-  padding: ${space(2)} ${space(2)};
-  border-bottom: 1px solid ${p => p.theme.border};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    max-width: 250px;
-    border-right: 1px solid ${p => p.theme.border};
-    border-bottom: 0;
-  }
-`;
-
-const Title = styled('div')`
-  font-size: ${p => p.theme.fontSize.lg};
-  margin: 0 0 ${space(0.5)};
-`;
-
-const Description = styled('div')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.md};
-`;
-
-const RightPanel = styled('div')`
-  flex-grow: 1;
-`;

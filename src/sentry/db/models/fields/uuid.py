@@ -89,10 +89,10 @@ class UUIDField(models.Field):
         # Now pass the rest of the work to CharField.
         super().__init__(**kwargs)
 
-    def db_type(self, connection):
+    def db_type(self, connection) -> str:
         return "uuid"
 
-    def get_internal_type(self):
+    def get_internal_type(self) -> str:
         return "CharField"
 
     def get_prep_value(self, value):
@@ -103,7 +103,7 @@ class UUIDField(models.Field):
             if self.null or self._auto_add or (self.default != NOT_PROVIDED):
                 return None
             raise ValueError(
-                "Explicit UUID required unless either `null` is " "True or `auto_add` is given."
+                "Explicit UUID required unless either `null` is True or `auto_add` is given."
             )
 
         # If we already have a UUID, pass it through.

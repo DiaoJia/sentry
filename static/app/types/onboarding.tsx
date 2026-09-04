@@ -1,9 +1,10 @@
-import type {Query} from 'history';
+import type {Location, Query} from 'history';
 
 import type {Category} from 'sentry/components/platformPicker';
-import type {InjectedRouter} from 'sentry/types/legacyReactRouter';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
 
-import type {PlatformIntegration, PlatformKey, Project} from './project';
+import type {PlatformKey} from './platform';
+import type {PlatformIntegration, Project} from './project';
 
 export enum OnboardingTaskGroup {
   GETTING_STARTED = 'getting_started',
@@ -53,8 +54,13 @@ interface OnboardingTaskDescriptorBase {
   serverTask?: string;
 }
 
+interface OnboardingTaskActionContext {
+  location: Location;
+  navigate: ReactRouter3Navigate;
+}
+
 interface OnboardingTypeDescriptorWithAction extends OnboardingTaskDescriptorBase {
-  action: (props: InjectedRouter) => void;
+  action: (context: OnboardingTaskActionContext) => void;
   actionType: 'action';
 }
 
@@ -82,16 +88,13 @@ export interface OnboardingTaskStatus {
 }
 
 interface OnboardingTaskWithAction
-  extends OnboardingTaskStatus,
-    OnboardingTypeDescriptorWithAction {}
+  extends OnboardingTaskStatus, OnboardingTypeDescriptorWithAction {}
 
 interface OnboardingTaskWithExternal
-  extends OnboardingTaskStatus,
-    OnboardingTypeDescriptorWithExternal {}
+  extends OnboardingTaskStatus, OnboardingTypeDescriptorWithExternal {}
 
 interface OnboardingTaskWithAppLink
-  extends OnboardingTaskStatus,
-    OnboardingTypeDescriptorWithAppLink {}
+  extends OnboardingTaskStatus, OnboardingTypeDescriptorWithAppLink {}
 
 export type OnboardingTask =
   | OnboardingTaskWithAction
@@ -107,8 +110,10 @@ export interface UpdatedTask extends Partial<Pick<OnboardingTask, 'status' | 'da
   completionSeen?: boolean;
 }
 
-export interface OnboardingSelectedSDK
-  extends Pick<PlatformIntegration, 'language' | 'link' | 'name' | 'type'> {
+export interface OnboardingSelectedSDK extends Pick<
+  PlatformIntegration,
+  'language' | 'link' | 'name' | 'type'
+> {
   category: Category;
   key: PlatformKey;
 }

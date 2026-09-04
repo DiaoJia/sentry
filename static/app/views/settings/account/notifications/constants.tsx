@@ -1,4 +1,9 @@
-export const SUPPORTED_PROVIDERS = ['email', 'slack', 'msteams'] as const;
+export const SUPPORTED_PROVIDERS = [
+  'email',
+  'slack',
+  'slack_staging',
+  'msteams',
+] as const;
 export type SupportedProviders = (typeof SUPPORTED_PROVIDERS)[number];
 
 type ProviderValue = 'always' | 'never';
@@ -36,11 +41,6 @@ export const NOTIFICATION_SETTINGS_TYPES = [
   'brokenMonitors',
 ] as const;
 
-export const SELF_NOTIFICATION_SETTINGS_TYPES = [
-  'personalActivityNotifications',
-  'selfAssignOnResolve',
-] as const;
-
 // 'alerts' | 'workflow' ...
 export type NotificationSettingsType = (typeof NOTIFICATION_SETTINGS_TYPES)[number];
 
@@ -54,11 +54,4 @@ export const NOTIFICATION_SETTINGS_PATHNAMES: Record<NotificationSettingsType, s
   email: 'email',
   spikeProtection: 'spike-protection',
   brokenMonitors: 'broken-monitors',
-};
-
-export const NOTIFICATION_FEATURE_MAP: Partial<
-  Record<NotificationSettingsType, string | string[]>
-> = {
-  quota: ['spend-visibility-notifications', 'user-spend-notifications-settings'],
-  spikeProtection: 'spike-projections',
 };

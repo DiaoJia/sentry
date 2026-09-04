@@ -32,7 +32,9 @@ function updateGhostRow({
   element.style.height = `${rowHeight}px`;
   element.style.position = 'absolute';
   element.style.backgroundColor =
-    interaction === 'clicked' ? theme.blue300 : theme.surface200;
+    interaction === 'clicked'
+      ? theme.tokens.background.accent.vibrant
+      : theme.tokens.background.secondary;
   element.style.pointerEvents = 'none';
   element.style.willChange = 'transform, opacity';
   element.style.transform = `translateY(${rowHeight * selectedNodeIndex - scrollTop}px)`;
@@ -55,7 +57,7 @@ export function markRowAsHovered(
   }
 ) {
   for (const row of renderedItems) {
-    if (row.ref && row.ref.dataset.hovered === 'true') {
+    if (row.ref?.dataset.hovered === 'true') {
       delete row.ref.dataset.hovered;
     }
   }
@@ -179,7 +181,19 @@ export interface VirtualizedTreeRenderedRow<T> {
   item: VirtualizedTreeNode<T>;
   key: number;
   ref: HTMLElement | null;
-  styles: React.CSSProperties;
+  styles: {position: 'absolute'; top: `${number}px`};
+}
+
+export interface VirtualizedTreeRenderedRowHandlers<T> {
+  handleExpandTreeNode: (
+    node: VirtualizedTreeNode<T>,
+    expand: boolean,
+    opts?: {expandChildren: boolean}
+  ) => void;
+  handleRowClick: (evt: React.MouseEvent<HTMLElement>) => void;
+  handleRowKeyDown: (event: React.KeyboardEvent) => void;
+  handleRowMouseEnter: (event: React.MouseEvent<HTMLElement>) => void;
+  selectedNodeIndex: number | null;
 }
 
 export function findRenderedItems<T extends TreeLike>({
@@ -236,7 +250,7 @@ export function findRenderedItems<T extends TreeLike>({
       renderedRows[visibleItemIndex] = {
         key: indexPointer,
         ref: null,
-        styles: {position: 'absolute', top: elementTop},
+        styles: {position: 'absolute', top: `${elementTop}px`},
         item: items[indexPointer]!,
       };
 

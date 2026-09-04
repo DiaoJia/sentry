@@ -19,7 +19,7 @@ class ScheduleEntry(NamedTuple):
     timestamp: float
 
 
-def load(options: Mapping[str, str]) -> Any:
+def load(options: Mapping[str, Any]) -> Any:
     return import_string(options["path"])(**options.get("options", {}))
 
 
@@ -198,7 +198,7 @@ class Backend(Service):
         call.)
 
         This is designed to handle the situation where task execution is
-        managed by a separate system such as RabbitMQ & Celery from scheduling.
+        managed separately from scheduling.
         A digest task may not be able to be successfully retried after a failure
         (e.g. if the process executing the task can no longer communicate with
         the messaging broker) which can result in a task remaining in the ready

@@ -1,6 +1,7 @@
 import types
 from unittest import TestCase
 
+from sentry.issue_detection.performance_problem import PerformanceProblem
 from sentry.issues.grouptype import (
     PerformanceNPlusOneAPICallsGroupType,
     PerformanceNPlusOneGroupType,
@@ -10,8 +11,8 @@ from sentry.notifications.utils import (
     NPlusOneAPICallProblemContext,
     PerformanceProblemContext,
     RenderBlockingAssetProblemContext,
+    get_replay_id,
 )
-from sentry.performance_issues.performance_problem import PerformanceProblem
 
 
 def mock_event(*, transaction, data=None):
@@ -19,7 +20,7 @@ def mock_event(*, transaction, data=None):
 
 
 class PerformanceProblemContextTestCase(TestCase):
-    def test_creates_correct_context(self):
+    def test_creates_correct_context(self) -> None:
         assert (
             PerformanceProblemContext.from_problem_and_spans(
                 PerformanceProblem(
@@ -56,7 +57,7 @@ class PerformanceProblemContextTestCase(TestCase):
             == NPlusOneAPICallProblemContext
         )
 
-    def test_returns_n_plus_one_db_query_context(self):
+    def test_returns_n_plus_one_db_query_context(self) -> None:
         event = mock_event(transaction="sentry transaction")
         context = PerformanceProblemContext(
             PerformanceProblem(
@@ -71,8 +72,18 @@ class PerformanceProblemContextTestCase(TestCase):
                 evidence_display=[],
             ),
             [
-                {"span_id": "b93d2be92cd64fd5", "description": "SELECT * FROM parent_table"},
-                {"span_id": "054ba3a374d543eb", "description": "SELECT * FROM table WHERE id=%s"},
+                {
+                    "span_id": "b93d2be92cd64fd5",
+                    "description": "SELECT * FROM parent_table",
+                    "start_timestamp": 1.0,
+                    "timestamp": 2.0,
+                },
+                {
+                    "span_id": "054ba3a374d543eb",
+                    "description": "SELECT * FROM table WHERE id=%s",
+                    "start_timestamp": 1.0,
+                    "timestamp": 2.0,
+                },
             ],
             event,
         )
@@ -84,7 +95,7 @@ class PerformanceProblemContextTestCase(TestCase):
             "num_repeating_spans": "1",
         }
 
-    def test_returns_n_plus_one_api_call_context(self):
+    def test_returns_n_plus_one_api_call_context(self) -> None:
         event = mock_event(transaction="/resources")
         context = NPlusOneAPICallProblemContext(
             PerformanceProblem(
@@ -102,12 +113,21 @@ class PerformanceProblemContextTestCase(TestCase):
                 {
                     "span_id": "b93d2be92cd64fd5",
                     "description": "GET https://resource.io/resource?id=1",
+                    "start_timestamp": 1.0,
+                    "timestamp": 2.0,
                 },
                 {
                     "span_id": "054ba3a374d543eb",
                     "description": "GET https://resource.io/resource?id=2",
+                    "start_timestamp": 1.0,
+                    "timestamp": 2.0,
                 },
-                {"span_id": "563712f9722fb09", "description": "GET https://resource.io/resource"},
+                {
+                    "span_id": "563712f9722fb09",
+                    "description": "GET https://resource.io/resource",
+                    "start_timestamp": 1.0,
+                    "timestamp": 2.0,
+                },
             ],
             event,
         )
@@ -119,7 +139,7 @@ class PerformanceProblemContextTestCase(TestCase):
             "num_repeating_spans": "3",
         }
 
-    def test_returns_render_blocking_asset_context(self):
+    def test_returns_render_blocking_asset_context(self) -> None:
         event = mock_event(
             transaction="/details",
             data={
@@ -160,3 +180,30 @@ class PerformanceProblemContextTestCase(TestCase):
             "transaction_duration": 3000,
             "fcp": 1500,
         }
+
+
+class GetReplayIdTestCase(TestCase):
+    def test_returns_replay_id(self):
+        event = mock_event(
+            transaction="tx",
+            data={"contexts": {"replay": {"replay_id": "abc123"}}},
+        )
+        assert get_replay_id(event) == "abc123"
+
+    def test_returns_none_when_replay_context_is_none(self):
+        event = mock_event(
+            transaction="tx",
+            data={"contexts": {"replay": None}},
+        )
+        assert get_replay_id(event) is None
+
+    def test_returns_none_when_contexts_is_none(self):
+        event = mock_event(
+            transaction="tx",
+            data={"contexts": None},
+        )
+        assert get_replay_id(event) is None
+
+    def test_returns_none_when_no_contexts(self):
+        event = mock_event(transaction="tx", data={})
+        assert get_replay_id(event) is None

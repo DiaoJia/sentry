@@ -1,19 +1,19 @@
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render} from 'sentry-test/reactTestingLibrary';
 
-import HookStore from 'sentry/stores/hookStore';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
+import {callSetOrganizationCallback} from 'sentry/utils/routeAnalytics/setOrganizationCallback';
 import {RouteAnalyticsContext} from 'sentry/views/routeAnalyticsContextProvider';
 
-import useRouteAnalyticsHookSetup from './useRouteAnalyticsHookSetup';
+import {useRouteAnalyticsHookSetup} from './useRouteAnalyticsHookSetup';
 
 function TestComponent() {
   useRouteAnalyticsHookSetup();
   return <div>hi</div>;
 }
 
-describe('useRouteAnalyticsHookSetup', function () {
-  it('registers callback', function () {
+describe('useRouteAnalyticsHookSetup', () => {
+  it('registers callback', () => {
     const {organization} = initializeOrg();
     const setOrganization = jest.fn();
     render(
@@ -31,8 +31,7 @@ describe('useRouteAnalyticsHookSetup', function () {
         </OrganizationContext>
       </RouteAnalyticsContext>
     );
-    expect(
-      HookStore.getCallback('react-hook:route-activated', 'setOrganization')
-    ).toEqual(setOrganization);
+    callSetOrganizationCallback(organization);
+    expect(setOrganization).toHaveBeenCalledWith(organization);
   });
 });

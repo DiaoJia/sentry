@@ -1,76 +1,75 @@
-import datetime
-from unittest.mock import patch
-
 import pytest
 from django.test import override_settings
+from taskbroker_client.constants import CompressionType
+from taskbroker_client.registry import TaskRegistry
+from taskbroker_client.retry import Retry
 
 from sentry.silo.base import SiloLimit, SiloMode
-from sentry.tasks.base import instrumented_task, retry
-from sentry.taskworker.config import TaskworkerConfig
-from sentry.taskworker.namespaces import test_tasks
-from sentry.testutils.helpers.options import override_options
+from sentry.tasks.base import instrumented_task
+from sentry.taskworker.adapters import SentryRouter, make_metrics, make_producer
+from sentry.taskworker.namespaces import exampletasks, test_tasks
 
 
 @instrumented_task(
     name="test.tasks.test_base.region_task",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
+    namespace=test_tasks,
+    silo_mode=SiloMode.CELL,
 )
-def region_task(param):
+def region_task(param) -> str:
     return f"Region task {param}"
 
 
 @instrumented_task(
     name="test.tasks.test_base.control_task",
+    namespace=test_tasks,
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
 )
-def control_task(param):
+def control_task(param) -> str:
     return f"Control task {param}"
 
 
-@retry(ignore_and_capture=(Exception,))
 @instrumented_task(
-    name="test.tasks.test_base.ignore_and_capture_task",
-    silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
+    name="tests.tasks.test_base.primary_task",
+    namespace=test_tasks,
+    alias="tests.tasks.test_base.alias_task",
 )
-def ignore_and_capture_retry_task(param):
-    raise Exception(param)
+def task_with_alias(param) -> str:
+    return f"Task with alias {param}"
 
 
-@retry(on=(Exception,))
 @instrumented_task(
-    name="test.tasks.test_base.retry_task",
-    silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
+    name="tests.tasks.test_base.region_primary_task",
+    namespace=test_tasks,
+    alias="tests.tasks.test_base.region_alias_task",
+    retry=Retry(times=3, on=(Exception,)),
+    silo_mode=SiloMode.CELL,
 )
-def retry_on_task(param):
-    raise Exception(param)
+def region_task_with_alias(param) -> str:
+    return f"Region task with alias {param}"
 
 
-@retry(ignore=(Exception,))
 @instrumented_task(
-    name="test.tasks.test_base.ignore_task",
+    name="tests.tasks.test_base.control_primary_task",
+    namespace=test_tasks,
+    alias="tests.tasks.test_base.control_alias_task",
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
 )
-def ignore_on_exception_task(param):
-    raise Exception(param)
+def control_task_with_alias(param) -> str:
+    return f"Control task with alias {param}"
 
 
-@retry(exclude=(Exception,))
 @instrumented_task(
-    name="test.tasks.test_base.exclude_task",
-    silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(namespace=test_tasks),
+    name="tests.tasks.test_base.primary_task_primary_namespace",
+    namespace=test_tasks,
+    alias="tests.tasks.test_base.alias_task_alias_namespace",
+    alias_namespace=exampletasks,
 )
-def exclude_on_exception_task(param):
-    raise Exception(param)
+def task_with_alias_and_alias_namespace(param) -> str:
+    return f"Task with alias and alias namespace {param}"
 
 
-@override_settings(SILO_MODE=SiloMode.REGION)
-def test_task_silo_limit_call_region():
+@override_settings(SILO_MODE=SiloMode.CELL)
+def test_task_silo_limit_call_region() -> None:
     result = region_task("hi")
     assert "Region task hi" == result
 
@@ -79,7 +78,7 @@ def test_task_silo_limit_call_region():
 
 
 @override_settings(SILO_MODE=SiloMode.CONTROL)
-def test_task_silo_limit_call_control():
+def test_task_silo_limit_call_control() -> None:
     with pytest.raises(SiloLimit.AvailabilityError):
         region_task("hi")
 
@@ -87,105 +86,95 @@ def test_task_silo_limit_call_control():
 
 
 @override_settings(SILO_MODE=SiloMode.MONOLITH)
-def test_task_silo_limit_call_monolith():
+def test_task_silo_limit_call_monolith() -> None:
     assert "Region task hi" == region_task("hi")
     assert "Control task hi" == control_task("hi")
 
 
-@patch("sentry_sdk.capture_exception")
-def test_ignore_and_retry(capture_exception):
-    ignore_and_capture_retry_task("bruh")
-
-    assert capture_exception.call_count == 1
-
-
-@patch("sentry_sdk.capture_exception")
-def test_ignore_exception_retry(capture_exception):
-    ignore_on_exception_task("bruh")
-
-    assert capture_exception.call_count == 0
-
-
-@patch("sentry_sdk.capture_exception")
-def test_exclude_exception_retry(capture_exception):
-    with pytest.raises(Exception):
-        exclude_on_exception_task("bruh")
-
-    assert capture_exception.call_count == 0
-
-
-@override_settings(
-    CELERY_COMPLAIN_ABOUT_BAD_USE_OF_PICKLE=True,
-    CELERY_PICKLE_ERROR_REPORT_SAMPLE_RATE=1.0,
-)
-@override_options(
-    {
-        "taskworker.test.rollout": {"*": 0.0},
-        "taskworker.route.overrides": {},
-    }
-)
-@patch("sentry.tasks.base.metrics.distribution")
-def test_capture_payload_metrics(mock_distribution):
-    region_task.apply_async(args=("bruh",))
-
-    mock_distribution.assert_called_once_with(
-        "celery.task.parameter_bytes",
-        71,
-        tags={"taskname": "test.tasks.test_base.region_task"},
-        sample_rate=1.0,
-    )
-
-
-@override_settings(
-    CELERY_COMPLAIN_ABOUT_BAD_USE_OF_PICKLE=True,
-    CELERY_PICKLE_ERROR_REPORT_SAMPLE_RATE=1.0,
-)
-@override_options(
-    {
-        "taskworker.test.rollout": {"*": 0.0},
-        "taskworker.route.overrides": {},
-    }
-)
-def test_validate_parameters_call():
-    with pytest.raises(TypeError) as err:
-        region_task.apply_async(args=(datetime.datetime.now(),))
-    assert "region_task was called with a parameter that cannot be JSON encoded" in str(err)
-
-    with pytest.raises(TypeError) as err:
-        region_task.delay(datetime.datetime.now())
-    assert "region_task was called with a parameter that cannot be JSON encoded" in str(err)
-
-    with pytest.raises(TypeError) as err:
-        region_task(datetime.datetime.now())
-    assert "region_task was called with a parameter that cannot be JSON encoded" in str(err)
-
-
-@patch("sentry.taskworker.retry.current_task")
-@patch("sentry_sdk.capture_exception")
-def test_retry_on(capture_exception, current_task):
-
-    # In reality current_task.retry will cause the given exception to be re-raised but we patch it here so no need to .raises :bufo-shrug:
-    retry_on_task("bruh")
-
-    assert capture_exception.call_count == 1
-    assert current_task.retry.call_count == 1
-
-
 @pytest.mark.parametrize(
     "method_name",
-    (
-        "apply",
-        "apply_async",
-        "delay",
-        "run",
-        "s",
-        "signature",
-        "retry",
-        "run",
-    ),
+    ("apply_async", "apply_async_with_future", "delay"),
 )
 @override_settings(SILO_MODE=SiloMode.CONTROL)
-def test_task_silo_limit_celery_task_methods(method_name):
+def test_task_silo_limit_task_methods(method_name: str) -> None:
     method = getattr(region_task, method_name)
     with pytest.raises(SiloLimit.AvailabilityError):
         method("hi")
+
+
+def test_instrumented_task_parameters() -> None:
+    registry = TaskRegistry(
+        application="sentry",
+        producer_factory=make_producer,
+        router=SentryRouter(),
+        metrics=make_metrics(),
+    )
+    namespace = registry.create_namespace("registertest")
+
+    @instrumented_task(
+        name="hello_task",
+        namespace=namespace,
+        retry=Retry(times=3, on=(RuntimeError,)),
+        processing_deadline_duration=60,
+        compression_type=CompressionType.ZSTD,
+    )
+    def hello_task():
+        pass
+
+    decorated = namespace.get("hello_task")
+    assert decorated
+    assert decorated.compression_type == CompressionType.ZSTD
+    assert decorated.retry
+    assert decorated.retry._times == 3
+    assert decorated.retry._allowed_exception_types == (RuntimeError,)
+
+
+def test_instrumented_task_with_alias_same_namespace() -> None:
+    assert test_tasks.contains("tests.tasks.test_base.primary_task")
+    assert task_with_alias("test") == "Task with alias test"
+
+    assert test_tasks.contains("tests.tasks.test_base.alias_task")
+    assert test_tasks.get("tests.tasks.test_base.alias_task")("test") == "Task with alias test"
+
+
+def test_instrumented_task_with_alias_different_namespaces() -> None:
+    assert test_tasks.contains("tests.tasks.test_base.primary_task_primary_namespace")
+    task_result = task_with_alias_and_alias_namespace("test")
+    assert task_result == "Task with alias and alias namespace test"
+
+    assert exampletasks.contains("tests.tasks.test_base.alias_task_alias_namespace")
+    assert (
+        exampletasks.get("tests.tasks.test_base.alias_task_alias_namespace")("test")
+        == "Task with alias and alias namespace test"
+    )
+
+
+@override_settings(SILO_MODE=SiloMode.CELL)
+def test_instrumented_task_with_alias_silo_limit_call_region() -> None:
+    assert test_tasks.contains("tests.tasks.test_base.region_primary_task")
+    assert region_task_with_alias("test") == "Region task with alias test"
+
+    assert test_tasks.contains("tests.tasks.test_base.region_alias_task")
+    assert (
+        test_tasks.get("tests.tasks.test_base.region_alias_task")("test")
+        == "Region task with alias test"
+    )
+
+    assert test_tasks.contains("tests.tasks.test_base.control_primary_task")
+    with pytest.raises(SiloLimit.AvailabilityError):
+        control_task_with_alias("test")
+
+    assert test_tasks.contains("tests.tasks.test_base.control_alias_task")
+    with pytest.raises(SiloLimit.AvailabilityError):
+        test_tasks.get("tests.tasks.test_base.control_alias_task")("test")
+
+
+@override_settings(SILO_MODE=SiloMode.CONTROL)
+def test_instrumented_task_with_alias_silo_limit_call_control() -> None:
+    assert test_tasks.contains("tests.tasks.test_base.region_primary_task")
+    with pytest.raises(SiloLimit.AvailabilityError):
+        region_task_with_alias("test")
+
+    assert test_tasks.contains("tests.tasks.test_base.region_alias_task")
+    with pytest.raises(SiloLimit.AvailabilityError):
+        test_tasks.get("tests.tasks.test_base.region_alias_task")("test")

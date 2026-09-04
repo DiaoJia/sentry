@@ -18,11 +18,14 @@ enum AppContextKeys {
   VERSION = 'app_version',
   BUILD = 'app_build',
   IN_FOREGROUND = 'in_foreground',
+  IS_ACTIVE = 'is_active',
   APP_MEMORY = 'app_memory',
   VIEW_NAMES = 'view_names',
   // XXX: From https://github.com/getsentry/sentry/issues/87238, not in the schema yet.
   FREE_MEMORY = 'free_memory',
   ARCHITECTURE = 'app_arch',
+  IS_SPLIT_APKS = 'is_split_apks',
+  PERMISSIONS = 'permissions',
 }
 
 export interface AppContext {
@@ -37,10 +40,13 @@ export interface AppContext {
   [AppContextKeys.TYPE]?: string;
   [AppContextKeys.DEVICE_HASH]?: string;
   [AppContextKeys.IN_FOREGROUND]?: boolean;
+  [AppContextKeys.IS_ACTIVE]?: boolean;
   [AppContextKeys.APP_MEMORY]?: number;
   [AppContextKeys.VIEW_NAMES]?: string[];
   [AppContextKeys.FREE_MEMORY]?: number;
   [AppContextKeys.ARCHITECTURE]?: string;
+  [AppContextKeys.IS_SPLIT_APKS]?: boolean;
+  [AppContextKeys.PERMISSIONS]?: Record<string, string>;
 }
 
 // https://github.com/getsentry/relay/blob/24.10.0/relay-event-schema/src/protocol/contexts/app.rs#L37
@@ -57,7 +63,7 @@ export function getAppContextData({
   meta,
 }: {
   data: AppContext;
-  event: Event;
+  event?: Event;
   meta?: Record<keyof AppContext, any>;
 }): KeyValueListData {
   return getContextKeys({data}).map(ctxKey => {
@@ -73,7 +79,7 @@ export function getAppContextData({
           key: ctxKey,
           subject: t('Start Time'),
           value: getRelativeTimeFromEventDateCreated(
-            event.dateCreated ? event.dateCreated : event.dateReceived,
+            event?.dateCreated ?? event?.dateReceived,
             data.app_start_time
           ),
         };
@@ -119,6 +125,12 @@ export function getAppContextData({
           subject: t('In Foreground'),
           value: data.in_foreground,
         };
+      case AppContextKeys.IS_ACTIVE:
+        return {
+          key: ctxKey,
+          subject: t('Is Active'),
+          value: data.is_active,
+        };
       case AppContextKeys.APP_MEMORY:
         return {
           key: ctxKey,
@@ -142,6 +154,18 @@ export function getAppContextData({
           key: ctxKey,
           subject: t('Architecture'),
           value: data.app_arch,
+        };
+      case AppContextKeys.IS_SPLIT_APKS:
+        return {
+          key: ctxKey,
+          subject: t('Split APKs'),
+          value: data.is_split_apks,
+        };
+      case AppContextKeys.PERMISSIONS:
+        return {
+          key: ctxKey,
+          subject: t('Permissions'),
+          value: data.permissions,
         };
       default:
         return {

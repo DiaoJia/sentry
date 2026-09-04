@@ -7,15 +7,15 @@ import type {Organization} from 'sentry/types/organization';
 import type {DashboardDetails, Widget} from 'sentry/views/dashboards/types';
 import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
 
-import WidgetLegendSelectionState from './widgetLegendSelectionState';
+import {WidgetLegendSelectionState} from './widgetLegendSelectionState';
 
 const WIDGET_ID_DELIMITER = ':';
-const SERIES_NAME_DELIMITER = ';';
+const SERIES_NAME_DELIMITER = '|~|';
 
 describe('WidgetLegend functions util', () => {
   let legendFunctions: WidgetLegendSelectionState;
 
-  describe('legendChanges', function () {
+  describe('legendChanges', () => {
     let widget: Widget;
     let location: Location;
     let organization: Organization;
@@ -97,14 +97,15 @@ describe('WidgetLegend functions util', () => {
     });
 
     it('gives updated query param when widget change submitted', () => {
+      // New-path widgets (ERRORS + AREA) don't default-hide Releases,
+      // so no default entries are generated.
       expect(legendFunctions.setMultipleWidgetSelectionStateURL(dashboard)).toEqual([
         `12345${WIDGET_ID_DELIMITER}Releases`,
-        `23456${WIDGET_ID_DELIMITER}Releases`,
       ]);
     });
   });
 
-  describe('legend naming', function () {
+  describe('legend naming', () => {
     let widget: Widget;
     beforeEach(() => {
       widget = {

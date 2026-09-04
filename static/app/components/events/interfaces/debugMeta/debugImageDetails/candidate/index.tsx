@@ -1,14 +1,14 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
 import {INTERNAL_SOURCE} from 'sentry/components/events/interfaces/debugMeta/debugImageDetails/utils';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import type {ImageCandidate} from 'sentry/types/debugImage';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 
-import StatusTooltip from './status/statusTooltip';
-import Actions from './actions';
-import Information from './information';
+import {StatusTooltip} from './status/statusTooltip';
+import {Actions} from './actions';
+import {Information} from './information';
 
 type Props = {
   baseUrl: string;
@@ -21,7 +21,7 @@ type Props = {
   eventDateReceived?: string;
 };
 
-function Candidate({
+export function Candidate({
   candidate,
   organization,
   projSlug,
@@ -35,7 +35,7 @@ function Candidate({
   const isInternalSource = source === INTERNAL_SOURCE;
 
   return (
-    <Fragment>
+    <SimpleTable.Row>
       <Column>
         <StatusTooltip candidate={candidate} hasReprocessWarning={hasReprocessWarning} />
       </Column>
@@ -61,13 +61,11 @@ function Candidate({
           />
         </ActionsColumn>
       )}
-    </Fragment>
+    </SimpleTable.Row>
   );
 }
 
-export default Candidate;
-
-const Column = styled('div')`
+const Column = styled(SimpleTable.RowCell)`
   display: flex;
   align-items: center;
 `;

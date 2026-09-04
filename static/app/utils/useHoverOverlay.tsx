@@ -1,9 +1,12 @@
 import {
   cloneElement,
+  createContext,
   isValidElement,
   useCallback,
+  useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,9 +14,14 @@ import {
 import type {PopperProps} from 'react-popper';
 import {usePopper} from 'react-popper';
 import {useTheme} from '@emotion/react';
-import {mergeProps, mergeRefs} from '@react-aria/utils';
+import {mergeProps} from '@react-aria/utils';
 
-import type {ColorOrAlias} from 'sentry/utils/theme';
+import type {CSS} from '@sentry/scraps/cssTypes';
+
+import {NODE_ENV} from 'sentry/constants/env';
+import type {Theme} from 'sentry/utils/theme';
+
+import {useStableMergeRef} from './useStableMergeRef';
 
 function makeDefaultPopperModifiers(arrowElement: HTMLElement | null, offset: number) {
   return [
@@ -59,14 +67,99 @@ function makeDefaultPopperModifiers(arrowElement: HTMLElement | null, offset: nu
 }
 
 /**
- * How long to wait before opening the overlay
+ * How long to wait before opening the overlay.
  */
-const OPEN_DELAY = 50;
+const OPEN_DELAY = 400;
 
 /**
- * How long to wait before closing the overlay when isHoverable is set
+ * How long to wait before closing the overlay when isHoverable or
+ * displayTimeout is set.
  */
-const CLOSE_DELAY = 50;
+const CLOSE_DELAY = 150;
+
+/**
+ * While one overlay is open (or was recently open), newly-hovered overlays
+ * skip the open delay so the user can scan a row of triggers without paying
+ * the warmup each time. The cooldown starts when the last open overlay
+ * closes; if no other overlay opens within this window, the group goes cold.
+ */
+const SKIP_DELAY_WINDOW = 600;
+
+// A delay group tracks whether any overlay inside it is currently (or was
+// recently) open. Reading/writing these fields at hover events is intentional
+// — we don't need (and don't want) React re-renders driven by this state;
+// consumers only read it at the moment of a HOVER transition. Open-listeners
+// exist so siblings can snap-close mid-exit-animation when another overlay
+// takes over.
+type OpenListener = (origin: symbol) => void;
+
+interface DelayGroup {
+  coolDownTimer: number | undefined;
+  isWarm: boolean;
+  openListeners: Set<OpenListener>;
+}
+
+function createDelayGroup(): DelayGroup {
+  return {isWarm: false, coolDownTimer: undefined, openListeners: new Set()};
+}
+
+// Default group used when no <HoverOverlayGroupProvider> is present. In
+// production the whole app shares this group — which is what we want, since
+// tooltip delay semantics are naturally global.
+const defaultDelayGroup = createDelayGroup();
+
+const DelayGroupContext = createContext(defaultDelayGroup);
+
+/**
+ * Scopes a delay group to a React subtree. Overlays inside the provider share
+ * warmth and snap-close coordination only with each other. Intended for tests
+ * (each `render()` gets a fresh group automatically) and any future scenario
+ * that needs isolated groups (e.g. a fullscreen modal).
+ */
+export function HoverOverlayGroupProvider({children}: {children: React.ReactNode}) {
+  const [group] = useState(createDelayGroup);
+  useEffect(() => {
+    return () => {
+      if (group.coolDownTimer !== undefined) {
+        window.clearTimeout(group.coolDownTimer);
+      }
+    };
+  }, [group]);
+  return (
+    <DelayGroupContext.Provider value={group}>{children}</DelayGroupContext.Provider>
+  );
+}
+
+function warmUpGroup(group: DelayGroup, origin: symbol) {
+  if (group.coolDownTimer !== undefined) {
+    window.clearTimeout(group.coolDownTimer);
+    group.coolDownTimer = undefined;
+  }
+  group.isWarm = true;
+  for (const listener of group.openListeners) {
+    listener(origin);
+  }
+}
+
+function startGroupCoolDown(group: DelayGroup) {
+  // In test mode the open path bypasses the warm-up delay entirely, so a
+  // cooldown timer would only serve to leak onto the default group (which has
+  // no provider cleaning it up). Match the open-path bypass and no-op here.
+  if (NODE_ENV === 'test') {
+    group.isWarm = false;
+    return;
+  }
+  if (group.coolDownTimer !== undefined) {
+    window.clearTimeout(group.coolDownTimer);
+  }
+  group.coolDownTimer = window.setTimeout(() => {
+    group.isWarm = false;
+    group.coolDownTimer = undefined;
+  }, SKIP_DELAY_WINDOW);
+}
+
+type OverlayStatus = 'idle' | 'warming' | 'open' | 'cooling';
+type UnderlineColor = 'warning' | 'danger' | 'success' | 'muted' | 'primary';
 
 interface UseHoverOverlayProps {
   /**
@@ -76,7 +169,7 @@ interface UseHoverOverlayProps {
   /**
    * Display mode for the container element. Does nothing using skipWrapper.
    */
-  containerDisplayMode?: React.CSSProperties['display'];
+  containerDisplayMode?: CSS['display'];
   /**
    * Time to wait (in milliseconds) before showing the overlay
    */
@@ -87,9 +180,10 @@ interface UseHoverOverlayProps {
    */
   displayTimeout?: number;
   /**
-   * Force the overlay to be visible without hovering
+   * Force the overlay to be visible without hovering. `true` opens
+   * immediately, while `delayed` uses the normal open delay.
    */
-  forceVisible?: boolean;
+  forceVisible?: boolean | 'delayed';
   /**
    * If true, user is able to hover overlay without it disappearing. (nice if
    * you want the overlay to be interactive)
@@ -112,6 +206,11 @@ interface UseHoverOverlayProps {
   onHover?: () => void;
 
   /**
+   * Called when the trigger changes between overflowing and fitting.
+   */
+  onOverflowChange?: (isOverflowing: boolean) => void;
+
+  /**
    * Position for the overlay.
    */
   position?: PopperProps<any>['placement'];
@@ -122,7 +221,7 @@ interface UseHoverOverlayProps {
   showOnlyOnOverflow?: boolean;
   /**
    * Whether to add a dotted underline to the trigger element, to indicate the
-   * presence of a overlay.
+   * presence of an overlay.
    */
   showUnderline?: boolean;
   /**
@@ -137,10 +236,10 @@ interface UseHoverOverlayProps {
   /**
    * Color of the dotted underline, if available. See also: showUnderline.
    */
-  underlineColor?: ColorOrAlias;
+  underlineColor?: UnderlineColor;
 }
 
-function isOverflown(el: Element): boolean {
+export function isOverflown(el: Element): boolean {
   // Safari seems to calculate scrollWidth incorrectly, causing isOverflown to always return true in some cases.
   // Adding a 2 pixel tolerance seems to account for this discrepancy.
   const tolerance =
@@ -148,6 +247,9 @@ function isOverflown(el: Element): boolean {
       ? 2
       : 0;
   return (
+    // Components that truncate text in JavaScript can expose logical overflow
+    // even when the rendered text fits its box.
+    el.getAttribute('data-overflowing') === 'true' ||
     el.scrollWidth - el.clientWidth > tolerance ||
     Array.from(el.children).some(isOverflown)
   );
@@ -159,6 +261,26 @@ function maybeClearRefTimeout(ref: React.MutableRefObject<number | undefined>) {
     ref.current = undefined;
   }
 }
+
+const tooltipUnderline = (theme: Theme, underlineColor: UnderlineColor = 'muted') =>
+  ({
+    textDecoration: 'underline',
+    textDecorationThickness: '0.75px',
+    textUnderlineOffset: '1.25px',
+    textDecorationColor:
+      underlineColor === 'warning'
+        ? theme.tokens.content.warning
+        : underlineColor === 'danger'
+          ? theme.tokens.content.danger
+          : underlineColor === 'success'
+            ? theme.tokens.content.success
+            : underlineColor === 'muted'
+              ? theme.tokens.content.secondary
+              : underlineColor === 'primary'
+                ? theme.tokens.content.primary
+                : undefined,
+    textDecorationStyle: 'dotted',
+  }) as const;
 
 /**
  * A hook used to trigger a positioned overlay on hover.
@@ -172,6 +294,7 @@ function useHoverOverlay({
   showUnderline,
   underlineColor,
   showOnlyOnOverflow,
+  onOverflowChange,
   skipWrapper,
   forceVisible,
   offset = 8,
@@ -182,21 +305,156 @@ function useHoverOverlay({
 }: UseHoverOverlayProps) {
   const theme = useTheme();
   const describeById = useId();
+  const group = useContext(DelayGroupContext);
+  // Stable identity for this instance — used by warmUpGroup to tell each
+  // listener whether it's the one that just opened (skip self-close) or a
+  // sibling that should snap shut.
+  const selfTokenRef = useRef(Symbol('hoverOverlay'));
 
-  const [isVisible, setIsVisible] = useState(forceVisible ?? false);
-  const isOpen = forceVisible ?? isVisible;
-
-  useEffect(() => {
-    if (isOpen) {
-      onHover?.();
-    } else {
-      onBlur?.();
+  const [status, setStatus] = useState<OverlayStatus>('idle');
+  const statusRef = useRef<OverlayStatus>('idle');
+  // When another overlay in the group opens while we are closing (or already
+  // closed-but-still-animating-out), we snap-close rather than letting the
+  // exit animation trail alongside the incoming overlay.
+  const [snapClosed, setSnapClosed] = useState(false);
+  // Tracks whether this overlay may currently be on-screen or mid-exit-
+  // animation. Used to skip snap-close bookkeeping for idle overlays that
+  // have never been hovered — in pages with many siblings (tables of
+  // tooltips) this keeps warmUpGroup O(visible) instead of O(N).
+  const mayBeAnimatingOutRef = useRef(false);
+  const commitStatus = useCallback((next: OverlayStatus) => {
+    statusRef.current = next;
+    setStatus(next);
+    if (next === 'open' || next === 'warming') {
+      setSnapClosed(false);
     }
-  }, [isOpen, onBlur, onHover]);
+    if (next === 'open') {
+      mayBeAnimatingOutRef.current = true;
+    }
+  }, []);
+
+  // Subscribe to group-open events. Only overlays that are currently visible
+  // or mid-exit-animation need to snap shut — idle overlays that have never
+  // opened have nothing to unmount. When snapping a 'cooling' overlay, also
+  // cancel its pending hide timer so the delayed startGroupCoolDown doesn't
+  // fire against the newly-warm group.
+  //
+  // forceVisible tooltips are explicitly decoupled from hover state — e.g.
+  // form-field validation errors anchored to a warning icon. They must not
+  // be snap-closed when another overlay in the group opens.
+  useEffect(() => {
+    if (forceVisible !== undefined && forceVisible !== false) {
+      return;
+    }
+    const listener: OpenListener = origin => {
+      // Skip the overlay that's itself opening — identify by reference rather
+      // than by status, since rapid hover transitions can leave a sibling in
+      // 'open' before its leave event has been processed.
+      if (origin === selfTokenRef.current) {
+        return;
+      }
+      if (!mayBeAnimatingOutRef.current) {
+        return;
+      }
+      maybeClearRefTimeout(openTimerRef);
+      maybeClearRefTimeout(hideTimerRef);
+      if (statusRef.current !== 'idle') {
+        commitStatus('idle');
+      }
+      mayBeAnimatingOutRef.current = false;
+      setSnapClosed(true);
+    };
+    group.openListeners.add(listener);
+    return () => {
+      group.openListeners.delete(listener);
+    };
+  }, [group, forceVisible, commitStatus]);
+
+  const isOpen =
+    forceVisible === true
+      ? true
+      : forceVisible === false
+        ? false
+        : status === 'open' || status === 'cooling';
+
+  // Fire onHover / onBlur on open/close transitions only. Read the callbacks
+  // from refs so that a new callback identity on re-render does not retrigger
+  // the effect (bug: previously re-fired the current-state branch whenever an
+  // inline callback was passed), and skip the initial render so onBlur does
+  // not fire spuriously on mount.
+  const onHoverRef = useRef(onHover);
+  const onBlurRef = useRef(onBlur);
+  useLayoutEffect(() => {
+    onHoverRef.current = onHover;
+    onBlurRef.current = onBlur;
+  });
+  const prevIsOpenRef = useRef(isOpen);
+  useEffect(() => {
+    if (prevIsOpenRef.current === isOpen) {
+      return;
+    }
+    prevIsOpenRef.current = isOpen;
+    if (isOpen) {
+      onHoverRef.current?.();
+    } else {
+      onBlurRef.current?.();
+    }
+  }, [isOpen]);
 
   const [triggerElement, setTriggerElement] = useState<HTMLElement | null>(null);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const isOverflowingRef = useRef(false);
   const [overlayElement, setOverlayElement] = useState<HTMLElement | null>(null);
   const [arrowElement, setArrowElement] = useState<HTMLElement | null>(null);
+
+  const onOverflowChangeRef = useRef(onOverflowChange);
+  useLayoutEffect(() => {
+    onOverflowChangeRef.current = onOverflowChange;
+  });
+
+  const updateOverflow = useCallback((element: HTMLElement | null) => {
+    const nextIsOverflowing = element ? isOverflown(element) : false;
+    if (isOverflowingRef.current === nextIsOverflowing) {
+      return;
+    }
+
+    isOverflowingRef.current = nextIsOverflowing;
+    setIsOverflowing(nextIsOverflowing);
+    onOverflowChangeRef.current?.(nextIsOverflowing);
+  }, []);
+
+  const setTriggerElementRef = useCallback(
+    (element: HTMLElement | null) => {
+      setTriggerElement(element);
+      updateOverflow(showOnlyOnOverflow ? element : null);
+
+      if (!showOnlyOnOverflow || !element) {
+        return;
+      }
+
+      const resizeObserver = new ResizeObserver(() => updateOverflow(element));
+      resizeObserver.observe(element);
+
+      const mutationObserver = new MutationObserver(() => updateOverflow(element));
+      mutationObserver.observe(element, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        attributeFilter: ['data-overflowing'],
+        subtree: true,
+      });
+
+      return () => {
+        resizeObserver.disconnect();
+        mutationObserver.disconnect();
+        setTriggerElement(null);
+        updateOverflow(null);
+      };
+    },
+    [showOnlyOnOverflow, updateOverflow]
+  );
+
+  const mergeTriggerRef = useStableMergeRef(setTriggerElementRef);
 
   const modifiers = useMemo(
     () => makeDefaultPopperModifiers(arrowElement, offset),
@@ -208,52 +466,90 @@ function useHoverOverlay({
     placement: position,
   });
 
-  // Delayed open and close time handles
-  const delayOpenTimeoutRef = useRef<number | undefined>(undefined);
-  const delayHideTimeoutRef = useRef<number | undefined>(undefined);
+  const openTimerRef = useRef<number | undefined>(undefined);
+  const hideTimerRef = useRef<number | undefined>(undefined);
 
-  // When the component is unmounted, make sure to stop the timeouts
-  // No need to reset value of refs to undefined since they will be garbage collected anyways
   useEffect(() => {
     return () => {
-      maybeClearRefTimeout(delayHideTimeoutRef);
-      maybeClearRefTimeout(delayOpenTimeoutRef);
+      maybeClearRefTimeout(openTimerRef);
+      maybeClearRefTimeout(hideTimerRef);
     };
   }, []);
 
   const handleMouseEnter = useCallback(() => {
-    // Do nothing if showOnlyOnOverflow and we're not overflowing.
     if (showOnlyOnOverflow && triggerElement && !isOverflown(triggerElement)) {
       return;
     }
 
-    maybeClearRefTimeout(delayHideTimeoutRef);
-    maybeClearRefTimeout(delayOpenTimeoutRef);
+    maybeClearRefTimeout(openTimerRef);
+    maybeClearRefTimeout(hideTimerRef);
 
-    if (delay === 0) {
-      setIsVisible(true);
+    // Re-entering an already-visible trigger (e.g. during the cooling grace
+    // window, or a nested hover target): keep it open.
+    if (statusRef.current === 'open' || statusRef.current === 'cooling') {
+      commitStatus('open');
+      warmUpGroup(group, selfTokenRef.current);
       return;
     }
 
-    delayOpenTimeoutRef.current = window.setTimeout(
-      () => setIsVisible(true),
-      delay ?? OPEN_DELAY
-    );
-  }, [delay, showOnlyOnOverflow, triggerElement]);
+    // Skip the warmup delay if the caller asked for instant open, we're in a
+    // test environment, or the delay-group is already warm from a recently
+    // open overlay.
+    if (delay === 0 || NODE_ENV === 'test' || group.isWarm) {
+      commitStatus('open');
+      warmUpGroup(group, selfTokenRef.current);
+      return;
+    }
+
+    commitStatus('warming');
+    openTimerRef.current = window.setTimeout(() => {
+      commitStatus('open');
+      warmUpGroup(group, selfTokenRef.current);
+    }, delay ?? OPEN_DELAY);
+  }, [delay, showOnlyOnOverflow, triggerElement, commitStatus, group]);
 
   const handleMouseLeave = useCallback(() => {
-    maybeClearRefTimeout(delayHideTimeoutRef);
-    maybeClearRefTimeout(delayOpenTimeoutRef);
+    maybeClearRefTimeout(openTimerRef);
+    maybeClearRefTimeout(hideTimerRef);
 
-    if (!isHoverable && !displayTimeout) {
-      setIsVisible(false);
+    // If we never made it to 'open' (still warming or already idle), cancel
+    // the pending open — no cooldown starts because the group was never warmed
+    // by this instance.
+    if (statusRef.current !== 'open' && statusRef.current !== 'cooling') {
+      commitStatus('idle');
       return;
     }
 
-    delayHideTimeoutRef.current = window.setTimeout(() => {
-      setIsVisible(false);
+    // Note: the NODE_ENV === 'test' bypass is intentionally only applied on
+    // the open path. Tests that want to verify close-delay behavior (the
+    // `cooling` grace window) can do so by asserting isOpen mid-timeout,
+    // which requires the timer to actually run.
+    const hasCloseDelay = isHoverable || displayTimeout !== undefined;
+    if (!hasCloseDelay) {
+      commitStatus('idle');
+      startGroupCoolDown(group);
+      return;
+    }
+
+    commitStatus('cooling');
+    hideTimerRef.current = window.setTimeout(() => {
+      commitStatus('idle');
+      startGroupCoolDown(group);
     }, displayTimeout ?? CLOSE_DELAY);
-  }, [isHoverable, displayTimeout]);
+  }, [isHoverable, displayTimeout, commitStatus, group]);
+
+  const previousForceVisibleRef = useRef<boolean | 'delayed' | undefined>(undefined);
+  useEffect(() => {
+    const wasDelayed = previousForceVisibleRef.current === 'delayed';
+
+    if (forceVisible === 'delayed' && !wasDelayed) {
+      handleMouseEnter();
+    } else if (forceVisible !== 'delayed' && wasDelayed) {
+      handleMouseLeave();
+    }
+
+    previousForceVisibleRef.current = forceVisible;
+  }, [forceVisible, handleMouseEnter, handleMouseLeave]);
 
   /**
    * Wraps the passed in react elements with a container that has the proper
@@ -264,10 +560,15 @@ function useHoverOverlay({
    */
   const wrapTrigger = useCallback(
     (triggerChildren: React.ReactNode) => {
+      const shouldInteract =
+        !showOnlyOnOverflow ||
+        isOverflowing ||
+        forceVisible === true ||
+        forceVisible === 'delayed';
       const providedProps = {
-        // !!These props are always overriden!!
-        'aria-describedby': describeById,
-        ref: setTriggerElement,
+        // !!These props are always overridden!!
+        'aria-describedby': shouldInteract ? describeById : undefined,
+        ref: setTriggerElementRef,
         // The following props are composed from the componentProps trigger props
         onFocus: handleMouseEnter,
         onBlur: handleMouseLeave,
@@ -283,16 +584,20 @@ function useHoverOverlay({
         isValidElement(triggerChildren) &&
         (skipWrapper || typeof triggerChildren.type === 'string')
       ) {
+        const triggerRef = mergeTriggerRef(
+          (triggerChildren.props as any).ref as React.Ref<HTMLElement> | null | undefined
+        );
+
         if (showUnderline) {
           const triggerStyle = {
             ...(triggerChildren.props as any).style,
-            ...theme.tooltipUnderline(underlineColor),
+            ...tooltipUnderline(theme, underlineColor),
           };
 
           return cloneElement<any>(
             triggerChildren,
             Object.assign(mergeProps(triggerChildren.props as any, providedProps), {
-              ref: mergeRefs((triggerChildren.props as any).ref, setTriggerElement),
+              ref: triggerRef,
               style: triggerStyle,
             })
           );
@@ -302,7 +607,7 @@ function useHoverOverlay({
         return cloneElement<any>(
           triggerChildren,
           Object.assign(mergeProps(triggerChildren.props as any, providedProps), {
-            ref: mergeRefs((triggerChildren.props as any).ref, setTriggerElement),
+            ref: triggerRef,
             style: (triggerChildren.props as any).style,
           })
         );
@@ -310,7 +615,7 @@ function useHoverOverlay({
 
       const containerProps = Object.assign(providedProps, {
         style: {
-          ...(showUnderline ? theme.tooltipUnderline(underlineColor) : {}),
+          ...(showUnderline ? tooltipUnderline(theme, underlineColor) : {}),
           ...(containerDisplayMode ? {display: containerDisplayMode} : {}),
           maxWidth: '100%',
           ...style,
@@ -328,19 +633,34 @@ function useHoverOverlay({
       handleMouseEnter,
       handleMouseLeave,
       showUnderline,
+      showOnlyOnOverflow,
       skipWrapper,
       describeById,
+      forceVisible,
       style,
       theme,
       underlineColor,
+      isOverflowing,
+      setTriggerElementRef,
+      mergeTriggerRef,
     ]
   );
 
   const reset = useCallback(() => {
-    setIsVisible(false);
-    maybeClearRefTimeout(delayHideTimeoutRef);
-    maybeClearRefTimeout(delayOpenTimeoutRef);
-  }, []);
+    maybeClearRefTimeout(openTimerRef);
+    maybeClearRefTimeout(hideTimerRef);
+    const wasVisible = statusRef.current === 'open' || statusRef.current === 'cooling';
+    commitStatus('idle');
+    if (wasVisible) {
+      startGroupCoolDown(group);
+    }
+  }, [commitStatus, group]);
+
+  useEffect(() => {
+    if (showOnlyOnOverflow && !isOverflowing) {
+      reset();
+    }
+  }, [showOnlyOnOverflow, isOverflowing, reset]);
 
   const overlayProps = useMemo(() => {
     return {
@@ -370,6 +690,10 @@ function useHoverOverlay({
   return {
     wrapTrigger,
     isOpen,
+    // True when another overlay took over while this one was closing —
+    // consumers should render null (bypassing any exit animation) so the
+    // incoming overlay doesn't trail alongside a fading-out sibling.
+    snapClosed,
     overlayProps,
     arrowProps,
     placement: state?.placement,

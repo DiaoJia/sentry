@@ -1,26 +1,27 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+
 import {addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import {CopyToClipboardButton} from 'sentry/components/copyToClipboardButton';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import TextField from 'sentry/components/forms/fields/textField';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import List from 'sentry/components/list';
-import TextCopyInput from 'sentry/components/textCopyInput';
+import {TextField} from 'sentry/components/forms/fields/textField';
+import {List} from 'sentry/components/list';
+import {IconOpen} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Integration} from 'sentry/types/integrations';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {uniq} from 'sentry/utils/array/uniq';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 
 type DerivedCodeMapping = {
   filename: string;
@@ -29,6 +30,27 @@ type DerivedCodeMapping = {
   source_path: string;
   stacktrace_root: string;
 };
+
+function WrappingFilePath({path}: {path: string}) {
+  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const directory = path.slice(0, separatorIndex + 1);
+  const basename = path.slice(separatorIndex + 1);
+
+  return (
+    <Text
+      as="span"
+      monospace
+      wrap="pre-wrap"
+      wordBreak="break-word"
+      data-test-id="file-path"
+    >
+      {directory}
+      <Text as="span" bold monospace variant="inherit">
+        {basename}
+      </Text>
+    </Text>
+  );
+}
 
 interface StacktraceLinkModalProps extends ModalRenderProps {
   filename: string;
@@ -41,7 +63,7 @@ interface StacktraceLinkModalProps extends ModalRenderProps {
   platform?: string;
 }
 
-function StacktraceLinkModal({
+export function StacktraceLinkModal({
   closeModal,
   onSubmit,
   organization,
@@ -59,9 +81,11 @@ function StacktraceLinkModal({
   const [error, setError] = useState<null | string>(null);
   const [sourceCodeInput, setSourceCodeInput] = useState('');
 
-  const {data: suggestedCodeMappings} = useApiQuery<DerivedCodeMapping[]>(
+  const {data: suggestedCodeMappings} = useApiQuery<DerivedCodeMapping[] | null>(
     [
-      `/organizations/${organization.slug}/derive-code-mappings/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/derive-code-mappings/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           projectId: project.id,
@@ -80,27 +104,53 @@ function StacktraceLinkModal({
     }
   );
 
+  const sourceCodeProviders = integrations.filter(integration =>
+    ['github', 'gitlab', 'bitbucket'].includes(integration.provider?.key)
+  );
+
+  // If they have more than one, they'll have to navigate themselves
+  const hasOneSourceCodeIntegration = sourceCodeProviders.length === 1;
+  const sourceCodeIntegration = hasOneSourceCodeIntegration
+    ? sourceCodeProviders[0]
+    : undefined;
+  const sourceUrl = hasOneSourceCodeIntegration
+    ? `https://${sourceCodeIntegration!.domainName}`
+    : undefined;
+  const providerDisplayName = sourceCodeIntegration?.provider.name;
+
   const suggestions = uniq(
-    suggestedCodeMappings?.map(suggestion => {
-      return `https://github.com/${suggestion.repo_name}/blob/${suggestion.repo_branch}/${suggestion.filename}`;
-    })
+    Array.isArray(suggestedCodeMappings)
+      ? suggestedCodeMappings.map(suggestion => {
+          if (hasOneSourceCodeIntegration) {
+            const provider = sourceCodeProviders[0];
+            if (provider?.provider?.key === 'bitbucket') {
+              return `https://bitbucket.org/${suggestion.repo_name}/src/${suggestion.repo_branch}/${suggestion.filename}`;
+            }
+            if (provider?.provider?.key === 'gitlab') {
+              return `https://gitlab.com/${suggestion.repo_name}/-/blob/${suggestion.repo_branch}/${suggestion.filename}`;
+            }
+          }
+          return `https://github.com/${suggestion.repo_name}/blob/${suggestion.repo_branch}/${suggestion.filename}`;
+        })
+      : []
   ).slice(0, 2);
+
+  const getPlaceholderUrl = () => {
+    if (hasOneSourceCodeIntegration) {
+      const provider = sourceCodeIntegration;
+      if (provider?.provider?.key === 'bitbucket') {
+        return 'https://bitbucket.org/workspace/repository/src/main/path/to/file';
+      }
+      if (provider?.provider?.key === 'gitlab') {
+        return 'https://gitlab.com/group/project/-/blob/main/path/to/file';
+      }
+    }
+    return 'https://github.com/organization/repository/blob/main/path/to/file';
+  };
 
   const onHandleChange = (input: string) => {
     setSourceCodeInput(input);
   };
-
-  const sourceCodeProviders = integrations.filter(integration =>
-    ['github', 'gitlab'].includes(integration.provider?.key)
-  );
-  // If they have more than one, they'll have to navigate themselves
-  const hasOneSourceCodeIntegration = sourceCodeProviders.length === 1;
-  const sourceUrl = hasOneSourceCodeIntegration
-    ? `https://${sourceCodeProviders[0]!.domainName}`
-    : undefined;
-  const providerName = hasOneSourceCodeIntegration
-    ? sourceCodeProviders[0]!.name
-    : t('source code');
 
   const onManualSetup = () => {
     trackAnalytics('integrations.stacktrace_manual_option_clicked', {
@@ -121,7 +171,15 @@ function StacktraceLinkModal({
       provider: sourceCodeProviders[0]?.provider.name ?? 'unknown',
       organization,
     });
-    const parsingEndpoint = `/projects/${organization.slug}/${project.slug}/repo-path-parsing/`;
+    const parsingEndpoint = getApiUrl(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/repo-path-parsing/',
+      {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: project.slug,
+        },
+      }
+    );
     try {
       const configData = await api.requestPromise(parsingEndpoint, {
         method: 'POST',
@@ -134,7 +192,12 @@ function StacktraceLinkModal({
         },
       });
 
-      const configEndpoint = `/organizations/${organization.slug}/code-mappings/`;
+      const configEndpoint = getApiUrl(
+        '/organizations/$organizationIdOrSlug/code-mappings/',
+        {
+          path: {organizationIdOrSlug: organization.slug},
+        }
+      );
       await api.requestPromise(configEndpoint, {
         method: 'POST',
         data: {
@@ -154,7 +217,7 @@ function StacktraceLinkModal({
       });
       closeModal();
       onSubmit();
-    } catch (err) {
+    } catch (err: any) {
       const errorJson = err?.responseJSON || {};
       setError(
         errorJson.sourceUrl?.[0] ??
@@ -170,14 +233,13 @@ function StacktraceLinkModal({
         <h4>{t('Set up Code Mapping')}</h4>
       </Header>
       <Body>
-        <ModalContainer>
+        <Stack gap="xl">
           {error && (
-            <Alert type="error" showIcon>
+            <Alert variant="danger">
               {error === 'Could not find repo'
                 ? tct(
-                    'We don’t have access to that [provider] repo. To fix this, [link:add your repo.]',
+                    'We can’t access this repository. [link:Add it] or use a URL from a connected repository.',
                     {
-                      provider: providerName,
                       link: (
                         <Link
                           onClick={onManualSetup}
@@ -196,42 +258,84 @@ function StacktraceLinkModal({
             </Alert>
           )}
           <div>
-            {tct(
-              'We can’t find the file path for [filename] in your [provider] repo. Add the correct link below to enable git blame and suspect commits for this project.',
-              {
-                provider: providerName,
-                filename: <StyledCode>{filename}</StyledCode>,
-              }
-            )}
+            {hasOneSourceCodeIntegration
+              ? tct(
+                  'We couldn’t find the source file automatically. Paste its [provider] URL so we can link to the source and identify suspect commits.',
+                  {
+                    provider: providerDisplayName,
+                  }
+                )
+              : t(
+                  'We couldn’t find the source file automatically. Paste its URL so we can link to the source and identify suspect commits.'
+                )}
           </div>
           <StyledList symbol="colored-numeric">
             <li>
-              <ItemContainer>
+              <Stack
+                flex="1"
+                minWidth="0"
+                marginTop="2xs"
+                gap="md"
+                maxWidth="calc(100% - 25px - 8px)"
+              >
                 <div>
-                  {hasOneSourceCodeIntegration
-                    ? tct('Go to [link]', {
-                        link: (
-                          <ExternalLink href={sourceUrl}>
-                            {sourceCodeProviders[0]!.provider.name}
-                          </ExternalLink>
-                        ),
-                      })
-                    : t('Go to your source code provider')}
+                  {hasOneSourceCodeIntegration ? (
+                    <ExternalLink href={sourceUrl}>
+                      <Flex as="span" align="center" gap="xs">
+                        {t(
+                          'Open %s on %s',
+                          sourceCodeIntegration!.name,
+                          providerDisplayName
+                        )}
+                        <IconOpen size="xs" />
+                      </Flex>
+                    </ExternalLink>
+                  ) : (
+                    t('Open your source code provider')
+                  )}
                 </div>
-              </ItemContainer>
+              </Stack>
             </li>
             <li>
-              <ItemContainer>
-                <div>{t('Find the correct repo and path for the file')}</div>
-                <TextCopyInput>{filename}</TextCopyInput>
-              </ItemContainer>
+              <Stack
+                flex="1"
+                minWidth="0"
+                marginTop="2xs"
+                gap="md"
+                maxWidth="calc(100% - 25px - 8px)"
+              >
+                <div>{t('Find the repository containing this file')}</div>
+                <Grid
+                  columns="minmax(0, 1fr) auto"
+                  align="start"
+                  gap="sm"
+                  padding="md"
+                  background="secondary"
+                  border="primary"
+                  radius="md"
+                >
+                  <WrappingFilePath path={filename} />
+                  <CopyToClipboardButton
+                    text={filename}
+                    size="xs"
+                    variant="transparent"
+                    aria-label={t('Copy file path')}
+                  />
+                </Grid>
+              </Stack>
             </li>
             <li>
-              <ItemContainer>
+              <Stack
+                flex="1"
+                minWidth="0"
+                marginTop="2xs"
+                gap="md"
+                maxWidth="calc(100% - 25px - 8px)"
+              >
                 <div>
                   {suggestions.length
-                    ? t('Select from one of these suggestions or paste your URL below')
-                    : t('Copy the URL and paste it below')}
+                    ? t('Copy a suggested URL or paste the file URL')
+                    : t('Paste the file URL')}
                 </div>
                 {suggestions.length ? (
                   <Suggestions>
@@ -240,10 +344,10 @@ function StacktraceLinkModal({
                         <div key={i} style={{display: 'flex', alignItems: 'center'}}>
                           <SuggestionOverflow>{suggestion}</SuggestionOverflow>
                           <CopyToClipboardButton
-                            borderless
+                            variant="transparent"
                             text={suggestion}
                             size="xs"
-                            iconSize="xs"
+                            aria-label={t('Copy suggestion to clipboard')}
                           />
                         </div>
                       );
@@ -253,39 +357,37 @@ function StacktraceLinkModal({
 
                 <StyledTextField
                   inline={false}
-                  aria-label={t('Repository URL')}
+                  aria-label={t('File URL')}
                   hideLabel
                   name="source-code-input"
                   value={sourceCodeInput}
                   onChange={onHandleChange}
-                  placeholder={`https://github.com/helloworld/Hello-World/blob/master${
-                    filename.startsWith('/') ? '' : '/'
-                  }${filename}`}
+                  placeholder={getPlaceholderUrl()}
                 />
-              </ItemContainer>
+              </Stack>
             </li>
           </StyledList>
-        </ModalContainer>
+        </Stack>
       </Body>
       <Footer>
-        <ButtonBar gap={1}>
+        <Grid flow="column" align="center" gap="md">
           <Button onClick={closeModal}>{t('Cancel')}</Button>
-          <Button priority="primary" onClick={handleSubmit}>
-            {t('Save')}
+          <Button variant="primary" onClick={handleSubmit}>
+            {t('Save mapping')}
           </Button>
-        </ButtonBar>
+        </Grid>
       </Footer>
     </Fragment>
   );
 }
 
 const StyledList = styled(List)`
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
 
   & > li {
     display: flex;
     padding-left: 0;
-    gap: ${space(1)};
+    gap: ${p => p.theme.space.md};
   }
 
   & > li:before {
@@ -295,33 +397,19 @@ const StyledList = styled(List)`
 `;
 
 const Suggestions = styled('div')`
-  background-color: ${p => p.theme.surface100};
-  border-radius: ${p => p.theme.borderRadius};
-  padding: ${space(1)} ${space(1)} ${space(1)} ${space(2)};
+  background-color: ${p => p.theme.colors.surface200};
+  border-radius: ${p => p.theme.radius.md};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.md} ${p => p.theme.space.md}
+    ${p => p.theme.space.xl};
 `;
 
 const SuggestionOverflow = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   direction: rtl;
-`;
-
-const ItemContainer = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-  flex-direction: column;
-  margin-top: ${space(0.25)};
-  flex: 1;
-  max-width: calc(100% - 25px - 8px);
-`;
-
-const ModalContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-`;
-
-const StyledCode = styled('code')`
-  word-break: break-word;
 `;
 
 const StyledTextField = styled(TextField)`
@@ -332,5 +420,3 @@ const StyledTextField = styled(TextField)`
     margin-left: 0px;
   }
 `;
-
-export default StacktraceLinkModal;

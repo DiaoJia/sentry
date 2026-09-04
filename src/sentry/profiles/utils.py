@@ -5,20 +5,22 @@ from typing import Any, Self
 from urllib.parse import urlencode, urlparse
 
 import brotli
-import sentry_sdk
 import urllib3
 from django.conf import settings
 from django.http import HttpResponse as SentryResponse
 from urllib3.connectionpool import ConnectionPool
 from urllib3.response import HTTPResponse as VroomResponse
 
-from sentry.grouping.enhancer import Enhancements, keep_profiling_rules
+from sentry.grouping.enhancer import EnhancementsConfig, keep_profiling_rules
 from sentry.net.http import connection_from_url
 from sentry.utils import json, metrics
 from sentry.utils.sdk import set_span_attribute
+from sentry.utils.tracing import start_span
 
 Profile = MutableMapping[str, Any]
 CallTrees = Mapping[str, list[Any]]
+
+PROFILE_FORMAT_V2_ANDROID_TRACE = "2.android-trace"
 
 
 class RetrySkipTimeout(urllib3.Retry):
@@ -111,7 +113,7 @@ def get_from_profiling_service(
                 "Content-Type": "application/json",
             }
         )
-        with sentry_sdk.start_span(op="json.dumps"):
+        with start_span(op="json.dumps", name="json.dumps"):
             data = json.dumps(json_data).encode("utf-8")
         set_span_attribute("payload.size", len(data))
         if metric:
@@ -158,7 +160,7 @@ PROFILE_FILTERS = {
 }
 
 
-# This support applying a subset of stack trace rules to the profile (matchers and actions).
+# This support applying a subset of stacktrace rules to the profile (matchers and actions).
 #
 # Matchers allowed:
 #
@@ -175,12 +177,10 @@ def apply_stack_trace_rules_to_profile(profile: Profile, rules_config: str) -> N
     profiling_rules = keep_profiling_rules(rules_config)
     if profiling_rules == "":
         return
-    enhancements = Enhancements.from_rules_text(profiling_rules, referrer="profiling")
-    if "version" in profile:
-        enhancements.apply_category_and_updated_in_app_to_frames(
-            profile["profile"]["frames"], profile["platform"], {}
-        )
-    elif profile["platform"] == "android":
+    enhancements = EnhancementsConfig.from_rules_text(profiling_rules, referrer="profiling")
+
+    version = profile.get("version")
+    if is_android_trace_format(profile):
         # Set the fields that Enhancements expect
         # with the right names.
         # Sample format already has the right fields,
@@ -192,3 +192,34 @@ def apply_stack_trace_rules_to_profile(profile: Profile, rules_config: str) -> N
         enhancements.apply_category_and_updated_in_app_to_frames(
             profile["profile"]["methods"], profile["platform"], {}
         )
+    elif version is not None:
+        enhancements.apply_category_and_updated_in_app_to_frames(
+            profile["profile"]["frames"], profile["platform"], {}
+        )
+
+
+def is_android_trace_format(profile: Profile) -> bool:
+    version = profile.get("version")
+
+    if version == PROFILE_FORMAT_V2_ANDROID_TRACE:
+        return True
+
+    # A faulty version can't be trusted: it may be missing or wrongly set on
+    # android trace profiles, so probe the structure instead — only the android
+    # trace format stores its frames in "methods".
+    if profile.get("platform") == "android":
+        if not version:
+            return True
+        if "methods" in profile.get("profile", {}):
+            return True
+
+    return False
+
+
+JVM_FRAME_PLATFORMS = frozenset(["java", "android"])
+
+
+def is_jvm_frame(frame: dict[str, Any], profile: Profile) -> bool:
+    # `platform` may be absent on a frame, in which case it inherits the
+    # profile's platform. Both "java" and "android" denote JVM frames.
+    return frame.get("platform", profile.get("platform")) in JVM_FRAME_PLATFORMS

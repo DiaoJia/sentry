@@ -13,9 +13,12 @@ from sentry.silo.util import (
     PROXY_OI_HEADER,
     PROXY_PATH,
     PROXY_SIGNATURE_HEADER,
+    PROXY_TIMEOUT_HEADER,
     clean_headers,
     clean_outbound_headers,
     clean_proxy_headers,
+    decode_proxy_timeout,
+    encode_proxy_timeout,
     encode_subnet_signature,
     trim_leading_slashes,
     verify_subnet_signature,
@@ -34,6 +37,7 @@ class SiloUtilityTest(TestCase):
             PROXY_SIGNATURE_HEADER: "-leander(but-in-cursive)",
             PROXY_BASE_URL_HEADER: "https://api.integration.com/",
             PROXY_PATH: "additional/path/params",
+            PROXY_TIMEOUT_HEADER: "30.0",
             "X-Test-Header-1": "One",
             "X-Test-Header-2": "Two",
             "X-Test-Header-3": "Three",
@@ -42,7 +46,7 @@ class SiloUtilityTest(TestCase):
     )
     secret = "hush-hush-im-invisible"
 
-    def test_trim_leading_slashes(self):
+    def test_trim_leading_slashes(self) -> None:
         assert trim_leading_slashes("/happy-path") == "happy-path"
         assert trim_leading_slashes("/a/bit/nested") == "a/bit/nested"
         assert trim_leading_slashes("/////way-nested") == "way-nested"
@@ -50,7 +54,7 @@ class SiloUtilityTest(TestCase):
         assert trim_leading_slashes("not-nested-at-all") == "not-nested-at-all"
         assert trim_leading_slashes("/url-safe?query=h%20c%20") == "url-safe?query=h%20c%20"
 
-    def test_clean_headers(self):
+    def test_clean_headers(self) -> None:
         assert clean_headers(self.headers, []) == self.headers
 
         assert "X-Test-Header-4" not in self.headers
@@ -61,7 +65,7 @@ class SiloUtilityTest(TestCase):
         assert "X-Test-Header-1" not in cleaned
         assert len(cleaned) == len(self.headers) - 1
 
-    def test_clean_proxy_headers(self):
+    def test_clean_proxy_headers(self) -> None:
         cleaned = clean_proxy_headers(self.headers)
         for header in INVALID_PROXY_HEADERS:
             assert header in self.headers
@@ -71,7 +75,7 @@ class SiloUtilityTest(TestCase):
         for header in retained_headers:
             assert self.headers[header] == cleaned[header]
 
-    def test_clean_outbound_headers(self):
+    def test_clean_outbound_headers(self) -> None:
         cleaned = clean_outbound_headers(self.headers)
         for header in INVALID_OUTBOUND_HEADERS:
             assert header in self.headers
@@ -81,7 +85,27 @@ class SiloUtilityTest(TestCase):
         for header in retained_headers:
             assert self.headers[header] == cleaned[header]
 
-    def test_clean_hop_by_hop_headers(self):
+    def test_encode_decode_proxy_timeout(self) -> None:
+        # Scalar timeouts round-trip.
+        assert encode_proxy_timeout(30) == "30"
+        assert decode_proxy_timeout("30") == 30.0
+        assert encode_proxy_timeout(45.5) == "45.5"
+        assert decode_proxy_timeout("45.5") == 45.5
+
+        # Tuple (connect, read) timeouts round-trip.
+        assert encode_proxy_timeout((3.0, 60.0)) == "3.0,60.0"
+        assert decode_proxy_timeout("3.0,60.0") == (3.0, 60.0)
+
+        # None means "no header", so downstream falls back to its own default.
+        assert encode_proxy_timeout(None) is None
+        assert decode_proxy_timeout(None) is None
+        assert decode_proxy_timeout("") is None
+
+        # Unparseable values are treated as absent rather than raising.
+        assert decode_proxy_timeout("not-a-number") is None
+        assert decode_proxy_timeout("1,2,3") is None
+
+    def test_clean_hop_by_hop_headers(self) -> None:
         headers = {
             **self.headers,
             "Keep-Alive": "timeout=5",
@@ -101,7 +125,7 @@ class SiloUtilityTest(TestCase):
             assert headers[header] == cleaned[header]
 
     @override_settings(SENTRY_SUBNET_SECRET=secret)
-    def test_subnet_signature(self):
+    def test_subnet_signature(self) -> None:
         signature = "v0=687940c95f7ec16fa8eb1641ac601bebfdeebf5eeaa698d3b6669077dde818ba"
 
         def _encode(

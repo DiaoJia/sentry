@@ -1,26 +1,23 @@
-import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 
-import {makeTestQueryClient} from 'sentry-test/queryClient';
-import {act, renderHook} from 'sentry-test/reactTestingLibrary';
+import {act, renderHookWithProviders} from 'sentry-test/reactTestingLibrary';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import * as OnboardingContext from 'sentry/components/onboarding/onboardingContext';
+import {useModal} from '@sentry/scraps/modal';
+
+import {OnboardingContextProvider} from 'sentry/components/onboarding/onboardingContext';
 import {useCreateProject} from 'sentry/components/onboarding/useCreateProject';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import type {OnboardingSelectedSDK} from 'sentry/types/onboarding';
-import type {Organization} from 'sentry/types/organization';
-import {QueryClientProvider} from 'sentry/utils/queryClient';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {sessionStorageWrapper} from 'sentry/utils/sessionStorage';
 
 import {useConfigureSdk} from './useConfigureSdk';
 
+jest.mock('@sentry/scraps/modal');
 jest.mock('sentry/actionCreators/modal');
 jest.mock('sentry/components/onboarding/useCreateProject');
 
-const mockUseOnboardingContext = jest.spyOn(OnboardingContext, 'useOnboardingContext');
 const mockCreateProject = jest.fn();
-const mockOpenModal = openModal as jest.Mock;
+const mockOpenModal = jest.fn();
 
 function mockCreateProjectHook() {
   let isPending = false;
@@ -43,21 +40,9 @@ function mockCreateProjectHook() {
   };
 }
 
-const mockUseCreateProject = useCreateProject as jest.Mock;
-
-function createWrapper(organization: Organization) {
-  const queryClient = makeTestQueryClient();
-  return function ({children}: {children?: React.ReactNode}) {
-    return (
-      <QueryClientProvider client={queryClient}>
-        <OrganizationContext value={organization}>{children}</OrganizationContext>
-      </QueryClientProvider>
-    );
-  };
-}
+const mockUseCreateProject = jest.mocked(useCreateProject);
 
 describe('useConfigureSdk', () => {
-  const organization = OrganizationFixture();
   const onComplete = jest.fn();
 
   let createProjectInstance: ReturnType<typeof mockCreateProjectHook>;
@@ -81,14 +66,19 @@ describe('useConfigureSdk', () => {
   };
 
   beforeEach(() => {
+    sessionStorageWrapper.clear();
     ProjectsStore.loadInitialData([ProjectFixture()]);
 
-    mockUseOnboardingContext.mockReturnValue({
-      setSelectedPlatform: jest.fn(),
-    });
-
     createProjectInstance = mockCreateProjectHook();
-    mockUseCreateProject.mockReturnValue(createProjectInstance);
+    mockUseCreateProject.mockReturnValue(
+      createProjectInstance as unknown as ReturnType<typeof useCreateProject>
+    );
+    jest.mocked(useModal).mockReturnValue({
+      openModal: mockOpenModal,
+      closeModal: jest.fn(),
+      isOpen: false,
+      visible: false,
+    });
   });
 
   afterEach(() => {
@@ -96,16 +86,16 @@ describe('useConfigureSdk', () => {
   });
 
   it('returns loading state correctly', () => {
-    const {result} = renderHook(() => useConfigureSdk({onComplete}), {
-      wrapper: createWrapper(organization),
+    const {result} = renderHookWithProviders(() => useConfigureSdk({onComplete}), {
+      additionalWrapper: OnboardingContextProvider,
     });
 
     expect(result.current.isLoadingData).toBe(true);
   });
 
   it('opens the framework suggestion modal if platform is supported', async () => {
-    const {result} = renderHook(() => useConfigureSdk({onComplete}), {
-      wrapper: createWrapper(organization),
+    const {result} = renderHookWithProviders(() => useConfigureSdk({onComplete}), {
+      additionalWrapper: OnboardingContextProvider,
     });
 
     await act(async () => {
@@ -116,8 +106,8 @@ describe('useConfigureSdk', () => {
   });
 
   it('does not open the framework suggestion modal if platform is not supported', async () => {
-    const {result} = renderHook(() => useConfigureSdk({onComplete}), {
-      wrapper: createWrapper(organization),
+    const {result} = renderHookWithProviders(() => useConfigureSdk({onComplete}), {
+      additionalWrapper: OnboardingContextProvider,
     });
 
     await act(async () => {
@@ -129,8 +119,8 @@ describe('useConfigureSdk', () => {
   });
 
   it('creates project only once even if called multiple times', async () => {
-    const {result} = renderHook(() => useConfigureSdk({onComplete}), {
-      wrapper: createWrapper(organization),
+    const {result} = renderHookWithProviders(() => useConfigureSdk({onComplete}), {
+      additionalWrapper: OnboardingContextProvider,
     });
 
     mockCreateProject.mockImplementation(

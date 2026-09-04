@@ -10,6 +10,7 @@ from string import Template
 from typing import Any
 from uuid import UUID
 
+import sentry_sdk
 from django.core.files.storage import Storage
 from django.utils import timezone
 from orjson import JSONDecodeError
@@ -207,7 +208,7 @@ artifacts:
   objects:
     location: "$bucket_root/runs/$uuid/findings/"
     paths: ["/workspace/findings/**"]
-timeout: 3600s
+timeout: 4800s
 options:
   machineType: "N1_HIGHCPU_32"
   env:
@@ -573,7 +574,7 @@ def start_relocation_task(
 
 def fail_relocation(relocation: Relocation, task: OrderedTask, reason: str = "") -> None:
     """
-    Helper function that conveniently fails a relocation celery task in such a way that the failure
+    Helper function that conveniently fails a relocation task in such a way that the failure
     reason is recorded for the user and no further retries occur. It should be used like:
 
     >>> relocation = Relocation.objects.get(...)
@@ -617,7 +618,7 @@ def retry_task_or_fail_relocation(
 ) -> Generator[None]:
     """
     Catches all exceptions, and does one of two things: calls into `fail_relocation` if there are no
-    retry attempts forthcoming, or simply bubbles them up (thereby triggering a celery retry) if
+    retry attempts forthcoming, or simply bubbles them up (thereby triggering a retry) if
     there are.
 
     This function is ideal for transient failures, like networked service lag, where retrying at a
@@ -628,7 +629,8 @@ def retry_task_or_fail_relocation(
     logger_data = {"uuid": str(relocation.uuid), "task": task.name, "attempts_left": attempts_left}
     try:
         yield
-    except Exception:
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
         # If this is the last attempt, fail in the manner requested before reraising the exception.
         # This ensures that the database entry for this `Relocation` correctly notes it as a
         # `FAILURE`.
@@ -650,7 +652,7 @@ def make_cloudbuild_step_args(indent: int, args: list[str]) -> str:
 # The set of arguments to invoke a "docker compose" in a cloudbuild step is tedious and repetitive -
 # better to just handle it here.
 @lru_cache(maxsize=1)
-def get_docker_compose_cmd():
+def get_docker_compose_cmd() -> str:
     return make_cloudbuild_step_args(
         3,
         [
@@ -666,7 +668,7 @@ def get_docker_compose_cmd():
 # The set of arguments to invoke a "docker compose run" in a cloudbuild step is tedious and
 # repetitive - better to just handle it here.
 @lru_cache(maxsize=1)
-def get_docker_compose_run():
+def get_docker_compose_run() -> str:
     return make_cloudbuild_step_args(
         3,
         [
@@ -678,7 +680,7 @@ def get_docker_compose_run():
 
 
 @lru_cache(maxsize=1)
-def get_relocations_bucket_name():
+def get_relocations_bucket_name() -> str:
     """
     When using the local FileSystemStorage (ie, in tests), we use a contrived bucket name, since
     this is really just an alias for a bespoke local directory in that case.
@@ -712,7 +714,7 @@ def create_cloudbuild_yaml(relocation: Relocation) -> bytes:
             id="import-colliding-users",
             step=IMPORT_VALIDATION_STEP_TEMPLATE,
             scope="users",
-            timeout=900,
+            timeout=1800,
             wait_for=["import-baseline-config"],
             kind=RelocationFile.Kind.COLLIDING_USERS_VALIDATION_DATA,
             args=["--filter-usernames-file", "/in/filter-usernames.txt"],

@@ -1,12 +1,18 @@
 import {useTheme} from '@emotion/react';
 import moment from 'moment-timezone';
 
-import MarkLine from 'sentry/components/charts/components/markLine';
+import {InlineCode} from '@sentry/scraps/code';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {useRenderToString} from '@sentry/scraps/renderToString';
+import {Separator} from '@sentry/scraps/separator';
+import {Text} from '@sentry/scraps/text';
+
+import {markLine as createMarkLine} from 'sentry/components/charts/components/markLine';
 import {hydrateToFlagSeries, type RawFlag} from 'sentry/components/featureFlags/utils';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import {getFormat, getFormattedDate} from 'sentry/utils/dates';
-import usePageFilters from 'sentry/utils/usePageFilters';
 
 interface FlagSeriesProps {
   event: Event | undefined;
@@ -16,6 +22,7 @@ interface FlagSeriesProps {
 export function useFlagSeries({event, flags}: FlagSeriesProps) {
   const theme = useTheme();
   const {selection} = usePageFilters();
+  const renderToString = useRenderToString();
 
   if (!flags.length) {
     return {
@@ -26,10 +33,10 @@ export function useFlagSeries({event, flags}: FlagSeriesProps) {
   }
 
   // create a markline series using hydrated flag data
-  const markLine = MarkLine({
+  const markLine = createMarkLine({
     animation: false,
     lineStyle: {
-      color: theme.blue300,
+      color: theme.colors.pink400,
       opacity: 0.3,
       type: 'solid',
     },
@@ -48,25 +55,36 @@ export function useFlagSeries({event, flags}: FlagSeriesProps) {
           }
         );
 
-        const eventIsBefore = moment(event?.dateCreated).isBefore(moment(time));
-        const formattedDate = moment(time).from(event?.dateCreated, true);
+        const timeObject = moment(data.xAxis);
+        const eventIsBefore = moment(event?.dateCreated).isBefore(timeObject);
+        const formattedDate = timeObject.from(event?.dateCreated, true);
         const suffix = eventIsBefore
           ? t(' (%s after this event)', formattedDate)
           : t(' (%s before this event)', formattedDate);
 
-        return [
-          '<div class="tooltip-series">',
-          `<div><span class="tooltip-label"><strong>${t(
-            'Feature Flag'
-          )}</strong></span></div>`,
-          `<span class="tooltip-label-align-start"><code class="tooltip-code-no-margin">${data.name}</code>${data.label.formatter()}</span>`,
-          '</div>',
-          '<div class="tooltip-footer">',
-          time,
-          event?.dateCreated && suffix,
-          '</div>',
-          '<div class="tooltip-arrow"></div>',
-        ].join('');
+        return renderToString(
+          <Stack gap="lg" padding="lg 0">
+            <Stack gap="md" padding="0 lg">
+              <Text size="sm">{t('Feature Flag')}</Text>
+              <Flex gap="xs" align="baseline">
+                <Text size="sm">
+                  <InlineCode variant="neutral">{data.name}</InlineCode>
+                </Text>
+                <Text size="sm" variant="muted">
+                  {data.label.formatter()}
+                </Text>
+              </Flex>
+            </Stack>
+            <Separator orientation="horizontal" padding="0" />
+            <Flex padding="0 lg">
+              <Text size="sm" variant="muted">
+                {time}
+                {event?.dateCreated && suffix}
+              </Text>
+            </Flex>
+            <div className="tooltip-arrow" />
+          </Stack>
+        );
       },
     },
   });
@@ -75,7 +93,7 @@ export function useFlagSeries({event, flags}: FlagSeriesProps) {
     seriesName: t('Feature Flags'),
     id: 'flag-lines',
     data: [],
-    color: theme.blue200,
+    color: theme.colors.pink400,
     markLine,
     type: 'line', // use this type so the bar chart doesn't shrink/grow
   };

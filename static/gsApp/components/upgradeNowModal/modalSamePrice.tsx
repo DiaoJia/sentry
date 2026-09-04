@@ -1,27 +1,27 @@
-import {useCallback} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 import HeroImg from 'getsentry-images/features/replay-modal-hero.jpg';
 
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import {closeModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import useApi from 'sentry/utils/useApi';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useApi} from 'sentry/utils/useApi';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 import type {Plan, Subscription} from 'getsentry/types';
 import type {AM2UpdateSurfaces} from 'getsentry/utils/trackGetsentryAnalytics';
-import trackGetsentryAnalytics from 'getsentry/utils/trackGetsentryAnalytics';
+import {trackGetsentryAnalytics} from 'getsentry/utils/trackGetsentryAnalytics';
 
 import type {Reservations} from './types';
-import useLogUpgradeNowViewed from './useLogUpgradeNowViewed';
-import {redirectToManage} from './utils';
+import {useLogUpgradeNowViewed} from './useLogUpgradeNowViewed';
 
 type Props = ModalRenderProps & {
   organization: Organization;
@@ -43,8 +43,9 @@ function UpgradeNowModal({
   useLogUpgradeNowViewed({organization, subscription, surface, hasPriceChange: false});
 
   const api = useApi();
+  const navigate = useNavigate();
 
-  const onUpdatePlan = useCallback(async () => {
+  const onUpdatePlan = async () => {
     try {
       await api.requestPromise(`/customers/${organization.slug}/subscription/`, {
         method: 'PUT',
@@ -65,7 +66,6 @@ function UpgradeNowModal({
 
         trackGetsentryAnalytics('upgrade_now.modal.update_now', {
           organization,
-          planTier: subscription.planTier,
           canSelfServe: subscription.canSelfServe,
           channel: subscription.channel,
           has_billing_scope: organization.access?.includes('org:billing'),
@@ -75,14 +75,20 @@ function UpgradeNowModal({
       });
     } catch (err) {
       Sentry.captureException(err);
-      redirectToManage(organization);
+      navigate(
+        normalizeUrl({
+          pathname: `/checkout/${organization.slug}/`,
+          query: {referrer: 'replay_same_price_modal-update_plan-error'},
+        }),
+        {replace: true}
+      );
       addErrorMessage(
         t(
           'Oops! Unable to update Subscription automatically. Click through to update manually.'
         )
       );
     }
-  }, [api, organization, subscription, plan, reservations, onComplete, surface]);
+  };
 
   return (
     <UpsellContent>
@@ -90,7 +96,7 @@ function UpgradeNowModal({
       <Header>{t('Get to the root cause of an error faster')}</Header>
       <p>
         {t(
-          'Enable video-like reproduction of your user sessions so you can see what happened before, during and after an error or performance issue occured.'
+          'Enable video-like reproduction of your user sessions so you can see what happened before, during and after an error or performance issue occurred.'
         )}
       </p>
       <CTAPanel>
@@ -98,7 +104,7 @@ function UpgradeNowModal({
           <CTAPrimary>{t('500 replays')}</CTAPrimary>
           <CTASecondary>{t('at no additional cost')}</CTASecondary>
         </div>
-        <Button priority="primary" onClick={onUpdatePlan}>
+        <Button variant="primary" onClick={onUpdatePlan}>
           {t('Enable Now')}
         </Button>
       </CTAPanel>
@@ -124,45 +130,45 @@ const UpsellContent = styled('div')`
   padding-top: 190px;
   margin-inline: -45px;
   padding-inline: 45px;
-  font-size: ${p => p.theme.fontSize.lg};
+  font-size: ${p => p.theme.font.size.lg};
 `;
 
 const Subheader = styled('h2')`
-  color: ${p => p.theme.purple300};
-  font-size: ${p => p.theme.fontSize.sm};
+  color: ${p => p.theme.tokens.content.accent};
+  font-size: ${p => p.theme.font.size.sm};
   font-weight: bold;
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
   text-transform: uppercase;
 `;
 
 const Header = styled('h1')`
-  font-size: ${p => p.theme.headerFontSize};
+  font-size: ${p => p.theme.font.size.xl};
   font-weight: bold;
-  margin: ${space(1.5)} 0;
+  margin: ${p => p.theme.space.lg} 0;
 `;
 
 const CTAPanel = styled('div')`
-  background: ${p => p.theme.backgroundSecondary};
-  border-radius: ${p => p.theme.borderRadius};
+  background: ${p => p.theme.tokens.background.secondary};
+  border-radius: ${p => p.theme.radius.md};
   display: flex;
   justify-content: space-between;
-  padding: ${space(2)};
-  margin-block: ${space(2)};
+  padding: ${p => p.theme.space.xl};
+  margin-block: ${p => p.theme.space.xl};
 `;
 
 const CTAPrimary = styled('div')`
-  font-size: ${p => p.theme.fontSize.lg};
+  font-size: ${p => p.theme.font.size.lg};
   font-weight: bold;
 `;
 const CTASecondary = styled('div')`
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
 `;
 
 const Note = styled('p')`
   text-align: center;
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.xs};
-  margin-block: ${space(4)};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.xs};
+  margin-block: ${p => p.theme.space['3xl']};
 `;
 
 export const modalCss = css`

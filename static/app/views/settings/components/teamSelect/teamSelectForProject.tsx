@@ -1,19 +1,18 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import EmptyMessage from 'sentry/components/emptyMessage';
+import {Button} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+
+import {Confirm} from 'sentry/components/confirm';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
 import {TeamBadge} from 'sentry/components/idBadge/teamBadge';
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import PanelItem from 'sentry/components/panels/panelItem';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {PanelItem} from 'sentry/components/panels/panelItem';
 import {IconSubtract} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization, Team} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {useTeams} from 'sentry/utils/useTeams';
@@ -22,7 +21,6 @@ import type {TeamSelectProps} from './utils';
 import {DropdownAddTeam} from './utils';
 
 type Props = TeamSelectProps & {
-  canCreateTeam: boolean;
   project: Project;
   /**
    * Used when showing Teams for a Project
@@ -30,9 +28,8 @@ type Props = TeamSelectProps & {
   selectedTeams: Team[];
 };
 
-function TeamSelect({
+export function TeamSelect({
   disabled,
-  canCreateTeam,
   project,
   selectedTeams,
   organization,
@@ -94,8 +91,6 @@ function TeamSelect({
         <DropdownAddTeam
           disabled={disabled}
           isLoadingTeams={isLoadingTeams}
-          isAddingTeamToProject
-          canCreateTeam={canCreateTeam}
           onSearch={onSearch}
           onSelect={onAddTeam}
           onCreateTeam={onCreateTeam}
@@ -106,7 +101,7 @@ function TeamSelect({
         />
       </PanelHeader>
 
-      <PanelBody>{isLoadingTeams ? <LoadingIndicator /> : renderBody()}</PanelBody>
+      <PanelBody>{renderBody()}</PanelBody>
     </Panel>
   );
 }
@@ -139,7 +134,7 @@ function TeamRow({
         disabled={disabled}
         confirmText="Remove Team"
       >
-        <Button size="xs" icon={<IconSubtract isCircled />} disabled={disabled}>
+        <Button size="xs" icon={<IconSubtract />} disabled={disabled}>
           {t('Remove')}
         </Button>
       </Confirm>
@@ -148,7 +143,7 @@ function TeamRow({
 }
 
 const TeamPanelItem = styled(PanelItem)`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
   align-items: center;
   justify-content: space-between;
 `;
@@ -156,5 +151,3 @@ const TeamPanelItem = styled(PanelItem)`
 const TeamPanelItemLeft = styled('div')`
   flex-grow: 4;
 `;
-
-export default TeamSelect;

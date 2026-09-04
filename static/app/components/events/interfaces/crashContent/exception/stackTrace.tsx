@@ -1,17 +1,16 @@
-import EmptyMessage from 'sentry/components/emptyMessage';
-import StackTraceContent from 'sentry/components/events/interfaces/crashContent/stackTrace/content';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {Content as StackTraceContent} from 'sentry/components/events/interfaces/crashContent/stackTrace/content';
 import {NativeContent} from 'sentry/components/events/interfaces/crashContent/stackTrace/nativeContent';
 import type {FrameSourceMapDebuggerData} from 'sentry/components/events/interfaces/sourceMapsDebuggerModal';
-import Panel from 'sentry/components/panels/panel';
+import {Panel} from 'sentry/components/panels/panel';
 import {IconWarning} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Event, ExceptionValue} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import {StackType, StackView} from 'sentry/types/stacktrace';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {isNativePlatform} from 'sentry/utils/platform';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
 
 type Props = {
   chainedException: boolean;
@@ -29,7 +28,7 @@ type Props = {
   threadId?: number;
 };
 
-function StackTrace({
+export function StackTrace({
   stackView,
   stacktrace,
   chainedException,
@@ -44,20 +43,19 @@ function StackTrace({
   frameSourceMapDebuggerData,
   stackType,
 }: Props) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
   if (!defined(stacktrace)) {
     return null;
   }
 
   if (
     stackView === StackView.APP &&
-    (stacktrace.frames ?? []).filter(frame => frame.inApp).length === 0 &&
+    !(stacktrace.frames ?? []).some(frame => frame.inApp) &&
     !chainedException
   ) {
     return (
       <Panel dashedBorder>
         <EmptyMessage
-          icon={<IconWarning size="xl" />}
+          icon={<IconWarning />}
           title={t('No app only stack trace has been found!')}
         />
       </Panel>
@@ -90,7 +88,6 @@ function StackTrace({
         newestFirst={newestFirst}
         event={event}
         meta={meta}
-        hideIcon={hasStreamlinedUI}
       />
     );
   }
@@ -107,9 +104,6 @@ function StackTrace({
       threadId={threadId}
       frameSourceMapDebuggerData={frameSourceMapDebuggerData}
       hideSourceMapDebugger={stackType === StackType.MINIFIED}
-      hideIcon={hasStreamlinedUI}
     />
   );
 }
-
-export default StackTrace;

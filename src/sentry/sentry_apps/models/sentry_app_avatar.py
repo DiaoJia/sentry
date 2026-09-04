@@ -32,14 +32,14 @@ class SentryAppAvatarTypes(Enum):
 class SentryAppAvatarManager(BaseManager["SentryAppAvatar"]):
     def get_by_apps_as_dict(
         self, sentry_apps: Iterable[SentryApp]
-    ) -> dict[int, set[SentryAppAvatar]]:
+    ) -> dict[int, list[SentryAppAvatar]]:
         """
         Returns a dict mapping sentry_app_id (key) to List[SentryAppAvatar] (value)
         """
         avatars = SentryAppAvatar.objects.filter(sentry_app__in=sentry_apps)
-        avatar_to_app_map = defaultdict(set)
+        avatar_to_app_map: dict[int, list[SentryAppAvatar]] = defaultdict(list)
         for avatar in avatars:
-            avatar_to_app_map[avatar.sentry_app_id].add(avatar)
+            avatar_to_app_map[avatar.sentry_app_id].append(avatar)
         return avatar_to_app_map
 
 
@@ -67,9 +67,9 @@ class SentryAppAvatar(ControlAvatarBase):
 
     url_path = "sentry-app-avatar"
 
-    def get_cache_key(self, size):
+    def get_cache_key(self, size) -> str:
         color_identifier = "color" if self.color else "simple"
         return f"sentry_app_avatar:{self.sentry_app_id}:{color_identifier}:{size}"
 
-    def get_avatar_photo_type(self):
+    def get_avatar_photo_type(self) -> SentryAppAvatarPhotoTypes:
         return SentryAppAvatarPhotoTypes.LOGO if self.color else SentryAppAvatarPhotoTypes.ICON

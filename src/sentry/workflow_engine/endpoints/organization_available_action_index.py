@@ -2,10 +2,13 @@ from collections import defaultdict
 from typing import TypedDict
 
 from drf_spectacular.utils import extend_schema
+from rest_framework.request import Request
+from rest_framework.response import Response
 
+from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import OrganizationEndpoint
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import serialize
@@ -18,18 +21,22 @@ from sentry.apidocs.constants import (
 from sentry.apidocs.parameters import GlobalParams
 from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.integrations.services.integration import RpcIntegration
+from sentry.models.organization import Organization
+from sentry.rules.actions.services import SentryAppService
+from sentry.sentry_apps.models.sentry_app_installation import prepare_ui_component
 from sentry.sentry_apps.services.app import app_service
-from sentry.workflow_engine.endpoints.serializers import (
+from sentry.workflow_engine.endpoints.serializers.action_handler_serializer import (
     ActionHandlerSerializer,
     ActionHandlerSerializerResponse,
 )
+from sentry.workflow_engine.endpoints.validators.base.action import DEPRECATED_ACTION_TYPES
 from sentry.workflow_engine.models import Action
 from sentry.workflow_engine.processors.action import (
     get_available_action_integrations_for_org,
     get_integration_services,
-    get_notification_plugins_for_org,
 )
 from sentry.workflow_engine.registry import action_handler_registry
+from sentry.workflow_engine.types import ActionHandler
 
 
 class AvailableIntegration(TypedDict):
@@ -37,7 +44,7 @@ class AvailableIntegration(TypedDict):
     services: list[tuple[int, str]]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationAvailableActionIndexEndpoint(OrganizationEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.EXPERIMENTAL,
@@ -59,10 +66,14 @@ class OrganizationAvailableActionIndexEndpoint(OrganizationEndpoint):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def get(self, request, organization):
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[list[ActionHandlerSerializerResponse]]:
         """
         Returns a list of available actions for a given org
         """
+        can_create_tickets = features.has("organizations:integrations-ticket-rules", organization)
+
         integration_services = get_integration_services(organization.id)
 
         provider_integrations: dict[str, list[AvailableIntegration]] = defaultdict(list)
@@ -72,14 +83,40 @@ class OrganizationAvailableActionIndexEndpoint(OrganizationEndpoint):
                 AvailableIntegration(integration=integration, services=services)
             )
 
-        sentry_app_component_contexts = app_service.get_installation_component_contexts(
+        all_sentry_app_contexts = app_service.get_installation_component_contexts(
             filter={"organization_id": organization.id},
             component_type="alert-rule-action",
             include_contexts_without_component=True,
         )
 
+        # filter for alertable apps and split contexts into those with and without components
+        alertable_apps_with_components = []
+        alertable_apps_without_components = []
+        for context in all_sentry_app_contexts:
+            if not context.installation.sentry_app.is_alertable:
+                continue
+
+            if context.component:
+                # filter out broken apps by checking if prepare_ui_component succeeds
+                prepared_component = prepare_ui_component(
+                    installation=context.installation,
+                    component=context.component,
+                )
+                if prepared_component is not None:
+                    alertable_apps_with_components.append(context)
+            else:
+                alertable_apps_without_components.append(context)
+
         actions = []
         for action_type, handler in action_handler_registry.registrations.items():
+            # skip ticket creation actions if organization doesn't have the feature
+            if not can_create_tickets and handler.group == ActionHandler.Group.TICKET_CREATION:
+                continue
+
+            # skip deprecated action types
+            if action_type in DEPRECATED_ACTION_TYPES:
+                continue
+
             # add integration actions
             if hasattr(handler, "provider_slug"):
                 integrations = provider_integrations.get(handler.provider_slug, [])
@@ -95,34 +132,40 @@ class OrganizationAvailableActionIndexEndpoint(OrganizationEndpoint):
                     )
 
             # add alertable sentry app actions
+            # sentry app actions are only for alertable sentry apps with components
             elif action_type == Action.Type.SENTRY_APP:
-                for context in sentry_app_component_contexts:
-                    if context.installation.sentry_app.is_alertable:
-                        actions.append(
-                            serialize(
-                                handler,
-                                request.user,
-                                ActionHandlerSerializer(),
-                                action_type=action_type,
-                                sentry_app_context=context,
-                            )
-                        )
-
-            # add plugin service actions
-            elif action_type == Action.Type.WEBHOOK:
-                plugins = get_notification_plugins_for_org(organization)
-                if plugins:
+                for context in alertable_apps_with_components:
                     actions.append(
                         serialize(
                             handler,
                             request.user,
                             ActionHandlerSerializer(),
                             action_type=action_type,
-                            services=plugins,
+                            sentry_app_context=context,
                         )
                     )
 
-            # add all other action types (EMAIL, PLUGIN, etc.)
+            # add webhook action
+            # service options include sentry apps without components
+            elif action_type == Action.Type.WEBHOOK:
+                sentry_apps: list[SentryAppService] = [
+                    SentryAppService(context.installation.sentry_app)
+                    for context in alertable_apps_without_components
+                ]
+                available_services = sentry_apps
+
+                if available_services:
+                    actions.append(
+                        serialize(
+                            handler,
+                            request.user,
+                            ActionHandlerSerializer(),
+                            action_type=action_type,
+                            services=available_services,
+                        )
+                    )
+
+            # add all other action types (EMAIL, etc.)
             else:
                 actions.append(
                     serialize(
@@ -133,11 +176,7 @@ class OrganizationAvailableActionIndexEndpoint(OrganizationEndpoint):
         actions.sort(
             key=lambda x: (
                 x["handlerGroup"],
-                (
-                    0
-                    if x["type"] in [Action.Type.EMAIL, Action.Type.PLUGIN, Action.Type.WEBHOOK]
-                    else 1
-                ),
+                (0 if x["type"] in [Action.Type.EMAIL, Action.Type.WEBHOOK] else 1),
                 x["type"],
                 (x["sentryApp"].get("name", "") if x.get("sentryApp") else ""),
             )

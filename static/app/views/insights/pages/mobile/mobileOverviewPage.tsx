@@ -1,52 +1,64 @@
 import styled from '@emotion/styled';
 
+import {Alert} from '@sentry/scraps/alert';
+import {Link} from '@sentry/scraps/link';
+
 import Feature from 'sentry/components/acl/feature';
 import * as Layout from 'sentry/components/layouts/thirds';
 import {NoAccess} from 'sentry/components/noAccess';
-import {DatePageFilter} from 'sentry/components/organizations/datePageFilter';
-import {EnvironmentPageFilter} from 'sentry/components/organizations/environmentPageFilter';
-import PageFilterBar from 'sentry/components/organizations/pageFilterBar';
+import {
+  DatePageFilter,
+  type DatePageFilterProps,
+} from 'sentry/components/pageFilters/date/datePageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {tct} from 'sentry/locale';
+import {DataCategory} from 'sentry/types/core';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {
   canUseMetricsData,
   useMEPSettingContext,
 } from 'sentry/utils/performance/contexts/metricsEnhancedSetting';
 import {PageAlert} from 'sentry/utils/performance/contexts/pageAlert';
-import {PerformanceDisplayProvider} from 'sentry/utils/performance/contexts/performanceDisplayContext';
+import {PerformanceDisplayContext} from 'sentry/utils/performance/contexts/performanceDisplayContext';
 import {getSelectedProjectList} from 'sentry/utils/project/useSelectedProjectsHaveField';
 import {decodeScalar, decodeSorts} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import useLocationQuery from 'sentry/utils/url/useLocationQuery';
+import {useLocationQuery} from 'sentry/utils/url/useLocationQuery';
+import {useDatePageFilterProps} from 'sentry/utils/useDatePageFilterProps';
 import {useLocation} from 'sentry/utils/useLocation';
+import {useMaxPickableDays} from 'sentry/utils/useMaxPickableDays';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {PrebuiltDashboardId} from 'sentry/views/dashboards/utils/prebuiltConfigs';
+import {useGetPrebuiltDashboard} from 'sentry/views/dashboards/utils/usePopulateLinkedDashboards';
+import {InsightsEnvironmentSelector} from 'sentry/views/insights/common/components/enviornmentSelector';
 import * as ModuleLayout from 'sentry/views/insights/common/components/moduleLayout';
 import {InsightsProjectSelector} from 'sentry/views/insights/common/components/projectSelector';
 import {ToolRibbon} from 'sentry/views/insights/common/components/ribbon';
 import {STARRED_SEGMENT_TABLE_QUERY_KEY} from 'sentry/views/insights/common/components/tableCells/starredSegmentCell';
-import {useEAPSpans} from 'sentry/views/insights/common/queries/useDiscover';
+import {useSpans} from 'sentry/views/insights/common/queries/useDiscover';
 import {useOnboardingProject} from 'sentry/views/insights/common/queries/useOnboardingProject';
+import {useDefaultToAllProjects} from 'sentry/views/insights/common/utils/useDefaultToAllProjects';
 import {useInsightsEap} from 'sentry/views/insights/common/utils/useEap';
 import {QueryParameterNames} from 'sentry/views/insights/common/views/queryParameters';
 import {DomainOverviewPageProviders} from 'sentry/views/insights/pages/domainOverviewPageProviders';
+import {Am1MobileOverviewPage} from 'sentry/views/insights/pages/mobile/am1OverviewPage';
 import {
   isAValidSort,
   MobileOverviewTable,
   type ValidSort,
 } from 'sentry/views/insights/pages/mobile/mobileOverviewTable';
-import {MobileHeader} from 'sentry/views/insights/pages/mobile/mobilePageHeader';
-import {OldMobileOverviewPage} from 'sentry/views/insights/pages/mobile/oldMobileOverviewPage';
+import {Referrer} from 'sentry/views/insights/pages/mobile/referrers';
 import {
   DEFAULT_SORT,
-  MOBILE_LANDING_TITLE,
   OVERVIEW_PAGE_ALLOWED_OPS,
 } from 'sentry/views/insights/pages/mobile/settings';
 import {TransactionNameSearchBar} from 'sentry/views/insights/pages/transactionNameSearchBar';
 import {useOverviewPageTrackPageload} from 'sentry/views/insights/pages/useOverviewPageTrackAnalytics';
 import {categorizeProjects} from 'sentry/views/insights/pages/utils';
-import type {EAPSpanProperty} from 'sentry/views/insights/types';
+import type {SpanProperty} from 'sentry/views/insights/types';
 import {
   generateGenericPerformanceEventView,
   generateMobilePerformanceEventView,
@@ -60,7 +72,39 @@ import {PerformanceWidgetSetting} from 'sentry/views/performance/landing/widgets
 import {LegacyOnboarding} from 'sentry/views/performance/onboarding';
 import {ProjectPerformanceType} from 'sentry/views/performance/utils';
 
-function EAPMobileOverviewPage() {
+function MobileVitalsBanner() {
+  const organization = useOrganization();
+  const {dashboard, isLoading} = useGetPrebuiltDashboard(
+    PrebuiltDashboardId.MOBILE_VITALS
+  );
+
+  if (isLoading || !dashboard?.id) {
+    return null;
+  }
+
+  return (
+    <ModuleLayout.Full>
+      <Alert variant="info" showIcon>
+        {tct(
+          'This page is no longer being updated. For more detailed mobile performance metrics, visit the [link:Mobile Vitals Dashboard].',
+          {
+            link: (
+              <Link
+                to={`/organizations/${organization.slug}/dashboards/${dashboard.id}/`}
+              />
+            ),
+          }
+        )}
+      </Alert>
+    </ModuleLayout.Full>
+  );
+}
+
+interface EAPMobileOverviewPageProps {
+  datePageFilterProps: DatePageFilterProps;
+}
+
+function EAPMobileOverviewPage({datePageFilterProps}: EAPMobileOverviewPageProps) {
   useOverviewPageTrackPageload();
 
   const organization = useOrganization();
@@ -72,14 +116,15 @@ function EAPMobileOverviewPage() {
   const {selection} = usePageFilters();
   const cursor = decodeScalar(location.query?.[QueryParameterNames.PAGES_CURSOR]);
 
+  useDefaultToAllProjects();
+
   const withStaticFilters = canUseMetricsData(organization);
 
   const eventView = generateMobilePerformanceEventView(
     location,
     projects,
-    generateGenericPerformanceEventView(location, withStaticFilters, organization),
+    generateGenericPerformanceEventView(location, withStaticFilters),
     withStaticFilters,
-    organization,
     true
   );
 
@@ -122,25 +167,15 @@ function EAPMobileOverviewPage() {
     mepSetting
   );
 
-  if (organization.features.includes('mobile-vitals')) {
-    tripleChartRowCharts.push(
-      ...[
-        PerformanceWidgetSetting.TIME_TO_INITIAL_DISPLAY,
-        PerformanceWidgetSetting.TIME_TO_FULL_DISPLAY,
-      ]
-    );
-  }
-  if (organization.features.includes('insights-initial-modules')) {
+  if (organization.features.includes('insight-modules')) {
     doubleChartRowCharts[0] = PerformanceWidgetSetting.SLOW_SCREENS_BY_TTID;
   }
-  if (organization.features.includes('starfish-mobile-appstart')) {
-    doubleChartRowCharts.push(
-      PerformanceWidgetSetting.SLOW_SCREENS_BY_COLD_START,
-      PerformanceWidgetSetting.SLOW_SCREENS_BY_WARM_START
-    );
-  }
+  doubleChartRowCharts.push(
+    PerformanceWidgetSetting.SLOW_SCREENS_BY_COLD_START,
+    PerformanceWidgetSetting.SLOW_SCREENS_BY_WARM_START
+  );
 
-  if (organization.features.includes('insights-initial-modules')) {
+  if (organization.features.includes('insight-modules')) {
     doubleChartRowCharts.push(PerformanceWidgetSetting.MOST_TIME_CONSUMING_DOMAINS);
   }
 
@@ -182,7 +217,7 @@ function EAPMobileOverviewPage() {
 
   const sorts: [ValidSort, ValidSort] = [
     {
-      field: 'is_starred_transaction' satisfies EAPSpanProperty,
+      field: 'is_starred_transaction' satisfies SpanProperty,
       kind: 'desc',
     },
     decodeSorts(location.query?.sort).find(isAValidSort) ?? DEFAULT_SORT,
@@ -190,7 +225,7 @@ function EAPMobileOverviewPage() {
 
   existingQuery.addFilterValue('is_transaction', 'true');
 
-  const response = useEAPSpans(
+  const response = useSpans(
     {
       search: existingQuery,
       sorts,
@@ -208,7 +243,7 @@ function EAPMobileOverviewPage() {
         'sum(span.duration)',
       ],
     },
-    'api.performance.landing-table'
+    Referrer.MOBILE_LANDING_TABLE
   );
 
   const searchBarProjectsIds = [...selectedMobileProjects, ...selectedOtherProjects].map(
@@ -221,16 +256,15 @@ function EAPMobileOverviewPage() {
       organization={organization}
       renderDisabled={NoAccess}
     >
-      <MobileHeader headerTitle={MOBILE_LANDING_TITLE} />
       <Layout.Body>
-        <Layout.Main fullWidth>
+        <Layout.Main width="full">
           <ModuleLayout.Layout>
             <ModuleLayout.Full>
               <ToolRibbon>
                 <PageFilterBar condensed>
                   <InsightsProjectSelector />
-                  <EnvironmentPageFilter />
-                  <DatePageFilter />
+                  <InsightsEnvironmentSelector />
+                  <DatePageFilter {...datePageFilterProps} />
                 </PageFilterBar>
                 {!showOnboarding && (
                   <StyledTransactionNameSearchBar
@@ -245,6 +279,7 @@ function EAPMobileOverviewPage() {
               </ToolRibbon>
             </ModuleLayout.Full>
             <PageAlert />
+            <MobileVitalsBanner />
             <ModuleLayout.Full>
               {showOnboarding ? (
                 <LegacyOnboarding
@@ -252,7 +287,7 @@ function EAPMobileOverviewPage() {
                   organization={organization}
                 />
               ) : (
-                <PerformanceDisplayProvider
+                <PerformanceDisplayContext
                   value={{performanceType: ProjectPerformanceType.MOBILE}}
                 >
                   <DoubleChartRow
@@ -262,7 +297,7 @@ function EAPMobileOverviewPage() {
                   />
                   <TripleChartRow allowedCharts={tripleChartRowCharts} {...sharedProps} />
                   <MobileOverviewTable response={response} sort={sorts[1]} />
-                </PerformanceDisplayProvider>
+                </PerformanceDisplayContext>
               )}
             </ModuleLayout.Full>
           </ModuleLayout.Layout>
@@ -273,10 +308,18 @@ function EAPMobileOverviewPage() {
 }
 
 function MobileOverviewPageWithProviders() {
+  const maxPickableDays = useMaxPickableDays({
+    dataCategories: [DataCategory.SPANS],
+  });
+  const datePageFilterProps = useDatePageFilterProps(maxPickableDays);
   const useEap = useInsightsEap();
   return (
-    <DomainOverviewPageProviders>
-      {useEap ? <EAPMobileOverviewPage /> : <OldMobileOverviewPage />}
+    <DomainOverviewPageProviders maxPickableDays={maxPickableDays.maxPickableDays}>
+      {useEap ? (
+        <EAPMobileOverviewPage datePageFilterProps={datePageFilterProps} />
+      ) : (
+        <Am1MobileOverviewPage datePageFilterProps={datePageFilterProps} />
+      )}
     </DomainOverviewPageProviders>
   );
 }

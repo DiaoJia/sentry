@@ -1,14 +1,11 @@
-import {lazy, useState} from 'react';
+import {lazy} from 'react';
 
-import {GroupInfoSummary} from 'sentry/components/events/groupingInfo/groupingSummary';
-import LazyLoad from 'sentry/components/lazyLoad';
+import {LazyLoad} from 'sentry/components/lazyLoad';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
-import SectionToggleButton from 'sentry/views/issueDetails/sectionToggleButton';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 interface EventGroupingInfoSectionProps {
   event: Event;
@@ -25,32 +22,19 @@ export function EventGroupingInfoSection({
   showGroupingConfig,
   group,
 }: EventGroupingInfoSectionProps) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
-  const [isOpen, setIsOpen] = useState(false);
-
   return (
-    <InterimSection
+    <FoldSection
+      sectionKey={SectionKey.GROUPING_INFO}
       title={t('Event Grouping Information')}
-      actions={
-        hasStreamlinedUI ? null : (
-          <SectionToggleButton isExpanded={isOpen} onExpandChange={setIsOpen} />
-        )
-      }
-      type={SectionKey.GROUPING_INFO}
       initialCollapse
     >
-      {!hasStreamlinedUI && (
-        <GroupInfoSummary event={event} group={group} projectSlug={projectSlug} />
-      )}
-      {hasStreamlinedUI || isOpen ? (
-        <LazyLoad
-          LazyComponent={LazyGroupingInfo}
-          event={event}
-          projectSlug={projectSlug}
-          showGroupingConfig={showGroupingConfig}
-          group={group}
-        />
-      ) : null}
-    </InterimSection>
+      <LazyLoad
+        LazyComponent={LazyGroupingInfo}
+        event={event}
+        projectSlug={projectSlug}
+        showGroupingConfig={showGroupingConfig}
+        group={group}
+      />
+    </FoldSection>
   );
 }

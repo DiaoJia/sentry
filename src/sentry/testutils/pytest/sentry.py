@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path
 from typing import TypeVar
 from unittest import mock
 
@@ -18,10 +19,11 @@ from django.conf import settings
 
 from sentry.runner.importer import install_plugin_apps
 from sentry.silo.base import SiloMode
-from sentry.testutils.region import TestEnvRegionDirectory
+from sentry.testutils.cell import TestEnvCellDirectory
+from sentry.testutils.pytest import xdist
 from sentry.testutils.silo import monkey_patch_single_process_silo_mode_state
-from sentry.types import region
-from sentry.types.region import Region, RegionCategory
+from sentry.types import cell
+from sentry.types.cell import Cell
 from sentry.utils.warnings import UnsupportedBackend
 
 K = TypeVar("K")
@@ -30,8 +32,6 @@ V = TypeVar("V")
 TEST_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir, os.pardir, "tests")
 )
-
-TEST_REDIS_DB = 9
 
 
 def _use_monolith_dbs() -> bool:
@@ -43,11 +43,11 @@ def configure_split_db() -> None:
     if already_configured or _use_monolith_dbs():
         return
 
-    # Add connections for the region & control silo databases.
+    # Add connections for the cell & control silo databases.
     settings.DATABASES["control"] = settings.DATABASES["default"].copy()
     settings.DATABASES["control"]["NAME"] = "control"
 
-    # Use the region database in the default connection as region
+    # Use the cell database in the default connection as cell
     # silo database is the 'default' elsewhere in application logic.
     settings.DATABASES["default"]["NAME"] = "region"
 
@@ -59,28 +59,38 @@ def configure_split_db() -> None:
 
 
 def get_default_silo_mode_for_test_cases() -> SiloMode:
-    return SiloMode.MONOLITH if _use_monolith_dbs() else SiloMode.REGION
+    return SiloMode.MONOLITH if _use_monolith_dbs() else SiloMode.CELL
 
 
-def _configure_test_env_regions() -> None:
+def _configure_test_env_cells() -> None:
     settings.SILO_MODE = get_default_silo_mode_for_test_cases()
 
     # Assign a random name on every test run, as a reminder that test setup and
     # assertions should not depend on this value. If you need to test behavior that
-    # depends on region attributes, use `override_regions` in your test case.
-    region_name = "testregion" + "".join(random.choices(string.digits, k=6))
+    # depends on cell attributes, use `override_cells` in your test case.
+    # Under xdist, seed deterministically so all workers generate the same name
+    # (divergent names break xdist's requirement for identical test collection).
+    xdist_uid = os.environ.get("PYTEST_XDIST_TESTRUNUID")
+    r = random.Random(xdist_uid) if xdist_uid else random
+    cell_name = "testregion" + "".join(r.choices(string.digits, k=6))
 
-    default_region = Region(
-        region_name, 0, settings.SENTRY_OPTIONS["system.url-prefix"], RegionCategory.MULTI_TENANT
+    # Under xdist, each worker gets a unique snowflake_id (1, 2, 3, ...) so
+    # concurrent model creation doesn't produce colliding IDs.
+    cell_snowflake_id = xdist._worker_num + 1 if xdist._worker_num is not None else 0
+
+    default_cell = Cell(
+        cell_name,
+        cell_snowflake_id,
+        settings.SENTRY_OPTIONS["system.url-prefix"],
     )
 
-    settings.SENTRY_REGION = region_name
-    settings.SENTRY_MONOLITH_REGION = region_name
+    settings.SENTRY_LOCAL_CELL = cell_name
+    settings.SENTRY_FALLBACK_CELL = cell_name
 
-    # This not only populates the environment with the default region, but also
-    # ensures that a TestEnvRegionDirectory instance is injected into global state.
-    # See sentry.testutils.region.get_test_env_directory, which relies on it.
-    region.set_global_directory(TestEnvRegionDirectory([default_region]))
+    # This not only populates the environment with the default cell, but also
+    # ensures that a TestEnvCellDirectory instance is injected into global state.
+    # See sentry.testutils.cell.get_test_env_directory, which relies on it.
+    cell.set_global_directory(TestEnvCellDirectory([default_cell]))
 
     settings.SENTRY_SUBNET_SECRET = "secret"
     settings.SENTRY_CONTROL_ADDRESS = "http://controlserver/"
@@ -95,6 +105,48 @@ def _configure_test_env_regions() -> None:
     monkey_patch_single_process_silo_mode_state()
 
 
+_COLLECT_ALLOWED_FILES: frozenset[str] | None = None
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    # Skip importing test files not in SELECTED_TESTS_FILE (selective CI runs only).
+    global _COLLECT_ALLOWED_FILES
+    selected_file = os.environ.get("SELECTED_TESTS_FILE")
+    if not selected_file:
+        return None
+
+    if _COLLECT_ALLOWED_FILES is None:
+        p = Path(selected_file)
+        if not p.exists():
+            _COLLECT_ALLOWED_FILES = frozenset()
+        else:
+            with p.open() as f:
+                _COLLECT_ALLOWED_FILES = frozenset(
+                    line.strip().split("::")[0] for line in f if line.strip()
+                )
+
+    if not _COLLECT_ALLOWED_FILES:
+        return None  # empty or missing file → run all tests
+
+    if (
+        collection_path.is_dir()
+        or collection_path.suffix != ".py"
+        or collection_path.name == "conftest.py"
+    ):
+        return None
+
+    try:
+        rel = str(collection_path.relative_to(config.rootpath))
+    except ValueError:
+        return None
+
+    if not rel.startswith("tests/"):
+        return None
+
+    # firstresult hook: True=ignore, None=defer; False short-circuits other ignore hooks.
+    return True if rel not in _COLLECT_ALLOWED_FILES else None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     import warnings
 
@@ -106,6 +158,7 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
     config.addinivalue_line("markers", "migrations: requires --migrations")
+    config.addinivalue_line("markers", "symbolicator: test requires access to symbolicator")
 
     if sys.platform == "darwin" and shutil.which("colima"):
         # This is the only way other than pytest --basetemp to change
@@ -131,7 +184,22 @@ def pytest_configure(config: pytest.Config) -> None:
 
     integrationdocs.DOC_FOLDER = os.path.join(TEST_ROOT, os.pardir, "fixtures", "integration-docs")
 
+    # Route postgres through Unix domain socket when available (CI optimization).
+    # Must be set before configure_split_db() so the HOST override propagates
+    # to the control and secondary database copies.
+    if _pg_socket := os.environ.get("SENTRY_DB_SOCKET"):
+        settings.DATABASES["default"]["HOST"] = _pg_socket
+        settings.DATABASES["default"]["PORT"] = ""
+
     configure_split_db()
+
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        # On the rare case we hit a PostgreSQL deadlock, fail fast and let
+        # pytest --reruns retry it.
+        for alias in settings.DATABASES:
+            settings.DATABASES[alias].setdefault("OPTIONS", {})[  # type: ignore[index]
+                "options"
+            ] = "-c lock_timeout=180000"
 
     # Ensure we can test secure ssl settings
     settings.SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -164,6 +232,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     # enable draft features
     settings.SENTRY_OPTIONS["mail.enable-replies"] = True
+    settings.SENTRY_OPTIONS["objectstore.enable_for.attachments"] = 1.0
 
     settings.SENTRY_ALLOW_ORIGIN = "*"
 
@@ -175,9 +244,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     settings.BROKER_BACKEND = "memory"
     settings.BROKER_URL = "memory://"
-    settings.CELERY_ALWAYS_EAGER = False
-    settings.CELERY_COMPLAIN_ABOUT_BAD_USE_OF_PICKLE = True
-    settings.CELERY_EAGER_PROPAGATES_EXCEPTIONS = True
+    settings.TASKWORKER_ALWAYS_EAGER = False
     settings.SENTRY_METRICS_DISALLOW_BAD_TAGS = True
 
     settings.DEBUG_VIEWS = True
@@ -197,20 +264,28 @@ def pytest_configure(config: pytest.Config) -> None:
     settings.SENTRY_RATELIMITER = "sentry.ratelimits.redis.RedisRateLimiter"
     settings.SENTRY_RATELIMITER_OPTIONS = {}
 
+    if snuba_url := xdist.get_snuba_url():
+        settings.SENTRY_SNUBA = snuba_url
+
     settings.SENTRY_ISSUE_PLATFORM_FUTURES_MAX_LIMIT = 1
 
     if not hasattr(settings, "SENTRY_OPTIONS"):
         settings.SENTRY_OPTIONS = {}
 
+    # These were migrated from options to Django settings. Set them directly so
+    # consumers (which now read the settings) see the test values; the
+    # option->setting bridge in bootstrap_options would otherwise let a deploy
+    # default (e.g. getsentry's dev.py) win over an option set here.
+    settings.SENTRY_BASE_HOSTNAME = "testserver"
+    settings.SENTRY_ORGANIZATION_BASE_HOSTNAME = "{slug}.testserver"
+    settings.SENTRY_ORGANIZATION_URL_TEMPLATE = "http://{hostname}"
+    settings.SENTRY_REGION_API_URL_TEMPLATE = "http://{region}.testserver"
+
     settings.SENTRY_OPTIONS.update(
         {
-            "redis.clusters": {"default": {"hosts": {0: {"db": TEST_REDIS_DB}}}},
+            "redis.clusters": {"default": {"hosts": {0: {"db": xdist.get_redis_db()}}}},
             "mail.backend": "django.core.mail.backends.locmem.EmailBackend",
             "system.url-prefix": "http://testserver",
-            "system.base-hostname": "testserver",
-            "system.organization-base-hostname": "{slug}.testserver",
-            "system.organization-url-template": "http://{hostname}",
-            "system.region-api-url-template": "http://{region}.testserver",
             "system.secret-key": "a" * 52,
             "slack.client-id": "slack-client-id",
             "slack.client-secret": "slack-client-secret",
@@ -219,6 +294,11 @@ def pytest_configure(config: pytest.Config) -> None:
             "github-app.name": "sentry-test-app",
             "github-app.client-id": "github-client-id",
             "github-app.client-secret": "github-client-secret",
+            "github-console-sdk-app.id": 42,
+            "github-console-sdk-app.client-id": "github-client-id",
+            "github-console-sdk-app.client-secret": "github-client-secret",
+            "github-console-sdk-app.installation-id": "123123123",
+            "github-console-sdk-app.private-key": "github-private-key",
             "vsts.client-id": "vsts-client-id",
             "vsts.client-secret": "vsts-client-secret",
             "vsts-limited.client-id": "vsts-limited-client-id",
@@ -240,7 +320,7 @@ def pytest_configure(config: pytest.Config) -> None:
     settings.SENTRY_OPTIONS_COMPLAIN_ON_ERRORS = True
     settings.VALIDATE_SUPERUSER_ACCESS_CATEGORY_AND_REASON = False
 
-    _configure_test_env_regions()
+    _configure_test_env_cells()
 
     # ID controls
     settings.SENTRY_USE_SNOWFLAKE = True
@@ -285,25 +365,23 @@ def pytest_configure(config: pytest.Config) -> None:
     asset_version_patcher.start()
     from sentry.runner.initializer import initialize_app
 
-    initialize_app({"settings": settings, "options": None})
+    SENTRY_SKIP_SERVICE_VALIDATION = "SENTRY_SKIP_SERVICE_VALIDATION" in os.environ
+
+    initialize_app(
+        {"settings": settings, "options": None},
+        skip_service_validation=SENTRY_SKIP_SERVICE_VALIDATION,
+    )
     sentry_sdk.get_global_scope().set_client(None)
     register_extensions()
 
-    from sentry.utils.redis import clusters
+    if not SENTRY_SKIP_SERVICE_VALIDATION:
+        from sentry.utils.redis import clusters
 
-    with clusters.get("default").all() as client:
-        client.flushdb()
-
-    # force celery registration
-    from sentry.celery import app  # NOQA
+        with clusters.get("default").all() as client:
+            client.flushdb()
 
 
 def register_extensions() -> None:
-    from sentry.plugins.base import plugins
-    from sentry.plugins.utils import TestIssuePlugin2
-
-    plugins.register(TestIssuePlugin2)
-
     from sentry.integrations.example import (
         AlertRuleIntegrationProvider,
         AliasedIntegrationProvider,
@@ -321,12 +399,30 @@ def register_extensions() -> None:
     integrations.register(AlertRuleIntegrationProvider)
 
     from sentry.plugins.base import bindings
-    from sentry.plugins.providers.dummy import DummyRepositoryProvider
 
-    bindings.add("repository.provider", DummyRepositoryProvider, id="dummy")
     bindings.add(
         "integration-repository.provider", ExampleRepositoryProvider, id="integrations:example"
     )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    from taskbroker_client.registry import TaskNamespace
+
+    # Store original send_task so tests that need it can restore it
+    TaskNamespace._original_send_task = TaskNamespace.send_task  # type: ignore[attr-defined]
+
+    # Prevent tests from producing real Kafka messages via the taskworker pipeline.
+    # Tests use TaskRunner (TASKWORKER_ALWAYS_EAGER=True) or BurstTaskRunner
+    # (_signal_send hook) which both operate before send_task in the call chain.
+    TaskNamespace.send_task = lambda self, *args, **kwargs: None  # type: ignore[assignment,method-assign]
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    from taskbroker_client.registry import TaskNamespace
+
+    if hasattr(TaskNamespace, "_original_send_task"):
+        TaskNamespace.send_task = TaskNamespace._original_send_task  # type: ignore[method-assign]
+        del TaskNamespace._original_send_task
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -346,13 +442,6 @@ def pytest_runtest_teardown(item: pytest.Item) -> None:
 
     with clusters.get("default").all() as client:
         client.flushdb()
-
-    from celery.app.control import Control
-
-    from sentry.celery import app
-
-    celery_app_control = Control(app)
-    celery_app_control.discard_all()
 
     from sentry.models.options.organization_option import OrganizationOption
     from sentry.models.options.project_option import ProjectOption
@@ -398,12 +487,57 @@ def _shuffle(items: list[pytest.Item], r: random.Random) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """After collection, we need to select tests based on group and group strategy"""
+    """After collection, select tests based on selective file filter and group strategy.
+
+    When SELECTED_TESTS_FILE is set, only tests from files listed in that file are kept.
+    This enables selective testing while maintaining proper conftest loading order by
+    invoking pytest with the tests/ directory instead of specific file paths.
+    """
+
+    # Auto-add the `symbolicator` marker to any test using the _requires_symbolicator
+    # fixture so that `-m symbolicator` selects all symbolicator-dependent tests.
+    symbolicator_mark = pytest.mark.symbolicator
+    for item in items:
+        for marker in item.iter_markers("usefixtures"):
+            if "_requires_symbolicator" in marker.args:
+                item.add_marker(symbolicator_mark)
+                break
+
+    keep, discard = [], []
+
+    # Filter by selected test files if SELECTED_TESTS_FILE is set
+    selected_tests_file = os.environ.get("SELECTED_TESTS_FILE")
+    if selected_tests_file:
+        selected_path = Path(selected_tests_file)
+        if selected_path.exists():
+            with selected_path.open() as f:
+                selected_files = {line.strip() for line in f if line.strip()}
+
+            if selected_files:
+                for item in items:
+                    test_file = item.nodeid.split("::")[0]
+                    if test_file in selected_files:
+                        keep.append(item)
+                    else:
+                        discard.append(item)
+
+                items[:] = keep
+                if discard:
+                    config.hook.pytest_deselected(items=discard)
 
     total_groups = int(os.environ.get("TOTAL_TEST_GROUPS", 1))
     current_group = int(os.environ.get("TEST_GROUP", 0))
     grouping_strategy = os.environ.get("TEST_GROUP_STRATEGY", "scope")
 
+    # Determine shuffle seed early to incorporate into shard distribution
+    shuffle_enabled = bool(os.environ.get("SENTRY_SHUFFLE_TESTS"))
+    seed = None
+    if shuffle_enabled:
+        seed_env = os.environ.get("SENTRY_SHUFFLE_TESTS_SEED")
+        seed = int(seed_env) if seed_env else int(time.time())
+        config.get_terminal_writer().line(f"SENTRY_SHUFFLE_TESTS_SEED: {seed}")
+
+    # Reset keep/discard for sharding logic
     keep, discard = [], []
 
     for index, item in enumerate(items):
@@ -414,6 +548,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if grouping_strategy == "scope"
             else item.nodeid.encode()
         )
+
+        # Incorporate seed into shard assignment to redistribute tests across shards
+        if shuffle_enabled and seed is not None:
+            to_hash = to_hash + str(seed).encode()
+
         item_to_group = int(sha256(to_hash).hexdigest(), 16)
 
         # Split tests in different groups
@@ -426,9 +565,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     items[:] = keep
 
-    if os.environ.get("SENTRY_SHUFFLE_TESTS"):
-        seed = int(os.environ.get("SENTRY_SHUFFLE_TESTS_SEED", time.time()))
-        config.get_terminal_writer().line(f"SENTRY_SHUFFLE_TESTS_SEED: {seed}")
+    if shuffle_enabled:
         _shuffle(items, random.Random(seed))
 
     # This only needs to be done if there are items to be de-selected

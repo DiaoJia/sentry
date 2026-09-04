@@ -4,7 +4,7 @@ import {
   SENTRY_LOG_NUMBER_TAGS,
   SENTRY_LOG_STRING_TAGS,
 } from 'sentry/views/explore/constants';
-import {type OurLogFieldKey, OurLogKnownFieldKey} from 'sentry/views/explore/logs/types';
+import {OurLogKnownFieldKey, type OurLogFieldKey} from 'sentry/views/explore/logs/types';
 
 export const LogAttributesHumanLabel: Partial<Record<OurLogFieldKey, string>> = {
   [OurLogKnownFieldKey.TIMESTAMP]: t('Timestamp'),
@@ -13,7 +13,30 @@ export const LogAttributesHumanLabel: Partial<Record<OurLogFieldKey, string>> = 
   [OurLogKnownFieldKey.TRACE_ID]: t('Trace'),
 };
 
-export const LOG_INGEST_DELAY = 10_000;
+export const MAX_LOG_INGEST_DELAY = 40_000;
+export const QUERY_PAGE_LIMIT = 1000; // If this does not equal the limit with auto-refresh, the query keys will diverge and they will have separate caches. We may want to make this change in the future.
+/** Matches the OurLogs `max_per_page` cap on the events endpoint (organization_events.py). */
+export const AGGREGATE_EXPORT_MAX_ROWS = 9999;
+export const QUERY_PAGE_LIMIT_WITH_AUTO_REFRESH = 1000;
+export const LOG_ATTRIBUTE_LAZY_LOAD_HOVER_TIMEOUT = 150;
+export const DEFAULT_TRACE_ITEM_HOVER_TIMEOUT = 150;
+export const DEFAULT_TRACE_ITEM_HOVER_TIMEOUT_WITH_AUTO_REFRESH = 400; // With autorefresh on, a stationary mouse can prefetch multiple rows since virtual time moves rows constantly.
+export const MAX_LOGS_INFINITE_QUERY_PAGES = 30; // This number * the refresh interval must be more seconds than 2 * the smallest time interval in the chart for streaming to work.
+/** Larger page cap once enough rows are cached (see useInfiniteLogsQuery). */
+export const MAX_LOGS_INFINITE_QUERY_PAGES_EXPANDED = 300;
+/** Below this many rows in the client cache, use {@link MAX_LOGS_INFINITE_QUERY_PAGES}. */
+export const LOCAL_LOG_ROWS_FOR_EXPANDED_INFINITE_PAGES = 500;
+
+/**
+ * Initial duration to keep high-fidelity "needle in a haystack" auto-fetching.
+ */
+export const LOGS_HIGH_FIDELITY_INITIAL_AUTO_FETCH_WINDOW_MS = 15_000;
+
+/**
+ * Base additional duration to keep high-fidelity "needle in a haystack"
+ * auto-fetching after each resume attempt.
+ */
+export const LOGS_HIGH_FIDELITY_RESUMED_AUTO_FETCH_WINDOW_MS = 30_000;
 
 /**
  * These are required fields are always added to the query when fetching the log table.
@@ -26,15 +49,16 @@ export const AlwaysPresentLogFields: OurLogFieldKey[] = [
   OurLogKnownFieldKey.SEVERITY,
   OurLogKnownFieldKey.TIMESTAMP,
   OurLogKnownFieldKey.TIMESTAMP_PRECISE,
-  OurLogKnownFieldKey.OBSERVED_TIMESTAMP_PRECISE,
+  OurLogKnownFieldKey.TEMPLATE,
 ] as const;
 
 const AlwaysHiddenLogFields: OurLogFieldKey[] = [
   OurLogKnownFieldKey.ID,
   OurLogKnownFieldKey.ORGANIZATION_ID,
+  OurLogKnownFieldKey.SEVERITY_NUMBER,
   OurLogKnownFieldKey.ITEM_TYPE,
-  OurLogKnownFieldKey.PROJECT,
   OurLogKnownFieldKey.TIMESTAMP_PRECISE,
+  OurLogKnownFieldKey.TIMESTAMP_SEQUENCE,
   'project.id',
   'project_id', // these are both aliases that might show up
 ];
@@ -48,12 +72,17 @@ export const HiddenLogDetailFields: OurLogFieldKey[] = [
 
   // deprecated/otel fields that clutter the UI
   'sentry.timestamp_nanos',
-  'sentry.observed_timestamp_nanos',
+  OurLogKnownFieldKey.OBSERVED_TIMESTAMP_NANOS,
   'tags[sentry.trace_flags,number]',
-  'span_id',
+];
+
+export const DeprecatedLogDetailFields: OurLogFieldKey[] = [
+  OurLogKnownFieldKey.TIMESTAMP_NANOS,
 ];
 
 export const HiddenColumnEditorLogFields: OurLogFieldKey[] = [...AlwaysHiddenLogFields];
+
+export const HiddenLogSearchFields: string[] = [...AlwaysHiddenLogFields];
 
 const LOGS_FILTERS: FilterKeySection = {
   value: 'logs_filters',
@@ -66,6 +95,17 @@ export const LOGS_INSTRUCTIONS_URL =
 
 export const LOGS_FILTER_KEY_SECTIONS: FilterKeySection[] = [LOGS_FILTERS];
 
-export const VIRTUAL_STREAMED_INTERVAL_MS = 333;
+/**
+ * Query parameter key for controlling the logs drawer state.
+ * When this parameter is set to 'true', the logs drawer should open automatically.
+ */
+export const LOGS_DRAWER_QUERY_PARAM = 'logsDrawer';
 
-export const LOGS_GRID_SCROLL_MIN_ITEM_THRESHOLD = 100; // Items from bottom of table to trigger table fetch.
+export const VIRTUAL_STREAMED_INTERVAL_MS = 250;
+export const MINIMUM_INFINITE_SCROLL_FETCH_COOLDOWN_MS = 1000;
+
+export const LOGS_GRID_SCROLL_MIN_ITEM_THRESHOLD = 50; // Items from bottom of table to trigger table fetch.
+
+export const QUANTIZE_MINUTES = 120;
+
+export const LOGS_LARGE_SEARCH_TOTAL_THRESHOLD_BYTES = 1_099_511_627_776; // 1 TiB

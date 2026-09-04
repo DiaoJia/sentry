@@ -12,7 +12,7 @@ from sentry.flags.providers import (
 default_timezone = timezone.get_default_timezone()
 
 
-def test_launchdarkly_create():
+def test_launchdarkly_create() -> None:
     request_data = {
         "_links": {
             "canonical": {
@@ -160,7 +160,7 @@ def test_launchdarkly_create():
     assert flag_row["tags"]["description"] == "flag was created"
 
 
-def test_launchdarkly_update():
+def test_launchdarkly_update() -> None:
     request_data = {
         "_id": "1234",
         "_accountId": "1234",
@@ -352,7 +352,7 @@ def test_launchdarkly_update():
     assert flag_row["action"] == ACTION_MAP["updated"]
 
 
-def test_launchdarkly_create_no_member():
+def test_launchdarkly_create_no_member() -> None:
     request_data = {
         "_links": {
             "canonical": {
@@ -487,7 +487,7 @@ def test_launchdarkly_create_no_member():
     assert flag_row["tags"]["description"] == "flag was created"
 
 
-def test_launchdarkly_delete_and_update():
+def test_launchdarkly_delete_and_update() -> None:
     request_data = {
         "_id": "1234",
         "_accountId": "1234",
@@ -521,7 +521,7 @@ def test_launchdarkly_delete_and_update():
     assert flag_row_delete["action"] == ACTION_MAP["deleted"]
 
 
-def test_launchdarkly_no_valid_action():
+def test_launchdarkly_no_valid_action() -> None:
     request_data = {
         "_id": "1234",
         "_accountId": "1234",
@@ -559,7 +559,7 @@ def test_launchdarkly_no_valid_action():
     assert len(res) == 0
 
 
-def test_bad_launchdarkly_data():
+def test_bad_launchdarkly_data() -> None:
     request_data = {
         "accesses": [],
         "description": {},
@@ -591,3 +591,27 @@ def test_bad_launchdarkly_data():
         DeserializationError,
     ):
         LaunchDarklyProvider(123, None).handle(request_data)
+
+
+def test_launchdarkly_long_flag_name() -> None:
+    """LaunchDarkly allows flag names up to 256 characters."""
+    request_data = {
+        "_id": "1234",
+        "_accountId": "1234",
+        "date": 1729123867537,
+        "accesses": [{"action": "createFlag", "resource": "proj/default:env/test:flag/test-flag"}],
+        "kind": "flag",
+        "name": "a" * 256,
+        "description": "flag was created",
+        "shortDescription": "",
+        "comment": "",
+        "titleVerb": "created the flag",
+        "title": "Michelle created the flag",
+    }
+
+    res = LaunchDarklyProvider(123, None).handle(request_data)
+    assert len(res) == 1
+    assert res[0]["flag"] == "a" * 256
+
+    with pytest.raises(DeserializationError):
+        LaunchDarklyProvider(123, None).handle({**request_data, "name": "a" * 257})

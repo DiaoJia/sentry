@@ -1,36 +1,54 @@
 import {useCallback, useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import type {SmartSearchBarProps} from 'sentry/components/deprecatedSmartSearchBar';
+import {Grid} from '@sentry/scraps/layout';
+
 import * as Layout from 'sentry/components/layouts/thirds';
-import {DatePageFilter} from 'sentry/components/organizations/datePageFilter';
-import {EnvironmentPageFilter} from 'sentry/components/organizations/environmentPageFilter';
-import PageFilterBar from 'sentry/components/organizations/pageFilterBar';
-import {TransactionSearchQueryBuilder} from 'sentry/components/performance/transactionSearchQueryBuilder';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Organization} from 'sentry/types/organization';
-import EventView from 'sentry/utils/discover/eventView';
+import {DatePageFilter} from 'sentry/components/pageFilters/date/datePageFilter';
+import {EnvironmentPageFilter} from 'sentry/components/pageFilters/environment/environmentPageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
+import {useSpanSearchQueryBuilderProps} from 'sentry/components/performance/spanSearchQueryBuilder';
+import {DataCategory} from 'sentry/types/core';
 import {isAggregateField} from 'sentry/utils/discover/fields';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
+import {useDatePageFilterProps} from 'sentry/utils/useDatePageFilterProps';
 import {useLocation} from 'sentry/utils/useLocation';
+import {useMaxPickableDays} from 'sentry/utils/useMaxPickableDays';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import PageLayout, {
-  redirectToPerformanceHomepage,
-} from 'sentry/views/performance/transactionSummary/pageLayout';
-import Tab from 'sentry/views/performance/transactionSummary/tabs';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {TraceItemSearchQueryBuilder} from 'sentry/views/explore/components/traceItemSearchQueryBuilder';
+import {redirectToPerformanceHomepage} from 'sentry/views/performance/transactionSummary/pageLayout';
 
 import {TransactionProfilesContent} from './content';
 
+function EAPSearchBar({
+  projects,
+  initialQuery,
+  onSearch,
+}: {
+  initialQuery: string;
+  onSearch: (query: string) => void;
+  projects: number[];
+}) {
+  const {spanSearchQueryBuilderProps} = useSpanSearchQueryBuilderProps({
+    projects,
+    initialQuery,
+    onSearch,
+    searchSource: 'transaction_profiles',
+  });
+
+  return (
+    <TraceItemSearchQueryBuilder {...spanSearchQueryBuilderProps} disallowFreeText />
+  );
+}
+
 interface ProfilesProps {
-  organization: Organization;
   transaction: string;
 }
 
-function Profiles({organization, transaction}: ProfilesProps) {
+function Profiles({transaction}: ProfilesProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const {projects} = useProjects();
@@ -44,7 +62,7 @@ function Profiles({organization, transaction}: ProfilesProps) {
 
   const query = useMemo(() => {
     const conditions = new MutableSearch(rawQuery);
-    conditions.setFilterValues('event.type', ['transaction']);
+    conditions.setFilterValues('is_transaction', ['true']);
     conditions.setFilterValues('transaction', [transaction]);
 
     Object.keys(conditions.filters).forEach(field => {
@@ -56,7 +74,7 @@ function Profiles({organization, transaction}: ProfilesProps) {
     return conditions.formatString();
   }, [transaction, rawQuery]);
 
-  const handleSearch: SmartSearchBarProps['onSearch'] = useCallback(
+  const handleSearch = useCallback(
     (searchQuery: string) => {
       navigate({
         ...location,
@@ -75,44 +93,28 @@ function Profiles({organization, transaction}: ProfilesProps) {
     [project]
   );
 
+  const maxPickableDays = useMaxPickableDays({
+    dataCategories: [DataCategory.PROFILE_DURATION, DataCategory.PROFILE_DURATION_UI],
+  });
+  const datePageFilterProps = useDatePageFilterProps(maxPickableDays);
+
   return (
-    <PageLayout
-      location={location}
-      organization={organization}
-      projects={projects}
-      tab={Tab.PROFILING}
-      generateEventView={() => EventView.fromLocation(location)}
-      getDocumentTitle={() => t(`Profile: %s`, transaction)}
-      fillSpace
-      childComponent={() => {
-        return (
-          <StyledMain fullWidth>
-            <FilterActions>
-              <PageFilterBar condensed>
-                <EnvironmentPageFilter />
-                <DatePageFilter />
-              </PageFilterBar>
-              <TransactionSearchQueryBuilder
-                projects={projectIds}
-                initialQuery={rawQuery}
-                onSearch={handleSearch}
-                searchSource="transaction_profiles"
-              />
-            </FilterActions>
-            <TransactionProfilesContent query={query} transaction={transaction} />
-          </StyledMain>
-        );
-      }}
-    />
+    <StyledMain width="full">
+      <Grid columns={{zero: '1fr', xl: 'auto 1fr'}} gap="xl" marginBottom="xl">
+        <PageFilterBar condensed>
+          <EnvironmentPageFilter />
+          <DatePageFilter {...datePageFilterProps} />
+        </PageFilterBar>
+        <EAPSearchBar
+          projects={projectIds ?? []}
+          initialQuery={rawQuery}
+          onSearch={handleSearch}
+        />
+      </Grid>
+      <TransactionProfilesContent query={query} />
+    </StyledMain>
   );
 }
-
-const FilterActions = styled('div')`
-  margin-bottom: ${space(2)};
-  gap: ${space(2)};
-  display: grid;
-  grid-template-columns: min-content 1fr;
-`;
 
 const StyledMain = styled(Layout.Main)`
   display: flex;
@@ -123,14 +125,15 @@ const StyledMain = styled(Layout.Main)`
 function ProfilesIndex() {
   const organization = useOrganization();
   const location = useLocation();
+  const navigate = useNavigate();
   const transaction = decodeScalar(location.query.transaction);
 
   if (!transaction) {
-    redirectToPerformanceHomepage(organization, location);
+    redirectToPerformanceHomepage(organization, location, navigate);
     return null;
   }
 
-  return <Profiles organization={organization} transaction={transaction} />;
+  return <Profiles transaction={transaction} />;
 }
 
 export default ProfilesIndex;

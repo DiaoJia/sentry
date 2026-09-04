@@ -1,21 +1,22 @@
 import {useState} from 'react';
-import styled from '@emotion/styled';
+
+import {Button} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
 
 import {
   addErrorMessage,
   addLoadingMessage,
   clearIndicators,
 } from 'sentry/actionCreators/indicator';
-import ConfirmDelete from 'sentry/components/confirmDelete';
-import {Button} from 'sentry/components/core/button';
-import Link from 'sentry/components/links/link';
-import PanelItem from 'sentry/components/panels/panelItem';
+import {ConfirmDelete} from 'sentry/components/confirmDelete';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconDelete} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {ApiApplication} from 'sentry/types/user';
-import getDynamicText from 'sentry/utils/getDynamicText';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 
 const ROUTE_PREFIX = '/settings/account/api/';
 
@@ -24,7 +25,7 @@ type Props = {
   onRemove: (app: ApiApplication) => void;
 };
 
-function Row({app, onRemove}: Props) {
+export function Row({app, onRemove}: Props) {
   const api = useApi();
   const [isLoading, setLoading] = useState(false);
 
@@ -49,50 +50,39 @@ function Row({app, onRemove}: Props) {
   }
 
   return (
-    <StyledPanelItem>
-      <ApplicationNameWrapper>
-        <ApplicationName to={`${ROUTE_PREFIX}applications/${app.id}/`}>
-          {getDynamicText({value: app.name, fixed: 'CI_APPLICATION_NAME'})}
-        </ApplicationName>
-        <ClientId>
-          {getDynamicText({value: app.clientID, fixed: 'CI_CLIENT_ID'})}
-        </ClientId>
-      </ApplicationNameWrapper>
+    <SimpleTable.Row>
+      <SimpleTable.RowCell>
+        <Stack flex="1" minWidth="0">
+          <Link to={`${ROUTE_PREFIX}applications/${app.id}/`}>{app.name}</Link>
+          <Text as="span" variant="muted" size="sm" monospace ellipsis>
+            {app.clientID}
+          </Text>
+        </Stack>
+      </SimpleTable.RowCell>
 
-      <ConfirmDelete
-        message={t(
-          'Removing this API Application will break existing usages of the application!'
+      <SimpleTable.RowCell data-column-name="age">
+        {app.dateCreated ? (
+          <TimeSince date={app.dateCreated} suffix="" />
+        ) : (
+          <Text as="span" variant="muted">
+            -
+          </Text>
         )}
-        confirmInput={app.name}
-        onConfirm={handleRemove}
-      >
-        <Button disabled={isLoading} size="sm" icon={<IconDelete />}>
-          {t('Remove')}
-        </Button>
-      </ConfirmDelete>
-    </StyledPanelItem>
+      </SimpleTable.RowCell>
+
+      <SimpleTable.RowCell justify="end" data-column-name="actions">
+        <ConfirmDelete
+          message={t(
+            'Removing this API Application will break existing usages of the application!'
+          )}
+          confirmInput={app.name}
+          onConfirm={handleRemove}
+        >
+          <Button disabled={isLoading} size="sm" icon={<IconDelete />}>
+            {t('Remove')}
+          </Button>
+        </ConfirmDelete>
+      </SimpleTable.RowCell>
+    </SimpleTable.Row>
   );
 }
-
-const StyledPanelItem = styled(PanelItem)`
-  padding: ${space(2)};
-  align-items: center;
-`;
-
-const ApplicationNameWrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  margin-right: ${space(1)};
-`;
-
-const ApplicationName = styled(Link)`
-  margin-bottom: ${space(1)};
-`;
-
-const ClientId = styled('div')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.sm};
-`;
-
-export default Row;

@@ -6,7 +6,7 @@ from .group_events import GroupEventsEndpoint
 from .group_hashes import GroupHashesEndpoint
 from .group_notes import GroupNotesEndpoint
 from .group_notes_details import GroupNotesDetailsEndpoint
-from .group_open_periods import GroupOpenPeriodsEndpoint
+from .group_pull_requests import GroupPullRequestsEndpoint
 from .group_similar_issues import GroupSimilarIssuesEndpoint
 from .group_similar_issues_embeddings import GroupSimilarIssuesEmbeddingsEndpoint
 from .group_tombstone import GroupTombstoneEndpoint
@@ -23,17 +23,17 @@ from .organization_group_search_view_visit import OrganizationGroupSearchViewVis
 from .organization_group_search_views import OrganizationGroupSearchViewsEndpoint
 from .organization_group_search_views_starred import OrganizationGroupSearchViewsStarredEndpoint
 from .organization_issues_count import OrganizationIssuesCountEndpoint
+from .organization_issues_with_supergroups import OrganizationIssuesWithSupergroupsEndpoint
 from .organization_release_previous_commits import OrganizationReleasePreviousCommitsEndpoint
-from .organization_searches import OrganizationSearchesEndpoint
 from .organization_shortid import ShortIdLookupEndpoint
 from .project_event_details import EventJsonEndpoint, ProjectEventDetailsEndpoint
 from .project_events import ProjectEventsEndpoint
 from .project_group_index import ProjectGroupIndexEndpoint
 from .project_group_stats import ProjectGroupStatsEndpoint
 from .project_stacktrace_link import ProjectStacktraceLinkEndpoint
+from .project_stacktrace_source_context import ProjectStacktraceSourceContextEndpoint
 from .related_issues import RelatedIssuesEndpoint
 from .shared_group_details import SharedGroupDetailsEndpoint
-from .source_map_debug import SourceMapDebugEndpoint
 from .team_groups_old import TeamGroupsOldEndpoint
 
 __all__ = (
@@ -47,7 +47,7 @@ __all__ = (
     "GroupHashesEndpoint",
     "GroupNotesDetailsEndpoint",
     "GroupNotesEndpoint",
-    "GroupOpenPeriodsEndpoint",
+    "GroupPullRequestsEndpoint",
     "GroupSimilarIssuesEmbeddingsEndpoint",
     "GroupSimilarIssuesEndpoint",
     "GroupTombstoneDetailsEndpoint",
@@ -61,16 +61,16 @@ __all__ = (
     "OrganizationGroupSearchViewVisitEndpoint",
     "OrganizationGroupSearchViewsStarredEndpoint",
     "OrganizationIssuesCountEndpoint",
+    "OrganizationIssuesWithSupergroupsEndpoint",
     "OrganizationReleasePreviousCommitsEndpoint",
-    "OrganizationSearchesEndpoint",
     "ProjectEventDetailsEndpoint",
     "ProjectEventsEndpoint",
     "ProjectGroupIndexEndpoint",
     "ProjectGroupStatsEndpoint",
     "ProjectStacktraceLinkEndpoint",
+    "ProjectStacktraceSourceContextEndpoint",
     "RelatedIssuesEndpoint",
     "SharedGroupDetailsEndpoint",
     "ShortIdLookupEndpoint",
-    "SourceMapDebugEndpoint",
     "TeamGroupsOldEndpoint",
 )

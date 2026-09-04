@@ -1,17 +1,15 @@
 import {MembersFixture} from 'sentry-fixture/members';
-import {UserFixture} from 'sentry-fixture/user';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import MemberListStore from 'sentry/stores/memberListStore';
-import OwnerInput from 'sentry/views/settings/project/projectOwnership/ownerInput';
+import {OwnerInput} from 'sentry/views/settings/project/projectOwnership/ownerInput';
 
-describe('Project Ownership Input', function () {
+describe('Project Ownership Input', () => {
   const {organization, project} = initializeOrg();
   let put: jest.Mock;
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/members/`,
       method: 'GET',
@@ -22,11 +20,9 @@ describe('Project Ownership Input', function () {
       method: 'PUT',
       body: {raw: 'url:src @dummy@example.com'},
     });
-    MemberListStore.init();
-    MemberListStore.loadInitialData([UserFixture({id: '1', email: 'bob@example.com'})]);
   });
 
-  it('renders', async function () {
+  it('renders', async () => {
     render(
       <OwnerInput
         page="issue_details"
@@ -54,7 +50,7 @@ describe('Project Ownership Input', function () {
     expect(put).toHaveBeenCalled();
   });
 
-  it('updates on add preserving existing text', async function () {
+  it('updates on add preserving existing text', async () => {
     render(
       <OwnerInput
         page="issue_details"

@@ -1,10 +1,13 @@
 import isEqual from 'lodash/isEqual';
 
+import type {SelectValue} from '@sentry/scraps/select';
+
 import type {FilterKeySection} from 'sentry/components/searchQueryBuilder/types';
+import type {ColumnAlign} from 'sentry/components/tables/gridEditable';
 import {RELEASE_ADOPTION_STAGES} from 'sentry/constants';
-import type {SelectValue} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 import {assert} from 'sentry/types/utils';
+import {escapeDoubleQuotes} from 'sentry/utils';
 import {
   AGGREGATION_FIELDS,
   AggregationKey,
@@ -24,12 +27,15 @@ import {
 } from 'sentry/views/dashboards/widgetBuilder/releaseWidget/fields';
 import {STARFISH_FIELDS} from 'sentry/views/insights/common/utils/constants';
 import {STARFISH_AGGREGATION_FIELDS} from 'sentry/views/insights/constants';
+import {SpanFields} from 'sentry/views/insights/types';
 
 import {CONDITIONS_ARGUMENTS, DiscoverDatasets, WEB_VITALS_QUALITY} from './types';
 
+export type SortKind = 'asc' | 'desc';
+
 export type Sort = {
   field: string;
-  kind: 'asc' | 'desc';
+  kind: SortKind;
 };
 
 // Contains the URL field value & the related table column width.
@@ -49,6 +55,12 @@ export type ColumnValueType = ColumnType | `${FieldValueType.NEVER}`;
 export type ParsedFunction = {
   arguments: string[];
   name: string;
+  /**
+   * The search query from a backtick-wrapped first argument (EAP `_if` filter).
+   * Name and arguments are left as written; use `parseConditionalAggregate` when the
+   * combinator should be stripped.
+   */
+  filter?: string;
 };
 
 type ValidateColumnValueFunction = (data: {
@@ -105,20 +117,13 @@ export type QueryFieldValue =
       alias?: string;
     }
   | {
-      function: [
-        AggregationKeyWithAlias,
-        string,
-        AggregationRefinement,
-        AggregationRefinement,
-      ];
+      function: [AggregationKeyWithAlias, string, ...AggregationRefinement[]];
       kind: 'function';
       alias?: string;
     };
 
 // Column is just an alias of a Query value
 export type Column = QueryFieldValue;
-
-export type Alignments = 'left' | 'right';
 
 export type CountUnit = 'count';
 
@@ -186,6 +191,23 @@ export enum SizeUnit {
   EXBIBYTE = 'exbibyte',
   EXABYTE = 'exabyte',
 }
+
+// NOTE: These units are treated as base 10 (SI) vs. base 2 (IEC). That
+// intuitively makes sense for units like "kilobyte" (vs. kibibyte) where the
+// unit itself indicates its base. If this list contains "byte" (the default
+// unit for size data in Sentry), "byte" becomes a base 10 unit everywhere. That
+// will force effectively all tables and chart to format size data multipliers
+// using base 10. This is not a problem, it's just an important implication to
+// be aware of.
+export const ABYTE_UNITS = [
+  'byte',
+  'kilobyte',
+  'megabyte',
+  'gigabyte',
+  'terabyte',
+  'petabyte',
+  'exabyte',
+];
 
 // Sizes normalized to byte unit
 export const SIZE_UNIT_MULTIPLIERS: Record<SizeUnit, number> = {
@@ -296,7 +318,7 @@ export const AGGREGATIONS = {
       {
         kind: 'column',
         columnTypes: validateDenyListColumns(
-          ['string', 'duration', 'number'],
+          ['string', 'duration', 'number', 'integer'],
           ['id', 'issue', 'user.display']
         ),
         defaultValue: 'transaction.duration',
@@ -353,6 +375,24 @@ export const AGGREGATIONS = {
   },
   [AggregationKey.EPM]: {
     ...getDocsAndOutputType(AggregationKey.EPM),
+    parameters: [],
+    isSortable: true,
+    multiPlotType: 'area',
+  },
+  [AggregationKey.SAMPLE_COUNT]: {
+    ...getDocsAndOutputType(AggregationKey.SAMPLE_COUNT),
+    parameters: [],
+    isSortable: true,
+    multiPlotType: 'area',
+  },
+  [AggregationKey.SAMPLE_EPS]: {
+    ...getDocsAndOutputType(AggregationKey.SAMPLE_EPS),
+    parameters: [],
+    isSortable: true,
+    multiPlotType: 'area',
+  },
+  [AggregationKey.SAMPLE_EPM]: {
+    ...getDocsAndOutputType(AggregationKey.SAMPLE_EPM),
     parameters: [],
     isSortable: true,
     multiPlotType: 'area',
@@ -591,6 +631,23 @@ export const AGGREGATIONS = {
     isSortable: true,
     multiPlotType: 'line',
   },
+  [AggregationKey.OPPORTUNITY_SCORE]: {
+    ...getDocsAndOutputType(AggregationKey.OPPORTUNITY_SCORE),
+    parameters: [
+      {
+        kind: 'dropdown',
+        options: ['cls', 'fcp', 'inp', 'lcp', 'total', 'ttfb'].map(vital => ({
+          label: `measurements.score.${vital}`,
+          value: `measurements.score.${vital}`,
+        })),
+        dataType: 'number',
+        defaultValue: 'measurements.score.total',
+        required: true,
+      },
+    ],
+    isSortable: true,
+    multiPlotType: 'line',
+  },
 } as const;
 
 // TPM and TPS are aliases that are only used in Performance
@@ -599,13 +656,21 @@ const ALIASES = {
   tps: AggregationKey.EPS,
 };
 
-assert(AGGREGATIONS as Readonly<Record<AggregationKey, Aggregation>>);
+assert(AGGREGATIONS);
 
 export type AggregationKeyWithAlias = `${AggregationKey}` | keyof typeof ALIASES | '';
 
 export type AggregationOutputType = Extract<
   ColumnType,
-  'number' | 'integer' | 'date' | 'duration' | 'percentage' | 'string' | 'size' | 'rate'
+  | 'number'
+  | 'integer'
+  | 'date'
+  | 'duration'
+  | 'percentage'
+  | 'string'
+  | 'size'
+  | 'rate'
+  | 'score'
 >;
 
 export type PlotType = 'bar' | 'line' | 'area';
@@ -677,11 +742,14 @@ export function formatTagKey(key: string): string {
   if (key in FIELD_TAGS && !EXCLUDED_TAG_KEYS.has(key)) {
     return `tags[${key}]`;
   }
+
+  // Reserved keywords that conflict with discover search query
+  if (['project_id', 'project.name'].includes(key)) {
+    return `tags[${key}]`;
+  }
+
   return key;
 }
-
-// Allows for a less strict field key definition in cases we are returning custom strings as fields
-export type LooseFieldKey = FieldKey | string | '';
 
 type MeasurementType =
   | FieldValueType.DURATION
@@ -707,7 +775,7 @@ export function getAggregations(dataset: DiscoverDatasets) {
         {
           kind: 'column',
           columnTypes: validateDenyListColumns(
-            ['string', 'duration', 'number'],
+            ['string', 'duration', 'number', 'integer'],
             ['id', 'issue', 'user.display']
           ),
           defaultValue:
@@ -820,18 +888,51 @@ export const ERRORS_AGGREGATION_FUNCTIONS = [
   AggregationKey.LAST_SEEN,
 ];
 
+export const ERROR_UPSAMPLING_AGGREGATION_FUNCTIONS = [
+  AggregationKey.SAMPLE_COUNT,
+  AggregationKey.SAMPLE_EPS,
+  AggregationKey.SAMPLE_EPM,
+];
+
+export const TRANSACTIONS_AGGREGATION_FUNCTIONS = [
+  AggregationKey.COUNT,
+  AggregationKey.COUNT_IF,
+  AggregationKey.COUNT_UNIQUE,
+  AggregationKey.COUNT_MISERABLE,
+  AggregationKey.COUNT_WEB_VITALS,
+  AggregationKey.EPS,
+  AggregationKey.EPM,
+  AggregationKey.FAILURE_COUNT,
+  AggregationKey.MIN,
+  AggregationKey.MAX,
+  AggregationKey.SUM,
+  AggregationKey.ANY,
+  AggregationKey.P50,
+  AggregationKey.P75,
+  AggregationKey.P90,
+  AggregationKey.P95,
+  AggregationKey.P99,
+  AggregationKey.P100,
+  AggregationKey.PERCENTILE,
+  AggregationKey.AVG,
+  AggregationKey.APDEX,
+  AggregationKey.USER_MISERY,
+  AggregationKey.FAILURE_RATE,
+  AggregationKey.LAST_SEEN,
+];
+
 // This list contains fields/functions that are available with profiling feature.
 export const PROFILING_FIELDS: string[] = [FieldKey.PROFILE_ID];
 
-const MEASUREMENT_PATTERN = /^measurements\.([a-zA-Z0-9-_.]+)$/;
-const SPAN_OP_BREAKDOWN_PATTERN = /^spans\.([a-zA-Z0-9-_.]+)$/;
+const MEASUREMENT_PATTERN = /^measurements\.([\w-.]+)$/;
+const SPAN_OP_BREAKDOWN_PATTERN = /^spans\.([\w-.]+)$/;
 
 export function isMeasurement(field: string): boolean {
   return MEASUREMENT_PATTERN.test(field);
 }
 
 export function measurementType(field: string): MeasurementType {
-  if (MEASUREMENT_FIELDS.hasOwnProperty(field)) {
+  if (Object.hasOwn(MEASUREMENT_FIELDS, field)) {
     // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
     return MEASUREMENT_FIELDS[field].valueType as MeasurementType;
   }
@@ -839,17 +940,9 @@ export function measurementType(field: string): MeasurementType {
   return FieldValueType.NUMBER;
 }
 
-export function getMeasurementSlug(field: string): string | null {
-  const results = field.match(MEASUREMENT_PATTERN);
-  if (results && results.length >= 2) {
-    return results[1]!;
-  }
-  return null;
-}
-
-const AGGREGATE_PATTERN = /^(\w+)\((.*)?\)$/;
+const AGGREGATE_PATTERN = /^(\w+)\((.*)\)$/;
 // Identical to AGGREGATE_PATTERN, but without the $ for newline, or ^ for start of line
-const AGGREGATE_BASE = /(\w+)\((.*)?\)/g;
+export const AGGREGATE_BASE = /(\w+)\((.*)\)/g;
 
 export function getAggregateArg(field: string): string | null {
   // only returns the first argument if field is an aggregate
@@ -862,12 +955,53 @@ export function getAggregateArg(field: string): string | null {
   return null;
 }
 
+function isSearchFilterArgument(value: string): boolean {
+  return value.length >= 2 && value.startsWith('`') && value.endsWith('`');
+}
+
+const IF_SUFFIX = '_if';
+
+function getBaseAggregateFromParsedFunction(result: ParsedFunction): {
+  arguments: string[];
+  name: string;
+} {
+  if (result.filter !== undefined && result.name.endsWith(IF_SUFFIX)) {
+    return {
+      name: result.name.slice(0, -IF_SUFFIX.length),
+      arguments: result.arguments.slice(1),
+    };
+  }
+
+  return {name: result.name, arguments: result.arguments};
+}
+
+/**
+ * Parse an aggregate into its name and arguments.
+ *
+ * When the first argument is backtick-wrapped, `filter` is set to the unwrapped search
+ * query. Name and arguments are left as written so Discover helpers (explode, alias,
+ * prettify) keep working unchanged:
+ * `avg_if(\`span.op:db\`,span.duration)` →
+ * `{name: 'avg_if', arguments: ['\`span.op:db\`', 'span.duration'], filter: 'span.op:db'}`.
+ * Discover style conditionals such as `count_if(span.duration,equals,300)` do not wrap
+ * their first argument in backticks, and are left untouched.
+ */
 export function parseFunction(field: string): ParsedFunction | null {
   const results = field.match(AGGREGATE_PATTERN);
-  if (results && results.length === 3) {
+  if (results?.length === 3) {
+    const name = results[1]!;
+    const args = parseArguments(results[2]!);
+    const firstArgument = args[0];
+    if (isSearchFilterArgument(firstArgument ?? '') && name.endsWith(IF_SUFFIX)) {
+      return {
+        name,
+        arguments: args,
+        filter: firstArgument!.slice(1, -1),
+      };
+    }
     return {
-      name: results[1]!,
-      arguments: parseArguments(results[2]!),
+      name,
+      arguments: args,
     };
   }
 
@@ -888,19 +1022,29 @@ function parseArguments(columnText: string): string[] {
   let quoted = false;
   let inTag = false;
   let escaped = false;
+  let inFilter = false;
 
   let i = 0;
   let j = 0;
 
   while (j < columnText?.length) {
-    if (!inTag && i === j && columnText[j] === '"') {
+    if (!inFilter && !inTag && i === j && columnText[j] === '"') {
       // when we see a quote at the beginning of
       // an argument, then this is a quoted string
       quoted = true;
-    } else if (!quoted && columnText[j] === '[' && _lookback(columnText, j, 'tags')) {
+    } else if (
+      !inFilter &&
+      !quoted &&
+      columnText[j] === '[' &&
+      _lookback(columnText, j, 'tags')
+    ) {
       // when the argument begins with tags[,
       // then this is the beginning of the tag that may contain commas
       inTag = true;
+    } else if (!quoted && i === j && columnText[j] === '`') {
+      // when the argument begins with a backtick, it is a search filter for an
+      // `_if` aggregate and may contain any character other than a backtick
+      inFilter = true;
     } else if (i === j && columnText[j] === ' ') {
       // argument has leading spaces, skip over them
       i += 1;
@@ -916,6 +1060,9 @@ function parseArguments(columnText: string): string[] {
       // when we see a non-escaped quote while inside
       // of a quoted string, we should end it
       inTag = false;
+    } else if (inFilter && columnText[j] === '`') {
+      // when we see a backtick while inside a search filter, we should end it
+      inFilter = false;
     } else if (quoted && escaped) {
       // when we are inside a quoted string and have
       // begun an escape character, we should end it
@@ -924,7 +1071,7 @@ function parseArguments(columnText: string): string[] {
       // when we are inside a quoted string or tag and see
       // a comma, it should not be considered an
       // argument separator
-    } else if (columnText[j] === ',') {
+    } else if (!inFilter && columnText[j] === ',') {
       // when we see a comma outside of a quoted string
       // it is an argument separator
       args.push(columnText.substring(i, j).trim());
@@ -965,7 +1112,7 @@ export function stripEquationPrefix(field: string): string {
 export function getEquationAliasIndex(field: string): number {
   const results = field.match(EQUATION_ALIAS_PATTERN);
 
-  if (results && results.length === 2) {
+  if (results?.length === 2) {
     return parseInt(results[1]!, 10);
   }
   return -1;
@@ -1003,7 +1150,7 @@ export function generateAggregateFields(
     const parameters = AGGREGATIONS[func].parameters.map((param: any) => {
       // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
       const overrides = AGGREGATIONS[func].getFieldOverrides;
-      if (typeof overrides === 'undefined') {
+      if (overrides === undefined) {
         return param;
       }
       return {
@@ -1012,7 +1159,7 @@ export function generateAggregateFields(
       };
     });
 
-    if (parameters.every((param: any) => typeof param.defaultValue !== 'undefined')) {
+    if (parameters.every((param: any) => param.defaultValue !== undefined)) {
       const newField = `${func}(${parameters
         .map((param: any) => param.defaultValue)
         .join(',')})`;
@@ -1021,7 +1168,7 @@ export function generateAggregateFields(
       }
     }
   });
-  return fields.map(field => ({field})) as Field[];
+  return fields.map(field => ({field}));
 }
 
 function isDerivedMetric(field: string): boolean {
@@ -1044,19 +1191,46 @@ export function explodeFieldString(field: string, alias?: string): Column {
   const results = parseFunction(field);
 
   if (results) {
+    const args = results.arguments.map(normalizeFunctionArgument);
     return {
       kind: 'function',
-      function: [
-        results.name as AggregationKey,
-        results.arguments[0] ?? '',
-        results.arguments[1] as AggregationRefinement,
-        results.arguments[2] as AggregationRefinement,
-      ],
+      function: [results.name as AggregationKey, args[0] ?? '', ...args.slice(1)],
       alias,
     };
   }
 
   return {kind: 'field', field, alias};
+}
+
+const UNSAFE_FUNCTION_ARGUMENT = /[\s"(),]/;
+const EXPLICIT_TAG_FUNCTION_ARGUMENT = /^(?:sentry_tags|tags)\[.*\]$/;
+const MIN_SEPARATE_WORDS = 2;
+
+function isQuotedFunctionArgument(value: string): boolean {
+  return (
+    value.length >= MIN_SEPARATE_WORDS && value.startsWith('"') && value.endsWith('"')
+  );
+}
+
+function normalizeFunctionArgument(value: string): string {
+  if (!isQuotedFunctionArgument(value)) {
+    return value;
+  }
+
+  return value.slice(1, -1).replace(/\\"/g, '"');
+}
+
+function generateFunctionArgument(value: string): string {
+  if (
+    isQuotedFunctionArgument(value) ||
+    isSearchFilterArgument(value) ||
+    EXPLICIT_TAG_FUNCTION_ARGUMENT.test(value) ||
+    !UNSAFE_FUNCTION_ARGUMENT.test(value)
+  ) {
+    return value;
+  }
+
+  return `"${escapeDoubleQuotes(value)}"`;
 }
 
 export function generateFieldAsString(value: QueryFieldValue): string {
@@ -1073,8 +1247,18 @@ export function generateFieldAsString(value: QueryFieldValue): string {
   }
 
   const aggregation = value.function[0];
-  const parameters = value.function.slice(1).filter(i => i);
+  const slicedFunction = value.function.slice(1);
+  const parameters: string[] = [];
+  for (const parameter of slicedFunction) {
+    if (parameter) {
+      parameters.push(generateFunctionArgument(parameter));
+    }
+  }
   return `${aggregation}(${parameters.join(',')})`;
+}
+
+export function generateEquationFieldAsString(value: QueryFieldValue): string {
+  return generateFieldAsString(value);
 }
 
 export function explodeField(field: Field): Column {
@@ -1091,13 +1275,15 @@ export function getAggregateAlias(field: string): string {
     return field;
   }
 
-  let alias = result.name;
+  const {name, arguments: args} = getBaseAggregateFromParsedFunction(result);
 
-  if (result.arguments.length > 0) {
-    alias += '_' + result.arguments.join('_');
+  let alias = name;
+
+  if (args.length > 0) {
+    alias += '_' + args.join('_');
   }
 
-  return alias.replace(/[^\w]/g, '_').replace(/^_+/g, '').replace(/_+$/, '');
+  return alias.replace(/\W/g, '_').replace(/^_+/g, '').replace(/_+$/, '');
 }
 
 /**
@@ -1141,36 +1327,6 @@ export function getColumnsAndAggregates(fields: string[]): {
   return {columns, aggregates};
 }
 
-export function getColumnsAndAggregatesAsStrings(fields: QueryFieldValue[]): {
-  aggregates: string[];
-  columns: string[];
-  fieldAliases: string[];
-} {
-  // TODO(dam): distinguish between metrics, derived metrics and tags
-  const aggregateFields: string[] = [];
-  const nonAggregateFields: string[] = [];
-  const fieldAliases: string[] = [];
-
-  for (const field of fields) {
-    const fieldString = generateFieldAsString(field);
-    if (field.kind === 'function' || field.kind === 'calculatedField') {
-      aggregateFields.push(fieldString);
-    } else if (field.kind === 'equation') {
-      if (isAggregateEquation(fieldString)) {
-        aggregateFields.push(fieldString);
-      } else {
-        nonAggregateFields.push(fieldString);
-      }
-    } else {
-      nonAggregateFields.push(fieldString);
-    }
-
-    fieldAliases.push(field.alias ?? '');
-  }
-
-  return {aggregates: aggregateFields, columns: nonAggregateFields, fieldAliases};
-}
-
 /**
  * Convert a function string into type it will output.
  * This is useful when you need to format values in tooltips,
@@ -1184,7 +1340,8 @@ export function aggregateOutputType(field: string | undefined): AggregationOutpu
   if (!result) {
     return 'number';
   }
-  const outputType = aggregateFunctionOutputType(result.name, result.arguments[0]);
+  const {name, arguments: args} = getBaseAggregateFromParsedFunction(result);
+  const outputType = aggregateFunctionOutputType(name, args[0]);
   if (outputType === null) {
     return 'number';
   }
@@ -1221,7 +1378,7 @@ export function aggregateFunctionOutputType(
     }
   }
 
-  if (firstArg && SESSIONS_FIELDS.hasOwnProperty(firstArg)) {
+  if (firstArg && Object.hasOwn(SESSIONS_FIELDS, firstArg)) {
     // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
     return SESSIONS_FIELDS[firstArg].type as AggregationOutputType;
   }
@@ -1306,11 +1463,12 @@ export function aggregateMultiPlotType(field: string): PlotType {
   if (!result) {
     return 'area';
   }
-  if (!AGGREGATIONS.hasOwnProperty(result.name)) {
+  const {name} = getBaseAggregateFromParsedFunction(result);
+  if (!Object.hasOwn(AGGREGATIONS, name)) {
     return 'area';
   }
   // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
-  return AGGREGATIONS[result.name].multiPlotType;
+  return AGGREGATIONS[name].multiPlotType;
 }
 
 function validateForNumericAggregate(
@@ -1356,14 +1514,19 @@ const alignedTypes: ColumnValueType[] = [
   'percent_change',
   'rate',
   'size',
+  'currency',
 ];
 
 export function fieldAlignment(
   columnName: string,
-  columnType?: undefined | ColumnValueType,
+  columnType?: ColumnValueType,
   metadata?: Record<string, ColumnValueType>
-): Alignments {
-  let align: Alignments = 'left';
+): ColumnAlign {
+  if (columnName === SpanFields.IS_STARRED_TRANSACTION) {
+    return 'right';
+  }
+
+  let align: ColumnAlign = 'left';
 
   if (columnType) {
     align = alignedTypes.includes(columnType) ? 'right' : 'left';
@@ -1383,7 +1546,7 @@ export function fieldAlignment(
  * Match on types that are legal to show on a timeseries chart.
  */
 export function isLegalYAxisType(match: ColumnType) {
-  return ['number', 'integer', 'duration', 'percentage'].includes(match);
+  return ['number', 'integer', 'duration', 'percentage', 'score'].includes(match);
 }
 
 export function getSpanOperationName(field: string): string | null {
@@ -1641,6 +1804,13 @@ export function prettifyParsedFunction(func: ParsedFunction) {
     func.arguments[0] === 'message'
   ) {
     return 'count(logs)';
+  }
+
+  // special case for trace metrics format: function(value,metricName,metricType,unit)
+  // display as function(metricName)
+  if (func.arguments.length === 4 && func.arguments[0] === 'value') {
+    const metricName = func.arguments[1];
+    return `${func.name}(${prettifyTagKey(metricName ?? '')})`;
   }
 
   const args = func.arguments.map(prettifyTagKey);

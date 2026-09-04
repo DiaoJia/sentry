@@ -7,6 +7,8 @@ import {
   explodeField,
   fieldAlignment,
   generateAggregateFields,
+  generateEquationFieldAsString,
+  generateFieldAsString,
   getAggregateAlias,
   isAggregateEquation,
   isAggregateField,
@@ -15,14 +17,14 @@ import {
   parseFunction,
 } from 'sentry/utils/discover/fields';
 
-describe('parseFunction', function () {
-  it('returns null on non aggregate fields', function () {
+describe('parseFunction', () => {
+  it('returns null on non aggregate fields', () => {
     expect(parseFunction('field')).toBeNull();
     expect(parseFunction('under_field')).toBeNull();
     expect(parseFunction('foo.bar.is-Enterprise_42')).toBeNull();
   });
 
-  it('handles 0 arg functions', function () {
+  it('handles 0 arg functions', () => {
     expect(parseFunction('count()')).toEqual({
       name: 'count',
       arguments: [],
@@ -33,7 +35,7 @@ describe('parseFunction', function () {
     });
   });
 
-  it('handles 1 arg functions', function () {
+  it('handles 1 arg functions', () => {
     expect(parseFunction('count(id)')).toEqual({
       name: 'count',
       arguments: ['id'],
@@ -52,7 +54,7 @@ describe('parseFunction', function () {
     });
   });
 
-  it('handles 2 arg functions', function () {
+  it('handles 2 arg functions', () => {
     expect(parseFunction('percentile(transaction.duration,0.81)')).toEqual({
       name: 'percentile',
       arguments: ['transaction.duration', '0.81'],
@@ -63,7 +65,7 @@ describe('parseFunction', function () {
     });
   });
 
-  it('handles 3 arg functions', function () {
+  it('handles 3 arg functions', () => {
     expect(parseFunction('count_if(transaction.duration,greater,0.81)')).toEqual({
       name: 'count_if',
       arguments: ['transaction.duration', 'greater', '0.81'],
@@ -78,23 +80,143 @@ describe('parseFunction', function () {
     });
   });
 
-  it('handles 4 arg functions', function () {
+  it('handles 4 arg functions', () => {
     expect(parseFunction('to_other(release,"0.81,123,152,()",others,current)')).toEqual({
       name: 'to_other',
       arguments: ['release', '"0.81,123,152,()"', 'others', 'current'],
     });
   });
 
-  it('handles functions with numeric tag arguments', function () {
+  it('handles functions with numeric tag arguments', () => {
     expect(parseFunction('count(tags[foo,number])')).toEqual({
       name: 'count',
       arguments: ['tags[foo,number]'],
     });
   });
+
+  it('annotates filter when the first argument is backtick-wrapped', () => {
+    expect(parseFunction('avg_if(`span.op:db`,span.duration)')).toEqual({
+      name: 'avg_if',
+      arguments: ['`span.op:db`', 'span.duration'],
+      filter: 'span.op:db',
+    });
+  });
+
+  it('does not split backtick wrapped search filters on commas', () => {
+    expect(parseFunction('avg_if(`span.op:[db,http]`,span.duration)')).toEqual({
+      name: 'avg_if',
+      arguments: ['`span.op:[db,http]`', 'span.duration'],
+      filter: 'span.op:[db,http]',
+    });
+    expect(
+      parseFunction('count_if(`span.description:"GET /foo, /bar"`,span.duration)')
+    ).toEqual({
+      name: 'count_if',
+      arguments: ['`span.description:"GET /foo, /bar"`', 'span.duration'],
+      filter: 'span.description:"GET /foo, /bar"',
+    });
+  });
+
+  it('handles backtick wrapped search filters as the only argument', () => {
+    expect(parseFunction('count_if(`span.op:db`)')).toEqual({
+      name: 'count_if',
+      arguments: ['`span.op:db`'],
+      filter: 'span.op:db',
+    });
+  });
+
+  it('annotates filters containing commas and quotes', () => {
+    expect(
+      parseFunction('avg_if(`span.op:[db,http] AND span.status:ok`,span.duration)')
+    ).toEqual({
+      name: 'avg_if',
+      arguments: ['`span.op:[db,http] AND span.status:ok`', 'span.duration'],
+      filter: 'span.op:[db,http] AND span.status:ok',
+    });
+  });
+
+  it('leaves Discover style count_if untouched', () => {
+    expect(parseFunction('count_if(span.duration,equals,300)')).toEqual({
+      name: 'count_if',
+      arguments: ['span.duration', 'equals', '300'],
+    });
+  });
+
+  it('leaves plain aggregates without a filter key', () => {
+    expect(parseFunction('avg(span.duration)')).toEqual({
+      name: 'avg',
+      arguments: ['span.duration'],
+    });
+  });
+
+  it('does not treat backtick args as filters on non-_if aggregates', () => {
+    expect(parseFunction('avg(`span.op:db`,span.duration)')).toEqual({
+      name: 'avg',
+      arguments: ['`span.op:db`', 'span.duration'],
+    });
+  });
 });
 
-describe('getAggregateAlias', function () {
-  it('no-ops simple fields', function () {
+describe('generateFieldAsString', () => {
+  it('quotes function arguments that cannot parse raw', () => {
+    expect(
+      generateFieldAsString({
+        kind: 'function',
+        function: ['count_if', 'transaction.duration', 'equals', 'foo bar'],
+      })
+    ).toBe('count_if(transaction.duration,equals,"foo bar")');
+  });
+
+  it('preserves already quoted function arguments', () => {
+    expect(
+      generateFieldAsString({
+        kind: 'function',
+        function: ['count_if', 'transaction.duration', 'equals', '"foo bar"'],
+      })
+    ).toBe('count_if(transaction.duration,equals,"foo bar")');
+  });
+
+  it('preserves explicit tag function arguments', () => {
+    expect(
+      generateFieldAsString({
+        kind: 'function',
+        function: ['count', 'tags[foo,number]', undefined, undefined],
+      })
+    ).toBe('count(tags[foo,number])');
+  });
+
+  it('preserves backtick wrapped search filter arguments', () => {
+    expect(
+      generateFieldAsString({
+        kind: 'function',
+        function: ['avg_if', '`span.op:[db,http]`', 'span.duration', undefined],
+      })
+    ).toBe('avg_if(`span.op:[db,http]`,span.duration)');
+  });
+
+  it('round-trips quoted function arguments through field parsing', () => {
+    expect(
+      explodeField({field: 'count_if(transaction.duration,equals,"foo bar")'})
+    ).toEqual({
+      kind: 'function',
+      function: ['count_if', 'transaction.duration', 'equals', 'foo bar'],
+    });
+  });
+});
+
+describe('generateEquationFieldAsString', () => {
+  it('uses function-safe field serialization', () => {
+    expect(
+      generateEquationFieldAsString({
+        kind: 'function',
+        function: ['count_if', 'transaction.duration', 'equals', 'foo bar'],
+      })
+    ).toBe('count_if(transaction.duration,equals,"foo bar")');
+  });
+});
+
+describe('getAggregateAlias', () => {
+  it('no-ops simple fields', () => {
     expect(getAggregateAlias('field')).toBe('field');
     expect(getAggregateAlias('under_field')).toBe('under_field');
     expect(getAggregateAlias('foo.bar.is-Enterprise_42')).toBe(
@@ -102,12 +224,12 @@ describe('getAggregateAlias', function () {
     );
   });
 
-  it('handles 0 arg functions', function () {
+  it('handles 0 arg functions', () => {
     expect(getAggregateAlias('count()')).toBe('count');
     expect(getAggregateAlias('count_unique()')).toBe('count_unique');
   });
 
-  it('handles 1 arg functions', function () {
+  it('handles 1 arg functions', () => {
     expect(getAggregateAlias('count(id)')).toBe('count_id');
     expect(getAggregateAlias('count_unique(user)')).toBe('count_unique_user');
     expect(getAggregateAlias('count_unique(issue.id)')).toBe('count_unique_issue_id');
@@ -116,7 +238,7 @@ describe('getAggregateAlias', function () {
     );
   });
 
-  it('handles 2 arg functions', function () {
+  it('handles 2 arg functions', () => {
     expect(getAggregateAlias('percentile(transaction.duration,0.81)')).toBe(
       'percentile_transaction_duration_0_81'
     );
@@ -125,21 +247,30 @@ describe('getAggregateAlias', function () {
     );
   });
 
-  it('handles to_other with symbols', function () {
+  it('handles to_other with symbols', () => {
     expect(
       getAggregateAlias('to_other(release,"release:beta@1.1.1 (2)",others,current)')
     ).toBe('to_other_release__release_beta_1_1_1__2___others_current');
   });
+
+  it('handles EAP conditional aggregates', () => {
+    expect(getAggregateAlias('avg_if(`span.op:db`,span.duration)')).toBe(
+      'avg_span_duration'
+    );
+    expect(getAggregateAlias('count_if(`span.op:db`,span.duration)')).toBe(
+      'count_span_duration'
+    );
+  });
 });
 
-describe('isAggregateField', function () {
-  it('detects aliases', function () {
+describe('isAggregateField', () => {
+  it('detects aliases', () => {
     expect(isAggregateField('p888')).toBe(false);
     expect(isAggregateField('other_field')).toBe(false);
     expect(isAggregateField('foo.bar.is-Enterprise_42')).toBe(false);
   });
 
-  it('detects functions', function () {
+  it('detects functions', () => {
     expect(isAggregateField('count()')).toBe(true);
     expect(isAggregateField('p75()')).toBe(true);
     expect(isAggregateField('percentile(transaction.duration, 0.55)')).toBe(true);
@@ -150,8 +281,8 @@ describe('isAggregateField', function () {
   });
 });
 
-describe('isAggregateEquation', function () {
-  it('detects functions', function () {
+describe('isAggregateEquation', () => {
+  it('detects functions', () => {
     expect(isAggregateEquation('equation|5 + count()')).toBe(true);
     expect(
       isAggregateEquation('equation|percentile(transaction.duration, 0.55) / count()')
@@ -159,7 +290,7 @@ describe('isAggregateEquation', function () {
     expect(isAggregateEquation('equation|(5 + 5) + (count() - 2)')).toBe(true);
   });
 
-  it('detects lack of functions', function () {
+  it('detects lack of functions', () => {
     expect(isAggregateEquation('equation|5 + 5')).toBe(false);
     expect(isAggregateEquation('equation|(5 + 5)')).toBe(false);
     expect(isAggregateEquation('equation|5 + (thing - other_thing)')).toBe(false);
@@ -167,8 +298,8 @@ describe('isAggregateEquation', function () {
   });
 });
 
-describe('measurement', function () {
-  it('isMeasurement', function () {
+describe('measurement', () => {
+  it('isMeasurement', () => {
     expect(isMeasurement('measurements.fp')).toBe(true);
     expect(isMeasurement('measurements.fcp')).toBe(true);
     expect(isMeasurement('measurements.lcp')).toBe(true);
@@ -182,7 +313,7 @@ describe('measurement', function () {
     expect(isMeasurement('percentile(measurements.fcp, 0.5)')).toBe(false);
   });
 
-  it('measurementType', function () {
+  it('measurementType', () => {
     expect(measurementType('measurements.fp')).toBe('duration');
     expect(measurementType('measurements.fcp')).toBe('duration');
     expect(measurementType('measurements.lcp')).toBe('duration');
@@ -192,8 +323,8 @@ describe('measurement', function () {
   });
 });
 
-describe('explodeField', function () {
-  it('explodes fields', function () {
+describe('explodeField', () => {
+  it('explodes fields', () => {
     expect(explodeField({field: 'foobar'})).toEqual({
       kind: 'field',
       field: 'foobar',
@@ -223,15 +354,25 @@ describe('explodeField', function () {
       function: ['count', 'foo.bar.is-Enterprise_42', undefined, undefined],
     });
   });
+
+  it('round-trips backtick-wrapped _if filters', () => {
+    expect(explodeField({field: 'avg_if(`span.op:db`,span.duration)'})).toEqual({
+      kind: 'function',
+      function: ['avg_if', '`span.op:db`', 'span.duration'],
+    });
+    expect(
+      generateFieldAsString(explodeField({field: 'avg_if(`span.op:db`,span.duration)'}))
+    ).toBe('avg_if(`span.op:db`,span.duration)');
+  });
 });
 
-describe('aggregateOutputType', function () {
-  it('handles unknown fields', function () {
+describe('aggregateOutputType', () => {
+  it('handles unknown fields', () => {
     expect(aggregateOutputType('')).toBe('number');
     expect(aggregateOutputType('blerg')).toBe('number');
   });
 
-  it('handles duration functions', function () {
+  it('handles duration functions', () => {
     expect(aggregateOutputType('p50()')).toBe('duration');
     expect(aggregateOutputType('p75()')).toBe('duration');
     expect(aggregateOutputType('p95()')).toBe('duration');
@@ -248,11 +389,11 @@ describe('aggregateOutputType', function () {
     expect(aggregateOutputType('percentile(transaction.duration,0.99)')).toBe('duration');
   });
 
-  it('handles percentage functions', function () {
+  it('handles percentage functions', () => {
     expect(aggregateOutputType('failure_rate()')).toBe('percentage');
   });
 
-  it('handles number functions', function () {
+  it('handles number functions', () => {
     expect(aggregateOutputType('apdex()')).toBe('number');
     expect(aggregateOutputType('apdex(500)')).toBe('number');
     expect(aggregateOutputType('count_miserable(user, 500)')).toBe('number');
@@ -261,7 +402,7 @@ describe('aggregateOutputType', function () {
     expect(aggregateOutputType('epm()')).toBe('number');
   });
 
-  it('handles inherit functions', function () {
+  it('handles inherit functions', () => {
     expect(aggregateOutputType('sum(transaction.duration)')).toBe('duration');
     expect(aggregateOutputType('sum(stack.colno)')).toBe('number');
 
@@ -272,7 +413,7 @@ describe('aggregateOutputType', function () {
     expect(aggregateOutputType('max(timestamp)')).toBe('date');
   });
 
-  it('handles measurements', function () {
+  it('handles measurements', () => {
     expect(aggregateOutputType('sum(measurements.fcp)')).toBe('duration');
     expect(aggregateOutputType('min(measurements.fcp)')).toBe('duration');
     expect(aggregateOutputType('max(measurements.fcp)')).toBe('duration');
@@ -291,52 +432,53 @@ describe('aggregateOutputType', function () {
   });
 });
 
-describe('aggregateMultiPlotType', function () {
-  it('handles unknown functions', function () {
+describe('aggregateMultiPlotType', () => {
+  it('handles unknown functions', () => {
     expect(aggregateMultiPlotType('blerg')).toBe('area');
     expect(aggregateMultiPlotType('blerg(uhoh)')).toBe('area');
   });
-  it('handles known functions', function () {
+  it('handles known functions', () => {
     expect(aggregateMultiPlotType('sum(transaction.duration)')).toBe('area');
     expect(aggregateMultiPlotType('p95()')).toBe('line');
     expect(aggregateMultiPlotType('equation|sum(transaction.duration) / 2')).toBe('line');
+    expect(aggregateMultiPlotType('avg_if(`span.op:db`,span.duration)')).toBe('line');
   });
 });
 
-describe('generateAggregateFields', function () {
+describe('generateAggregateFields', () => {
   const organization = OrganizationFixture();
-  it('gets default aggregates', function () {
+  it('gets default aggregates', () => {
     expect(generateAggregateFields(organization, [])).toContainEqual({field: 'count()'});
   });
 
-  it('includes fields from eventFields', function () {
+  it('includes fields from eventFields', () => {
     expect(
       generateAggregateFields(organization, [{field: 'not_real_aggregate()'}])
     ).toContainEqual({field: 'not_real_aggregate()'});
   });
 
-  it('excludes fields from aggregates', function () {
+  it('excludes fields from aggregates', () => {
     expect(generateAggregateFields(organization, [], ['count()'])).not.toContainEqual({
       field: 'count()',
     });
   });
 });
 
-describe('fieldAlignment()', function () {
-  it('works with only field name', function () {
+describe('fieldAlignment()', () => {
+  it('works with only field name', () => {
     expect(fieldAlignment('event.type')).toBe('left');
 
     // Should be right, but we don't have any type data.
     expect(fieldAlignment('transaction.duration')).toBe('left');
   });
 
-  it('works with type parameter', function () {
+  it('works with type parameter', () => {
     expect(fieldAlignment('transaction.duration', 'duration')).toBe('right');
     expect(fieldAlignment('device.battery_level', 'number')).toBe('right');
     expect(fieldAlignment('min(timestamp)', 'date')).toBe('left');
   });
 
-  it('can use table metadata', function () {
+  it('can use table metadata', () => {
     const meta: Record<string, ColumnValueType> = {
       'transaction.duration': 'duration',
     };

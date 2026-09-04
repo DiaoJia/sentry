@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import click
 from arroyo.backends.abstract import Consumer
@@ -22,13 +23,81 @@ from sentry.conf.types.kafka_definition import (
     validate_consumer_definition,
 )
 from sentry.consumers.dlq import DlqStaleMessagesStrategyFactoryWrapper, maybe_build_dlq_producer
+from sentry.consumers.profiler import JoinProfiler
 from sentry.consumers.validate_schema import ValidateSchema
 from sentry.eventstream.types import EventStreamEventType
 from sentry.ingest.types import ConsumerType
+from sentry.utils import json
 from sentry.utils.imports import import_string
 from sentry.utils.kafka_config import get_topic_definition
 
 logger = logging.getLogger(__name__)
+
+
+def apply_processor_args_overrides(
+    consumer_name: str, base_args: dict[str, Any], overrides: Sequence[str]
+) -> dict[str, Any]:
+    """
+    Apply processor args overrides from CLI strings to the base StreamProcessor arguments.
+
+    Args:
+        consumer_name: Name of the consumer
+        base_args: Base arguments dict for StreamProcessor
+        overrides: Raw CLI argument strings in format 'key:value'
+
+    Returns:
+        Updated arguments dict with overrides applied
+    """
+    # Get resolved type hints (handles __future__.annotations)
+    type_hints = get_type_hints(StreamProcessor.__init__)
+
+    for arg in overrides:
+        try:
+            key, value_str = arg.split(":", 1)
+            param_type = type_hints[key]
+
+            # Extract the actual type from Optional[T] (which is Union[T, None])
+            if get_origin(param_type) is Union:
+                # For Optional[T] (Union[T, None]), extract T
+                type_args = get_args(param_type)
+                param_type = next((t for t in type_args if t is not type(None)), str)
+
+            # Try to parse as JSON first, fallback to string
+            try:
+                value = json.loads(value_str)
+            except Exception:
+                value = value_str
+
+            # Validate the type matches what we expect
+            # Allow int->float coercion since JSON parses as int
+            if param_type is float and isinstance(value, int):
+                value = float(value)
+            elif not isinstance(value, param_type):
+                raise ValueError(f"Expected {param_type}, got {type(value)}")
+
+            if key in base_args:
+                logger.info(
+                    "overriding argument %s from CLI: %s -> %s",
+                    key,
+                    base_args[key],
+                    value,
+                    extra={
+                        "consumer_name": consumer_name,
+                    },
+                )
+            base_args[key] = value
+        except Exception as e:
+            logger.warning(
+                "skipping invalid argument %s from CLI: %s",
+                arg,
+                str(e),
+                extra={
+                    "consumer_name": consumer_name,
+                    "valid_params": sorted(type_hints.keys()),
+                },
+            )
+
+    return base_args
 
 
 def convert_max_batch_time(ctx, param, value):
@@ -40,7 +109,8 @@ def convert_max_batch_time(ctx, param, value):
 
 
 def multiprocessing_options(
-    default_max_batch_size: int | None = None, default_max_batch_time_ms: int | None = 1000
+    default_max_batch_size: int | None = None,
+    default_max_batch_time_ms: int | None = 1000,
 ) -> list[click.Option]:
     return [
         click.Option(["--processes", "num_processes"], default=1, type=int),
@@ -75,13 +145,6 @@ def issue_occurrence_options() -> list[click.Option]:
     ]
 
 
-def ingest_replay_recordings_options() -> list[click.Option]:
-    """Return a list of ingest-replay-recordings options."""
-    options = multiprocessing_options(default_max_batch_size=10)
-    options.append(click.Option(["--threads", "num_threads"], type=int, default=4))
-    return options
-
-
 def ingest_monitors_options() -> list[click.Option]:
     """Return a list of ingest-monitors options."""
     options = [
@@ -102,6 +165,37 @@ def ingest_monitors_options() -> list[click.Option]:
             type=int,
             default=1,
             help="Maximum time spent batching check-ins to batch before processing in parallel.",
+        ),
+        click.Option(
+            ["--max-workers", "max_workers"],
+            type=int,
+            default=None,
+            help="The maximum number of threads to spawn in parallel mode.",
+        ),
+    ]
+    return options
+
+
+def clock_tasks_options() -> list[click.Option]:
+    """Return a list of monitors-clock-tasks options."""
+    options = [
+        click.Option(
+            ["--mode", "mode"],
+            type=click.Choice(["serial", "batched-parallel"]),
+            default="serial",
+            help="The mode to process clock tasks in. Parallel uses multithreading.",
+        ),
+        click.Option(
+            ["--max-batch-size", "max_batch_size"],
+            type=int,
+            default=500,
+            help="Maximum number of clock tasks to batch before processing in parallel.",
+        ),
+        click.Option(
+            ["--max-batch-time", "max_batch_time"],
+            type=int,
+            default=1,
+            help="Maximum time spent batching clock tasks before processing in parallel.",
         ),
         click.Option(
             ["--max-workers", "max_workers"],
@@ -138,7 +232,7 @@ def uptime_options() -> list[click.Option]:
             ["--max-workers", "max_workers"],
             type=int,
             default=None,
-            help="The maximum number of threads to spawn in parallel mode.",
+            help="The maximum amount of parallelism to use when in a parallel mode.",
         ),
         click.Option(["--processes", "num_processes"], default=1, type=int),
         click.Option(["--input-block-size"], type=int, default=None),
@@ -151,15 +245,27 @@ def ingest_events_options() -> list[click.Option]:
     """
     Options for the "events"-like consumers: `events`, `attachments`, `transactions`.
 
-    This adds a `--reprocess-only-stuck-events`option. If that option is specified, *only* events
-    that were already persisted in the `processing_store` will be processed.
-    Events that never made it to the store, and ones that already made it out of the store are skipped,
-    same as attachments (which are not idempotent, and we would rather not duplicate them).
+    Options added:
+        `--reprocess-only-stuck-events`: *only* events that were already persisted in the `processing_store`
+        will be processed. Events that never made it to the store, and ones that already made it out of the store are skipped,
+        same as attachments (which are not idempotent, and we would rather not duplicate them).
+
+        `--reprocess-only-events-not-in-nodestore`: *only* events whose payload is missing from `nodestore` are processed.
+        This works similarly to `--reprocess-only-stuck-events`, but can be used to reprocess events that were stuck
+        in redis, but then purged.
     """
     options = multiprocessing_options(default_max_batch_size=100)
     options.append(
         click.Option(
             ["--reprocess-only-stuck-events", "reprocess_only_stuck_events"],
+            type=bool,
+            is_flag=True,
+            default=False,
+        )
+    )
+    options.append(
+        click.Option(
+            ["--reprocess-only-events-not-in-nodestore", "reprocess_only_events_not_in_nodestore"],
             type=bool,
             is_flag=True,
             default=False,
@@ -175,19 +281,6 @@ def ingest_events_options() -> list[click.Option]:
     return options
 
 
-def ingest_transactions_options() -> list[click.Option]:
-    options = ingest_events_options()
-    options.append(
-        click.Option(
-            ["--no-celery-mode", "no_celery_mode"],
-            default=False,
-            is_flag=True,
-            help="Save event directly in consumer without celery",
-        )
-    )
-    return options
-
-
 _METRICS_INDEXER_OPTIONS = [
     click.Option(["--input-block-size"], type=int, default=None),
     click.Option(["--output-block-size"], type=int, default=None),
@@ -196,7 +289,9 @@ _METRICS_INDEXER_OPTIONS = [
     click.Option(["max_msg_batch_time", "--max-msg-batch-time-ms"], type=int, default=10000),
     click.Option(["max_parallel_batch_size", "--max-parallel-batch-size"], type=int, default=50),
     click.Option(
-        ["max_parallel_batch_time", "--max-parallel-batch-time-ms"], type=int, default=10000
+        ["max_parallel_batch_time", "--max-parallel-batch-time-ms"],
+        type=int,
+        default=10000,
     ),
     click.Option(
         ["--processes"],
@@ -241,15 +336,6 @@ _POST_PROCESS_FORWARDER_OPTIONS = multiprocessing_options(
 
 # consumer name -> consumer definition
 KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
-    "ingest-profiles": {
-        "topic": Topic.PROFILES,
-        "strategy_factory": "sentry.profiles.consumers.process.factory.ProcessProfileStrategyFactory",
-    },
-    "ingest-replay-recordings": {
-        "topic": Topic.INGEST_REPLAYS_RECORDINGS,
-        "strategy_factory": "sentry.replays.consumers.recording.ProcessReplayRecordingStrategyFactory",
-        "click_options": ingest_replay_recordings_options(),
-    },
     "ingest-monitors": {
         "topic": Topic.INGEST_MONITORS,
         "strategy_factory": "sentry.monitors.consumers.monitor_consumer.StoreMonitorCheckInStrategyFactory",
@@ -262,6 +348,7 @@ KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
     "monitors-clock-tasks": {
         "topic": Topic.MONITORS_CLOCK_TASKS,
         "strategy_factory": "sentry.monitors.consumers.clock_tasks_consumer.MonitorClockTasksStrategyFactory",
+        "click_options": clock_tasks_options(),
     },
     "monitors-incident-occurrences": {
         "topic": Topic.MONITORS_INCIDENT_OCCURRENCES,
@@ -271,10 +358,7 @@ KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
         "topic": Topic.UPTIME_RESULTS,
         "strategy_factory": "sentry.uptime.consumers.results_consumer.UptimeResultsStrategyFactory",
         "click_options": uptime_options(),
-    },
-    "billing-metrics-consumer": {
-        "topic": Topic.SNUBA_GENERIC_METRICS,
-        "strategy_factory": "sentry.ingest.billing_metrics_consumer.BillingMetricsConsumerStrategyFactory",
+        "pass_consumer_group": True,
     },
     # Known differences to 'sentry run occurrences-ingest-consumer':
     # - ingest_consumer_types metric tag is missing. Use the kafka_topic and
@@ -283,46 +367,6 @@ KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
         "topic": Topic.INGEST_OCCURRENCES,
         "strategy_factory": "sentry.issues.run.OccurrenceStrategyFactory",
         "click_options": issue_occurrence_options(),
-    },
-    "events-subscription-results": {
-        "topic": Topic.EVENTS_SUBSCRIPTIONS_RESULTS,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {"dataset": "events"},
-    },
-    "transactions-subscription-results": {
-        "topic": Topic.TRANSACTIONS_SUBSCRIPTIONS_RESULTS,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {"dataset": "transactions"},
-    },
-    "generic-metrics-subscription-results": {
-        "topic": Topic.GENERIC_METRICS_SUBSCRIPTIONS_RESULTS,
-        "validate_schema": True,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {"dataset": "generic_metrics"},
-    },
-    "metrics-subscription-results": {
-        "topic": Topic.METRICS_SUBSCRIPTIONS_RESULTS,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {"dataset": "metrics"},
-    },
-    "eap-spans-subscription-results": {
-        "topic": Topic.EAP_SPANS_SUBSCRIPTIONS_RESULTS,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {"dataset": "events_analytics_platform"},
-    },
-    "subscription-results-eap-items": {
-        "topic": Topic.EAP_ITEMS_SUBSCRIPTIONS_RESULTS,
-        "strategy_factory": "sentry.snuba.query_subscriptions.run.QuerySubscriptionStrategyFactory",
-        "click_options": multiprocessing_options(default_max_batch_size=100),
-        "static_args": {
-            "dataset": "events_analytics_platform",
-            "topic_override": "subscription-results-eap-items",
-        },
     },
     "ingest-events": {
         "topic": Topic.INGEST_EVENTS,
@@ -355,7 +399,7 @@ KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
     "ingest-transactions": {
         "topic": Topic.INGEST_TRANSACTIONS,
         "strategy_factory": "sentry.ingest.consumer.factory.IngestTransactionsStrategyFactory",
-        "click_options": ingest_transactions_options(),
+        "click_options": ingest_events_options(),
         "dlq_topic": Topic.INGEST_TRANSACTIONS_DLQ,
         "stale_topic": Topic.INGEST_TRANSACTIONS_BACKLOG,
     },
@@ -436,19 +480,7 @@ KAFKA_CONSUMERS: Mapping[str, ConsumerDefinition] = {
                 help="Maximum number of processes for the span flusher. Defaults to 1.",
             ),
         ],
-    },
-    "process-segments": {
-        "topic": Topic.BUFFERED_SEGMENTS,
-        "dlq_topic": Topic.BUFFERED_SEGMENTS_DLQ,
-        "strategy_factory": "sentry.spans.consumers.process_segments.factory.DetectPerformanceIssuesStrategyFactory",
-        "click_options": [
-            click.Option(
-                ["--skip-produce", "skip_produce"],
-                is_flag=True,
-                default=False,
-            ),
-            *multiprocessing_options(default_max_batch_size=100),
-        ],
+        "pass_kafka_slice_id": True,
     },
     **settings.SENTRY_KAFKA_CONSUMERS,
 }
@@ -458,7 +490,6 @@ def get_stream_processor(
     consumer_name: str,
     consumer_args: Sequence[str],
     topic: str | None,
-    cluster: str | None,
     group_id: str,
     auto_offset_reset: str,
     strict_offset_reset: bool,
@@ -473,6 +504,10 @@ def get_stream_processor(
     enforce_schema: bool = False,
     group_instance_id: str | None = None,
     max_dlq_buffer_length: int | None = None,
+    kafka_slice_id: int | None = None,
+    add_global_tags: bool = False,
+    profile_consumer_join: bool = False,
+    arroyo_args: Sequence[str] | None = None,
 ) -> StreamProcessor:
     from sentry.utils import kafka_config
 
@@ -494,30 +529,34 @@ def get_stream_processor(
     strategy_factory_cls = import_string(consumer_definition["strategy_factory"])
     consumer_topic = consumer_definition["topic"]
 
-    topic_defn = get_topic_definition(consumer_topic)
+    topic_defn = get_topic_definition(consumer_topic, kafka_slice_id=kafka_slice_id)
     real_topic = topic_defn["real_topic_name"]
     cluster_from_config = topic_defn["cluster"]
 
     if topic is None:
         topic = real_topic
 
-    if cluster is None:
-        cluster = cluster_from_config
-
     cmd = click.Command(
         name=consumer_name, params=list(consumer_definition.get("click_options") or ())
     )
     cmd_context = cmd.make_context(consumer_name, list(consumer_args))
+    extra_kwargs: dict[str, Any] = {}
+    if consumer_definition.get("pass_consumer_group", False):
+        extra_kwargs["consumer_group"] = group_id
+    if consumer_definition.get("pass_kafka_slice_id", False):
+        extra_kwargs["kafka_slice_id"] = kafka_slice_id
     strategy_factory = cmd_context.invoke(
-        strategy_factory_cls, **cmd_context.params, **consumer_definition.get("static_args") or {}
+        strategy_factory_cls,
+        **cmd_context.params,
+        **consumer_definition.get("static_args") or {},
+        **extra_kwargs,
     )
 
-    def build_consumer_config(group_id: str):
-        assert cluster is not None
-
+    def build_consumer_config(group_id: str, topic: Topic | None = consumer_topic):
         consumer_config = build_kafka_consumer_configuration(
             kafka_config.get_kafka_consumer_cluster_options(
-                cluster,
+                cluster_from_config,
+                topic=topic,
             ),
             group_id=group_id,
             auto_offset_reset=auto_offset_reset,
@@ -533,6 +572,9 @@ def get_stream_processor(
 
         if group_instance_id is not None:
             consumer_config["group.instance.id"] = group_instance_id
+
+        # Set commit interval to 1 second (1000ms)
+        consumer_config["auto.commit.interval.ms"] = 1000
 
         return consumer_config
 
@@ -555,8 +597,15 @@ def get_stream_processor(
         assert synchronize_commit_group is not None
         assert synchronize_commit_log_topic is not None
 
+        # The commit log consumer reads its own topic, so key its per-topic config by that
+        # topic rather than the main consumer's
+        try:
+            commit_log_topic = Topic(synchronize_commit_log_topic)
+        except ValueError:
+            commit_log_topic = None
+
         commit_log_consumer = KafkaConsumer(
-            build_consumer_config(f"sentry-commit-log-{uuid.uuid1().hex}")
+            build_consumer_config(f"sentry-commit-log-{uuid.uuid1().hex}", topic=commit_log_topic)
         )
 
         from sentry.consumers.synchronized import SynchronizedConsumer
@@ -585,10 +634,16 @@ def get_stream_processor(
             stale_threshold_sec, strategy_factory
         )
 
+    if add_global_tags:
+        strategy_factory = MinPartitionMetricTagWrapper(strategy_factory)
+
     if healthcheck_file_path is not None:
         strategy_factory = HealthcheckStrategyFactoryWrapper(
             healthcheck_file_path, strategy_factory
         )
+
+    if profile_consumer_join:
+        strategy_factory = JoinProfilerStrategyFactoryWrapper(strategy_factory)
 
     if enable_dlq and consumer_definition.get("dlq_topic"):
         dlq_topic = consumer_definition["dlq_topic"]
@@ -612,14 +667,21 @@ def get_stream_processor(
     else:
         dlq_policy = None
 
-    return StreamProcessor(
-        consumer=consumer,
-        topic=ArroyoTopic(topic),
-        processor_factory=strategy_factory,
-        commit_policy=ONCE_PER_SECOND,
-        join_timeout=join_timeout,
-        dlq_policy=dlq_policy,
-    )
+    # Build base StreamProcessor arguments
+    processor_args = {
+        "consumer": consumer,
+        "topic": ArroyoTopic(topic),
+        "processor_factory": strategy_factory,
+        "commit_policy": ONCE_PER_SECOND,
+        "join_timeout": join_timeout,
+        "dlq_policy": dlq_policy,
+    }
+
+    # Apply CLI-provided overrides for StreamProcessor arguments
+    if arroyo_args:
+        processor_args = apply_processor_args_overrides(consumer_name, processor_args, arroyo_args)
+
+    return StreamProcessor(**processor_args)
 
 
 class ValidateSchemaStrategyFactoryWrapper(ProcessingStrategyFactory):
@@ -640,6 +702,27 @@ class ValidateSchemaStrategyFactoryWrapper(ProcessingStrategyFactory):
         return ValidateSchema(self.topic, self.enforce_schema, rv)
 
 
+class MinPartitionMetricTagWrapper(ProcessingStrategyFactory):
+    """
+    A wrapper that tracks the minimum partition index being processed by the consumer
+    and adds it as a global metric tag. This helps with monitoring partition distribution
+    and debugging partition-specific issues.
+    """
+
+    def __init__(self, inner: ProcessingStrategyFactory):
+        self.inner = inner
+
+    def create_with_partitions(self, commit, partitions):
+        from sentry.metrics.middleware import add_global_tags
+
+        # Update the min_partition global tag based on current partition assignment
+        if partitions:
+            min_partition = min(p.index for p in partitions)
+            add_global_tags(tags={"min_partition": str(min_partition)})
+
+        return self.inner.create_with_partitions(commit, partitions)
+
+
 class HealthcheckStrategyFactoryWrapper(ProcessingStrategyFactory):
     def __init__(self, healthcheck_file_path: str, inner: ProcessingStrategyFactory):
         self.healthcheck_file_path = healthcheck_file_path
@@ -648,3 +731,12 @@ class HealthcheckStrategyFactoryWrapper(ProcessingStrategyFactory):
     def create_with_partitions(self, commit, partitions):
         rv = self.inner.create_with_partitions(commit, partitions)
         return Healthcheck(self.healthcheck_file_path, rv)
+
+
+class JoinProfilerStrategyFactoryWrapper(ProcessingStrategyFactory):
+    def __init__(self, inner: ProcessingStrategyFactory):
+        self.inner = inner
+
+    def create_with_partitions(self, commit, partitions):
+        rv = self.inner.create_with_partitions(commit, partitions)
+        return JoinProfiler(rv)

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from typing import Protocol, TypeVar
 
-import sentry_protos.snuba.v1alpha.request_common_pb2
 import sentry_sdk
 import sentry_sdk.scope
 import urllib3
+from google.protobuf.json_format import MessageToJson
+from google.protobuf.message import DecodeError as ProtobufDecodeError
 from google.protobuf.message import Message as ProtobufMessage
 from rest_framework.exceptions import NotFound
 from sentry_protos.snuba.v1.endpoint_create_subscription_pb2 import (
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
+)
+from sentry_protos.snuba.v1.endpoint_delete_trace_items_pb2 import (
+    DeleteTraceItemsRequest,
+    DeleteTraceItemsResponse,
 )
 from sentry_protos.snuba.v1.endpoint_get_trace_pb2 import GetTraceRequest, GetTraceResponse
 from sentry_protos.snuba.v1.endpoint_get_traces_pb2 import GetTracesRequest, GetTracesResponse
@@ -37,11 +42,20 @@ from sentry_protos.snuba.v1.endpoint_trace_item_table_pb2 import (
     TraceItemTableRequest,
     TraceItemTableResponse,
 )
+from sentry_protos.snuba.v1.endpoint_trace_items_pb2 import (
+    ExportTraceItemsRequest,
+    ExportTraceItemsResponse,
+)
 from sentry_protos.snuba.v1.error_pb2 import Error as ErrorProto
+from sentry_protos.snuba.v1.request_common_pb2 import RequestMeta
 from urllib3.response import BaseHTTPResponse
 
+from sentry.utils import json, metrics
+from sentry.utils.concurrent import ContextPropagatingThreadPoolExecutor
 from sentry.utils.snuba import SnubaError, _snuba_pool
+from sentry.utils.tracing import set_span_data, set_span_tag, start_span, trace
 
+logger = logging.getLogger(__name__)
 RPCResponseType = TypeVar("RPCResponseType", bound=ProtobufMessage)
 
 # Show the snuba query params and the corresponding sql or errors in the server logs
@@ -50,7 +64,6 @@ SNUBA_INFO_FILE = os.environ.get("SENTRY_SNUBA_INFO_FILE", "")
 SNUBA_INFO = (
     os.environ.get("SENTRY_SNUBA_INFO", "false").lower() in ("true", "1") or SNUBA_INFO_FILE
 )
-_query_thread_pool = ThreadPoolExecutor(max_workers=10)
 
 
 @dataclass(frozen=True)
@@ -64,44 +77,65 @@ def log_snuba_info(content: str) -> None:
         with open(SNUBA_INFO_FILE, "a") as file:
             file.writelines(content)
     else:
-        print(content)  # NOQA: only prints when an env variable is set
+        print(content)  # noqa: S002, T201 -- only prints when an env variable is set
 
 
 class SnubaRPCError(SnubaError):
     pass
 
 
+class SnubaRPCTimeout(SnubaRPCError):
+    pass
+
+
+class SnubaRPCRateLimitExceeded(SnubaRPCError):
+    pass
+
+
+class SnubaRPCTooManySimultaneous(SnubaRPCError):
+    """ClickHouse rejected the query because it hit the concurrent query limit."""
+
+    pass
+
+
 class SnubaRPCRequest(Protocol):
-    def SerializeToString(self, deterministic: bool = ...) -> bytes: ...
+    def SerializeToString(self, *, deterministic: bool = ...) -> bytes: ...
 
     @property
     def meta(
         self,
-    ) -> (
-        sentry_protos.snuba.v1alpha.request_common_pb2.RequestMeta
-        | sentry_protos.snuba.v1.request_common_pb2.RequestMeta
-    ): ...
+    ) -> RequestMeta: ...
 
 
-def table_rpc(requests: list[TraceItemTableRequest]) -> list[TraceItemTableResponse]:
-    return _make_rpc_requests(table_requests=requests).table_response
+def table_rpc(
+    requests: list[TraceItemTableRequest], debug: str | bool = False
+) -> list[TraceItemTableResponse]:
+    return _make_rpc_requests(table_requests=requests, debug=debug).table_response
 
 
-def timeseries_rpc(requests: list[TimeSeriesRequest]) -> list[TimeSeriesResponse]:
-    return _make_rpc_requests(timeseries_requests=requests).timeseries_response
+def timeseries_rpc(
+    requests: list[TimeSeriesRequest], debug: str | bool = False
+) -> list[TimeSeriesResponse]:
+    return _make_rpc_requests(timeseries_requests=requests, debug=debug).timeseries_response
 
 
 def get_trace_rpc(request: GetTraceRequest) -> GetTraceResponse:
     resp = _make_rpc_request("EndpointGetTrace", "v1", referrer=request.meta.referrer, req=request)
     response = GetTraceResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response(
+        "EndpointGetTrace",
+        request,
+        sum(len(group.items) for group in response.item_groups),
+    )
     return response
 
 
-@sentry_sdk.trace
+@trace
 def _make_rpc_requests(
     table_requests: list[TraceItemTableRequest] | None = None,
     timeseries_requests: list[TimeSeriesRequest] | None = None,
+    debug: str | bool = False,
 ) -> MultiRpcResponse:
     """Given lists of requests batch and run them together"""
     # Throw the two lists together, _make_rpc_requests will just run them all
@@ -109,33 +143,45 @@ def _make_rpc_requests(
     timeseries_requests = [] if timeseries_requests is None else timeseries_requests
     requests = table_requests + timeseries_requests
 
-    endpoint_names = [
-        "EndpointTraceItemTable" if isinstance(req, TraceItemTableRequest) else "EndpointTimeSeries"
-        for req in requests
-    ]
+    endpoint_names: list[str] = []
+    for request in requests:
+        endpoint_name = (
+            "EndpointTraceItemTable"
+            if isinstance(request, TraceItemTableRequest)
+            else "EndpointTimeSeries"
+        )
+        endpoint_names.append(endpoint_name)
 
     referrers = [req.meta.referrer for req in requests]
-    assert (
-        len(referrers) == len(requests) == len(endpoint_names)
-    ), "Length of Referrers must match length of requests for making requests"
+    assert len(referrers) == len(requests) == len(endpoint_names), (
+        "Length of Referrers must match length of requests for making requests"
+    )
+
+    if referrers:
+        sentry_sdk.set_tag("query.referrer", referrers[0])
+        sentry_sdk.set_attribute("query.referrer", referrers[0])
 
     # Sets the thread parameters once so we're not doing it in the map repeatedly
     partial_request = partial(
         _make_rpc_request,
         thread_isolation_scope=sentry_sdk.get_isolation_scope(),
         thread_current_scope=sentry_sdk.get_current_scope(),
+        debug=debug,
     )
-    response = [
-        result
-        for result in _query_thread_pool.map(
-            partial_request,
-            endpoint_names,
-            # Currently assuming everything is v1
-            ["v1"] * len(referrers),
-            referrers,
-            requests,
-        )
-    ]
+    with ContextPropagatingThreadPoolExecutor(
+        thread_name_prefix=__name__, max_workers=10
+    ) as query_thread_pool:
+        response = [
+            result
+            for result in query_thread_pool.map(
+                partial_request,
+                endpoint_names,
+                # Currently assuming everything is v1
+                ["v1"] * len(referrers),
+                referrers,
+                requests,
+            )
+        ]
 
     # Split the results back up, the thread pool will return them back in order so we can use the type in the
     # requests list to determine which request goes where
@@ -146,31 +192,121 @@ def _make_rpc_requests(
             table_response = TraceItemTableResponse()
             table_response.ParseFromString(item.data)
             table_results.append(table_response)
+
+            if len(table_response.column_values) > 0:
+                rpc_rows = len(table_response.column_values[0].results)
+            else:
+                rpc_rows = 0
+            logger_extra = {
+                "rpc_rows": rpc_rows,
+                "referrer": request.meta.referrer,
+                "organization_id": request.meta.organization_id,
+                "trace_item_type": request.meta.trace_item_type,
+                "page_token": table_response.page_token,
+                "meta": table_response.meta,
+                "debug": debug is not False,
+            }
+            if isinstance(debug, str):
+                logger_extra["debug_msg"] = debug
+            logger.info(
+                "Table RPC query response",
+                extra=logger_extra,
+            )
+            metrics.distribution("snuba_rpc.table_response.length", rpc_rows)
         elif isinstance(request, TimeSeriesRequest):
             timeseries_response = TimeSeriesResponse()
             timeseries_response.ParseFromString(item.data)
             timeseries_results.append(timeseries_response)
+
+            if len(timeseries_response.result_timeseries) > 0:
+                rpc_rows = len(timeseries_response.result_timeseries[0].data_points)
+            else:
+                rpc_rows = 0
+            logger_extra = {
+                "rpc_rows": rpc_rows,
+                "referrer": request.meta.referrer,
+                "organization_id": request.meta.organization_id,
+                "trace_item_type": request.meta.trace_item_type,
+                "meta": timeseries_response.meta,
+                "debug": debug is not False,
+            }
+            if isinstance(debug, str):
+                logger_extra["debug_msg"] = debug
+            logger.info(
+                "Timeseries RPC query response",
+                extra=logger_extra,
+            )
+            metrics.distribution("snuba_rpc.timeseries_response.length", rpc_rows)
     return MultiRpcResponse(table_results, timeseries_results)
 
 
-def attribute_names_rpc(req: TraceItemAttributeNamesRequest) -> TraceItemAttributeNamesResponse:
-    resp = _make_rpc_request("EndpointTraceItemAttributeNames", "v1", req.meta.referrer, req)
+def _log_rpc_response(
+    endpoint_name: str,
+    req: SnubaRPCRequest,
+    rpc_rows: int | None,
+    debug: str | bool = False,
+) -> None:
+    logger_extra: dict[str, object] = {
+        "rpc_rows": rpc_rows,
+        "referrer": req.meta.referrer,
+        "organization_id": req.meta.organization_id,
+        "trace_item_type": req.meta.trace_item_type,
+        "debug": debug is not False,
+    }
+    if isinstance(debug, str):
+        logger_extra["debug_msg"] = debug
+    logger.info(
+        "%s RPC query response",
+        endpoint_name,
+        extra=logger_extra,
+    )
+    if rpc_rows is not None:
+        metrics.distribution(
+            "snuba_rpc.response.length", rpc_rows, tags={"endpoint": endpoint_name}
+        )
+
+
+def attribute_names_rpc(
+    req: TraceItemAttributeNamesRequest, debug: str | bool = False
+) -> TraceItemAttributeNamesResponse:
+    """
+    This endpoint allows you to request attribute names for traces matching some filters.
+    You can also specify a substring to refine the names returned.
+    """
+    resp = _make_rpc_request(
+        "EndpointTraceItemAttributeNames", "v1", req.meta.referrer, req, debug=debug
+    )
     response = TraceItemAttributeNamesResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointTraceItemAttributeNames", req, len(response.attributes), debug=debug)
     return response
 
 
 def attribute_values_rpc(req: TraceItemAttributeValuesRequest) -> TraceItemAttributeValuesResponse:
+    """
+    This endpoints allows you to request values for a given attribute key.
+    Only works for string attributes.
+
+    You can specify organizationID / projectID / time range / TraceItemType through meta.
+    You cannot apply arbitrary attribute filters (e.g. group_id) to this query.
+    You can specify a substring to refine the values returned.
+    """
     resp = _make_rpc_request("AttributeValuesRequest", "v1", req.meta.referrer, req)
     response = TraceItemAttributeValuesResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response("AttributeValuesRequest", req, len(response.values))
     return response
 
 
 def get_traces_rpc(req: GetTracesRequest) -> GetTracesResponse:
+    """
+    Get Traces matching some set of TraceItemFilters.
+    The Trace data returned are restricted to the set of TraceAttribute.Key
+    """
     resp = _make_rpc_request("EndpointGetTraces", "v1", req.meta.referrer, req)
     response = GetTracesResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointGetTraces", req, len(response.traces))
     return response
 
 
@@ -178,18 +314,34 @@ def trace_item_stats_rpc(req: TraceItemStatsRequest) -> TraceItemStatsResponse:
     resp = _make_rpc_request("EndpointTraceItemStats", "v1", req.meta.referrer, req)
     response = TraceItemStatsResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointTraceItemStats", req, len(response.results))
     return response
 
 
-def trace_item_details_rpc(req: TraceItemDetailsRequest) -> TraceItemDetailsResponse:
+def trace_item_details_rpc(
+    req: TraceItemDetailsRequest, debug: str | bool = False
+) -> TraceItemDetailsResponse:
     """
     An RPC which requests all of the details about a specific trace item.
     For example, you might say "give me all of the attributes for the log with id 1234" or
     "give me all of the attributes for the span with id 12345 and trace_id 34567"
     """
-    resp = _make_rpc_request("EndpointTraceItemDetails", "v1", req.meta.referrer, req)
+    resp = _make_rpc_request("EndpointTraceItemDetails", "v1", req.meta.referrer, req, debug=debug)
     response = TraceItemDetailsResponse()
     response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointTraceItemDetails", req, len(response.attributes), debug=debug)
+    return response
+
+
+def delete_trace_items_rpc(req: DeleteTraceItemsRequest) -> DeleteTraceItemsResponse:
+    """
+    An RPC which deletes trace items matching the filters specified in the request.
+    Used for deleting EAP trace items (e.g. occurrences).
+    """
+    resp = _make_rpc_request("EndpointDeleteTraceItems", "v1", req.meta.referrer, req)
+    response = DeleteTraceItemsResponse()
+    response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointDeleteTraceItems", req, response.matching_items_count)
     return response
 
 
@@ -235,10 +387,19 @@ def rpc(
     http_resp = _make_rpc_request(endpoint_name, class_version, req.meta.referrer, req)
     resp = resp_type()
     resp.ParseFromString(http_resp.data)
+    _log_rpc_response(endpoint_name, req, None)
     return resp
 
 
-@sentry_sdk.trace
+def export_logs_rpc(req: ExportTraceItemsRequest) -> ExportTraceItemsResponse:
+    resp = _make_rpc_request("EndpointExportTraceItems", "v1", req.meta.referrer, req)
+    response = ExportTraceItemsResponse()
+    response.ParseFromString(resp.data)
+    _log_rpc_response("EndpointExportTraceItems", req, len(response.trace_items))
+    return response
+
+
+@trace
 def _make_rpc_request(
     endpoint_name: str,
     class_version: str,
@@ -246,7 +407,26 @@ def _make_rpc_request(
     req: SnubaRPCRequest | CreateSubscriptionRequest,
     thread_isolation_scope: sentry_sdk.Scope | None = None,
     thread_current_scope: sentry_sdk.Scope | None = None,
+    debug: str | bool = False,
 ) -> BaseHTTPResponse:
+    try:
+        logger_extra: dict[str, object] = {
+            "rpc_query": json.loads(MessageToJson(req)),  # type: ignore[arg-type]
+            "referrer": referrer,
+            "debug": debug is not False,
+        }
+        if isinstance(req, ProtobufMessage) and hasattr(req, "meta"):
+            logger_extra["organization_id"] = req.meta.organization_id
+            logger_extra["trace_item_type"] = req.meta.trace_item_type
+        if isinstance(debug, str):
+            logger_extra["debug_msg"] = debug
+        logger.info(
+            f"Running a {endpoint_name} RPC query",  # noqa: LOG011
+            extra=logger_extra,
+        )
+    except Exception:
+        logger.exception("Failed to log RPC query")
+
     thread_isolation_scope = (
         sentry_sdk.get_isolation_scope()
         if thread_isolation_scope is None
@@ -256,15 +436,13 @@ def _make_rpc_request(
         sentry_sdk.get_current_scope() if thread_current_scope is None else thread_current_scope
     )
     if SNUBA_INFO:
-        from google.protobuf.json_format import MessageToJson
-
         log_snuba_info(f"{referrer}.body:\n{MessageToJson(req)}")  # type: ignore[arg-type]
     with sentry_sdk.scope.use_isolation_scope(thread_isolation_scope):
         with sentry_sdk.scope.use_scope(thread_current_scope):
-            with sentry_sdk.start_span(op="snuba_rpc.run", name=req.__class__.__name__) as span:
+            with start_span(op="snuba_rpc.run", name=req.__class__.__name__) as span:
                 if referrer:
-                    span.set_tag("snuba.referrer", referrer)
-                    span.set_data("snuba.query", req)
+                    set_span_tag(span, "snuba.referrer", referrer)
+                    set_span_data(span, "snuba.query", req)
                 try:
                     http_resp = _snuba_pool.urlopen(
                         "POST",
@@ -279,17 +457,36 @@ def _make_rpc_request(
                         ),
                     )
                 except urllib3.exceptions.HTTPError as err:
+                    if isinstance(err, urllib3.exceptions.ReadTimeoutError):
+                        metrics.incr("snuba_rpc.read_timeout_error", tags={"referrer": referrer})
+                        raise SnubaRPCTimeout(err)
                     raise SnubaRPCError(err)
-                span.set_tag("timeout", "False")
+                set_span_tag(span, "timeout", "False")
                 if http_resp.status != 200 and http_resp.status != 202:
-                    error = ErrorProto()
-                    error.ParseFromString(http_resp.data)
+                    error = _parse_error(http_resp)
                     if SNUBA_INFO:
                         log_snuba_info(f"{referrer}.error:\n{error}")
                     if http_resp.status == 404:
                         raise NotFound() from SnubaRPCError(error)
+                    if http_resp.status == 429:
+                        raise SnubaRPCRateLimitExceeded(error)
+                    if "Too many simultaneous queries" in error.message:
+                        raise SnubaRPCTooManySimultaneous(error)
                     raise SnubaRPCError(error)
                 return http_resp
+
+
+def _parse_error(http_resp: BaseHTTPResponse) -> ErrorProto:
+    error = ErrorProto()
+    try:
+        error.ParseFromString(http_resp.data)
+    except ProtobufDecodeError:
+        try:
+            body = http_resp.data.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            body = "<non-text response body>"
+        raise SnubaRPCError(f"Snuba RPC returned HTTP {http_resp.status}: {body}")
+    return error
 
 
 def create_subscription(req: CreateSubscriptionRequest) -> CreateSubscriptionResponse:
@@ -299,4 +496,5 @@ def create_subscription(req: CreateSubscriptionRequest) -> CreateSubscriptionRes
     http_resp = _make_rpc_request(endpoint_name, class_version, None, req)
     resp = CreateSubscriptionResponse()
     resp.ParseFromString(http_resp.data)
+    _log_rpc_response(endpoint_name, req.time_series_request, None)
     return resp

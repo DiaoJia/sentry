@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, MutableMapping
 
 from django.utils.functional import cached_property
-from snuba_sdk import Column, Condition, Function, Op, OrderBy
+from snuba_sdk import Column, Condition, Direction, Function, Op, OrderBy
 
 from sentry.api.event_search import ParenExpression, SearchFilter, parse_search_query
 from sentry.exceptions import IncompatibleMetricsQuery, InvalidSearchQuery
@@ -70,18 +70,12 @@ class MetricsDatasetConfig(DatasetConfig):
         mri_map = constants.SPAN_METRICS_MAP | constants.METRICS_MAP
         metric_id = self.builder.resolve_metric_index(mri_map.get(value, value))
         if metric_id is None:
-            # Maybe this is a custom measurment?
-            for measurement in self.builder.custom_measurement_map:
-                if measurement["name"] == value and measurement["metric_id"] is not None:
-                    metric_id = measurement["metric_id"]
-        # If its still None its not a custom measurement
-        if metric_id is None:
             raise IncompatibleMetricsQuery(f"Metric: {value} could not be resolved")
         self.builder.metric_ids.add(metric_id)
         return metric_id
 
     @property
-    def should_skip_interval_calculation(self):
+    def should_skip_interval_calculation(self) -> bool:
         return self.builder.builder_config.skip_time_conditions and (
             not self.builder.params.start or not self.builder.params.end
         )
@@ -91,8 +85,6 @@ class MetricsDatasetConfig(DatasetConfig):
         """While the final functions in clickhouse must have their -Merge combinators in order to function, we don't
         need to add them here since snuba has a FunctionMapper that will add it for us. Basically it turns expressions
         like quantiles(0.9)(value) into quantilesMerge(0.9)(percentiles)
-        Make sure to update METRIC_FUNCTION_LIST_BY_TYPE when adding functions here, can't be a dynamic list since the
-        Metric Layer will actually handle which dataset each function goes to
         """
         resolve_metric_id = {
             "name": "metric_id",
@@ -846,7 +838,8 @@ class MetricsDatasetConfig(DatasetConfig):
                         fields.SnQLDateArg("middle"),
                     ],
                     calculated_args=[resolve_metric_id],
-                    snql_distribution=lambda args, alias: function_aliases.resolve_metrics_percentile(
+                    snql_distribution=lambda args,
+                    alias: function_aliases.resolve_metrics_percentile(
                         args=args,
                         alias=alias,
                         fixed_percentile=args["percentile"],
@@ -945,8 +938,13 @@ class MetricsDatasetConfig(DatasetConfig):
         return function_converter
 
     @property
-    def orderby_converter(self) -> Mapping[str, OrderBy]:
-        return {}
+    def orderby_converter(self) -> Mapping[str, Callable[[Direction], OrderBy]]:
+        return {
+            constants.DEVICE_CLASS_ALIAS: self._device_class_orderby_converter,
+        }
+
+    def _device_class_orderby_converter(self, direction: Direction) -> OrderBy:
+        return OrderBy(self.builder.column("device.class"), direction)
 
     # Field Aliases
     def _resolve_title_alias(self, alias: str) -> SelectType:
@@ -2122,7 +2120,6 @@ class MetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         return self._resolve_count_if(
             Function(
                 "equals",
@@ -2146,7 +2143,6 @@ class MetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         return self._resolve_count_if(
             Function(
                 "equals",
@@ -2170,7 +2166,6 @@ class MetricsDatasetConfig(DatasetConfig):
         _: Mapping[str, str | Column | SelectType | int | float],
         alias: str | None = None,
     ) -> SelectType:
-
         statuses = [self.builder.resolve_tag_value(status) for status in constants.CACHE_HIT_STATUS]
 
         return self._resolve_count_if(

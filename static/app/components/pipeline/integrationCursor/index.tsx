@@ -1,0 +1,83 @@
+import {useEffect} from 'react';
+import {z} from 'zod';
+
+import {defaultFormOptions, setFieldErrors, useScrapsForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+
+import type {
+  PipelineDefinition,
+  PipelineStepProps,
+} from 'sentry/components/pipeline/types';
+import {pipelineComplete} from 'sentry/components/pipeline/types';
+import {t} from 'sentry/locale';
+import type {IntegrationWithConfig} from 'sentry/types/integrations';
+import {requestErrorToFieldErrors} from 'sentry/utils/requestError/requestErrorToFieldErrors';
+
+const apiKeySchema = z.object({
+  apiKey: z.string().min(1, t('API key is required')),
+});
+
+function CursorApiKeyStep({
+  advance,
+  advanceError,
+  isAdvancing,
+  isInitializing,
+}: PipelineStepProps<Record<string, never>, {apiKey: string}>) {
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {apiKey: ''},
+    validators: {onDynamic: apiKeySchema},
+    onSubmit: ({value}) => {
+      advance({apiKey: value.apiKey});
+    },
+  });
+
+  useEffect(() => {
+    if (advanceError) {
+      setFieldErrors(form, requestErrorToFieldErrors(advanceError, form.state.values));
+    }
+  }, [advanceError, form]);
+
+  return (
+    <form.AppForm form={form}>
+      <Stack gap="lg">
+        <Text>
+          {t('Enter your Cursor API key to connect Cursor Agents with Sentry.')}
+        </Text>
+        <form.AppField name="apiKey">
+          {field => (
+            <field.Layout.Stack label={t('Cursor API Key')} required>
+              <field.Input
+                type="password"
+                value={field.state.value}
+                onChange={field.handleChange}
+                placeholder="crsr_..."
+              />
+            </field.Layout.Stack>
+          )}
+        </form.AppField>
+        <Flex>
+          <form.SubmitButton busy={isAdvancing} disabled={isInitializing}>
+            {t('Continue')}
+          </form.SubmitButton>
+        </Flex>
+      </Stack>
+    </form.AppForm>
+  );
+}
+
+export const cursorIntegrationPipeline = {
+  type: 'integration',
+  provider: 'cursor',
+  actionTitle: t('Installing Cursor Agent'),
+  getCompletionData: pipelineComplete<IntegrationWithConfig>,
+  completionView: null,
+  steps: [
+    {
+      stepId: 'api_key_config',
+      shortDescription: t('Configuring API key'),
+      component: CursorApiKeyStep,
+    },
+  ],
+} as const satisfies PipelineDefinition;

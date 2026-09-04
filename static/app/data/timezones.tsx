@@ -2,7 +2,7 @@ import styled from '@emotion/styled';
 import groupBy from 'lodash/groupBy';
 import moment from 'moment-timezone';
 
-import type {SelectValue} from 'sentry/types/core';
+import type {SelectValue} from '@sentry/scraps/select';
 
 type TimezoneGroup =
   | null
@@ -465,11 +465,11 @@ const timezones: Array<[group: TimezoneGroup, value: string, label: string]> = [
 ];
 
 const OffsetLabel = styled('div')`
-  color: ${p => p.theme.subText};
-  font-weight: ${p => p.theme.fontWeightBold};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   display: flex;
   align-items: center;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   width: max-content;
 `;
 

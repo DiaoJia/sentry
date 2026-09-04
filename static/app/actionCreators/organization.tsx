@@ -2,26 +2,32 @@ import * as Sentry from '@sentry/react';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import {setActiveOrganization} from 'sentry/actionCreators/organizations';
-import type {ApiResult} from 'sentry/api';
 import {Client} from 'sentry/api';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {TeamStore} from 'sentry/stores/teamStore';
+import type {ApiResult} from 'sentry/types/api';
 import type {Organization, Team} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import FeatureFlagOverrides from 'sentry/utils/featureFlagOverrides';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {FeatureFlagOverrides} from 'sentry/utils/featureFlagOverrides';
 import {
   addOrganizationFeaturesHandler,
   buildSentryFeaturesHandler,
 } from 'sentry/utils/featureFlags';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
-import type RequestError from 'sentry/utils/requestError/requestError';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
 
 async function fetchOrg(api: Client, slug: string): Promise<Organization> {
-  const [org] = await api.requestPromise(`/organizations/${slug}/`, {
-    includeAllArgs: true,
-    query: {detailed: 0, include_feature_flags: 1},
-  });
+  const [org] = await api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/', {
+      path: {organizationIdOrSlug: slug},
+    }),
+    {
+      includeAllArgs: true,
+      query: {detailed: 0, include_feature_flags: 1},
+    }
+  );
 
   if (!org) {
     throw new Error('retrieved organization is falsey');
@@ -40,6 +46,7 @@ async function fetchOrg(api: Client, slug: string): Promise<Organization> {
   // XXX(dcramer): this is duplicated in sdk.py on the backend
   scope.setTag('organization', org.id);
   scope.setTag('organization.slug', org.slug);
+  scope.setAttributes({organization: org.id, 'organization.slug': org.slug});
   scope.setContext('organization', {id: org.id, slug: org.slug});
 
   return org;
@@ -52,7 +59,9 @@ async function fetchProjectsAndTeams(
   const uncancelableApi = new Client();
 
   const projectsPromise = uncancelableApi.requestPromise(
-    `/organizations/${slug}/projects/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/projects/', {
+      path: {organizationIdOrSlug: slug},
+    }),
     {
       includeAllArgs: true,
       query: {
@@ -62,13 +71,16 @@ async function fetchProjectsAndTeams(
     }
   );
 
-  const teamsPromise = uncancelableApi.requestPromise(`/organizations/${slug}/teams/`, {
-    includeAllArgs: true,
-  });
+  const teamsPromise = uncancelableApi.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/teams/', {
+      path: {organizationIdOrSlug: slug},
+    }),
+    {includeAllArgs: true}
+  );
 
   try {
     return await Promise.all([projectsPromise, teamsPromise]);
-  } catch (err) {
+  } catch (err: any) {
     // It's possible these requests fail with a 403 if the user has a role with
     // insufficient access to projects and teams, but *can* access org details
     // (e.g. billing). An example of this is in org settings.
@@ -103,10 +115,10 @@ export async function fetchOrganizationDetails(api: Client, slug: string): Promi
   };
 
   const loadOrganization = async () => {
-    let org: Organization | undefined = undefined;
+    let org: Organization | undefined;
     try {
       org = await fetchOrg(api, slug);
-    } catch (err) {
+    } catch (err: any) {
       if (!err) {
         throw err;
       }
@@ -118,10 +130,11 @@ export async function fetchOrganizationDetails(api: Client, slug: string): Promi
 
         if (errMessage) {
           addErrorMessage(errMessage);
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
           throw errMessage;
         }
 
-        return undefined;
+        return;
       }
       Sentry.captureException(err);
     }

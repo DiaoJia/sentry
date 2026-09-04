@@ -1,26 +1,35 @@
 import {useCallback, useEffect, useRef} from 'react';
 
-type Options = {
+interface Options {
   onTimeout: () => void;
   timeMs: number;
-};
+}
 
-function useTimeout({timeMs, onTimeout}: Options) {
-  const timeoutRef = useRef<number>(null);
+export function useTimeout({timeMs, onTimeout}: Options) {
+  const timeoutRef = useRef<number | null>(null);
 
-  const saveTimeout = useCallback((timeout: ReturnType<typeof setTimeout> | null) => {
+  // Using a ref to stabilize the callbacks.
+  const onTimeoutRef = useRef(onTimeout);
+  useEffect(() => {
+    onTimeoutRef.current = onTimeout;
+  });
+
+  const saveTimeout = useCallback((timeout: number | null) => {
     if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
+      window.clearTimeout(timeoutRef.current);
     }
-    // See: https://reactjs.org/docs/hooks-faq.html#is-there-something-like-instance-variables
-    // @ts-expect-error TS(2540): Cannot assign to 'current' because it is a read-on... Remove this comment to see the full error message
     timeoutRef.current = timeout;
   }, []);
 
-  const start = useCallback(() => {
-    saveTimeout(null);
-    saveTimeout(setTimeout(onTimeout, timeMs));
-  }, [onTimeout, saveTimeout, timeMs]);
+  const start = useCallback(
+    (overrideTimeMs?: number) => {
+      saveTimeout(null);
+      saveTimeout(
+        window.setTimeout(() => onTimeoutRef.current(), overrideTimeMs ?? timeMs)
+      );
+    },
+    [saveTimeout, timeMs]
+  );
 
   const cancel = useCallback(() => {
     saveTimeout(null);
@@ -28,15 +37,18 @@ function useTimeout({timeMs, onTimeout}: Options) {
 
   const end = useCallback(() => {
     saveTimeout(null);
-    onTimeout();
-  }, [onTimeout, saveTimeout]);
+    onTimeoutRef.current();
+  }, [saveTimeout]);
 
   // Cancel the timeout on unmount
   useEffect(() => cancel, [cancel]);
 
   return {
     /**
-     * Start the timer
+     * Start the timer.
+     *
+     * Pass an optional `overrideTimeMs` to fire after a different duration
+     * than the one provided at construction.
      *
      * If there was a previous timer, then it will be cancelled.
      */
@@ -55,5 +67,3 @@ function useTimeout({timeMs, onTimeout}: Options) {
     end,
   };
 }
-
-export default useTimeout;

@@ -1,23 +1,26 @@
+from __future__ import annotations
+
 import logging
-from typing import NotRequired, TypedDict
+from collections.abc import Sequence
+from typing import TypedDict
 
 from django.conf import settings
-from urllib3.exceptions import ReadTimeoutError
+from urllib3.exceptions import MaxRetryError, ReadTimeoutError, TimeoutError
 
 from sentry import options
-from sentry.conf.server import (
-    SEER_GROUPING_RECORDS_URL,
-    SEER_HASH_GROUPING_RECORDS_DELETE_URL,
-    SEER_PROJECT_GROUPING_RECORDS_DELETE_URL,
-)
+from sentry.conf.server import SEER_HASH_GROUPING_RECORDS_DELETE_URL
 from sentry.net.http import connection_from_url
-from sentry.seer.signed_seer_api import make_signed_seer_api_request
-from sentry.seer.similarity.types import RawSeerSimilarIssueData
+from sentry.seer.signed_seer_api import (
+    DeleteGroupingRecordsByProjectRequest,
+    make_delete_grouping_records_by_project_request,
+    make_signed_seer_api_request,
+)
 from sentry.utils import json, metrics
 
 logger = logging.getLogger(__name__)
 
 POST_BULK_GROUPING_RECORDS_TIMEOUT = 10000
+DELETE_HASH_METRIC = "grouping.similarity.delete_records_by_hash"
 
 
 class CreateGroupingRecordData(TypedDict):
@@ -27,69 +30,19 @@ class CreateGroupingRecordData(TypedDict):
     exception_type: str | None
 
 
-class CreateGroupingRecordsRequest(TypedDict):
-    group_id_list: list[int]
-    data: list[CreateGroupingRecordData]
-    stacktrace_list: list[str]
-    use_reranking: bool | None
+seer_grouping_connection_pool = connection_from_url(
+    settings.SEER_GROUPING_URL,
+    timeout=settings.SEER_DEFAULT_TIMEOUT,
+)
 
 
-class BulkCreateGroupingRecordsResponse(TypedDict):
-    success: bool
-    groups_with_neighbor: NotRequired[dict[str, RawSeerSimilarIssueData]]
-    reason: NotRequired[str | None]
-
-
-seer_grouping_backfill_connection_pool = connection_from_url(settings.SEER_GROUPING_BACKFILL_URL)
-seer_grouping_connection_pool = connection_from_url(settings.SEER_GROUPING_URL)
-
-
-def post_bulk_grouping_records(
-    grouping_records_request: CreateGroupingRecordsRequest,
-) -> BulkCreateGroupingRecordsResponse:
-    """Call /v0/issues/similar-issues/grouping-record endpoint from seer."""
-    if not grouping_records_request.get("data"):
-        return {"success": True}
-
-    extra = {
-        "group_ids": json.dumps(grouping_records_request["group_id_list"]),
-        "project_id": grouping_records_request["data"][0]["project_id"],
-        "stacktrace_length_sum": sum(
-            [len(stacktrace) for stacktrace in grouping_records_request["stacktrace_list"]]
-        ),
-        "use_reranking": grouping_records_request.get("use_reranking"),
-    }
-
-    try:
-        response = make_signed_seer_api_request(
-            seer_grouping_backfill_connection_pool,
-            SEER_GROUPING_RECORDS_URL,
-            body=json.dumps(grouping_records_request).encode("utf-8"),
-            timeout=POST_BULK_GROUPING_RECORDS_TIMEOUT,
-        )
-    except ReadTimeoutError:
-        extra.update({"reason": "ReadTimeoutError", "timeout": POST_BULK_GROUPING_RECORDS_TIMEOUT})
-        logger.info("seer.post_bulk_grouping_records.failure", extra=extra)
-        return {"success": False, "reason": "ReadTimeoutError"}
-
-    if response.status >= 200 and response.status < 300:
-        logger.info("seer.post_bulk_grouping_records.success", extra=extra)
-        return json.loads(response.data.decode("utf-8"))
-    else:
-        extra.update({"reason": response.reason})
-        logger.info("seer.post_bulk_grouping_records.failure", extra=extra)
-        return {"success": False, "reason": response.reason}
-
-
-def delete_project_grouping_records(
+def call_seer_to_delete_project_grouping_records(
     project_id: int,
 ) -> bool:
     try:
-        # TODO: Move this over to POST json_api implementation
-        response = seer_grouping_connection_pool.urlopen(
-            "GET",
-            f"{SEER_PROJECT_GROUPING_RECORDS_DELETE_URL}/{project_id}",
-            headers={"Content-Type": "application/json;charset=utf-8"},
+        body: DeleteGroupingRecordsByProjectRequest = {"project_id": project_id}
+        response = make_delete_grouping_records_by_project_request(
+            body,
             timeout=POST_BULK_GROUPING_RECORDS_TIMEOUT,
         )
     except ReadTimeoutError:
@@ -122,22 +75,26 @@ def delete_project_grouping_records(
         return False
 
 
-def delete_grouping_records_by_hash(project_id: int, hashes: list[str]) -> bool:
+def call_seer_to_delete_these_hashes(project_id: int, hashes: Sequence[str]) -> bool:
     extra = {"project_id": project_id, "hashes": hashes}
     try:
-        body = {"project_id": project_id, "hash_list": hashes}
-        response = seer_grouping_connection_pool.urlopen(
-            "POST",
+        body = json.dumps({"project_id": project_id, "hash_list": hashes}).encode("utf-8")
+        response = make_signed_seer_api_request(
+            seer_grouping_connection_pool,
             SEER_HASH_GROUPING_RECORDS_DELETE_URL,
-            body=json.dumps(body),
-            headers={"Content-Type": "application/json;charset=utf-8"},
+            body=body,
             timeout=POST_BULK_GROUPING_RECORDS_TIMEOUT,
         )
-    except ReadTimeoutError:
-        extra.update({"reason": "ReadTimeoutError", "timeout": POST_BULK_GROUPING_RECORDS_TIMEOUT})
+    except (TimeoutError, MaxRetryError) as e:
+        extra.update({"reason": type(e).__name__, "timeout": POST_BULK_GROUPING_RECORDS_TIMEOUT})
         logger.exception(
             "seer.delete_grouping_records.hashes.timeout",
             extra=extra,
+        )
+        metrics.incr(
+            DELETE_HASH_METRIC,
+            sample_rate=options.get("seer.similarity.metrics_sample_rate"),
+            tags={"success": False, "reason": type(e).__name__},
         )
         return False
 
@@ -147,7 +104,7 @@ def delete_grouping_records_by_hash(project_id: int, hashes: list[str]) -> bool:
             extra=extra,
         )
         metrics.incr(
-            "grouping.similarity.delete_records_by_hash",
+            DELETE_HASH_METRIC,
             sample_rate=options.get("seer.similarity.metrics_sample_rate"),
             tags={"success": True},
         )
@@ -155,7 +112,7 @@ def delete_grouping_records_by_hash(project_id: int, hashes: list[str]) -> bool:
     else:
         logger.error("seer.delete_grouping_records.hashes.failure", extra=extra)
         metrics.incr(
-            "grouping.similarity.delete_records_by_hash",
+            DELETE_HASH_METRIC,
             sample_rate=options.get("seer.similarity.metrics_sample_rate"),
             tags={"success": False},
         )

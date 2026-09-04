@@ -1,24 +1,32 @@
 import {Fragment} from 'react';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import Link from 'sentry/components/links/link';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {t} from 'sentry/locale';
 import type {ClickFrame} from 'sentry/utils/replays/types';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {makeReplaysPathname} from 'sentry/views/replays/pathnames';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeReplaysPathname} from 'sentry/views/explore/replays/pathnames';
 
-export default function SelectorList({frame}: {frame: ClickFrame}) {
+export function SelectorList({frame}: {frame: ClickFrame}) {
   const location = useLocation();
   const organization = useOrganization();
 
-  const componentName = frame.data.node?.attributes['data-sentry-component'];
-  const indexOfArrow = frame.message?.lastIndexOf('>') ?? -1;
-  const lastComponentIndex = indexOfArrow === -1 ? 0 : indexOfArrow + 2;
+  // These fields can be missing when an SDK emits a malformed breadcrumb.
+  const componentName = frame.data?.node?.attributes?.['data-sentry-component'];
 
-  return componentName ? (
+  if (!componentName) {
+    return frame.message;
+  }
+
+  const lastSeparatorIndex = frame.message?.lastIndexOf('>') ?? -1;
+  const selectorPrefix =
+    lastSeparatorIndex < 0 ? '' : frame.message?.slice(0, lastSeparatorIndex + 2);
+
+  return (
     <Fragment>
-      <span>{frame.message?.substring(0, lastComponentIndex)}</span>
+      <span>{selectorPrefix}</span>
       <Tooltip
         title={t('Search by this component')}
         containerDisplayMode="inline"
@@ -40,7 +48,5 @@ export default function SelectorList({frame}: {frame: ClickFrame}) {
         </Link>
       </Tooltip>
     </Fragment>
-  ) : (
-    frame.message
   );
 }

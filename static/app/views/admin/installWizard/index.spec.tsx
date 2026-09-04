@@ -4,30 +4,32 @@ import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import InstallWizard from 'sentry/views/admin/installWizard';
 
-describe('InstallWizard', function () {
-  beforeEach(function () {
+describe('InstallWizard', () => {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
-      url: '/internal/options/?query=is:required',
+      url: '/internal/options/',
+      match: [MockApiClient.matchQuery({query: 'is:required'})],
       body: InstallWizardFixture(),
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders', function () {
+  it('renders', () => {
     render(<InstallWizard onConfigured={jest.fn()} />);
   });
 
-  it('has no option selected when beacon.anonymous is unset', async function () {
+  it('has no option selected when beacon.anonymous is unset', async () => {
     MockApiClient.addMockResponse({
-      url: '/internal/options/?query=is:required',
+      url: '/internal/options/',
+      match: [MockApiClient.matchQuery({query: 'is:required'})],
       body: InstallWizardFixture({
         'beacon.anonymous': {
           field: {
-            disabledReason: null,
-            default: false,
+            key: '',
+            label: '',
             required: true,
             disabled: false,
             allowEmpty: true,
@@ -38,9 +40,8 @@ describe('InstallWizard', function () {
       }),
     });
     render(<InstallWizard onConfigured={jest.fn()} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
     expect(
-      screen.getByRole('radio', {
+      await screen.findByRole('radio', {
         name: 'Please keep my usage information anonymous',
       })
     ).not.toBeChecked();
@@ -51,14 +52,15 @@ describe('InstallWizard', function () {
     ).not.toBeChecked();
   });
 
-  it('has no option selected even when beacon.anonymous is set', async function () {
+  it('has no option selected even when beacon.anonymous is set', async () => {
     MockApiClient.addMockResponse({
-      url: '/internal/options/?query=is:required',
+      url: '/internal/options/',
+      match: [MockApiClient.matchQuery({query: 'is:required'})],
       body: InstallWizardFixture({
         'beacon.anonymous': {
           field: {
-            disabledReason: null,
-            default: false,
+            key: '',
+            label: '',
             required: true,
             disabled: false,
             allowEmpty: true,
@@ -69,9 +71,8 @@ describe('InstallWizard', function () {
       }),
     });
     render(<InstallWizard onConfigured={jest.fn()} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
     expect(
-      screen.getByRole('radio', {
+      await screen.findByRole('radio', {
         name: 'Please keep my usage information anonymous',
       })
     ).not.toBeChecked();

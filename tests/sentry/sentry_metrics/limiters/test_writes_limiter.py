@@ -16,14 +16,14 @@ WRITES_LIMITERS = {
 }
 
 
-def get_writes_limiter(namespace: str):
+def get_writes_limiter(namespace: str) -> WritesLimiter:
     return WRITES_LIMITERS[namespace]
 
 
 MOCK_METRIC_PATH_MAPPING = {
     UseCaseID.TRANSACTIONS: UseCaseKey.PERFORMANCE,
     UseCaseID.SPANS: UseCaseKey.PERFORMANCE,
-    UseCaseID.ESCALATING_ISSUES: UseCaseKey.PERFORMANCE,
+    UseCaseID.PROFILES: UseCaseKey.PERFORMANCE,
 }
 
 MOCK_REVERSE_METRIC_PATH_MAPPING = {
@@ -34,7 +34,7 @@ MOCK_REVERSE_METRIC_PATH_MAPPING = {
 MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS = {
     UseCaseID.TRANSACTIONS: "sentry-metrics.writes-limiter.limits.transactions",
     UseCaseID.SPANS: "sentry-metrics.writes-limiter.limits.uc1",
-    UseCaseID.ESCALATING_ISSUES: "sentry-metrics.writes-limiter.limits.uc2",
+    UseCaseID.PROFILES: "sentry-metrics.writes-limiter.limits.uc2",
 }
 
 
@@ -42,7 +42,7 @@ MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS = {
     "sentry.sentry_metrics.indexer.limiters.writes.USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS",
     MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS,
 )
-def test_writes_limiter_no_limits():
+def test_writes_limiter_no_limits() -> None:
     with override_options(
         {
             "sentry-metrics.writes-limiter.limits.transactions.global": [],
@@ -67,7 +67,7 @@ def test_writes_limiter_no_limits():
                     10: {"x", "y", "z"},
                     11: {"a", "b", "c"},
                 },
-                UseCaseID.ESCALATING_ISSUES: {
+                UseCaseID.PROFILES: {
                     3: {"x", "y", "z"},
                     4: {"a", "b", "c"},
                 },
@@ -82,7 +82,7 @@ def test_writes_limiter_no_limits():
     "sentry.sentry_metrics.indexer.limiters.writes.USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS",
     MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS,
 )
-def test_writes_limiter_doesnt_limit():
+def test_writes_limiter_doesnt_limit() -> None:
     with override_options(
         {
             "sentry-metrics.writes-limiter.limits.transactions.global": [],
@@ -115,7 +115,7 @@ def test_writes_limiter_doesnt_limit():
                     3: {"c", "d"},
                     4: {"e", "f"},
                 },
-                UseCaseID.ESCALATING_ISSUES: {
+                UseCaseID.PROFILES: {
                     5: {"g", "h", "i"},
                     6: {"j", "k", "l"},
                 },
@@ -131,7 +131,7 @@ def test_writes_limiter_doesnt_limit():
     "sentry.sentry_metrics.indexer.limiters.writes.USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS",
     MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS,
 )
-def test_writes_limiter_org_limit():
+def test_writes_limiter_org_limit() -> None:
     with override_options(
         {
             "sentry-metrics.writes-limiter.limits.transactions.global": [],
@@ -164,7 +164,7 @@ def test_writes_limiter_org_limit():
                     3: {"c", "d"},
                     4: {"e", "f"},
                 },
-                UseCaseID.ESCALATING_ISSUES: {
+                UseCaseID.PROFILES: {
                     5: {"g", "h", "i"},
                     6: {"j", "k", "l"},
                 },
@@ -195,7 +195,7 @@ def test_writes_limiter_org_limit():
     "sentry.sentry_metrics.indexer.limiters.writes.USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS",
     MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS,
 )
-def test_writes_limiter_global_limit():
+def test_writes_limiter_global_limit() -> None:
     with override_options(
         {
             "sentry-metrics.writes-limiter.limits.transactions.global": [
@@ -230,7 +230,7 @@ def test_writes_limiter_global_limit():
                     3: {"c", "d"},
                     4: {"e", "f"},
                 },
-                UseCaseID.ESCALATING_ISSUES: {
+                UseCaseID.PROFILES: {
                     5: {"g", "h", "i"},
                     6: {"j", "k", "l"},
                 },
@@ -245,7 +245,7 @@ def test_writes_limiter_global_limit():
     "sentry.sentry_metrics.indexer.limiters.writes.USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS",
     MOCK_USE_CASE_ID_WRITES_LIMIT_QUOTA_OPTIONS,
 )
-def test_writes_limiter_respects_use_case_id():
+def test_writes_limiter_respects_use_case_id() -> None:
     """
     Here we test that a use_case_id currently exceededing quota results in
     dropping all strings for subsequent calls to check_write_limits
@@ -282,7 +282,7 @@ def test_writes_limiter_respects_use_case_id():
                     10: {"x", "y", "z"},
                     11: {"a", "b", "c"},
                 },
-                UseCaseID.ESCALATING_ISSUES: {
+                UseCaseID.PROFILES: {
                     3: {"x", "y", "z"},
                     4: {"a", "b", "c"},
                 },

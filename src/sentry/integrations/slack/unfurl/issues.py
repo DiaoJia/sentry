@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import re
 
-from django.http.request import HttpRequest
-
-from sentry import eventstore
 from sentry.integrations.messaging.metrics import (
     MessagingInteractionEvent,
     MessagingInteractionType,
 )
 from sentry.integrations.models.integration import Integration
-from sentry.integrations.services.integration import integration_service
+from sentry.integrations.services.integration import RpcIntegration, integration_service
 from sentry.integrations.slack.message_builder.issues import SlackIssuesMessageBuilder
 from sentry.integrations.slack.spec import SlackMessagingSpec
 from sentry.integrations.slack.unfurl.types import (
@@ -21,35 +18,39 @@ from sentry.integrations.slack.unfurl.types import (
 )
 from sentry.models.group import Group
 from sentry.models.project import Project
+from sentry.services import eventstore
 from sentry.users.models.user import User
+from sentry.users.services.user import RpcUser
 
 map_issue_args = make_type_coercer(
     {
         "issue_id": int,
         "event_id": str,
+        "org_slug": str,
     }
 )
 
 
 def unfurl_issues(
-    request: HttpRequest,
-    integration: Integration,
+    integration: Integration | RpcIntegration,
     links: list[UnfurlableUrl],
-    user: User | None = None,
+    user: User | RpcUser | None = None,
 ) -> UnfurledUrl:
     """
     Returns a map of the attachments used in the response we send to Slack
     for a particular issue by the URL of the yet-unfurled links a user included
     in their Slack message.
     """
-    event = MessagingInteractionEvent(
+    with MessagingInteractionEvent(
         MessagingInteractionType.UNFURL_ISSUES, SlackMessagingSpec(), user=user
-    )
-    with event.capture():
+    ).capture() as lifecycle:
+        lifecycle.add_extras({"integration_id": integration.id})
         return _unfurl_issues(integration, links)
 
 
-def _unfurl_issues(integration: Integration, links: list[UnfurlableUrl]) -> UnfurledUrl:
+def _unfurl_issues(
+    integration: Integration | RpcIntegration, links: list[UnfurlableUrl]
+) -> UnfurledUrl:
     org_integrations = integration_service.get_organization_integrations(
         integration_id=integration.id
     )
@@ -85,11 +86,11 @@ def _unfurl_issues(integration: Integration, links: list[UnfurlableUrl]) -> Unfu
 
 
 issue_link_regex = re.compile(
-    r"^https?\://(?#url_prefix)[^/]+/organizations/(?#organization_slug)[^/]+/issues/(?P<issue_id>\d+)(?:/events/(?P<event_id>\w+))?"
+    r"^https?\://(?#url_prefix)[^/]+/organizations/(?P<org_slug>[^/]+)/issues/(?P<issue_id>\d+)(?:/events/(?P<event_id>\w+))?"
 )
 
 customer_domain_issue_link_regex = re.compile(
-    r"^https?\://(?#url_prefix)[^/]+/issues/(?P<issue_id>\d+)(?:/events/(?P<event_id>\w+))?"
+    r"^https?\://(?P<org_slug>[^.]+?)\.(?#url_prefix)[^/]+/issues/(?P<issue_id>\d+)(?:/events/(?P<event_id>\w+))?"
 )
 
 issues_handler = Handler(

@@ -1,41 +1,123 @@
 import {useState} from 'react';
-import styled from '@emotion/styled';
+import {skipToken} from '@tanstack/react-query';
 
-import {Button} from 'sentry/components/core/button';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import UserBadge from 'sentry/components/idBadge/userBadge';
-import Truncate from 'sentry/components/truncate';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {Alert} from '@sentry/scraps/alert';
+import {UserAvatar} from '@sentry/scraps/avatar';
+import {Badge} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Container, Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import {Heading, Text} from '@sentry/scraps/text';
+
+import type {OrganizationSummary} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
+import type {User} from 'sentry/types/user';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getCells} from 'sentry/utils/cells';
 import {useNavigate} from 'sentry/utils/useNavigate';
 
-import DebounceSearch from 'admin/components/debounceSearch';
-import Overview from 'admin/views/overview';
+import {AdminSearchCombobox} from 'admin/components/adminSearchCombobox';
+import {Overview} from 'admin/views/overview';
 
-type Props = RouteComponentProps<unknown, unknown>;
+type OrganizationSearchResult = Pick<OrganizationSummary, 'id' | 'name' | 'slug'>;
 
-function HomePage(props: Props) {
+type ProjectSearchResult = Pick<Project, 'id' | 'slug'> & {
+  organization: Pick<OrganizationSummary, 'slug'>;
+};
+
+function normalizeProjectIdQuery(query: string): string | null {
+  const match = query.match(/^(?:id:)?\s*(\d+)$/);
+  return match?.[1] ?? null;
+}
+
+function renderOrganizationResult(organization: OrganizationSearchResult) {
+  return (
+    <Text as="span">
+      <Text as="span" bold>
+        {organization.slug}
+      </Text>{' '}
+      (
+      <Text as="span" variant="muted">
+        {organization.name}
+      </Text>
+      )
+    </Text>
+  );
+}
+
+function renderUserResult(user: User) {
+  const displayName = user.name || user.username || user.email;
+  const identifiers = [...new Set([user.email, user.username])].filter(
+    identifier => identifier && identifier !== displayName
+  );
+
+  return (
+    <Flex align="center" gap="md" minWidth={0}>
+      <UserAvatar user={user} size={32} />
+      <Stack gap="2xs" flex={1} minWidth={0}>
+        <Grid align="center" columns="minmax(0, 1fr) auto" gap="sm">
+          <Text as="span" bold ellipsis>
+            {displayName}
+          </Text>
+          <Flex align="center" gap="xs">
+            {user.isSuperuser ? (
+              <Badge variant="internal">Superuser</Badge>
+            ) : user.isStaff ? (
+              <Badge variant="muted">Staff</Badge>
+            ) : null}
+            {user.isSuspended ? (
+              <Badge variant="danger">Suspended</Badge>
+            ) : user.isActive ? null : (
+              <Badge variant="warning">Inactive</Badge>
+            )}
+          </Flex>
+        </Grid>
+        <Text as="span" size="sm" variant="muted" ellipsis>
+          {[...identifiers, `ID ${user.id}`].join(' · ')}
+        </Text>
+      </Stack>
+    </Flex>
+  );
+}
+
+function renderProjectResult(project: ProjectSearchResult) {
+  return (
+    <Text as="span">
+      <Text as="span" bold>
+        {project.organization.slug}
+      </Text>
+      : {project.slug} (id:{' '}
+      <Text as="span" variant="muted">
+        {project.id}
+      </Text>
+      )
+    </Text>
+  );
+}
+
+export function HomePage() {
   const navigate = useNavigate();
-  const regions = ConfigStore.get('regions');
+  const cells = getCells();
   const [oldSplash, setOldSplash] = useState(false);
-  const [regionUrl, setRegionUrl] = useState(regions[0]!.url);
+  const [localityUrl, setLocalityUrl] = useState(cells[0]!.locality_url);
+  const selectedCell = cells.find(cell => cell.locality_url === localityUrl);
 
-  const buildOrgPath = (org: any) => `/_admin/customers/${org.slug}/`;
-  const orgSelect = (org: any) => {
-    navigate(buildOrgPath(org));
+  const orgSelect = (organization: OrganizationSearchResult) => {
+    navigate(`/_admin/customers/${organization.slug}/`);
   };
   const orgSubmit = (query: string) => {
     navigate({
       pathname: '/_admin/customers/',
       query: {
         query,
+        regionUrl: localityUrl,
       },
     });
   };
-  const buildUserPath = (user: any) => `/_admin/users/${user.id}/`;
-  const userSelect = (user: any) => {
-    navigate(buildUserPath(user));
+  const userSelect = (user: User) => {
+    navigate(`/_admin/users/${user.id}/`);
   };
   const userSubmit = (query: string) => {
     navigate({
@@ -45,154 +127,127 @@ function HomePage(props: Props) {
       },
     });
   };
-  const buildProjPath = (proj: any) =>
-    `/_admin/customers/${proj.organization.slug}/projects/${proj.slug}/`;
-  const projSelect = (proj: any) => {
-    navigate(buildProjPath(proj));
-  };
-
-  const renderOrgSuggestion = (org: any) => {
-    return (
-      <div>
-        <strong>{org.slug}</strong> (<SecondaryText>{org.name}</SecondaryText>)
-      </div>
-    );
-  };
-  const renderUserSuggestion = (user: any) => {
-    return (
-      <UserBadge
-        hideEmail
-        user={user}
-        displayName={<Truncate maxLength={40} value={user.name} />}
-      />
-    );
-  };
-  const renderProjSuggestion = (proj: any) => {
-    return (
-      <div>
-        <strong>{proj.organization.slug}</strong>: {proj.slug} (id:{' '}
-        <SecondaryText>{proj.id}</SecondaryText>)
-      </div>
-    );
+  const projSelect = (project: ProjectSearchResult) => {
+    navigate(`/_admin/customers/${project.organization.slug}/projects/${project.slug}/`);
   };
 
   if (oldSplash) {
-    return <Overview {...props} />;
+    return <Overview />;
   }
   return (
-    <SplashWrapper>
-      <Header>
-        <HeaderTitle>Welcome to the Admin Portal!</HeaderTitle>
-      </Header>
-      <div>
-        <strong>
-          This is an internal tool meant to enable Sentry Employees (you!) to better
-          assist and resolve issues that may arise for our customers.
-        </strong>
-        <div>If you have any questions, ask us in #discuss-admin</div>
-      </div>
-      <Centered>
-        <Warning>
-          <strong>NOTE:</strong>&nbsp;
-          <span>All actions are logged and audited</span>
-        </Warning>
-      </Centered>
-      <div>
-        <SearchLabel>Users</SearchLabel>
-        <DebounceSearch
-          path="/users/"
+    <Container padding="2xl">
+      <Stack gap="lg" margin="3xl 0 2xl 0">
+        <Heading as="h1" size="2xl">
+          Welcome to the Admin Portal!
+        </Heading>
+        <Stack gap="xs">
+          <Text>
+            This is an internal tool meant to enable Sentry Employees (you!) to better
+            assist and resolve issues that may arise for our customers.
+          </Text>
+          <Text variant="muted">
+            If you have any questions, ask us in{' '}
+            <ExternalLink href="https://app.slack.com/client/T024ZCV9U/CQDHVRS2W">
+              #triage-product
+            </ExternalLink>
+            .
+          </Text>
+        </Stack>
+        <Alert variant="danger">
+          <Text bold>All actions are logged and audited.</Text>
+        </Alert>
+      </Stack>
+      <Container paddingTop="xl">
+        <AdminSearchCombobox
+          label="Users"
+          placeholder="Query users"
+          getResultKey={user => user.id}
+          getResultSearchTerms={user => [user.username, user.email, user.name]}
           onSelectResult={userSelect}
           onSearch={userSubmit}
-          suggestionContent={renderUserSuggestion}
-          placeholder="Query users"
-          createSuggestionPath={buildUserPath}
+          queryOptions={query =>
+            apiOptions.as<User[]>()('/users/', {
+              query: {query, per_page: 10},
+              staleTime: 30_000,
+            })
+          }
+          renderResult={renderUserResult}
         />
-      </div>
-      <RegionPanel>
+      </Container>
+      <Container padding="3xl 0">
         <CompactSelect
-          triggerProps={{prefix: 'Region'}}
-          value={regionUrl}
-          options={regions.map((r: any) => ({
-            label: r.name,
-            value: r.url,
+          trigger={triggerProps => (
+            <OverlayTrigger.Button {...triggerProps} prefix="Region" />
+          )}
+          value={localityUrl}
+          options={cells.map(c => ({
+            label: c.name,
+            value: c.locality_url,
           }))}
-          onChange={opt => setRegionUrl(opt.value)}
+          onChange={opt => {
+            setLocalityUrl(opt.value);
+          }}
         />
 
-        <SearchLabel>Organizations</SearchLabel>
-        <DebounceSearch
-          host={regionUrl}
-          path="/customers/"
-          onSelectResult={orgSelect}
-          onSearch={orgSubmit}
-          suggestionContent={renderOrgSuggestion}
-          placeholder="Query organizations"
-          createSuggestionPath={buildOrgPath}
-        />
+        <Container paddingTop="xl">
+          <AdminSearchCombobox
+            label="Organizations"
+            placeholder="Query organizations"
+            getResultKey={organization => organization.id}
+            getResultSearchTerms={organization => [organization.slug, organization.name]}
+            isExactMatch={(organization, query) =>
+              organization.slug.toLowerCase() === query.toLowerCase()
+            }
+            onSelectResult={orgSelect}
+            onSearch={orgSubmit}
+            queryOptions={query =>
+              apiOptions.as<OrganizationSearchResult[]>()(
+                '/_admin/cells/$region/customers/',
+                {
+                  path: selectedCell ? {region: selectedCell.name} : skipToken,
+                  query: {query, per_page: 50, sortBy: 'members'},
+                  host: localityUrl,
+                  staleTime: 30_000,
+                }
+              )
+            }
+            renderResult={renderOrganizationResult}
+          />
+        </Container>
 
-        <SearchLabel>Projects (by ID)</SearchLabel>
-        <DebounceSearch
-          createSuggestionPath={buildProjPath}
-          onSelectResult={projSelect}
-          placeholder="Project ID"
-          queryParam="id"
-          host={regionUrl}
-          path="/projects/?show=all"
-          suggestionContent={renderProjSuggestion}
-        />
-      </RegionPanel>
+        <Container paddingTop="xl">
+          <AdminSearchCombobox
+            label="Projects (by ID)"
+            placeholder="Project ID"
+            getResultKey={project => project.id}
+            getResultSearchTerms={project => [
+              project.id,
+              project.slug,
+              project.organization.slug,
+            ]}
+            onSelectResult={projSelect}
+            queryOptions={query => {
+              const projectId = normalizeProjectIdQuery(query);
+              return {
+                ...apiOptions.as<ProjectSearchResult[]>()('/projects/', {
+                  query: {query: `id:${projectId}`, per_page: 10, show: 'all'},
+                  host: localityUrl,
+                  staleTime: 30_000,
+                }),
+                enabled: projectId !== null,
+              };
+            }}
+            renderResult={renderProjectResult}
+          />
+        </Container>
+      </Container>
 
-      <OverviewWrap>
-        <div>Looking for the old overview page?</div>
+      <Flex align="center" gap="md" margin="xl 0">
+        <Text variant="muted">Looking for the old overview page?</Text>
         <Button size="xs" onClick={() => setOldSplash(true)}>
-          click here
+          Click here
         </Button>
-      </OverviewWrap>
-    </SplashWrapper>
+      </Flex>
+    </Container>
   );
 }
-
-const RegionPanel = styled('div')`
-  padding: ${space(4)} 0;
-`;
-
-const SearchLabel = styled('label')`
-  display: block;
-  margin-top: ${space(2)};
-`;
-
-const SplashWrapper = styled('div')`
-  padding: ${space(3)};
-`;
-
-const Header = styled('div')`
-  display: flex;
-  align-items: center;
-  margin: ${space(4)} 0;
-`;
-const HeaderTitle = styled('h3')`
-  margin: 0;
-  font-size: ${p => p.theme.fontSize.xl};
-  font-weight: normal;
-  color: ${p => p.theme.textColor};
-`;
-
-const OverviewWrap = styled('div')`
-  margin: ${space(2)} 0;
-`;
-const SecondaryText = styled('span')`
-  color: ${p => p.theme.subText};
-`;
-
-const Centered = styled('div')`
-  display: flex;
-  justify-content: center;
-  margin: ${space(2)} 0;
-`;
-
-const Warning = styled('div')`
-  color: red;
-  font-size: large;
-`;
-
-export default HomePage;

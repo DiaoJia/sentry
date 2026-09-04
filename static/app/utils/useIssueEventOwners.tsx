@@ -1,7 +1,8 @@
-import type {EventOwners} from 'sentry/components/group/assignedTo';
-import type {ApiQueryKey, UseApiQueryOptions} from 'sentry/utils/queryClient';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {EventOwners} from 'sentry/views/issueDetails/header/getOwnerList';
 
 interface UseIssueEventOwnersProps {
   eventId: string;
@@ -12,12 +13,17 @@ const makeCommittersQueryKey = (
   orgSlug: string,
   projectSlug: string,
   eventId: string
-): ApiQueryKey => [`/projects/${orgSlug}/${projectSlug}/events/${eventId}/owners/`];
+): ApiQueryKey => [
+  getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/owners/', {
+    path: {
+      organizationIdOrSlug: orgSlug,
+      projectIdOrSlug: projectSlug,
+      eventId,
+    },
+  }),
+];
 
-export function useIssueEventOwners(
-  {eventId, projectSlug}: UseIssueEventOwnersProps,
-  options: Partial<UseApiQueryOptions<EventOwners>> = {}
-) {
+export function useIssueEventOwners({eventId, projectSlug}: UseIssueEventOwnersProps) {
   const org = useOrganization();
   return useApiQuery<EventOwners>(
     makeCommittersQueryKey(org.slug, projectSlug, eventId),
@@ -25,7 +31,6 @@ export function useIssueEventOwners(
       staleTime: Infinity,
       retry: false,
       enabled: !!eventId,
-      ...options,
     }
   );
 }

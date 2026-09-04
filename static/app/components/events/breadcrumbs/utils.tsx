@@ -1,8 +1,9 @@
 import {useCallback, useMemo} from 'react';
-import {type Theme, useTheme} from '@emotion/react';
+import {useTheme, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import type {SelectOption, SelectSection} from 'sentry/components/core/compactSelect';
+import type {SelectOption, SelectSection} from '@sentry/scraps/compactSelect';
+
 import {BreadcrumbSort} from 'sentry/components/events/interfaces/breadcrumbs';
 import type {BreadcrumbMeta} from 'sentry/components/events/interfaces/breadcrumbs/types';
 import {
@@ -27,7 +28,6 @@ import {
   IconWifi,
 } from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {
   BreadcrumbLevelType,
   BreadcrumbType,
@@ -35,7 +35,6 @@ import {
 } from 'sentry/types/breadcrumbs';
 import {EntryType, type Event} from 'sentry/types/event';
 import {toTitleCase} from 'sentry/utils/string/toTitleCase';
-import {isChonkTheme} from 'sentry/utils/theme/withChonk';
 
 const BREADCRUMB_TITLE_PLACEHOLDER = t('Generic');
 const BREADCRUMB_SUMMARY_COUNT = 5;
@@ -59,6 +58,7 @@ export const BREADCRUMB_TIME_DISPLAY_LOCALSTORAGE_KEY = 'event-breadcrumb-time-d
 const Color = styled('span')<{
   colorConfig: NonNullable<TimelineItemProps['colorConfig']>;
 }>`
+  display: flex;
   color: ${p => p.colorConfig.icon};
 `;
 
@@ -86,7 +86,7 @@ function getBreadcrumbTypeOptions(crumbs: EnhancedCrumb[], theme: Theme) {
     return crumbTypeSet;
   }, new Set<BreadcrumbType>());
 
-  const typeOptions = [...uniqueCrumbTypes].map<SelectOption<string>>(crumbType => {
+  const typeOptions = Array.from(uniqueCrumbTypes, crumbType => {
     const crumbFilter = getBreadcrumbFilter(crumbType);
     return {
       value: crumbFilter,
@@ -102,13 +102,12 @@ function getBreadcrumbTypeOptions(crumbs: EnhancedCrumb[], theme: Theme) {
 }
 
 function getBreadcrumbLevelOptions(crumbs: EnhancedCrumb[]) {
-  const crumbLevels = crumbs.reduce(
-    (crumbMap, ec) => {
-      crumbMap[ec.breadcrumb.level] = ec.levelComponent;
-      return crumbMap;
-    },
-    {} as Record<BreadcrumbLevelType, EnhancedCrumb['levelComponent']>
-  );
+  const crumbLevels = crumbs.reduce<
+    Partial<Record<BreadcrumbLevelType, EnhancedCrumb['levelComponent']>>
+  >((crumbMap, ec) => {
+    crumbMap[ec.breadcrumb.level] = ec.levelComponent;
+    return crumbMap;
+  }, {});
 
   const levelOptions = Object.entries(crumbLevels).map<SelectOption<string>>(
     ([crumbLevel, levelComponent]) => {
@@ -199,15 +198,38 @@ export interface EnhancedCrumb {
 export function getEnhancedBreadcrumbs(event: Event, theme: Theme): EnhancedCrumb[] {
   const breadcrumbEntryIndex =
     event.entries?.findIndex(entry => entry.type === EntryType.BREADCRUMBS) ?? -1;
-  const breadcrumbs: any[] = event.entries?.[breadcrumbEntryIndex]?.data?.values ?? [];
-
-  if (breadcrumbs.length === 0) {
-    return [];
-  }
+  const breadcrumbs: RawCrumb[] =
+    event.entries?.[breadcrumbEntryIndex]?.data?.values ?? [];
 
   // Mapping of breadcrumb index -> breadcrumb meta
   const meta: Record<number, any> =
     event._meta?.entries?.[breadcrumbEntryIndex]?.data?.values ?? {};
+
+  return getEnhancedBreadcrumbsFromValues({
+    breadcrumbs,
+    theme,
+    meta,
+    virtualCrumb: getVirtualCrumb(event),
+  });
+}
+
+/**
+ * Prefer `getEnhancedBreadcrumbs` when an `Event` is available.
+ */
+export function getEnhancedBreadcrumbsFromValues({
+  breadcrumbs,
+  theme,
+  meta = {},
+  virtualCrumb,
+}: {
+  breadcrumbs: RawCrumb[];
+  theme: Theme;
+  meta?: Record<number, any>;
+  virtualCrumb?: RawCrumb;
+}): EnhancedCrumb[] {
+  if (breadcrumbs.length === 0) {
+    return [];
+  }
 
   const enhancedCrumbs = breadcrumbs.map<
     Pick<EnhancedCrumb, 'raw' | 'meta' | 'breadcrumb'>
@@ -218,9 +240,6 @@ export function getEnhancedBreadcrumbs(event: Event, theme: Theme): EnhancedCrum
     breadcrumb: convertCrumbType(raw),
   }));
 
-  // The virtual crumb is a representation of this event, displayed alongside
-  // the rest of the breadcrumbs for more additional context.
-  const virtualCrumb = getVirtualCrumb(event);
   const allCrumbs = virtualCrumb
     ? [...enhancedCrumbs, {breadcrumb: virtualCrumb}]
     : enhancedCrumbs;
@@ -267,35 +286,56 @@ function getBreadcrumbColorConfig(
 ): NonNullable<TimelineItemProps['colorConfig']> {
   switch (type) {
     case BreadcrumbType.ERROR:
-      return {title: theme.red400, icon: theme.red400, iconBorder: theme.red200};
+      return {
+        title: theme.tokens.content.danger,
+        icon: theme.tokens.content.danger,
+        iconBorder: theme.tokens.border.transparent.danger.moderate,
+      };
     case BreadcrumbType.WARNING:
-      return {title: theme.yellow400, icon: theme.yellow400, iconBorder: theme.yellow200};
+      return {
+        title: theme.tokens.content.warning,
+        icon: theme.tokens.content.warning,
+        iconBorder: theme.tokens.border.transparent.warning.moderate,
+      };
     case BreadcrumbType.NAVIGATION:
     case BreadcrumbType.HTTP:
     case BreadcrumbType.QUERY:
     case BreadcrumbType.TRANSACTION:
-      return {title: theme.green400, icon: theme.green400, iconBorder: theme.green200};
+      return {
+        title: theme.tokens.content.success,
+        icon: theme.tokens.content.success,
+        iconBorder: theme.tokens.border.transparent.success.moderate,
+      };
     case BreadcrumbType.USER:
     case BreadcrumbType.UI:
-      return {title: theme.purple400, icon: theme.purple400, iconBorder: theme.purple200};
+      return {
+        title: theme.tokens.content.accent,
+        icon: theme.tokens.content.accent,
+        iconBorder: theme.tokens.border.transparent.accent.moderate,
+      };
     case BreadcrumbType.SYSTEM:
     case BreadcrumbType.SESSION:
     case BreadcrumbType.DEVICE:
     case BreadcrumbType.NETWORK:
     case BreadcrumbType.CONNECTIVITY:
-      return {title: theme.pink400, icon: theme.pink400, iconBorder: theme.pink200};
+      return {
+        title: theme.tokens.content.promotion,
+        icon: theme.tokens.content.promotion,
+        iconBorder: theme.tokens.border.transparent.promotion.moderate,
+      };
     case BreadcrumbType.INFO:
-      return {title: theme.blue400, icon: theme.blue300, iconBorder: theme.blue200};
+      return {
+        title: theme.tokens.content.accent,
+        icon: theme.tokens.content.accent,
+        iconBorder: theme.tokens.border.transparent.accent.moderate,
+      };
     case BreadcrumbType.DEBUG:
     default:
-      if (isChonkTheme(theme)) {
-        return {
-          title: theme.colors.content.primary,
-          icon: theme.colors.content.muted,
-          iconBorder: theme.colors.content.muted,
-        };
-      }
-      return {title: theme.gray400, icon: theme.gray300, iconBorder: theme.gray200};
+      return {
+        title: theme.tokens.content.primary,
+        icon: theme.tokens.content.primary,
+        iconBorder: theme.tokens.border.transparent.neutral.moderate,
+      };
   }
 }
 
@@ -372,23 +412,23 @@ function BreadcrumbIcon({type}: {type?: BreadcrumbType}) {
 }
 
 const BreadcrumbLevel = styled('div')<{level: BreadcrumbLevelType}>`
-  margin: 0 ${space(1)};
+  margin: 0 ${p => p.theme.space.md};
   font-weight: normal;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   border: 0;
   background: none;
   color: ${p => {
     switch (p.level) {
       case BreadcrumbLevelType.ERROR:
       case BreadcrumbLevelType.FATAL:
-        return p.theme.red400;
+        return p.theme.colors.red500;
       case BreadcrumbLevelType.WARNING:
-        return p.theme.yellow400;
+        return p.theme.colors.yellow500;
       default:
       case BreadcrumbLevelType.DEBUG:
       case BreadcrumbLevelType.INFO:
       case BreadcrumbLevelType.LOG:
-        return p.theme.subText;
+        return p.theme.tokens.content.secondary;
     }
   }};
   display: ${p => (p.level === BreadcrumbLevelType.UNDEFINED ? 'none' : 'block')};

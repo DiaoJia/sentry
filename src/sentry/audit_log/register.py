@@ -105,6 +105,7 @@ default_manager.add(
 )
 default_manager.add(events.ProjectEnableAuditLogEvent())
 default_manager.add(events.ProjectDisableAuditLogEvent())
+default_manager.add(events.CustomInboundFilterAuditLogEvent())
 default_manager.add(
     AuditLogEvent(
         event_id=40,
@@ -237,6 +238,19 @@ default_manager.add(events.IntegrationEditAuditLogEvent())
 default_manager.add(events.IntegrationRemoveAuditLogEvent())
 default_manager.add(
     AuditLogEvent(
+        event_id=114,
+        name="INTEGRATION_PROJECT_MAPPINGS_UPDATE",
+        api_name="integration.project-mappings-update",
+        # `removed_project_mappings` carries the prior values of anything removed, so a
+        # mapping cleared by mistake can be rebuilt from this entry.
+        template=(
+            "updated project status mappings for the {provider} integration "
+            "({added_count} added, {updated_count} updated, {removed_count} removed)"
+        ),
+    )
+)
+default_manager.add(
+    AuditLogEvent(
         event_id=113,
         name="SENTRY_APP_ADD",
         api_name="sentry-app.add",
@@ -340,6 +354,14 @@ default_manager.add(
         name="INVITE_REQUEST_REMOVE",
         api_name="invite-request.remove",
         template="removed the invite request for {email}",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=142,
+        name="INVITE_REMOVE",
+        api_name="invite.remove",
+        template="removed the invite for {email}",
     )
 )
 default_manager.add(
@@ -549,6 +571,14 @@ default_manager.add(
 )
 default_manager.add(
     AuditLogEvent(
+        event_id=203,
+        name="UPTIME_MONITOR_DISABLE_BROKEN",
+        api_name="uptime_monitor.disable_broken",
+        template="Automatically disabled broken uptime monitor {name}",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
         event_id=202,
         name="UPTIME_MONITOR_REMOVE",
         api_name="uptime_monitor.remove",
@@ -629,16 +659,6 @@ default_manager.add(
     )
 )
 
-default_manager.add(events.DataSecrecyWaivedAuditLogEvent())
-
-default_manager.add(
-    AuditLogEvent(
-        event_id=1142,
-        name="DATA_SECRECY_REINSTATED",
-        api_name="data-secrecy.reinstated",
-    )
-)
-
 default_manager.add(
     AuditLogEvent(
         event_id=1152,
@@ -661,5 +681,74 @@ default_manager.add(
         name="PROJECT_ADD_WITH_ORIGIN",
         api_name="project.create-with-origin",
         template="created project {slug} via {origin}",
+    )
+)
+# NOTE: 1155 is defined in the private repo but not here in the public repo so we skip it.
+default_manager.add(
+    AuditLogEvent(
+        event_id=1156,
+        name="REPLAYDELETIONJOBMODEL_START",
+        api_name="replay-deletion-jobs.start",
+        template="started replay deletion job",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=1157,
+        name="REPLAYDELETIONJOBMODEL_CANCELED",
+        api_name="replay-deletion-jobs.stop",
+        template="canceled replay deletion job",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=1158,
+        name="ORG_CONSOLE_PLATFORM_EDIT",
+        api_name="org.console-platform.edit",
+        template="{console_platforms}",
+    )
+)
+default_manager.add(events.RepoSettingsEditAuditLogEvent())
+default_manager.add(
+    AuditLogEvent(
+        event_id=1160,
+        name="AUTOFIX_SETTINGS_EDIT",
+        api_name="autofix-settings.edit",
+        template="updated autofix automation settings for {project_count} projects",
+    )
+)
+default_manager.add(events.RepoAddedAuditLogEvent())
+default_manager.add(events.RepoDisabledAuditLogEvent())
+default_manager.add(events.RepoEnabledAuditLogEvent())
+default_manager.add(
+    AuditLogEvent(
+        event_id=219,
+        name="DASHBOARD_ADD",
+        api_name="dashboard.create",
+        template="created dashboard {title}",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=220,
+        name="DASHBOARD_EDIT",
+        api_name="dashboard.edit",
+        template="edited dashboard {title}",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=221,
+        name="DASHBOARD_REMOVE",
+        api_name="dashboard.remove",
+        template="removed dashboard {title}",
+    )
+)
+default_manager.add(
+    AuditLogEvent(
+        event_id=222,
+        name="DASHBOARD_RESTORE",
+        api_name="dashboard.restore",
+        template="restored dashboard {title}",
     )
 )

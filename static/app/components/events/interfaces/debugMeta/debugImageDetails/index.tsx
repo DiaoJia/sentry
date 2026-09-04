@@ -1,17 +1,18 @@
 import {Fragment} from 'react';
 import {css, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 import partition from 'lodash/partition';
 import sortBy from 'lodash/sortBy';
 
+import {LinkButton} from '@sentry/scraps/button';
+import {Grid, type GridProps} from '@sentry/scraps/layout';
+
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
 import {getFileName} from 'sentry/components/events/interfaces/debugMeta/utils';
-import LoadingError from 'sentry/components/loadingError';
+import {LoadingError} from 'sentry/components/loadingError';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DebugFile} from 'sentry/types/debugFiles';
 import {DebugFileFeature} from 'sentry/types/debugFiles';
 import type {ImageCandidate, ImageWithCombinedStatus} from 'sentry/types/debugImage';
@@ -19,15 +20,16 @@ import {CandidateDownloadStatus} from 'sentry/types/debugImage';
 import type {Event} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {displayReprocessEventAction} from 'sentry/utils/displayReprocessEventAction';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {getPrettyFileType} from 'sentry/views/settings/projectDebugFiles/utils';
 
-import Candidates from './candidates';
-import GeneralInfo from './generalInfo';
-import ReprocessAlert from './reprocessAlert';
+import {Candidates} from './candidates';
+import {GeneralInfo} from './generalInfo';
+import {ReprocessAlert} from './reprocessAlert';
 import {INTERNAL_SOURCE, INTERNAL_SOURCE_LOCATION} from './utils';
 
 type ImageCandidates = ImageCandidate[];
@@ -217,11 +219,17 @@ export function DebugImageDetails({
     isPending,
     isError,
     refetch,
-  } = useApiQuery<DebugFile[]>(
-    [
-      `/projects/${organization.slug}/${projSlug}/files/dsyms/?debug_id=${image?.debug_id}`,
+  } = useQuery({
+    ...apiOptions.as<DebugFile[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/files/dsyms/',
       {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: projSlug,
+        },
         query: {
+          debug_id: image?.debug_id,
+          code_id: image?.code_id,
           // FIXME(swatinem): Ideally we should not filter here at all,
           // though Symbolicator does not currently report `bcsymbolmap` and `il2cpp`
           // candidates, and we would thus show bogus "unapplied" entries for those,
@@ -238,13 +246,11 @@ export function DebugImageDetails({
             'portablepdb',
           ],
         },
-      },
-    ],
-    {
-      enabled: hasUploadedDebugFiles,
-      staleTime: 0,
-    }
-  );
+        staleTime: 0,
+      }
+    ),
+    enabled: hasUploadedDebugFiles,
+  });
 
   const {code_file, status} = image ?? {};
   const candidates = getCandidates({debugFiles, image, isLoading: isPending});
@@ -267,8 +273,13 @@ export function DebugImageDetails({
   const handleDelete = async (debugId: string) => {
     try {
       await api.requestPromise(
-        `/projects/${organization.slug}/${projSlug}/files/dsyms/?id=${debugId}`,
-        {method: 'DELETE'}
+        getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/files/dsyms/', {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            projectIdOrSlug: projSlug,
+          },
+        }),
+        {method: 'DELETE', query: {id: debugId}}
       );
       refetch();
     } catch {
@@ -315,7 +326,7 @@ export function DebugImageDetails({
         </Content>
       </Body>
       <Footer>
-        <StyledButtonBar gap={1}>
+        <StyledButtonBar>
           <LinkButton
             href="https://docs.sentry.io/platforms/native/data-management/debug-files/"
             external
@@ -324,10 +335,12 @@ export function DebugImageDetails({
           </LinkButton>
           {debugFilesSettingsLink && (
             <LinkButton
-              title={t(
-                'Search for this debug file in all images for the %s project',
-                projSlug
-              )}
+              tooltipProps={{
+                title: t(
+                  'Search for this debug file in all images for the %s project',
+                  projSlug
+                ),
+              }}
               to={debugFilesSettingsLink}
             >
               {t('Open in Settings')}
@@ -341,25 +354,27 @@ export function DebugImageDetails({
 
 const Content = styled('div')`
   display: grid;
-  gap: ${space(3)};
-  font-size: ${p => p.theme.fontSize.md};
+  gap: ${p => p.theme.space['2xl']};
+  font-size: ${p => p.theme.font.size.md};
 `;
 
 const Title = styled('div')`
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
-  font-size: ${p => p.theme.fontSize.xl};
+  font-size: ${p => p.theme.font.size.xl};
   max-width: calc(100% - 40px);
   word-break: break-all;
 `;
 
 const FileName = styled('span')`
-  font-family: ${p => p.theme.text.familyMono};
+  font-family: ${p => p.theme.font.family.mono};
 `;
 
-const StyledButtonBar = styled(ButtonBar)`
+const StyledButtonBar = styled((props: GridProps) => (
+  <Grid flow="column" align="center" gap="md" {...props} />
+))`
   white-space: nowrap;
 `;
 
@@ -368,15 +383,15 @@ export const modalCss = (theme: Theme) => css`
     overflow: initial;
   }
 
-  @media (min-width: ${theme.breakpoints.small}) {
+  @media (min-width: ${theme.breakpoints.sm}) {
     width: 90%;
   }
 
-  @media (min-width: ${theme.breakpoints.xlarge}) {
+  @media (min-width: ${theme.breakpoints.xl}) {
     width: 70%;
   }
 
-  @media (min-width: ${theme.breakpoints.xxlarge}) {
+  @media (min-width: ${theme.breakpoints['2xl']}) {
     width: 50%;
   }
 `;

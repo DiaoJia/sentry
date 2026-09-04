@@ -1,20 +1,26 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {ExportQueryType} from 'sentry/components/dataExport';
+import {Button, LinkButton} from '@sentry/scraps/button';
+
 import {DateTime} from 'sentry/components/dateTime';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {ExportQueryType} from 'sentry/components/exports/useDataExport';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {IconDownload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {isAggregateField} from 'sentry/utils/discover/fields';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import Layout from 'sentry/views/auth/layout';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {AuthLayoutContent as Layout} from 'sentry/views/auth/layout';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
+import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
+import {getLogsUrl} from 'sentry/views/explore/logs/utils';
+import {TraceItemDataset} from 'sentry/views/explore/types';
 
 export enum DownloadStatus {
   EARLY = 'EARLY',
@@ -22,19 +28,23 @@ export enum DownloadStatus {
   EXPIRED = 'EXPIRED',
 }
 
-type RouteParams = {
-  dataExportId: string;
-  orgId: string;
-};
+interface ExploreQueryInfo {
+  dataset: TraceItemDataset;
+  field: string[];
+  project: number[];
+  query: string;
+  sort: string[];
+  end?: string;
+  environment?: string[];
+  equations?: string[];
+  start?: string;
+  statsPeriod?: string;
+}
 
-type Download = {
+type BaseDownload = {
   checksum: string;
   dateCreated: string;
   id: number;
-  query: {
-    info: Record<PropertyKey, unknown>;
-    type: ExportQueryType;
-  };
   status: DownloadStatus;
   user: {
     email: string;
@@ -43,19 +53,50 @@ type Download = {
   };
   dateExpired?: string;
   dateFinished?: string;
+  export_format?: 'csv' | 'jsonl';
 };
 
-type Props = {} & RouteComponentProps<RouteParams>;
+type ExploreDownload = BaseDownload & {
+  query: {
+    info: ExploreQueryInfo;
+    type: ExportQueryType.EXPLORE | ExportQueryType.TRACE_ITEM_FULL_EXPORT;
+  };
+};
 
-function DataDownload({params: {orgId, dataExportId}}: Props) {
+type OtherDownload = BaseDownload & {
+  query: {
+    info: Record<PropertyKey, unknown>;
+    type: Exclude<
+      ExportQueryType,
+      ExportQueryType.EXPLORE | ExportQueryType.TRACE_ITEM_FULL_EXPORT
+    >;
+  };
+};
+
+type Download = ExploreDownload | OtherDownload;
+
+export default function DataDownload() {
+  const {dataExportId, orgId: orgSlug} = useParams<{
+    dataExportId: string;
+    orgId: string;
+  }>();
+  const organization = useOrganization({allowNull: true});
+
   const {
     data: download,
     isPending,
     isError,
     error,
-  } = useApiQuery<Download>([`/organizations/${orgId}/data-export/${dataExportId}/`], {
-    staleTime: 0,
-  });
+  } = useApiQuery<Download>(
+    [
+      getApiUrl('/organizations/$organizationIdOrSlug/data-export/$dataExportId/', {
+        path: {organizationIdOrSlug: orgSlug, dataExportId},
+      }),
+    ],
+    {
+      staleTime: 0,
+    }
+  );
 
   const navigate = useNavigate();
 
@@ -83,12 +124,21 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
     return <LoadingIndicator />;
   }
 
-  const getActionLink = (queryType: any): string => {
+  const getActionLink = (
+    queryType: ExportQueryType,
+    traceItemDataset?: TraceItemDataset
+  ): string => {
     switch (queryType) {
       case ExportQueryType.ISSUES_BY_TAG:
-        return `/organizations/${orgId}/issues/`;
+        return `/organizations/${orgSlug}/issues/`;
       case ExportQueryType.DISCOVER:
-        return `/organizations/${orgId}/discover/queries/`;
+        return `/organizations/${orgSlug}/explore/discover/queries/`;
+      case ExportQueryType.EXPLORE:
+      case ExportQueryType.TRACE_ITEM_FULL_EXPORT:
+        if (traceItemDataset === TraceItemDataset.LOGS) {
+          return `/organizations/${orgSlug}/explore/logs/`;
+        }
+        return `/organizations/${orgSlug}/explore/traces/`;
       default:
         return '/';
     }
@@ -130,7 +180,17 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
 
   const renderExpired = (): React.ReactNode => {
     const {query} = download;
-    const actionLink = getActionLink(query.type);
+    let actionLink: string;
+
+    if (
+      query.type === ExportQueryType.EXPLORE ||
+      query.type === ExportQueryType.TRACE_ITEM_FULL_EXPORT
+    ) {
+      const traceItemDataset = query.info.dataset;
+      actionLink = getActionLink(query.type, traceItemDataset);
+    } else {
+      actionLink = getActionLink(query.type);
+    }
     return (
       <Fragment>
         <Header>
@@ -147,7 +207,7 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
               'Make a new one with your latest data. Your old download will never see it coming.'
             )}
           </p>
-          <DownloadButton href={actionLink} priority="primary">
+          <DownloadButton href={actionLink} variant="primary">
             {t('Start a New Download')}
           </DownloadButton>
         </Body>
@@ -161,30 +221,108 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
     } = download;
 
     const to = {
-      pathname: `/organizations/${orgId}/discover/results/`,
+      pathname: `/organizations/${orgSlug}/explore/discover/results/`,
       query: info,
     };
 
     navigate(normalizeUrl(to));
   };
 
-  const renderOpenInDiscover = () => {
-    const {
-      query = {
-        type: ExportQueryType.ISSUES_BY_TAG,
-        info: {},
-      },
-    } = download;
+  const openInExplore = () => {
+    const {query} = download;
+
+    if (
+      query.type !== ExportQueryType.EXPLORE &&
+      query.type !== ExportQueryType.TRACE_ITEM_FULL_EXPORT
+    ) {
+      return;
+    }
+
+    const {info} = query;
+    const traceItemDataset = info.dataset;
+
+    if (traceItemDataset === TraceItemDataset.LOGS) {
+      const url = getLogsUrl({
+        organization: orgSlug,
+        selection: {
+          datetime: {
+            end: info.end ?? null,
+            start: info.start ?? null,
+            utc: null,
+            period: info.statsPeriod ?? null,
+          },
+          environments: info.environment ?? [],
+          projects: info.project,
+        },
+        query: info.query,
+        field: info.field,
+      });
+      navigate(url);
+      return;
+    }
+
+    // We can't pass in explore queries the same way we pass in discover queries to the url.
+    // Explore queries need to have field or aggregateField depending on the mode it's in.
+    // We're structuring the info object to include the correct formatting.
+
+    const equations = Array.isArray(info.equations) ? info.equations : [];
+    const aggregates = Array.isArray(info.field)
+      ? info.field.filter((field: string) => isAggregateField(field))
+      : [];
+
+    const fields = Array.isArray(info.field)
+      ? info.field.filter((field: string) => !isAggregateField(field))
+      : [];
+
+    const mode = aggregates.length + equations.length > 0 ? Mode.AGGREGATE : Mode.SAMPLES;
+
+    const groupBy = fields.map(field => ({groupBy: field}));
+    const aggregateFields = aggregates.map(aggregate => ({yAxes: [aggregate]}));
+    const equationFields = equations.map(equation => ({yAxes: [equation]}));
+
+    const aggregateInfo = {
+      mode,
+      aggregateField: [...groupBy, ...aggregateFields, ...equationFields],
+      field: [],
+    };
+
+    const samplesInfo = {
+      mode,
+      aggregateField: [],
+      field: fields,
+    };
+
+    const to = {
+      pathname: `/organizations/${orgSlug}/explore/traces/`,
+      query: {...info, ...(mode === Mode.AGGREGATE ? aggregateInfo : samplesInfo)},
+    };
+
+    navigate(normalizeUrl(to));
+  };
+
+  const renderOpenInButton = () => {
+    const {query} = download;
 
     // default to IssuesByTag because we don't want to
     // display this unless we're sure its a discover query
-    const {type = ExportQueryType.ISSUES_BY_TAG} = query;
+    const {type} = query;
 
-    return type === 'Discover' ? (
+    return type === ExportQueryType.DISCOVER ||
+      type === ExportQueryType.EXPLORE ||
+      type === ExportQueryType.TRACE_ITEM_FULL_EXPORT ? (
       <Fragment>
         <p>{t('Need to make changes?')}</p>
-        <Button priority="primary" onClick={() => openInDiscover()}>
-          {t('Open in Discover')}
+        <Button
+          variant="primary"
+          onClick={() =>
+            type === ExportQueryType.DISCOVER ? openInDiscover() : openInExplore()
+          }
+        >
+          {type === ExportQueryType.DISCOVER
+            ? organization && getDiscoverDeprecation(organization)
+              ? t('Open in Explore')
+              : t('Open in Discover')
+            : t('Open in Explore')}
         </Button>
         <br />
       </Fragment>
@@ -192,7 +330,8 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
   };
 
   const renderValid = (): React.ReactNode => {
-    const {dateExpired, checksum} = download;
+    const {dateExpired, checksum, export_format} = download;
+    const exportFormatLabel = export_format?.toUpperCase() ?? 'CSV';
 
     return (
       <Fragment>
@@ -202,18 +341,18 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
         <Body>
           <p>{t("See, that wasn't so bad. Your data is all ready for download.")}</p>
           <LinkButton
-            priority="primary"
+            variant="primary"
             icon={<IconDownload />}
-            href={`/api/0/organizations/${orgId}/data-export/${dataExportId}/?download=true`}
+            href={`/api/0/organizations/${orgSlug}/data-export/${dataExportId}/?download=true`}
           >
-            {t('Download CSV')}
+            {t('Download %s', exportFormatLabel)}
           </LinkButton>
           <p>
             {t("That link won't last forever — it expires:")}
             <br />
             {renderDate(dateExpired)}
           </p>
-          {renderOpenInDiscover()}
+          {renderOpenInButton()}
           <p>
             <small>
               <strong>SHA1:{checksum}</strong>
@@ -257,24 +396,22 @@ function DataDownload({params: {orgId, dataExportId}}: Props) {
 }
 
 const Header = styled('header')`
-  border-bottom: 1px solid ${p => p.theme.border};
-  padding: ${space(3)} 40px 0;
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
+  padding: ${p => p.theme.space['2xl']} 40px 0;
   h3 {
     font-size: 24px;
-    margin: 0 0 ${space(3)} 0;
+    margin: 0 0 ${p => p.theme.space['2xl']} 0;
   }
 `;
 
 const Body = styled('div')`
-  padding: ${space(2)} 40px;
+  padding: ${p => p.theme.space.xl} 40px;
   max-width: 500px;
   p {
-    margin: ${space(1.5)} 0;
+    margin: ${p => p.theme.space.lg} 0;
   }
 `;
 
 const DownloadButton = styled(LinkButton)`
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 `;
-
-export default DataDownload;

@@ -1,12 +1,13 @@
+import type {UptimeMonitorMode} from 'sentry/views/detectors/components/uptime/types';
+
 export type AlertsEventParameters = {
-  'anomaly-detection.feedback-submitted': {
-    choice_selected: boolean;
-    incident_id: string;
+  'uptime_monitor.created': {
+    uptime_mode: UptimeMonitorMode;
   };
 };
 
 type AlertsEventKey = keyof AlertsEventParameters;
 
 export const alertsEventMap: Record<AlertsEventKey, string | null> = {
-  'anomaly-detection.feedback-submitted': 'Anomaly Detection Feedback Submitted',
+  'uptime_monitor.created': 'Uptime Monitor Created',
 };

@@ -4,7 +4,6 @@ import base64
 import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from django.contrib.auth.models import AnonymousUser
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models.expressions import Expression
@@ -34,7 +33,7 @@ from sentry.db.models.manager.base import BaseManager
 from sentry.hybridcloud.models.outbox import ControlOutboxBase
 from sentry.hybridcloud.outbox.base import ControlOutboxProducingModel
 from sentry.hybridcloud.outbox.category import OutboxCategory
-from sentry.types.region import find_regions_for_user
+from sentry.types.cell import find_cells_for_user
 
 if TYPE_CHECKING:
     from sentry.users.models.user import User
@@ -98,9 +97,7 @@ class AuthenticatorManager(BaseManager["Authenticator"]):
             return interface
         return None
 
-    def get_interface(
-        self, user: User | AnonymousUser, interface_id: str
-    ) -> OtpMixin | AuthenticatorInterface:
+    def get_interface(self, user: User, interface_id: str) -> OtpMixin | AuthenticatorInterface:
         """Looks up an interface by interface ID for a user.  If the
         interface is not available but configured a
         `Authenticator.DoesNotExist` will be raised just as if the
@@ -133,7 +130,7 @@ class AuthenticatorConfig(models.JSONField):
     def _is_devices_config(self, value: Any) -> bool:
         return isinstance(value, dict) and "devices" in value
 
-    def get_db_prep_value(self, value: Any, *args: Any, **kwargs: Any) -> Any:
+    def _encode_value(self, value: Any) -> Any:
         if self._is_devices_config(value):
             # avoid mutating the original object
             value = copy.deepcopy(value)
@@ -141,8 +138,10 @@ class AuthenticatorConfig(models.JSONField):
                 # AuthenticatorData is a non-json-serializable bytes subclass
                 if isinstance(device["binding"], AuthenticatorData):
                     device["binding"] = base64.b64encode(device["binding"]).decode()
+        return value
 
-        return super().get_db_prep_value(value, *args, **kwargs)
+    def get_db_prep_value(self, value: Any, *args: Any, **kwargs: Any) -> Any:
+        return super().get_db_prep_value(self._encode_value(value), *args, **kwargs)
 
     def from_db_value(
         self, value: str | None, expression: Expression, connection: BaseDatabaseWrapper
@@ -153,6 +152,9 @@ class AuthenticatorConfig(models.JSONField):
                 if isinstance(device["binding"], str):
                     device["binding"] = AuthenticatorData(base64.b64decode(device["binding"]))
         return ret
+
+    def value_to_string(self, obj: models.Model) -> object:  # type: ignore[override]  # see typeddjango/django-stubs#2729
+        return self._encode_value(self.value_from_object(obj))
 
 
 @control_silo_model
@@ -182,9 +184,9 @@ class Authenticator(ControlOutboxProducingModel):
         unique_together = (("user", "type"),)
 
     def outboxes_for_update(self, shard_identifier: int | None = None) -> list[ControlOutboxBase]:
-        regions = find_regions_for_user(self.user_id)
+        cells = find_cells_for_user(self.user_id)
         return OutboxCategory.USER_UPDATE.as_control_outboxes(
-            region_names=regions,
+            cell_names=cells,
             shard_identifier=self.user_id,
             object_identifier=self.user_id,
         )
@@ -204,7 +206,7 @@ class Authenticator(ControlOutboxProducingModel):
         if save:
             self.save()
 
-    def __repr__(self) -> str:  # type: ignore[override]  # python/mypy#17562
+    def __repr__(self) -> str:
         return f"<Authenticator user={self.user.email!r} interface={self.interface.interface_id!r}>"
 
     @classmethod

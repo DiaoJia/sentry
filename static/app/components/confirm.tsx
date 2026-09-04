@@ -1,11 +1,12 @@
 import {cloneElement, Fragment, isValidElement, useRef, useState} from 'react';
 
+import {Alert} from '@sentry/scraps/alert';
+import type {ButtonProps} from '@sentry/scraps/button';
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import {openModal} from 'sentry/actionCreators/modal';
-import {Alert} from 'sentry/components/core/alert';
-import type {ButtonProps} from 'sentry/components/core/button';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
 import {t} from 'sentry/locale';
 
 export type ConfirmMessageRenderProps = {
@@ -118,7 +119,7 @@ export type OpenConfirmOptions = {
   /**
    * Button priority
    */
-  priority?: ButtonProps['priority'];
+  priority?: ButtonProps['variant'];
   /**
    * Custom function to render the cancel button
    */
@@ -187,7 +188,7 @@ export const openConfirmModal = ({
  *
  * This is the declarative alternative to using openConfirmModal
  */
-function Confirm({
+export function Confirm({
   disabled,
   children,
   stopPropagation = false,
@@ -256,9 +257,9 @@ function ConfirmModal({
   closeModal,
 }: ModalProps) {
   const confirmCallbackRef = useRef<() => void>(() => {});
-  const isConfirmingRef = useRef(false);
   const [shouldDisableConfirmButton, setShouldDisableConfirmButton] =
     useState(disableConfirmButton);
+  const [isConfirming, setIsConfirming] = useState(false);
   const [isError, setIsError] = useState(false);
 
   const handleClose = () => {
@@ -266,27 +267,25 @@ function ConfirmModal({
     setShouldDisableConfirmButton(disableConfirmButton ?? false);
 
     // always reset `confirming` when modal visibility changes
-    isConfirmingRef.current = false;
+    setIsConfirming(false);
     closeModal();
   };
 
   const handleConfirm = async () => {
-    if (isConfirmingRef.current) {
+    if (isConfirming) {
       return;
     }
 
-    isConfirmingRef.current = true;
-    setShouldDisableConfirmButton(true);
+    setIsConfirming(true);
 
     if (onConfirm) {
       try {
         await onConfirm();
       } catch (error) {
         setIsError(true);
-        setShouldDisableConfirmButton(disableConfirmButton ?? false);
         return;
       } finally {
-        isConfirmingRef.current = false;
+        setIsConfirming(false);
       }
     }
 
@@ -318,13 +317,15 @@ function ConfirmModal({
       <Body>
         {isError && (
           <Alert.Container>
-            <Alert type="error">{errorMessage}</Alert>
+            <Alert variant="danger" showIcon={false}>
+              {errorMessage}
+            </Alert>
           </Alert.Container>
         )}
         {makeConfirmMessage()}
       </Body>
       <Footer>
-        <ButtonBar gap={2}>
+        <Grid flow="column" align="center" gap="xl">
           {renderCancelButton ? (
             renderCancelButton({
               closeModal,
@@ -348,7 +349,8 @@ function ConfirmModal({
             <Button
               data-test-id="confirm-button"
               disabled={shouldDisableConfirmButton}
-              priority={priority}
+              busy={isConfirming}
+              variant={priority}
               onClick={handleConfirm}
               autoFocus={!isDangerous}
               aria-label={typeof confirmText === 'string' ? confirmText : t('Confirm')}
@@ -356,10 +358,8 @@ function ConfirmModal({
               {confirmText ?? t('Confirm')}
             </Button>
           )}
-        </ButtonBar>
+        </Grid>
       </Footer>
     </Fragment>
   );
 }
-
-export default Confirm;

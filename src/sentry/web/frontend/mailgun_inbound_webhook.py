@@ -71,9 +71,9 @@ class MailgunInboundWebhookView(View):
 
         if org_id:
             org_mapping = OrganizationMapping.objects.get(organization_id=org_id)
-            region_name = org_mapping.region_name
+            region_name = org_mapping.cell_name
         else:
-            region_name = settings.SENTRY_MONOLITH_REGION
+            region_name = settings.SENTRY_FALLBACK_CELL
 
         # Email replies cannot be coaleseced so we
         # need to generate unique object_identifier values.
@@ -83,7 +83,7 @@ class MailgunInboundWebhookView(View):
             shard_identifier=org_id or 0,
             category=OutboxCategory.ISSUE_COMMENT_UPDATE,
             object_identifier=ControlOutbox.next_object_identifier(),
-            region_name=region_name,
+            cell_name=region_name,
             payload=outbox_payload,
         )
         outbox.save()

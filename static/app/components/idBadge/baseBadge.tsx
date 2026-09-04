@@ -1,18 +1,22 @@
 import {memo} from 'react';
 import styled from '@emotion/styled';
 
-import {ActorAvatar} from 'sentry/components/core/avatar/actorAvatar';
-import {OrganizationAvatar} from 'sentry/components/core/avatar/organizationAvatar';
-import {ProjectAvatar} from 'sentry/components/core/avatar/projectAvatar';
-import {TeamAvatar} from 'sentry/components/core/avatar/teamAvatar';
-import {UserAvatar} from 'sentry/components/core/avatar/userAvatar';
-import {space, type ValidSize} from 'sentry/styles/space';
+import {
+  ActorAvatar,
+  OrganizationAvatar,
+  ProjectAvatar,
+  TeamAvatar,
+  UserAvatar,
+} from '@sentry/scraps/avatar';
+import {Flex, type FlexProps} from '@sentry/scraps/layout';
+
 import type {Actor} from 'sentry/types/core';
-import type {Organization, Team} from 'sentry/types/organization';
+import type {OrganizationSummary, Team} from 'sentry/types/organization';
 import type {AvatarProject} from 'sentry/types/project';
 import type {AvatarUser} from 'sentry/types/user';
+import type {SpaceSize} from 'sentry/utils/theme';
 
-export interface BaseBadgeProps {
+export interface BaseBadgeProps extends FlexProps {
   avatarProps?: Record<string, any>;
   avatarSize?: number;
   className?: string;
@@ -26,56 +30,62 @@ export interface BaseBadgeProps {
 interface AllBaseBadgeProps extends BaseBadgeProps {
   displayName: React.ReactNode;
   actor?: Actor;
-  organization?: Organization;
+  organization?: OrganizationSummary;
   project?: AvatarProject;
   team?: Team;
   user?: AvatarUser;
 }
 
-export const BaseBadge = memo(
-  ({
-    displayName,
-    hideName = false,
-    hideAvatar = false,
-    avatarProps = {},
-    avatarSize = 24,
-    description,
-    onClick,
-    team,
-    user,
-    organization,
-    project,
-    actor,
-    className,
-  }: AllBaseBadgeProps) => {
-    // Space items appropriatley depending on avatar size
-    const wrapperGap: ValidSize = avatarSize <= 14 ? 0.5 : avatarSize <= 20 ? 0.75 : 1;
+export const BaseBadge = memo(function BaseBadgeComponent({
+  displayName,
+  hideName = false,
+  hideAvatar = false,
+  avatarProps = {},
+  avatarSize = 24,
+  description,
+  onClick,
+  team,
+  user,
+  organization,
+  project,
+  actor,
+  className,
+  ...flexProps
+}: AllBaseBadgeProps) {
+  // Space items appropriately depending on avatar size
+  const wrapperGap: SpaceSize = avatarSize <= 14 ? 'xs' : avatarSize <= 20 ? 'sm' : 'md';
 
-    return (
-      <Wrapper className={className} style={{gap: space(wrapperGap)}} onClick={onClick}>
-        {!hideAvatar && (
-          <EntityAvatarType
-            team={team}
-            user={user}
-            organization={organization}
-            project={project}
-            actor={actor}
-            avatarProps={{...avatarProps, size: avatarSize}}
-          />
-        )}
+  return (
+    <Flex
+      {...flexProps}
+      align="center"
+      gap={wrapperGap}
+      flexShrink={0}
+      className={className}
+      onClick={onClick}
+    >
+      {!hideAvatar && (
+        <EntityAvatarType
+          team={team}
+          user={user}
+          organization={organization}
+          project={project}
+          actor={actor}
+          avatarProps={{...avatarProps, size: avatarSize}}
+        />
+      )}
 
-        {(!hideName || !!description) && (
-          <DisplayNameAndDescription>
-            {!hideName && (
-              <DisplayName data-test-id="badge-display-name">{displayName}</DisplayName>
-            )}
-            {!!description && <Description>{description}</Description>}
-          </DisplayNameAndDescription>
-        )}
-      </Wrapper>
-    );
-  }
-);
+      {(!hideName || !!description) && (
+        <DisplayNameAndDescription>
+          {!hideName && (
+            <DisplayName data-test-id="badge-display-name">{displayName}</DisplayName>
+          )}
+          {!!description && <Description>{description}</Description>}
+        </DisplayNameAndDescription>
+      )}
+    </Flex>
+  );
+});
 
 function EntityAvatarType({
   user,
@@ -111,12 +121,6 @@ function EntityAvatarType({
   return null;
 }
 
-const Wrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-`;
-
 const DisplayNameAndDescription = styled('div')`
   display: flex;
   flex-direction: column;
@@ -132,8 +136,12 @@ const DisplayName = styled('span')`
 
 const Description = styled('div')`
   font-size: 0.875em;
-  margin-top: ${space(0.25)};
-  color: ${p => p.theme.subText};
+  margin-top: ${p => p.theme.space['2xs']};
+  color: ${p => p.theme.tokens.content.secondary};
   line-height: 14px;
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;

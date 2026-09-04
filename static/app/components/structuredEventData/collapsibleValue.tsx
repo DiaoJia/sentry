@@ -1,11 +1,13 @@
-import {Children, type ReactNode, useState} from 'react';
+import {Children, useState, type ReactNode} from 'react';
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import useExpandedState from 'sentry/components/structuredEventData/useExpandedState';
+import {Button} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+
+import {useExpandedState} from 'sentry/components/structuredEventData/useExpandedState';
 import {IconChevron} from 'sentry/icons';
 import {t, tn} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 interface Props {
   children: ReactNode;
@@ -14,6 +16,12 @@ interface Props {
   path: string;
   noBasePadding?: boolean;
   prefix?: ReactNode;
+  /**
+   * If provided, indicates the total number of children available on the
+   * server-side, which may be greater than the rendered children when data
+   * has been truncated upstream.
+   */
+  totalChildren?: number;
 }
 
 export function CollapsibleValue({
@@ -23,11 +31,14 @@ export function CollapsibleValue({
   path,
   prefix = null,
   noBasePadding,
+  totalChildren,
 }: Props) {
   const {collapse, expand, isExpanded: isInitiallyExpanded} = useExpandedState({path});
   const [isExpanded, setIsExpanded] = useState(isInitiallyExpanded);
 
   const numChildren = Children.count(children);
+  const totalCount = typeof totalChildren === 'number' ? totalChildren : numChildren;
+  const hiddenCount = Math.max(0, totalCount - numChildren);
 
   const shouldShowToggleButton = numChildren > 0;
   const isBaseLevel = path === '$';
@@ -54,7 +65,7 @@ export function CollapsibleValue({
           icon={
             <IconChevron direction={isExpanded ? 'down' : 'right'} legacySize="10px" />
           }
-          borderless
+          variant="transparent"
           data-base-with-toggle={baseLevelPadding}
         />
       ) : null}
@@ -63,19 +74,25 @@ export function CollapsibleValue({
       {shouldShowToggleButton && !isExpanded ? (
         <NumItemsButton
           size="zero"
-          priority="transparent"
+          variant="transparent"
           onClick={() => {
             expand();
             setIsExpanded(true);
           }}
         >
-          {tn('%s item', '%s items', numChildren)}
+          {tn('%s item', '%s items', numChildren + hiddenCount)}
         </NumItemsButton>
       ) : null}
       {shouldShowToggleButton && isExpanded ? (
-        <IndentedValues>{children}</IndentedValues>
+        <Container paddingLeft="lg">{children}</Container>
       ) : null}
       <span>{closeTag}</span>
+      {isExpanded && hiddenCount > 0 ? (
+        <Text
+          variant="muted"
+          size="xs"
+        >{` (${tn('%s item truncated', '%s items truncated', hiddenCount)})`}</Text>
+      ) : null}
     </CollapsibleDataContainer>
   );
 }
@@ -85,12 +102,8 @@ const CollapsibleDataContainer = styled('span')`
 
   &[data-base-with-toggle='true'] {
     display: block;
-    padding-left: ${space(3)};
+    padding-left: ${p => p.theme.space['2xl']};
   }
-`;
-
-const IndentedValues = styled('div')`
-  padding-left: ${space(1.5)};
 `;
 
 const NumItemsButton = styled(Button)`
@@ -98,11 +111,11 @@ const NumItemsButton = styled(Button)`
   border: none;
   padding: 0 2px;
   border-radius: 2px;
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   box-shadow: none;
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
-  margin: 0 ${space(0.5)};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
+  margin: 0 ${p => p.theme.space.xs};
 
   height: 18px;
   min-height: 18px;
@@ -110,8 +123,8 @@ const NumItemsButton = styled(Button)`
 
 const ToggleButton = styled(Button)`
   position: absolute;
-  left: -${space(3)};
-  top: ${p => (p.theme.isChonk ? '0px' : '2px')};
+  left: -${p => p.theme.space['2xl']};
+  top: 0px;
   border-radius: 2px;
   align-items: center;
   justify-content: center;

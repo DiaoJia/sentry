@@ -7,7 +7,9 @@ from typing import Any, TypedDict
 from django.contrib.auth.models import AnonymousUser
 
 from sentry.api.serializers import Serializer, register, serialize
+from sentry.constants import ObjectStatus
 from sentry.integrations.base import IntegrationProvider
+from sentry.integrations.constants import SlackScope
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.integrations.services.integration import (
@@ -15,6 +17,8 @@ from sentry.integrations.services.integration import (
     RpcOrganizationIntegration,
     integration_service,
 )
+from sentry.integrations.types import IntegrationIssueConfigField
+from sentry.integrations.utils.github_permissions import get_missing_github_app_permissions
 from sentry.shared_integrations.exceptions import ApiError
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
@@ -29,6 +33,7 @@ class OrganizationIntegrationResponse(TypedDict):
     domainName: str | None
     accountType: str | None
     scopes: list[str] | None
+    outOfDate: bool | None
     status: str
     provider: Any
     configOrganization: Any
@@ -39,8 +44,18 @@ class OrganizationIntegrationResponse(TypedDict):
     gracePeriodEnd: str | None
 
 
+class IntegrationProviderInfo(TypedDict):
+    key: str
+    slug: str
+    name: str
+    canAdd: bool
+    canDisable: bool
+    features: list[str]
+    aspects: dict[str, Any]
+
+
 # converts the provider to JSON
-def serialize_provider(provider: IntegrationProvider) -> Mapping[str, Any]:
+def serialize_provider(provider: IntegrationProvider) -> IntegrationProviderInfo:
     return {
         "key": provider.key,
         "slug": provider.key,
@@ -52,6 +67,18 @@ def serialize_provider(provider: IntegrationProvider) -> Mapping[str, Any]:
     }
 
 
+class IntegrationSerializerResponse(TypedDict):
+    id: str
+    name: str
+    icon: str | None
+    domainName: str | None
+    accountType: str | None
+    scopes: list[str] | None
+    outOfDate: bool | None
+    status: str
+    provider: IntegrationProviderInfo
+
+
 @register(Integration)
 class IntegrationSerializer(Serializer):
     def serialize(
@@ -60,8 +87,17 @@ class IntegrationSerializer(Serializer):
         attrs: Mapping[str, Any],
         user: User | RpcUser | AnonymousUser,
         **kwargs: Any,
-    ) -> MutableMapping[str, Any]:
+    ) -> IntegrationSerializerResponse:
         provider = obj.get_provider()
+
+        out_of_date = None
+
+        match provider.key:
+            case "github":
+                out_of_date = bool(get_missing_github_app_permissions(obj.metadata))
+            case "slack":
+                out_of_date = SlackScope.APP_MENTIONS_READ not in (obj.metadata.get("scopes") or [])
+
         return {
             "id": str(obj.id),
             "name": obj.name,
@@ -69,9 +105,15 @@ class IntegrationSerializer(Serializer):
             "domainName": obj.metadata.get("domain_name"),
             "accountType": obj.metadata.get("account_type"),
             "scopes": obj.metadata.get("scopes"),
+            "outOfDate": out_of_date,
             "status": obj.get_status_display(),
             "provider": serialize_provider(provider),
         }
+
+
+class IntegrationConfigSerializerResponse(IntegrationSerializerResponse, total=False):
+    configOrganization: Sequence[Any]
+    createIssueConfig: list[IntegrationIssueConfigField]
 
 
 class IntegrationConfigSerializer(IntegrationSerializer):
@@ -88,40 +130,42 @@ class IntegrationConfigSerializer(IntegrationSerializer):
         user: User | RpcUser | AnonymousUser,
         include_config: bool = True,
         **kwargs: Any,
-    ) -> MutableMapping[str, Any]:
-        data = super().serialize(obj, attrs, user)
+    ) -> IntegrationConfigSerializerResponse:
+        base = super().serialize(obj, attrs, user)
 
         if not include_config:
-            return data
-
-        data.update({"configOrganization": []})
+            return {**base}
 
         if not self.organization_id:
-            return data
+            return {**base, "configOrganization": []}
 
         try:
-            install = obj.get_installation(organization_id=self.organization_id)
+            installation = obj.get_installation(organization_id=self.organization_id)
         except NotImplementedError:
             # The integration may not implement a Installed Integration object
             # representation.
-            pass
-        else:
-            data.update({"configOrganization": install.get_organization_config()})
+            return {**base, "configOrganization": []}
 
-            # Query param "action" only attached in TicketRuleForm modal.
-            if self.params.get("action") == "create":
+        # TicketRuleModal only needs the ticket-creation form for this request.
+        if self.params.get("action") == "create":
+            return {
+                **base,
+                "configOrganization": [],
                 # This method comes from IssueBasicIntegration within the integration's installation class
-                data["createIssueConfig"] = install.get_create_issue_config(  # type: ignore[attr-defined]
-                    None, user, params=self.params
-                )
+                "createIssueConfig": installation.get_create_issue_config(  # type: ignore[attr-defined]
+                    None,
+                    user,
+                    params=self.params,
+                ),
+            }
 
-        return data
+        return {**base, "configOrganization": installation.get_organization_config()}
 
 
 @register(OrganizationIntegration)
 class OrganizationIntegrationSerializer(Serializer):
     def __init__(self, params: Mapping[str, Any] | None = None) -> None:
-        self.params = params
+        self.params = params or {}
 
     def get_attrs(
         self,
@@ -150,12 +194,23 @@ class OrganizationIntegrationSerializer(Serializer):
         # integration installation config object which very well may be making
         # API request for config options.
         integration: RpcIntegration = attrs.get("integration")  # type: ignore[assignment]
-        serialized_integration: MutableMapping[str, Any] = serialize(
+        integration_config = serialize(
             objects=integration,
             user=user,
             serializer=IntegrationConfigSerializer(obj.organization_id, params=self.params),
             include_config=include_config,
         )
+        serialized_integration: MutableMapping[str, Any] = {**integration_config}
+
+        organization_integration_fields = {
+            "externalId": integration.external_id,
+            "organizationId": obj.organization_id,
+            "organizationIntegrationStatus": obj.get_status_display(),
+            "gracePeriodEnd": obj.grace_period_end,
+        }
+        if self.params.get("action") == "create":
+            serialized_integration.update({"configData": None, **organization_integration_fields})
+            return serialized_integration
 
         dynamic_display_information = None
         config_data = None
@@ -186,10 +241,7 @@ class OrganizationIntegrationSerializer(Serializer):
         serialized_integration.update(
             {
                 "configData": config_data,
-                "externalId": integration.external_id,
-                "organizationId": obj.organization_id,
-                "organizationIntegrationStatus": obj.get_status_display(),
-                "gracePeriodEnd": obj.grace_period_end,
+                **organization_integration_fields,
             }
         )
 
@@ -208,10 +260,9 @@ class IntegrationProviderResponse(TypedDict):
     canAdd: bool
     canDisable: bool
     features: list[str]
-    setupDialog: dict[str, Any]
 
 
-class IntegrationProviderSerializer(Serializer):
+class IntegrationProviderSerializer(Serializer[IntegrationProviderResponse]):
     def serialize(
         self,
         obj: IntegrationProvider,
@@ -219,20 +270,26 @@ class IntegrationProviderSerializer(Serializer):
         user: User | RpcUser | AnonymousUser,
         **kwargs: Any,
     ) -> IntegrationProviderResponse:
-        org_slug = kwargs.pop("organization").slug
+        organization = kwargs.pop("organization")
         metadata: Any = obj.metadata
         metadata = metadata and metadata.asdict() or None
+
+        can_add = obj.can_add
+        if can_add and not obj.allow_multiple:
+            existing = integration_service.get_integrations(
+                organization_id=organization.id,
+                providers=[obj.key],
+                status=ObjectStatus.ACTIVE,
+            )
+            if existing:
+                can_add = False
 
         return {
             "key": obj.key,
             "slug": obj.key,
             "name": obj.name,
             "metadata": metadata,
-            "canAdd": obj.can_add,
+            "canAdd": can_add,
             "canDisable": obj.can_disable,
             "features": [f.value for f in obj.features],
-            "setupDialog": dict(
-                url=f"/organizations/{org_slug}/integrations/{obj.key}/setup/",
-                **obj.setup_dialog_config,
-            ),
         }

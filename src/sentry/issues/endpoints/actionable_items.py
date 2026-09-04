@@ -1,11 +1,11 @@
+import sentry_sdk
 from rest_framework.exceptions import NotFound
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import eventstore
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
 from sentry.api.helpers.actionable_items_helper import (
     ActionPriority,
@@ -15,9 +15,10 @@ from sentry.api.helpers.actionable_items_helper import (
 )
 from sentry.models.eventerror import EventError
 from sentry.models.project import Project
+from sentry.services import eventstore
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ActionableItemsEndpoint(ProjectEndpoint):
     """
     This endpoint is used to retrieve actionable items that a user can perform on an event. It is a private endpoint
@@ -36,6 +37,8 @@ class ActionableItemsEndpoint(ProjectEndpoint):
         event = eventstore.backend.get_event_by_id(project.id, event_id)
         if event is None:
             raise NotFound(detail="Event not found")
+
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
 
         actions = []
         event_errors = event.data.get("errors", [])

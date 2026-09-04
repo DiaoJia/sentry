@@ -1,27 +1,31 @@
-import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 import {PlatformIcon} from 'platformicons';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Link from 'sentry/components/links/link';
-import {IconProject} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
 
-import ResultGrid from 'admin/components/resultGrid';
+import {IconProject} from 'sentry/icons';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+
+import {ResultGrid} from 'admin/components/resultGrid';
 
 type Props = {
   orgId: string;
 };
 
-function CustomerProjects({orgId}: Props) {
+export function CustomerProjects({orgId}: Props) {
   return (
     <ResultGrid
       inPanel
       panelTitle="Projects"
       path={`/_admin/customers/${orgId}/`}
-      endpoint={`/organizations/${orgId}/projects/?statsPeriod=30d`}
+      endpoint={getApiUrl('/organizations/$organizationIdOrSlug/projects/', {
+        path: {organizationIdOrSlug: orgId},
+      })}
       method="GET"
-      defaultParams={{per_page: 10}}
+      defaultParams={{per_page: 10, statsPeriod: '30d'}}
+      useQueryString={false}
       hasSearch
       columns={[
         <th key="name">Project</th>,
@@ -37,20 +41,20 @@ function CustomerProjects({orgId}: Props) {
       ]}
       columnsForRow={(row: any) => [
         <td key="name">
-          <ProjectName>
+          <Flex align="center" gap="md">
             <PlatformIcon size={16} platform={row.platform ?? 'other'} />
             <LinkButton
               external
-              priority="link"
+              variant="link"
               href={`/${orgId}/${row.slug}/`}
               icon={<IconProject size="xs" />}
-              title="View in Sentry"
-              aria-label={'View in Sentry'}
+              tooltipProps={{title: 'View in Sentry'}}
+              aria-label="View in Sentry"
             />
             <Link to={`/_admin/customers/${orgId}/projects/${row.slug}/`}>
               {row.slug}
             </Link>
-          </ProjectName>
+          </Flex>
         </td>,
         <td key="status" style={{textAlign: 'center'}}>
           {row.status}
@@ -65,11 +69,3 @@ function CustomerProjects({orgId}: Props) {
     />
   );
 }
-
-const ProjectName = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-  align-items: center;
-`;
-
-export default CustomerProjects;

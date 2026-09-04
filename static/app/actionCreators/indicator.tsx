@@ -1,10 +1,10 @@
 import {isValidElement} from 'react';
 import * as Sentry from '@sentry/react';
 
-import type FormModel from 'sentry/components/forms/model';
+import type {FormModel} from 'sentry/components/forms/model';
 import {DEFAULT_TOAST_DURATION} from 'sentry/constants';
 import {t} from 'sentry/locale';
-import IndicatorStore from 'sentry/stores/indicatorStore';
+import {IndicatorStore} from 'sentry/stores/indicatorStore';
 import {isDemoModeActive} from 'sentry/utils/demoMode';
 
 type IndicatorType = 'loading' | 'error' | 'success' | 'undo' | '';
@@ -15,6 +15,8 @@ interface IndicatorOptions {
   duration?: number | null;
   undo?: () => void;
 }
+
+type UndoIndicatorOptions = IndicatorOptions & {undo: () => void};
 
 interface UndoableIndicatorOptions extends IndicatorOptions {
   formModel: {
@@ -39,6 +41,16 @@ export function clearIndicators() {
 // Note previous IndicatorStore.add behavior was to default to "loading" if no type was supplied
 export function addMessage(
   msg: React.ReactNode,
+  type: 'undo',
+  options: UndoIndicatorOptions
+): void;
+export function addMessage(
+  msg: React.ReactNode,
+  type: Exclude<IndicatorType, 'undo'>,
+  options?: IndicatorOptions
+): void;
+export function addMessage(
+  msg: React.ReactNode,
   type: IndicatorType,
   options: IndicatorOptions = {}
 ): void {
@@ -46,9 +58,9 @@ export function addMessage(
 
   // XXX: Debug for https://sentry.io/organizations/sentry/issues/1595204979/
   if (
-    typeof (msg as any)?.message !== 'undefined' &&
-    typeof (msg as any)?.code !== 'undefined' &&
-    typeof (msg as any)?.extra !== 'undefined'
+    (msg as any)?.message !== undefined &&
+    (msg as any)?.code !== undefined &&
+    (msg as any)?.extra !== undefined
   ) {
     Sentry.captureException(new Error('Attempt to XHR response to Indicators'));
   }
@@ -60,7 +72,7 @@ export function addMessage(
 
   // use default only if undefined, as 0 is a valid duration
   const duration =
-    typeof optionsDuration === 'undefined' ? DEFAULT_TOAST_DURATION : optionsDuration;
+    optionsDuration === undefined ? DEFAULT_TOAST_DURATION : optionsDuration;
 
   const action = append ? 'append' : 'add';
   // XXX: This differs from `IndicatorStore.add` since it won't return the indicator that is created

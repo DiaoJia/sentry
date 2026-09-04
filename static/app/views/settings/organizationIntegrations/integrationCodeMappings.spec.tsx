@@ -11,13 +11,12 @@ import {
   userEvent,
   waitFor,
 } from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 
-import ModalStore from 'sentry/stores/modalStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import IntegrationCodeMappings from 'sentry/views/settings/organizationIntegrations/integrationCodeMappings';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {IntegrationCodeMappings} from 'sentry/views/settings/organizationIntegrations/integrationCodeMappings';
 
-describe('IntegrationCodeMappings', function () {
+describe('IntegrationCodeMappings', () => {
   const projects = [
     ProjectFixture(),
     ProjectFixture({
@@ -59,7 +58,6 @@ describe('IntegrationCodeMappings', function () {
   });
 
   beforeEach(() => {
-    ModalStore.init();
     ProjectsStore.loadInitialData(projects);
 
     MockApiClient.addMockResponse({
@@ -77,17 +75,15 @@ describe('IntegrationCodeMappings', function () {
   });
 
   afterEach(() => {
-    // Clear the fields from the GlobalModal after every test
-    ModalStore.reset();
     ProjectsStore.reset();
     MockApiClient.clearMockResponses();
   });
 
   it('shows the paths', async () => {
     render(<IntegrationCodeMappings integration={integration} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
 
-    for (const repo of repos) {
+    expect(await screen.findByText(repos[0]!.name)).toBeInTheDocument();
+    for (const repo of repos.slice(1)) {
       expect(screen.getByText(repo.name)).toBeInTheDocument();
     }
   });
@@ -110,10 +106,9 @@ describe('IntegrationCodeMappings', function () {
       }),
     });
     render(<IntegrationCodeMappings integration={integration} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
     const {waitForModalToHide} = renderGlobalModal();
 
-    await userEvent.click(screen.getByRole('button', {name: 'Add Code Mapping'}));
+    await userEvent.click(await screen.findByRole('button', {name: 'Add Code Mapping'}));
     expect(screen.getByRole('dialog')).toBeInTheDocument();
 
     await selectEvent.select(
@@ -169,10 +164,9 @@ describe('IntegrationCodeMappings', function () {
       }),
     });
     render(<IntegrationCodeMappings integration={integration} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
     const {waitForModalToHide} = renderGlobalModal();
 
-    await userEvent.click(screen.getAllByRole('button', {name: 'edit'})[0]!);
+    await userEvent.click((await screen.findAllByRole('button', {name: 'edit'}))[0]!);
     await userEvent.clear(screen.getByRole('textbox', {name: 'Stack Trace Root'}));
     await userEvent.type(
       screen.getByRole('textbox', {name: 'Stack Trace Root'}),
@@ -210,15 +204,44 @@ describe('IntegrationCodeMappings', function () {
       },
     });
     render(<IntegrationCodeMappings integration={integration} />);
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
     renderGlobalModal();
 
-    await userEvent.click(screen.getByRole('button', {name: 'Add Code Mapping'}));
+    await userEvent.click(await screen.findByRole('button', {name: 'Add Code Mapping'}));
     expect(screen.getByRole('textbox', {name: 'Branch'})).toHaveValue('main');
 
     await selectEvent.select(screen.getByText('Choose repo'), repos[1]!.name);
     await waitFor(() => {
       expect(screen.getByRole('textbox', {name: 'Branch'})).toHaveValue('main');
     });
+  });
+
+  it('deletes existing config and refreshes data', async () => {
+    const deleteUrl = `/organizations/${org.slug}/code-mappings/${pathConfig1.id}/`;
+    const deleteMock = MockApiClient.addMockResponse({
+      url: deleteUrl,
+      method: 'DELETE',
+    });
+
+    render(<IntegrationCodeMappings integration={integration} />);
+    renderGlobalModal();
+
+    // Should show both path configs initially
+    expect(await screen.findByText(pathConfig1.repoName)).toBeInTheDocument();
+    expect(screen.getByText(pathConfig2.repoName)).toBeInTheDocument();
+
+    // Override mock before refetch happens after delete
+    MockApiClient.addMockResponse({
+      url: `/organizations/${org.slug}/code-mappings/`,
+      body: [pathConfig2], // Only pathConfig2 remains after delete
+    });
+
+    // Click delete button for first config
+    await userEvent.click(screen.getAllByRole('button', {name: 'delete'})[0]!);
+    await userEvent.click(screen.getByRole('button', {name: 'Confirm'}));
+
+    await waitFor(() => expect(deleteMock).toHaveBeenCalled());
+
+    expect(screen.queryByText(pathConfig1.repoName)).not.toBeInTheDocument();
+    expect(screen.getByText(pathConfig2.repoName)).toBeInTheDocument();
   });
 });

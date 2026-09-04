@@ -1,63 +1,119 @@
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import BreadcrumbTitle from './breadcrumbTitle';
+import {BreadcrumbTitle} from './breadcrumbTitle';
 import {BreadcrumbProvider} from './context';
-import SettingsBreadcrumb from '.';
+import {SettingsBreadcrumb} from '.';
 
 jest.unmock('sentry/utils/recreateRoute');
 
-describe('BreadcrumbTitle', function () {
-  const testRoutes = [
-    {name: 'One', path: '/one/'},
-    {name: 'Two', path: '/two/'},
-    {name: 'Three', path: '/three/'},
-  ];
+const routeChildren = [
+  {
+    path: 'one',
+    handle: {name: 'One', path: '/one/'},
+    children: [
+      {
+        path: 'two',
+        handle: {name: 'Two', path: '/two/'},
+        element: <div />,
+        children: [
+          {
+            path: 'three',
+            handle: {name: 'Three', path: '/three/'},
+            element: <div />,
+          },
+        ],
+      },
+    ],
+  },
+];
 
-  it('renders settings breadcrumbs and replaces title', function () {
+const documentIntegrationRouteChildren = [
+  {
+    path: 'document-integrations',
+    handle: {name: 'Integrations', path: 'document-integrations/'},
+    children: [
+      {
+        path: ':integrationSlug',
+        handle: {name: 'Details', path: ':integrationSlug'},
+        element: <div />,
+      },
+    ],
+  },
+];
+
+describe('BreadcrumbTitle', () => {
+  it('renders settings breadcrumbs and replaces title', () => {
     render(
       <BreadcrumbProvider>
-        <SettingsBreadcrumb routes={testRoutes} params={{}} route={{}} />
-        <BreadcrumbTitle routes={testRoutes} title="Last Title" />
-      </BreadcrumbProvider>
+        <SettingsBreadcrumb params={{}} />
+        <BreadcrumbTitle title="Last Title" />
+      </BreadcrumbProvider>,
+      {
+        initialRouterConfig: {
+          route: '/',
+          location: {pathname: '/one/two/three/'},
+          children: routeChildren,
+        },
+      }
     );
 
     const crumbs = screen.getAllByRole('link');
 
-    expect(crumbs).toHaveLength(3);
-    expect(crumbs[2]).toHaveTextContent('Last Title');
+    expect(crumbs).toHaveLength(2);
+    expect(screen.getByText('Last Title')).toBeInTheDocument();
   });
 
   it('cleans up routes', () => {
-    let upOneRoutes = testRoutes.slice(0, -1);
-
-    const {rerender} = render(
+    const {rerender, router} = render(
       <BreadcrumbProvider>
-        <SettingsBreadcrumb routes={testRoutes} params={{}} route={{}} />
-        <BreadcrumbTitle routes={upOneRoutes} title="Second Title" />
-        <BreadcrumbTitle routes={testRoutes} title="Last Title" />
-      </BreadcrumbProvider>
+        <SettingsBreadcrumb params={{}} />
+        <BreadcrumbTitle title="Last Title" />
+      </BreadcrumbProvider>,
+      {
+        initialRouterConfig: {
+          route: '/',
+          location: {pathname: '/one/two/three/'},
+          children: routeChildren,
+        },
+      }
     );
 
     const crumbs = screen.getAllByRole('link');
 
-    expect(crumbs).toHaveLength(3);
-    expect(crumbs[1]).toHaveTextContent('Second Title');
-    expect(crumbs[2]).toHaveTextContent('Last Title');
-
-    // Mutate the object so that breadcrumbTitle re-renders
-    upOneRoutes = testRoutes.slice(0, -1);
+    expect(crumbs).toHaveLength(2);
+    expect(screen.getByText('Last Title')).toBeInTheDocument();
 
     // Simulate navigating up a level, trimming the last title
+    router.navigate('/one/two/');
+
     rerender(
       <BreadcrumbProvider>
-        <SettingsBreadcrumb routes={upOneRoutes} params={{}} route={{}} />
-        <BreadcrumbTitle routes={upOneRoutes} title="Second Title" />
+        <SettingsBreadcrumb params={{}} />
       </BreadcrumbProvider>
     );
 
     const crumbsNext = screen.getAllByRole('link');
 
-    expect(crumbsNext).toHaveLength(2);
-    expect(crumbsNext[1]).toHaveTextContent('Second Title');
+    expect(crumbsNext).toHaveLength(1);
+    expect(screen.getByText('Two')).toBeInTheDocument();
+  });
+
+  it('uses the explicit title for document integrations', () => {
+    render(
+      <BreadcrumbProvider>
+        <SettingsBreadcrumb params={{integrationSlug: 'example-doc'}} />
+        <BreadcrumbTitle title="Example Documentation" />
+      </BreadcrumbProvider>,
+      {
+        initialRouterConfig: {
+          route: '/',
+          location: {pathname: '/document-integrations/example-doc'},
+          children: documentIntegrationRouteChildren,
+        },
+      }
+    );
+
+    expect(screen.getByText('Example Documentation')).toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: 'example-doc'})).not.toBeInTheDocument();
   });
 });

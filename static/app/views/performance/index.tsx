@@ -1,46 +1,48 @@
-import type {Location} from 'history';
+import {Outlet} from 'react-router-dom';
+
+import {Alert} from '@sentry/scraps/alert';
+import {Stack} from '@sentry/scraps/layout';
 
 import Feature from 'sentry/components/acl/feature';
-import {Alert} from 'sentry/components/core/alert';
-import * as Layout from 'sentry/components/layouts/thirds';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
 import {t} from 'sentry/locale';
-import type {Organization} from 'sentry/types/organization';
 import {MetricsCardinalityProvider} from 'sentry/utils/performance/contexts/metricsCardinality';
 import {MEPSettingProvider} from 'sentry/utils/performance/contexts/metricsEnhancedSetting';
-import withOrganization from 'sentry/utils/withOrganization';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-type Props = {
-  children: React.ReactNode;
-  location: Location;
-  organization: Organization;
-};
+function PerformanceContainer() {
+  const organization = useOrganization();
+  const location = useLocation();
 
-function PerformanceContainer({organization, location, children}: Props) {
   function renderNoAccess() {
     return (
-      <Layout.Page withPadding>
+      <Stack flex={1} padding="2xl 3xl">
         <Alert.Container>
-          <Alert type="warning">{t("You don't have access to this feature")}</Alert>
+          <Alert variant="warning" showIcon={false}>
+            {t("You don't have access to this feature")}
+          </Alert>
         </Alert.Container>
-      </Layout.Page>
+      </Stack>
     );
   }
 
   return (
     <Feature
-      hookName="feature-disabled:performance-page"
+      overrideName="feature-disabled:performance-page"
       features="performance-view"
       organization={organization}
       renderDisabled={renderNoAccess}
     >
       <NoProjectMessage organization={organization}>
         <MetricsCardinalityProvider location={location} organization={organization}>
-          <MEPSettingProvider>{children}</MEPSettingProvider>
+          <MEPSettingProvider>
+            <Outlet />
+          </MEPSettingProvider>
         </MetricsCardinalityProvider>
       </NoProjectMessage>
     </Feature>
   );
 }
 
-export default withOrganization(PerformanceContainer);
+export default PerformanceContainer;

@@ -1,23 +1,25 @@
 import datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 import responses
 from django.http import HttpRequest
+from django.test import override_settings
 
 from sentry.auth.authenticators.sms import SmsInterface, SMSRateLimitExceeded
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.datetime import freeze_time
 from sentry.testutils.silo import control_silo_test
-from sentry.utils.sms import InvalidPhoneNumber, phone_number_as_e164
+from sentry.utils.sms import InvalidPhoneNumber, phone_number_as_e164, send_sms, sms_available
 
 
 @control_silo_test
 class SmsInterfaceTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user(email="test@example.com", is_superuser=False)
 
     @responses.activate
-    def test_activate(self):
+    def test_activate(self) -> None:
         request = HttpRequest()
         request.user = self.user
         request.META["REMOTE_ADDR"] = "127.0.0.1"
@@ -63,7 +65,7 @@ class SmsInterfaceTest(TestCase):
         )
 
     @responses.activate
-    def test_ratelimit_exception(self):
+    def test_ratelimit_exception(self) -> None:
         request = HttpRequest()
         request.user = self.user
         request.META["REMOTE_ADDR"] = "127.0.0.1"
@@ -113,10 +115,42 @@ class SmsInterfaceTest(TestCase):
                     == "A confirmation code was sent to <strong>(***) ***-**00</strong>. It is valid for 45 seconds."
                 )
 
-    def test_invalid_phone_number(self):
+    def test_invalid_phone_number(self) -> None:
         with pytest.raises(InvalidPhoneNumber):
             phone_number_as_e164("+15555555555")
 
-    def test_valid_phone_number(self):
+    def test_valid_phone_number(self) -> None:
         formatted_number = phone_number_as_e164("2345678900")
         assert "+12345678900" == formatted_number
+
+    @patch("sentry.utils.sms.logger.info")
+    @patch("sentry.utils.sms.requests.post")
+    @override_settings(DEBUG=True)
+    def test_console_backend(self, requests_post: MagicMock, logger_info: MagicMock) -> None:
+        with self.options({"sms.backend": "console", "sms.twilio-account": ""}):
+            assert sms_available()
+            assert send_sms("123456 is your Sentry authentication code.", "2125550199")
+
+        requests_post.assert_not_called()
+        logger_info.assert_called_once_with(
+            "sms.console",
+            extra={
+                "phone_number": "+12125550199",
+                "body": "123456 is your Sentry authentication code.",
+            },
+        )
+
+    @override_settings(DEBUG=False)
+    def test_console_backend_outside_debug_mode(self) -> None:
+        with self.options({"sms.backend": "console", "sms.twilio-account": ""}):
+            assert not sms_available()
+            with pytest.raises(
+                RuntimeError, match="Console SMS backend is only available in debug mode"
+            ):
+                send_sms("message", "2125550199")
+
+    def test_unknown_backend(self) -> None:
+        with self.options({"sms.backend": "unknown"}):
+            assert not sms_available()
+            with pytest.raises(RuntimeError, match="Unknown SMS backend: unknown"):
+                send_sms("message", "2125550199")

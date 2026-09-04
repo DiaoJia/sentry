@@ -32,7 +32,7 @@ free_text
   = free_text_quoted / free_text_unquoted
 
 free_text_unquoted
-  = (!filter !boolean_operator (free_parens / [^()\n ]+) spaces)+ {
+  = (!filter_start !boolean_operator (free_parens / [^()\n ]+) spaces)+ {
       return tc.tokenFreeText(text(), false);
     }
 
@@ -46,6 +46,15 @@ free_parens
 
 // All key:value filter types
 
+filter_start
+  = negation? ((array_includes_key / text_key / search_key) sep / aggregate_filter_start)
+
+aggregate_filter_start
+  = &aggregate_key_start &aggregate_filter
+
+aggregate_key_start
+  = [a-zA-Z0-9_.-]+ "("
+
 filter
   = date_filter
   / specific_date_filter
@@ -55,16 +64,20 @@ filter
   / boolean_filter
   / numeric_in_filter
   / numeric_filter
-  / aggregate_duration_filter
+  / aggregate_filter
+  / has_filter
+  / is_filter
+  / array_includes_filter
+  / text_in_filter
+  / text_filter
+
+aggregate_filter
+  = aggregate_duration_filter
   / aggregate_size_filter
   / aggregate_numeric_filter
   / aggregate_percentage_filter
   / aggregate_date_filter
   / aggregate_rel_date_filter
-  / has_filter
-  / is_filter
-  / text_in_filter
-  / text_filter
 
 // filter for dates
 date_filter
@@ -194,12 +207,43 @@ is_filter
       return tc.tokenFilter(FilterType.IS, key, value, opDefault, !!negation);
     }
 
+// Array membership filter, eg. `foo[*]:value`. The `[*]` on the key carries the
+// operation, so it uses the default operator (`:`) with `!` for negation.
+array_includes_filter
+  = negation:negation?
+    key:array_includes_key
+    sep
+    value:search_value &{
+      return tc.predicateFilter(FilterType.ARRAY_INCLUDES, key)
+    } {
+      return tc.tokenFilter(
+        FilterType.ARRAY_INCLUDES,
+        key,
+        value,
+        opDefault,
+        !!negation,
+        undefined,
+      );
+    }
+
 // in filter key:[val1, val2]
 text_in_filter
-  = negation:negation? key:text_key sep value:text_in_list &{
+  = negation:negation?
+    key:text_key
+    sep
+    wildcard_op:wildcard_op?
+    value:text_in_list &{
       return tc.predicateFilter(FilterType.TEXT_IN, key)
     } {
-      return tc.tokenFilter(FilterType.TEXT_IN, key, value, opDefault, !!negation);
+      const wildcard = wildcard_op ? wildcard_op.join("") : undefined;
+      return tc.tokenFilter(
+        FilterType.TEXT_IN,
+        key,
+        value,
+        opDefault,
+        !!negation,
+        wildcard,
+      );
     }
 
 // standard key:val filter
@@ -211,11 +255,20 @@ text_filter
   = negation:negation?
     key:text_key
     sep
+    wildcard_op:wildcard_op?
     op:(operator &{ return tc.predicateTextOperator(key); })?
     value:search_value &{
       return tc.predicateFilter(FilterType.TEXT, key)
     } {
-      return tc.tokenFilter(FilterType.TEXT, key, value, op ? op[0] : opDefault, !!negation);
+      const wildcard = wildcard_op ? wildcard_op.join("") : undefined;
+      return tc.tokenFilter(
+        FilterType.TEXT,
+        key,
+        value,
+        op ? op[0] : opDefault,
+        !!negation,
+        wildcard,
+      );
     }
 
 // Filter keys
@@ -264,6 +317,33 @@ explicit_number_tag_key
       return tc.tokenKeyExplicitNumberTag(prefix, key)
     }
 
+explicit_boolean_tag_key
+  = prefix:"tags" open_bracket key:escaped_key spaces comma spaces 'boolean' closed_bracket {
+      return tc.tokenKeyExplicitBooleanTag(prefix, key)
+    }
+
+explicit_array_tag_key
+  = prefix:"tags" open_bracket key:escaped_key spaces comma spaces 'array' closed_bracket {
+      return tc.tokenKeyExplicitArrayTag(prefix, key)
+    }
+
+// `[*]` is the required array membership operator ("any element equals value"),
+// the array analogue of scalar `:`. A future `[N]` would target one index.
+array_access_suffix = open_bracket "*" closed_bracket
+
+array_includes_tag_key
+  = base:explicit_array_tag_key array_access_suffix {
+      return tc.tokenKeyArrayIncludes(base, "*");
+    }
+
+array_includes_attr_key
+  = base:key array_access_suffix {
+      return tc.tokenKeyArrayIncludes(base, "*");
+    }
+
+array_includes_key
+  = array_includes_tag_key / array_includes_attr_key
+
 aggregate_key
   = name:key open_paren s1:spaces args:function_args? s2:spaces closed_paren {
       return tc.tokenKeyAggregate(name, args, s1, s2);
@@ -289,15 +369,15 @@ quoted_aggregate_param
     }
 
 explicit_tag_aggregate_param
-  = key:(explicit_tag_key / explicit_string_tag_key / explicit_number_tag_key) {
+  = key:(explicit_tag_key / explicit_string_tag_key / explicit_number_tag_key / explicit_boolean_tag_key) {
       return tc.tokenKeyAggregateParam(key.text, false);
     }
 
 search_key
-  = explicit_number_flag_key / explicit_number_tag_key / key / quoted_key
+  = explicit_number_flag_key / explicit_number_tag_key / explicit_boolean_tag_key / key / quoted_key
 
 text_key
-  = explicit_flag_key / explicit_string_flag_key / explicit_tag_key / explicit_string_tag_key / search_key
+  = explicit_flag_key / explicit_string_flag_key / explicit_tag_key / explicit_string_tag_key / explicit_array_tag_key / search_key
 
 // Filter values
 
@@ -349,6 +429,13 @@ numeric_in_list
     &end_value {
       return tc.tokenValueNumberList(item1, items);
     }
+
+// NOTE: These wildcard operators are internal implementation details and
+// should not be included in product docs. Users should use `*` instead.
+wildcard_op
+  = wildcard_unicode
+    (contains / starts_with / ends_with )
+    wildcard_unicode
 
 // See: https://stackoverflow.com/a/39617181/790169
 in_value_termination
@@ -423,6 +510,12 @@ open_bracket   = "["
 closed_bracket = "]"
 sep            = ":"
 negation       = "!"
+// NOTE: These wildcard operators are internal implementation details and
+// should not be included in product docs. Users should use `*` instead.
+wildcard_unicode     = [\uF00D]
+contains             = "Contains"
+starts_with          = "StartsWith"
+ends_with            = "EndsWith"
 comma          = ","
 spaces         = " "* { return tc.tokenSpaces(text()) }
 

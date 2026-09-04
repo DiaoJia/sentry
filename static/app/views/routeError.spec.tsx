@@ -1,28 +1,16 @@
 import * as Sentry from '@sentry/react';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import RouteError from 'sentry/views/routeError';
+import {getRouteStringFromRoutes} from 'sentry/utils/getRouteStringFromRoutes';
+import {RouteError} from 'sentry/views/routeError';
 
-describe('RouteError', function () {
-  const {router} = initializeOrg({
-    router: {
-      routes: [
-        {path: '/'},
-        {path: '/:orgId/'},
-        {name: 'this should be skipped'},
-        {path: '/organizations/:orgId/'},
-        {path: 'api-keys/', name: 'API Key'},
-      ],
-    },
-  });
+jest.mock('sentry/utils/getRouteStringFromRoutes');
+jest.mocked(getRouteStringFromRoutes).mockReturnValue('/organizations/:orgId/api-keys/');
 
-  it('captures errors with sentry', async function () {
-    render(<RouteError error={new Error('Big Bad Error')} />, {
-      router,
-      deprecatedRouterMocks: true,
-    });
+describe('RouteError', () => {
+  it('captures errors with sentry', async () => {
+    render(<RouteError error={new Error('Big Bad Error')} />);
 
     await waitFor(() =>
       expect(Sentry.captureException).toHaveBeenCalledWith(

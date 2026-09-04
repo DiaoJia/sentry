@@ -1,35 +1,49 @@
+import {useQuery} from '@tanstack/react-query';
+
 import type {Group} from 'sentry/types/group';
-import {
-  type ApiQueryKey,
-  useApiQuery,
-  type UseApiQueryOptions,
-} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {orgHasIssueInbox} from 'sentry/utils/seer/orgHasIssueInbox';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useEnvironmentsFromUrl} from 'sentry/views/issueDetails/utils';
 
-type FetchGroupQueryParameters = {
+type GroupApiOptionsParameters = {
   environments: string[];
   groupId: string;
   organizationSlug: string;
+  expandDerivedData?: boolean;
 };
 
-export function makeFetchGroupQueryKey({
+export function groupApiOptions({
   groupId,
   organizationSlug,
   environments,
-}: FetchGroupQueryParameters): ApiQueryKey {
-  const query: Record<string, string | string[]> = {
-    ...(environments.length > 0 ? {environment: environments} : {}),
-    expand: ['inbox', 'owners'],
-    collapse: ['release', 'tags'],
-  };
+  expandDerivedData = false,
+}: GroupApiOptionsParameters) {
+  return apiOptions.as<Group>()('/organizations/$organizationIdOrSlug/issues/$issueId/', {
+    path: {organizationIdOrSlug: organizationSlug, issueId: groupId},
+    query: {
+      ...(environments.length > 0 ? {environment: environments} : {}),
+      expand: ['inbox', 'owners', ...(expandDerivedData ? ['derivedData'] : [])],
+      collapse: ['release', 'tags', 'stats'],
+    },
+    staleTime: 30_000,
+  });
+}
 
-  return [`/organizations/${organizationSlug}/issues/${groupId}/`, {query}];
+type GroupQueryKeyParameters = Pick<
+  GroupApiOptionsParameters,
+  'groupId' | 'organizationSlug'
+>;
+
+export function groupQueryKey(params: GroupQueryKeyParameters) {
+  return [groupApiOptions({...params, environments: []}).queryKey[0]] as const;
 }
 
 interface UseGroupOptions {
   groupId: string;
-  options?: Omit<UseApiQueryOptions<Group>, 'staleTime'>;
+  options?: {
+    enabled?: boolean;
+  };
 }
 
 /**
@@ -40,13 +54,15 @@ export function useGroup({groupId, options}: UseGroupOptions) {
   const organization = useOrganization();
   const environments = useEnvironmentsFromUrl();
 
-  return useApiQuery<Group>(
-    makeFetchGroupQueryKey({organizationSlug: organization.slug, groupId, environments}),
-    {
-      staleTime: 30000,
-      gcTime: 30000,
-      retry: false,
-      ...options,
-    }
-  );
+  return useQuery({
+    ...groupApiOptions({
+      organizationSlug: organization.slug,
+      groupId,
+      environments,
+      expandDerivedData: orgHasIssueInbox(organization),
+    }),
+    gcTime: 30_000,
+    retry: false,
+    ...options,
+  });
 }

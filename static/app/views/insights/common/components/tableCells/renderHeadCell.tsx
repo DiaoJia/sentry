@@ -1,10 +1,15 @@
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import type {GridColumnHeader} from 'sentry/components/gridEditable';
-import type {Alignments} from 'sentry/components/gridEditable/sortLink';
-import SortLink from 'sentry/components/gridEditable/sortLink';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {getNextSort} from 'sentry/components/tables/getNextSort';
+import type {
+  ColumnAlign,
+  GridColumnHeader,
+  GridColumnSort,
+} from 'sentry/components/tables/gridEditable';
+import {encodeSort} from 'sentry/utils/discover/eventView';
 import type {Sort} from 'sentry/utils/discover/fields';
 import {
   aggregateFunctionOutputType,
@@ -12,11 +17,7 @@ import {
   parseFunction,
 } from 'sentry/utils/discover/fields';
 import type {QueryParameterNames} from 'sentry/views/insights/common/views/queryParameters';
-import {
-  SpanFunction,
-  SpanIndexedField,
-  SpanMetricsField,
-} from 'sentry/views/insights/types';
+import {SpanFields, SpanFunction} from 'sentry/views/insights/types';
 
 type Options = {
   column: GridColumnHeader<string>;
@@ -28,10 +29,9 @@ type Options = {
 const DEFAULT_SORT_PARAMETER_NAME = 'sort';
 
 const {SPAN_SELF_TIME, SPAN_DURATION, HTTP_RESPONSE_CONTENT_LENGTH, CACHE_ITEM_SIZE} =
-  SpanMetricsField;
+  SpanFields;
 const {
   TIME_SPENT_PERCENTAGE,
-  SPS,
   EPM,
   TPM,
   HTTP_RESPONSE_COUNT,
@@ -46,11 +46,10 @@ const SORTABLE_FIELDS = new Set([
   `sum(${SPAN_DURATION})`,
   `sum(${SPAN_SELF_TIME})`,
   `p95(${SPAN_SELF_TIME})`,
-  `p75(transaction.duration)`,
-  `transaction.duration`,
+  'p75(transaction.duration)',
+  'transaction.duration',
   'transaction',
-  `count()`,
-  `${SPS}()`,
+  'count()',
   `${EPM}()`,
   `${TPM}()`,
   `${TIME_SPENT_PERCENTAGE}()`,
@@ -65,13 +64,13 @@ const SORTABLE_FIELDS = new Set([
   `avg(${HTTP_RESPONSE_CONTENT_LENGTH})`,
   `${CACHE_HIT_RATE}()`,
   `${CACHE_MISS_RATE}()`,
-  SpanIndexedField.TIMESTAMP,
-  SpanIndexedField.SPAN_DURATION,
+  SpanFields.TIMESTAMP,
+  SpanFields.SPAN_DURATION,
   `avg(${CACHE_ITEM_SIZE})`,
-  SpanIndexedField.MESSAGING_MESSAGE_DESTINATION_NAME,
+  SpanFields.MESSAGING_MESSAGE_DESTINATION_NAME,
   'count_op(queue.publish)',
   'count_op(queue.process)',
-  'avg_if(span.duration,span.op,queue.process)',
+  'avg_if(span.duration,span.op,equals,queue.process)',
   'avg(messaging.message.receive.latency)',
   'time_spent_percentage(span.duration)',
   'transaction',
@@ -84,10 +83,13 @@ const SORTABLE_FIELDS = new Set([
   'failure_rate()',
   'performance_score(measurements.score.total)',
   'count_unique(user)',
-  'p50_if(span.duration,is_transaction,true)',
-  'p95_if(span.duration,is_transaction,true)',
-  'failure_rate_if(is_transaction,true)',
-  'sum_if(span.duration,is_transaction,true)',
+  'p50_if(span.duration,is_transaction,equals,true)',
+  'p75_if(span.duration,is_transaction,equals,true)',
+  'p90_if(span.duration,is_transaction,equals,true)',
+  'p95_if(span.duration,is_transaction,equals,true)',
+  'p99_if(span.duration,is_transaction,equals,true)',
+  'failure_rate_if(is_transaction,equals,true)',
+  'sum_if(span.duration,is_transaction,equals,true)',
   'p75(measurements.frames_slow_rate)',
   'p75(measurements.frames_frozen_rate)',
   'trace_status_rate(ok)',
@@ -95,63 +97,50 @@ const SORTABLE_FIELDS = new Set([
 
 const NUMERIC_FIELDS = new Set([
   'transaction.duration',
-  SpanMetricsField.CACHE_ITEM_SIZE,
-  SpanIndexedField.SPAN_SELF_TIME,
-  SpanIndexedField.SPAN_DURATION,
-  SpanIndexedField.CACHE_ITEM_SIZE,
-  SpanIndexedField.MESSAGING_MESSAGE_BODY_SIZE,
-  SpanIndexedField.MESSAGING_MESSAGE_RETRY_COUNT,
+  SpanFields.CACHE_ITEM_SIZE,
+  SpanFields.SPAN_SELF_TIME,
+  SpanFields.SPAN_DURATION,
+  SpanFields.CACHE_ITEM_SIZE,
+  SpanFields.MESSAGING_MESSAGE_BODY_SIZE,
+  SpanFields.MESSAGING_MESSAGE_RETRY_COUNT,
 ]);
 
-export const renderHeadCell = ({column, location, sort, sortParameterName}: Options) => {
-  const {key, name} = column;
-  const alignment = getAlignment(key);
+export const getColumnSort = ({
+  column,
+  location,
+  sort,
+  sortParameterName,
+}: Options): GridColumnSort => {
+  const {key} = column;
+  const canSort = Boolean(location && sort && SORTABLE_FIELDS.has(key));
 
-  let newSortDirection: Sort['kind'] = 'desc';
-  if (sort?.field === column.key) {
-    if (sort.kind === 'desc') {
-      newSortDirection = 'asc';
-    }
-  }
-
-  const newSort = `${newSortDirection === 'desc' ? '-' : ''}${key}`;
-
-  const hasTooltip = column.tooltip;
-
-  const sortLink = (
-    <SortLink
-      align={alignment}
-      canSort={Boolean(location && sort && SORTABLE_FIELDS.has(key))}
-      direction={sort?.field === column.key ? sort.kind : undefined}
-      title={hasTooltip ? <TooltipHeader>{name}</TooltipHeader> : name}
-      generateSortLink={() => {
-        return {
+  return {
+    align: getAlignment(key),
+    direction: canSort && sort?.field === key ? sort.kind : undefined,
+    to: canSort
+      ? {
           ...location,
           query: {
             ...location?.query,
-            [sortParameterName ?? DEFAULT_SORT_PARAMETER_NAME]: newSort,
+            [sortParameterName ?? DEFAULT_SORT_PARAMETER_NAME]: encodeSort(
+              getNextSort(key, sort)
+            ),
           },
-        };
-      }}
-    />
-  );
-
-  if (hasTooltip) {
-    const AlignmentContainer = alignment === 'right' ? AlignRight : AlignLeft;
-
-    return (
-      <AlignmentContainer>
-        <StyledTooltip isHoverable title={column.tooltip}>
-          {sortLink}
-        </StyledTooltip>
-      </AlignmentContainer>
-    );
-  }
-
-  return sortLink;
+        }
+      : undefined,
+  };
 };
 
-const getAlignment = (key: string): Alignments => {
+export const renderHeadCell = ({column}: Pick<Options, 'column'>) =>
+  column.tooltip ? (
+    <StyledTooltip isHoverable showUnderline title={column.tooltip}>
+      {column.name}
+    </StyledTooltip>
+  ) : (
+    column.name
+  );
+
+const getAlignment = (key: string): ColumnAlign => {
   const result = parseFunction(key);
 
   if (result) {
@@ -167,25 +156,7 @@ const getAlignment = (key: string): Alignments => {
   return 'left';
 };
 
-const AlignLeft = styled('span')`
-  display: block;
-  margin: auto;
-  text-align: left;
-  width: 100%;
-`;
-
-const AlignRight = styled('span')`
-  display: block;
-  margin: auto;
-  text-align: right;
-  width: 100%;
-`;
-
 const StyledTooltip = styled(Tooltip)`
   top: 1px;
   position: relative;
-`;
-
-const TooltipHeader = styled('span')`
-  ${p => p.theme.tooltipUnderline()};
 `;

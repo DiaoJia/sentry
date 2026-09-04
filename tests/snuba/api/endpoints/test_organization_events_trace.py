@@ -6,7 +6,19 @@ import pytest
 from django.urls import NoReverseMatch, reverse
 
 from sentry import options
-from sentry.testutils.cases import TraceTestCase
+from sentry.api.endpoints.organization_events_trace import query_trace_data
+from sentry.issues.grouptype import (
+    PerformanceFileIOMainThreadGroupType,
+    PerformanceSlowDBQueryGroupType,
+)
+from sentry.issues.issue_occurrence import IssueOccurrence
+from sentry.models.group import Group
+from sentry.search.eap.occurrences.rollout_utils import (
+    EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION,
+    EAP_OCCURRENCES_USE_EXPERIMENTAL_DATA_ALLOWLIST_OPTION,
+)
+from sentry.search.events.types import SnubaParams
+from sentry.testutils.cases import OccurrenceTestCase, TraceTestCase
 from sentry.utils.samples import load_data
 from tests.snuba.api.endpoints.test_organization_events import OrganizationEventsEndpointTestBase
 
@@ -15,10 +27,9 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
     url_name: str
     FEATURES = [
         "organizations:performance-view",
-        "organizations:trace-view-load-more",
     ]
 
-    def setUp(self):
+    def setUp(self) -> None:
         """
         Span structure:
 
@@ -45,7 +56,7 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
             },
         )
 
-    def load_trace(self, is_eap=False):
+    def load_trace(self):
         self.root_event = self.create_event(
             trace_id=self.trace_id,
             transaction="root",
@@ -56,6 +67,19 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
                     "description": f"GET gen1-{i}",
                     "span_id": root_span_id,
                     "trace_id": self.trace_id,
+                    "data": {
+                        "gen_ai.request.model": "gpt-4o",
+                        "gen_ai.usage.total_tokens": 100,
+                        "browser.web_vital.lcp.value": 2807.335,
+                        "browser.web_vital.cls.value": 0.0382,
+                        "browser.web_vital.inp.value": 120.0,
+                        "browser.web_vital.ttfb.value": 450.0,
+                        "browser.web_vital.fcp.value": 2258.06,
+                        "app.vitals.start.cold.value": 1600.0,
+                        "app.vitals.start.warm.value": 400.0,
+                        "app.vitals.ttid.value": 1200.0,
+                        "app.vitals.ttfd.value": 2400.0,
+                    },
                 }
                 for i, root_span_id in enumerate(self.root_span_ids)
             ],
@@ -69,15 +93,10 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
             slow_db_performance_issue=True,
             project_id=self.project.id,
             milliseconds=3000,
-            is_eap=is_eap,
         )
 
         # First Generation
-        # TODO: temporary, this is until we deprecate using this endpoint without useSpans
-        if isinstance(self, OrganizationEventsTraceEndpointTestUsingSpans):
-            self.gen1_span_ids = ["0014" * 4, *(uuid4().hex[:16] for _ in range(2))]
-        else:
-            self.gen1_span_ids = [uuid4().hex[:16] for _ in range(3)]
+        self.gen1_span_ids = [uuid4().hex[:16] for _ in range(3)]
         self.gen1_project = self.create_project(organization=self.organization)
         self.gen1_events = [
             self.create_event(
@@ -95,7 +114,6 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
                 parent_span_id=root_span_id,
                 project_id=self.gen1_project.id,
                 milliseconds=2000,
-                is_eap=is_eap,
             )
             for i, (root_span_id, gen1_span_id) in enumerate(
                 zip(self.root_span_ids, self.gen1_span_ids)
@@ -127,7 +145,6 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
                 span_id=self.gen2_span_id if i == 0 else None,
                 project_id=self.gen2_project.id,
                 milliseconds=1000,
-                is_eap=is_eap,
             )
             for i, (gen1_span_id, gen2_span_id) in enumerate(
                 zip(self.gen1_span_ids, self.gen2_span_ids)
@@ -143,512 +160,10 @@ class OrganizationEventsTraceEndpointBase(OrganizationEventsEndpointTestBase, Tr
             project_id=self.gen3_project.id,
             parent_span_id=self.gen2_span_id,
             milliseconds=500,
-            is_eap=is_eap,
         )
 
 
-class OrganizationEventsTraceLightEndpointTest(OrganizationEventsTraceEndpointBase):
-    url_name = "sentry-api-0-organization-events-trace-light"
-
-    def test_no_projects(self):
-        user = self.create_user()
-        org = self.create_organization(owner=user)
-        self.login_as(user=user)
-
-        url = reverse(
-            self.url_name,
-            kwargs={"organization_id_or_slug": org.slug, "trace_id": uuid4().hex},
-        )
-
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                url,
-                format="json",
-            )
-
-        assert response.status_code == 404, response.content
-
-    def test_bad_ids(self):
-        # Fake event id
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"event_id": uuid4().hex},
-                format="json",
-            )
-
-        assert response.status_code == 404, response.content
-
-        # Invalid event id
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"event_id": "not-a-event"},
-                format="json",
-            )
-
-        assert response.status_code == 400, response.content
-
-        # Fake trace id
-        self.url = reverse(
-            "sentry-api-0-organization-events-trace-light",
-            kwargs={
-                "organization_id_or_slug": self.project.organization.slug,
-                "trace_id": uuid4().hex,
-            },
-        )
-
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"event_id": "a" * 32},
-                format="json",
-            )
-
-        assert response.status_code == 404, response.content
-
-        # Invalid trace id
-        with pytest.raises(NoReverseMatch):
-            self.url = reverse(
-                "sentry-api-0-organization-events-trace-light",
-                kwargs={
-                    "organization_id_or_slug": self.project.organization.slug,
-                    "trace_id": "not-a-trace",
-                },
-            )
-
-    def test_no_roots(self):
-        """Even when there's no root, we return the current event"""
-        self.load_trace()
-        no_root_trace = uuid4().hex
-        parent_span_id = uuid4().hex[:16]
-        no_root_event = self.create_event(
-            trace_id=no_root_trace,
-            transaction="/not_root/but_only_transaction",
-            spans=[],
-            parent_span_id=parent_span_id,
-            project_id=self.project.id,
-        )
-        url = reverse(
-            "sentry-api-0-organization-events-trace-light",
-            kwargs={
-                "organization_id_or_slug": self.project.organization.slug,
-                "trace_id": no_root_trace,
-            },
-        )
-
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                url,
-                data={"event_id": no_root_event.event_id},
-                format="json",
-            )
-
-        assert response.status_code == 200, response.content
-        assert len(response.data["transactions"]) == 1
-
-        event = response.data["transactions"][0]
-        # Basically know nothing about this event
-        assert event["generation"] is None
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] == parent_span_id
-        assert event["event_id"] == no_root_event.event_id
-
-    def test_multiple_roots(self):
-        self.load_trace()
-        second_root = self.create_event(
-            trace_id=self.trace_id,
-            transaction="/second_root",
-            spans=[],
-            parent_span_id=None,
-            project_id=self.project.id,
-        )
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": second_root.event_id, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-        assert len(response.data["transactions"]) == 1
-
-        event = response.data["transactions"][0]
-        assert event["generation"] == 0
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] is None
-
-    def test_root_event(self):
-        self.load_trace()
-        root_event_id = self.root_event.event_id
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": root_event_id, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-        assert len(response.data["transactions"]) == 4
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        assert root_event_id in events
-        event = events[root_event_id]
-        assert event["generation"] == 0
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] is None
-
-        for i, child_event in enumerate(self.gen1_events):
-            child_event_id = child_event.event_id
-            assert child_event_id in events
-            event = events[child_event_id]
-            assert event["generation"] == 1
-            assert event["parent_event_id"] == root_event_id
-            assert event["parent_span_id"] == self.root_span_ids[i]
-
-    def test_root_with_multiple_roots(self):
-        self.load_trace()
-        root_event_id = self.root_event.event_id
-        self.create_event(
-            trace_id=self.trace_id,
-            transaction="/second_root",
-            spans=[],
-            parent_span_id=None,
-            project_id=self.project.id,
-        )
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"event_id": self.root_event.event_id},
-                format="json",
-            )
-
-        assert response.status_code == 200, response.content
-
-        assert len(response.data["transactions"]) == 4
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        assert root_event_id in events
-        event = events[root_event_id]
-        assert event["generation"] == 0
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] is None
-
-        for i, child_event in enumerate(self.gen1_events):
-            child_event_id = child_event.event_id
-            assert child_event_id in events
-            event = events[child_event_id]
-            assert event["generation"] == 1
-            assert event["parent_event_id"] == root_event_id
-            assert event["parent_span_id"] == self.root_span_ids[i]
-
-    def test_direct_parent_with_children(self):
-        self.load_trace()
-        root_event_id = self.root_event.event_id
-        current_event = self.gen1_events[0].event_id
-        child_event_id = self.gen2_events[0].event_id
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-
-        assert len(response.data["transactions"]) == 3
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        assert root_event_id in events
-        event = events[root_event_id]
-        assert event["generation"] == 0
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] is None
-
-        assert current_event in events
-        event = events[current_event]
-        assert event["generation"] == 1
-        assert event["parent_event_id"] == root_event_id
-        assert event["parent_span_id"] == self.root_span_ids[0]
-
-        assert child_event_id in events
-        event = events[child_event_id]
-        assert event["generation"] == 2
-        assert event["parent_event_id"] == current_event
-        assert event["parent_span_id"] == self.gen1_span_ids[0]
-
-    def test_direct_parent_with_children_and_multiple_root(self):
-        self.load_trace()
-        root_event_id = self.root_event.event_id
-        current_event = self.gen1_events[0].event_id
-        child_event_id = self.gen2_events[0].event_id
-        self.create_event(
-            trace_id=self.trace_id,
-            transaction="/second_root",
-            spans=[],
-            parent_span_id=None,
-            project_id=self.project.id,
-        )
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-
-        assert len(response.data["transactions"]) == 3
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        assert root_event_id in events
-        event = events[root_event_id]
-        assert event["generation"] == 0
-        assert event["parent_event_id"] is None
-        assert event["parent_span_id"] is None
-
-        assert current_event in events
-        event = events[current_event]
-        assert event["generation"] == 1
-        assert event["parent_event_id"] == root_event_id
-        assert event["parent_span_id"] == self.root_span_ids[0]
-
-        assert child_event_id in events
-        event = events[child_event_id]
-        assert event["generation"] == 2
-        assert event["parent_event_id"] == current_event
-        assert event["parent_span_id"] == self.gen1_span_ids[0]
-
-    def test_second_generation_with_children(self):
-        self.load_trace()
-        current_event = self.gen2_events[0].event_id
-        child_event_id = self.gen3_event.event_id
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-
-        assert len(response.data["transactions"]) == 2
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        assert current_event in events
-        event = events[current_event]
-        # Parent/generation is unknown in this case
-        assert event["generation"] is None
-        assert event["parent_event_id"] is None
-        # But we still know the parent_span
-        assert event["parent_span_id"] == self.gen1_span_ids[0]
-
-        assert child_event_id in events
-        event = events[child_event_id]
-        assert event["generation"] is None
-        assert event["parent_event_id"] == current_event
-        assert event["parent_span_id"] == self.gen2_span_id
-
-    def test_third_generation_no_children(self):
-        self.load_trace()
-        current_event = self.gen3_event.event_id
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert response.status_code == 200, response.content
-
-        assert len(response.data["transactions"]) == 1
-
-        event = response.data["transactions"][0]
-        assert event["generation"] is None
-        # Parent is unknown in this case
-        assert event["parent_event_id"] is None
-        # But we still know the parent_span
-        assert event["parent_span_id"] == self.gen2_span_id
-
-    def test_sibling_transactions(self):
-        """More than one transaction can share a parent_span_id"""
-        self.load_trace()
-        gen3_event_siblings = [
-            self.create_event(
-                trace_id=self.trace_id,
-                transaction="/transaction/gen3-1",
-                spans=[],
-                project_id=self.create_project(organization=self.organization).id,
-                parent_span_id=self.gen2_span_ids[1],
-                milliseconds=500,
-            ).event_id,
-            self.create_event(
-                trace_id=self.trace_id,
-                transaction="/transaction/gen3-2",
-                spans=[],
-                project_id=self.create_project(organization=self.organization).id,
-                parent_span_id=self.gen2_span_ids[1],
-                milliseconds=1500,
-            ).event_id,
-        ]
-
-        current_event = self.gen2_events[1].event_id
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assert len(response.data["transactions"]) == 3
-        events = {item["event_id"]: item for item in response.data["transactions"]}
-
-        for child_event_id in gen3_event_siblings:
-            assert child_event_id in events
-            event = events[child_event_id]
-            assert event["generation"] is None
-            assert event["parent_event_id"] == current_event
-            assert event["parent_span_id"] == self.gen2_span_ids[1]
-
-    def test_with_error_event(self):
-        self.load_trace()
-        root_event_id = self.root_event.event_id
-        current_transaction_event = self.gen1_events[0].event_id
-
-        start, _ = self.get_start_end_from_day_ago(1000)
-        error_data = load_data(
-            "javascript",
-            timestamp=start,
-        )
-        error_data["contexts"]["trace"] = {
-            "type": "trace",
-            "trace_id": self.trace_id,
-            "span_id": self.gen1_span_ids[0],
-        }
-        error_data["tags"] = [["transaction", "/transaction/gen1-0"]]
-        error = self.store_event(error_data, project_id=self.gen1_project.id)
-
-        def assertions(response):
-            assert response.status_code == 200, response.content
-            assert len(response.data["transactions"]) == 3
-            events = {item["event_id"]: item for item in response.data["transactions"]}
-
-            assert root_event_id in events
-            event = events[root_event_id]
-            assert event["generation"] == 0
-            assert event["parent_event_id"] is None
-            assert event["parent_span_id"] is None
-            assert len(event["errors"]) == 0
-
-            assert current_transaction_event in events
-            event = events[current_transaction_event]
-            assert event["generation"] == 1
-            assert event["parent_event_id"] == root_event_id
-            assert event["parent_span_id"] == self.root_span_ids[0]
-            assert len(event["errors"]) == 1
-            assert event["errors"][0]["event_id"] == error.event_id
-            assert event["errors"][0]["issue_id"] == error.group_id
-            assert event["errors"][0]["message"] == error.search_message
-
-        with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"event_id": error.event_id, "project": -1},
-                format="json",
-            )
-
-        assertions(response)
-
-        with self.feature(self.FEATURES):
-            data: dict[str, str | int] = {"event_id": current_transaction_event, "project": -1}
-            response = self.client.get(self.url, data=data, format="json")
-
-        assertions(response)
-
-    def assert_orphan_error_response(self, response, error, span_id):
-        assert response.status_code == 200, response.content
-        assert response.data["transactions"] == []
-        assert len(response.data["orphan_errors"]) == 1
-        assert {
-            "event_id": error.event_id,
-            "issue_id": error.group_id,
-            "span": span_id,
-            "project_id": self.project.id,
-            "project_slug": self.project.slug,
-            "level": "fatal",
-            "title": error.title,
-            "timestamp": datetime.fromisoformat(error.timestamp).timestamp(),
-            "generation": 0,
-            "event_type": "error",
-            "message": error.search_message,
-        } == response.data["orphan_errors"][0]
-
-    def test_with_one_orphan_error(self):
-        self.load_trace()
-        span_id = uuid4().hex[:16]
-        start, _ = self.get_start_end_from_day_ago(1000)
-
-        error_data = load_data(
-            "javascript",
-            timestamp=start,
-        )
-        error_data["contexts"]["trace"] = {
-            "type": "trace",
-            "trace_id": self.trace_id,
-            "span_id": span_id,
-        }
-        error_data["level"] = "fatal"
-        error = self.store_event(error_data, project_id=self.project.id)
-
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
-            response = self.client.get(
-                self.url,
-                data={"event_id": error.event_id, "project": -1},
-                format="json",
-            )
-
-        self.assert_orphan_error_response(response, error, span_id)
-
-    def test_with_multiple_orphan_errors(self):
-        self.load_trace()
-        span_id = uuid4().hex[:16]
-        start, end = self.get_start_end_from_day_ago(1000)
-
-        error_data = load_data(
-            "javascript",
-            timestamp=start,
-        )
-        error_data["contexts"]["trace"] = {
-            "type": "trace",
-            "trace_id": self.trace_id,
-            "span_id": span_id,
-        }
-        error_data["level"] = "fatal"
-        error = self.store_event(error_data, project_id=self.project.id)
-
-        error_data1 = load_data(
-            "javascript",
-            timestamp=end,
-        )
-        error_data1["contexts"]["trace"] = {
-            "type": "trace",
-            "trace_id": self.trace_id,
-            "span_id": span_id,
-        }
-        error_data1["level"] = "warning"
-        self.store_event(error_data1, project_id=self.project.id)
-
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
-            response = self.client.get(
-                self.url,
-                data={"event_id": error.event_id, "project": -1},
-                format="json",
-            )
-
-        self.assert_orphan_error_response(response, error, span_id)
-
-    def test_with_unknown_event(self):
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
-            response = self.client.get(
-                self.url,
-                data={"event_id": "766758c00ff54d8ab865369ecab53ae6", "project": "-1"},
-                format="json",
-            )
-
-        assert response.status_code == 404
-
-
-class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
+class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase, OccurrenceTestCase):
     url_name = "sentry-api-0-organization-events-trace"
     check_generation = True
 
@@ -708,16 +223,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         """Broken in the non-spans endpoint, but we're not maintaining that anymore"""
         pass
 
-    def client_get(self, data, url=None):
-        if url is None:
-            url = self.url
-        return self.client.get(
-            url,
-            data,
-            format="json",
-        )
-
-    def test_no_projects(self):
+    def test_no_projects(self) -> None:
         user = self.create_user()
         org = self.create_organization(owner=user)
         self.login_as(user=user)
@@ -728,14 +234,11 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         )
 
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                url,
-                format="json",
-            )
+            response = self.client_get(url=url)
 
         assert response.status_code == 404, response.content
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.load_trace()
         with self.feature(self.FEATURES):
             response = self.client_get(
@@ -749,7 +252,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert "tags" not in trace_transaction
         assert "measurements" not in trace_transaction
 
-    def test_simple_with_limit(self):
+    def test_simple_with_limit(self) -> None:
         self.load_trace()
         with self.feature(self.FEATURES):
             response = self.client_get(
@@ -763,7 +266,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert "tags" not in trace_transaction
         assert "measurements" not in trace_transaction
 
-    def test_detailed_trace(self):
+    def test_detailed_trace(self) -> None:
         self.load_trace()
         with self.feature(self.FEATURES):
             response = self.client_get(
@@ -783,16 +286,18 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert root["measurements"]["lcp"]["value"] == 1000
         assert root["measurements"]["fcp"]["value"] == 750
 
-    def test_detailed_trace_with_bad_tags(self):
+    def test_detailed_trace_with_bad_tags(self) -> None:
         """Basically test that we're actually using the event serializer's method for tags"""
         trace = uuid4().hex
+        long_tag_key = "somethinglong" * 250  # 3250 characters
+        long_tag_value = "somethinglong" * 250  # 3250 characters
         self.create_event(
             trace_id=trace,
             transaction="bad-tags",
             parent_span_id=None,
             spans=[],
             project_id=self.project.id,
-            tags=[["somethinglong" * 250, "somethinglong" * 250]],
+            tags=[[long_tag_key, long_tag_value]],
             milliseconds=3000,
             store_event_kwargs={"assert_no_errors": False},
         )
@@ -811,9 +316,38 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert response.status_code == 200, response.content
         root = response.data["transactions"][0]
         assert root["transaction.status"] == "ok"
-        assert {"key": None, "value": None} in root["tags"]
 
-    def test_bad_span_loop(self):
+        # Check that tags are trimmed to 200 characters, not dropped
+        # Find the tag with the long key/value (it should be trimmed but present)
+        found_long_tag = None
+        for tag in root["tags"]:
+            # Look for a tag that starts with our long key pattern and is around 200 chars
+            if (
+                tag["key"]
+                and tag["key"].startswith("somethinglongsomethinglong")
+                and len(tag["key"]) <= 200
+                and tag["value"]
+                and tag["value"].startswith("somethinglongsomethinglong")
+                and len(tag["value"]) <= 200
+            ):
+                found_long_tag = tag
+                break
+
+        assert found_long_tag is not None, f"Expected trimmed tag not found. Tags: {root['tags']}"
+
+        # Verify the tag key and value are trimmed to approximately 200 characters
+        assert len(found_long_tag["key"]) <= 200, (
+            f"Tag key too long: {len(found_long_tag['key'])} chars"
+        )
+        assert len(found_long_tag["value"]) <= 200, (
+            f"Tag value too long: {len(found_long_tag['value'])} chars"
+        )
+
+        # Verify they start with the expected pattern (not None)
+        assert found_long_tag["key"].startswith("somethinglongsomethinglong")
+        assert found_long_tag["value"].startswith("somethinglongsomethinglong")
+
+    def test_bad_span_loop(self) -> None:
         """Maliciously create a loop in the span structure
         Structure then becomes something like this:
         root
@@ -858,7 +392,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         # We didn't even try to start the loop of spans
         assert len(gen3_1["children"]) == 0
 
-    def test_bad_orphan_span_loop(self):
+    def test_bad_orphan_span_loop(self) -> None:
         """Maliciously create a loop in the span structure but for an orphan event"""
         root_span_id = uuid4().hex[:16]
         root_parent_span = uuid4().hex[:16]
@@ -911,7 +445,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         child = root["children"][0]
         self.assert_event(child, orphan_child, "child")
 
-    def test_multiple_roots(self):
+    def test_multiple_roots(self) -> None:
         trace_id = uuid4().hex
         first_root = self.create_event(
             trace_id=trace_id,
@@ -946,7 +480,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         self.assert_event(response.data["transactions"][0], first_root, "first_root")
         self.assert_event(response.data["transactions"][1], second_root, "second_root")
 
-    def test_sibling_transactions(self):
+    def test_sibling_transactions(self) -> None:
         """More than one transaction can share a parent_span_id"""
         self.load_trace()
         gen3_event_siblings = [
@@ -980,7 +514,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert len(gen2_parent["children"]) == 2
         assert [child["event_id"] for child in gen2_parent["children"]] == gen3_event_siblings
 
-    def test_with_orphan_siblings(self):
+    def test_with_orphan_siblings(self) -> None:
         self.load_trace()
         parent_span_id = uuid4().hex[:16]
         root_event = self.create_event(
@@ -1017,7 +551,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             orphan["event_id"] for orphan in orphans
         ]
 
-    def test_with_orphan_trace(self):
+    def test_with_orphan_trace(self) -> None:
         self.load_trace()
         orphan_span_ids = {
             key: uuid4().hex[:16]
@@ -1107,7 +641,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             assert grandchild["generation"] == 2
         assert grandchild["parent_event_id"] == child_event.event_id
 
-    def test_with_errors(self):
+    def test_with_errors(self) -> None:
         self.load_trace()
         error, error1, _ = self.load_errors(self.gen1_project, self.gen1_span_ids[0])
 
@@ -1149,7 +683,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert data in gen1_event["errors"]
         assert data1 in gen1_event["errors"]
 
-    def test_with_only_orphan_errors_with_same_span_ids(self):
+    def test_with_only_orphan_errors_with_same_span_ids(self) -> None:
         span_id = uuid4().hex[:16]
         start, end = self.get_start_end_from_day_ago(10000)
 
@@ -1179,9 +713,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         }
         error1 = self.store_event(error_data1, project_id=self.project.id)
 
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
+        with self.feature([*self.FEATURES]):
             response = self.client_get(
                 data={"project": -1},
             )
@@ -1215,7 +747,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             "message": error1.search_message,
         } == response.data["orphan_errors"][0]
 
-    def test_with_only_orphan_errors_with_different_span_ids(self):
+    def test_with_only_orphan_errors_with_different_span_ids(self) -> None:
         start, _ = self.get_start_end_from_day_ago(1000)
         span_id = uuid4().hex[:16]
         error_data = load_data(
@@ -1238,9 +770,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         }
         error1 = self.store_event(error_data, project_id=self.project.id)
 
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
+        with self.feature([*self.FEATURES]):
             response = self.client_get(
                 data={"project": -1},
             )
@@ -1273,7 +803,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             "message": error1.search_message,
         } in response.data["orphan_errors"]
 
-    def test_with_mixup_of_orphan_errors_with_simple_trace_data(self):
+    def test_with_mixup_of_orphan_errors_with_simple_trace_data(self) -> None:
         self.load_trace()
         start, _ = self.get_start_end_from_day_ago(1000)
         span_id = uuid4().hex[:16]
@@ -1296,9 +826,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             "span_id": span_id1,
         }
 
-        with self.feature(
-            [*self.FEATURES, "organizations:performance-tracing-without-performance"]
-        ):
+        with self.feature([*self.FEATURES]):
             response = self.client_get(
                 data={"project": -1},
             )
@@ -1321,7 +849,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         } in response.data["orphan_errors"]
 
     @pytest.mark.skip(reason="flaky: #84070")
-    def test_with_default(self):
+    def test_with_default(self) -> None:
         self.load_trace()
         start, _ = self.get_start_end_from_day_ago(1000)
         default_event = self.load_default()
@@ -1348,7 +876,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
             "message": default_event.search_message,
         } in root_event["errors"]
 
-    def test_pruning_root(self):
+    def test_pruning_root(self) -> None:
         self.load_trace()
         # Pruning shouldn't happen for the root event
         with self.feature(self.FEATURES):
@@ -1358,7 +886,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert response.status_code == 200, response.content
         self.assert_trace_data(response.data["transactions"][0])
 
-    def test_pruning_event(self):
+    def test_pruning_event(self) -> None:
         self.load_trace()
         with self.feature(self.FEATURES):
             response = self.client_get(
@@ -1385,7 +913,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
                 assert len(gen1["children"]) == 0
 
     @mock.patch("sentry.api.endpoints.organization_events_trace.query_trace_data")
-    def test_timestamp_optimization(self, mock_query):
+    def test_timestamp_optimization(self, mock_query: mock.MagicMock) -> None:
         """When timestamp is passed we'll ignore the statsPeriod and make a query with a smaller start & end"""
         self.load_trace()
         with self.feature(self.FEATURES):
@@ -1400,7 +928,7 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         params = mock_query.call_args.args[1]
         assert abs((params.end - params.start).days) <= 7
 
-    def test_timestamp_optimization_without_mock(self):
+    def test_timestamp_optimization_without_mock(self) -> None:
         """Make sure that even if the params are smaller the query still works"""
         self.load_trace()
         with self.feature(self.FEATURES):
@@ -1419,229 +947,171 @@ class OrganizationEventsTraceEndpointTest(OrganizationEventsTraceEndpointBase):
         assert "tags" not in trace_transaction
         assert "measurements" not in trace_transaction
 
-
-class OrganizationEventsTraceEndpointTestUsingSpans(OrganizationEventsTraceEndpointTest):
-    check_generation = False
-
-    def client_get(self, data, url=None):
-        data["useSpans"] = 1
-        return super().client_get(data, url)
-
-    def assert_performance_issues(self, root):
-        assert len(root["performance_issues"]) == 2
-        # The perf issues are the last 2 spans
-        perf_issue_spans = {span["span_id"]: span for span in self.root_event.data["spans"][-2:]}
-        for perf_issue in root["performance_issues"]:
-            assert len(perf_issue["suspect_spans"]) == 1
-            expected = perf_issue_spans[perf_issue["suspect_spans"][0]]
-            assert perf_issue["start"] == expected["start_timestamp"]
-            assert perf_issue["end"] == expected["timestamp"]
-
-    @pytest.mark.querybuilder
-    def test_simple(self):
+    def test_load_performance_issues_with_eap_as_source_of_truth(self) -> None:
         self.load_trace()
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        # We shouldn't have detailed fields here
-        assert "transaction.status" not in trace_transaction
-        assert "tags" not in trace_transaction
 
-    def test_simple_with_limit(self):
-        self.load_trace()
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={"limit": 200},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        # We shouldn't have detailed fields here
-        assert "transaction.status" not in trace_transaction
-        assert "tags" not in trace_transaction
-
-    def test_with_error_event(self):
-        self.load_trace()
-        _, start = self.get_start_end_from_day_ago(123)
-        error_data = load_data(
-            "javascript",
-            timestamp=start,
+        group_ids = list(
+            Group.objects.filter(
+                project=self.project,
+                type__in=[
+                    PerformanceFileIOMainThreadGroupType.type_id,
+                    PerformanceSlowDBQueryGroupType.type_id,
+                ],
+            ).values_list("id", flat=True)
         )
-        error_data["contexts"]["trace"] = {
-            "type": "trace",
-            "trace_id": self.trace_id,
-            "span_id": self.gen1_span_ids[0],
-        }
-        error_data["tags"] = [["transaction", "/transaction/gen1-0"]]
-        error = self.store_event(error_data, project_id=self.gen1_project.id)
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        errors = trace_transaction["children"][0]["errors"]
-        assert len(errors) == 1
-        error_result = errors[0]
-        assert error_result["event_id"] == error.event_id
-        assert error_result["span"] == self.gen1_span_ids[0]
-        assert error_result["title"] == error.title
-        assert error_result["message"] == error.search_message
-        assert error_result["timestamp"] == datetime.fromisoformat(error.timestamp).timestamp()
+        assert len(group_ids) == 2
 
-    @pytest.mark.skip(
-        "Loops can only be orphans cause the most recent parent to be saved will overwrite the previous"
-    )
-    def test_bad_span_loop(self):
-        super().test_bad_span_loop()
+        issue_occ_id_1 = uuid4().hex
+        issue_occ_id_2 = uuid4().hex
+        offender_span_id = "0012" * 4
 
-    @pytest.mark.skip("Can't use the detailed response with useSpans on")
-    def test_detailed_trace_with_bad_tags(self):
-        super().test_detailed_trace_with_bad_tags()
-
-    @pytest.mark.skip("We shouldn't need to prune with events anymore since spans should be faster")
-    def test_pruning_event(self):
-        super().test_pruning_event()
-
-    def test_detailed_trace(self):
-        """Can't use detailed with useSpans, so this should actually just 400"""
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={"detailed": 1},
-            )
-
-        assert response.status_code == 400, response.content
-
-    @mock.patch("sentry.api.endpoints.organization_events_trace.SpansIndexedQueryBuilder")
-    def test_indexed_spans_only_query_required_projects(self, mock_query_builder):
-        mock_builder = mock.Mock()
-        mock_builder.resolve_column_name.return_value = "span_id"
-        mock_builder.run_query.return_value = {}
-        mock_query_builder.return_value = mock_builder
-        # Add a few more projects to the org
-        self.create_project(organization=self.organization)
-        self.create_project(organization=self.organization)
-
-        self.load_trace()
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={},
-            )
-
-        assert sorted(
-            [self.project.id, self.gen1_project.id, self.gen2_project.id, self.gen3_project.id]
-        ) == sorted(mock_query_builder.mock_calls[0].kwargs["snuba_params"].project_ids)
-
-        assert response.status_code == 200, response.content
-
-    def test_event_id(self):
-        self.load_trace()
-        # When given an event_id even if its not the root transaction we should prioritize loading that specific event
-        # over loading roots
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={
-                    "timestamp": self.root_event.timestamp,
-                    # Limit of one means the only result is the target event
-                    "limit": 1,
-                    "eventId": self.gen1_events[0].event_id,
+        for occ_id in [issue_occ_id_1, issue_occ_id_2]:
+            IssueOccurrence(
+                id=occ_id,
+                project_id=self.project.id,
+                event_id=self.root_event.event_id,
+                fingerprint=[uuid4().hex],
+                issue_title="EAP Test Issue",
+                subtitle="eap test",
+                resource_id=None,
+                evidence_data={
+                    "parent_span_ids": [],
+                    "offender_span_ids": [offender_span_id],
                 },
-            )
+                evidence_display=[],
+                type=PerformanceFileIOMainThreadGroupType,
+                detection_time=self.day_ago,
+                level="info",
+                culprit="test",
+            ).save()
+
+        self.store_eap_items(
+            [
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=group_ids[0],
+                    trace_id=self.trace_id,
+                    event_id=self.root_event.event_id,
+                    issue_occurrence_id=issue_occ_id_1,
+                    timestamp=self.day_ago,
+                ),
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=group_ids[1],
+                    trace_id=self.trace_id,
+                    event_id=self.root_event.event_id,
+                    issue_occurrence_id=issue_occ_id_2,
+                    timestamp=self.day_ago,
+                ),
+            ]
+        )
+
+        with self.options(
+            {
+                EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION: True,
+                EAP_OCCURRENCES_USE_EXPERIMENTAL_DATA_ALLOWLIST_OPTION: [
+                    "api.trace.load_performance_issues"
+                ],
+            }
+        ):
+            with self.feature(self.FEATURES):
+                response = self.client_get(
+                    data={"project": -1},
+                )
+
         assert response.status_code == 200, response.content
         trace_transaction = response.data["transactions"][0]
-        self.assert_event(trace_transaction, self.gen1_events[0], "root")
+        assert len(trace_transaction["performance_issues"]) == 2
+        for perf_issue in trace_transaction["performance_issues"]:
+            assert perf_issue["event_id"] == self.root_event.event_id
+            assert perf_issue["project_id"] == self.project.id
+            assert perf_issue["suspect_spans"] == [offender_span_id]
 
-    def test_span_id(self):
-        """Event id is going away, so some parts of the UI have started passing a span id instead"""
+    def test_query_trace_data_errors_with_eap_as_source_of_truth(self) -> None:
         self.load_trace()
-        # When given an event_id even if its not the root transaction we should prioritize loading that specific event
-        # over loading roots
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={
-                    "timestamp": self.root_event.timestamp,
-                    # Limit of one means the only result is the target event
-                    "limit": 1,
-                    "eventId": self.gen1_events[0].data["contexts"]["trace"]["span_id"],
-                },
+
+        group_1 = self.create_group(project=self.project)
+        group_2 = self.create_group(project=self.project)
+        error_event_id_1 = uuid4().hex
+        error_event_id_2 = uuid4().hex
+        self.store_eap_items(
+            [
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=group_1.id,
+                    trace_id=self.trace_id,
+                    event_id=error_event_id_1,
+                    timestamp=self.day_ago,
+                    level="error",
+                    title="First EAP error",
+                    transaction="/api/first",
+                ),
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=group_2.id,
+                    trace_id=self.trace_id,
+                    event_id=error_event_id_2,
+                    timestamp=self.day_ago,
+                    level="warning",
+                    title="Second EAP error",
+                    transaction="/api/second",
+                ),
+            ]
+        )
+
+        snuba_params = SnubaParams(
+            start=self.day_ago - timedelta(hours=1),
+            end=self.day_ago + timedelta(hours=1),
+            organization=self.organization,
+            projects=[self.project, self.gen1_project, self.gen2_project],
+        )
+
+        with self.options(
+            {
+                EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION: True,
+                EAP_OCCURRENCES_USE_EXPERIMENTAL_DATA_ALLOWLIST_OPTION: [
+                    "api.trace.query_trace_data.errors"
+                ],
+            }
+        ):
+            _transactions, errors = query_trace_data(
+                trace_id=self.trace_id,
+                snuba_params=snuba_params,
+                transaction_params=snuba_params,
+                limit=100,
+                event_id=None,
             )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_event(trace_transaction, self.gen1_events[0], "root")
 
-    @pytest.mark.skip(reason="flaky: #84070")
-    def test_timestamp_optimization_without_mock(self):
-        """Make sure that even if the params are smaller the query still works"""
-        self.load_trace()
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={
-                    "timestamp": self.root_event.timestamp,
-                    "statsPeriod": "90d",
-                },
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        # We shouldn't have detailed fields here
-        assert "transaction.status" not in trace_transaction
-        assert "tags" not in trace_transaction
+        assert len(errors) == 2
+        errors_by_id = {e["id"]: e for e in errors}
 
-    def test_measurements(self):
-        self.load_trace()
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        root = trace_transaction
-        assert root["measurements"]["lcp"]["value"] == 1000
-        assert root["measurements"]["lcp"]["type"] == "duration"
-        assert root["measurements"]["fid"]["value"] == 3.5
-        assert root["measurements"]["fid"]["type"] == "duration"
+        error_1 = errors_by_id[error_event_id_1]
+        assert error_1["issue.id"] == group_1.id
+        assert error_1["project.id"] == self.project.id
+        assert error_1["project"] == self.project.slug
+        assert error_1["title"] == "First EAP error"
+        assert error_1["tags[level]"] == "error"
+        assert error_1["transaction"] == "/api/first"
+        assert error_1["timestamp"] is not None
+        assert error_1["timestamp_ms"] is not None
+        assert "trace.span" in error_1
+        assert "message" in error_1
 
-    def test_project_param(self):
-        self.load_trace()
-        with self.feature(self.FEATURES):
-            # If project is included we should still return the entire trace
-            response = self.client_get(
-                data={"project": self.project.id},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        # We shouldn't have detailed fields here
-        assert "transaction.status" not in trace_transaction
-        assert "tags" not in trace_transaction
-
-    @pytest.mark.skip(reason="flaky: #84070")
-    def test_split_by_char_optimization(self):
-        self.load_trace()
-        # This changes the span_id condition so its a split on a string instead of an array
-        options.set("performance.traces.span_query_minimum_spans", 1)
-        with self.feature(self.FEATURES):
-            response = self.client_get(
-                data={},
-            )
-        assert response.status_code == 200, response.content
-        trace_transaction = response.data["transactions"][0]
-        self.assert_trace_data(trace_transaction)
-        # We shouldn't have detailed fields here
-        assert "transaction.status" not in trace_transaction
-        assert "tags" not in trace_transaction
+        error_2 = errors_by_id[error_event_id_2]
+        assert error_2["issue.id"] == group_2.id
+        assert error_2["project.id"] == self.project.id
+        assert error_2["project"] == self.project.slug
+        assert error_2["title"] == "Second EAP error"
+        assert error_2["tags[level]"] == "warning"
+        assert error_2["transaction"] == "/api/second"
 
 
-class OrganizationEventsTraceMetaEndpointTest(OrganizationEventsTraceEndpointBase):
+class OrganizationEventsTraceMetaEndpointTest(
+    OrganizationEventsTraceEndpointBase, OccurrenceTestCase
+):
     url_name = "sentry-api-0-organization-events-trace-meta"
 
-    def test_no_projects(self):
+    def test_no_projects(self) -> None:
         user = self.create_user()
         org = self.create_organization(owner=user)
         self.login_as(user=user)
@@ -1652,14 +1122,11 @@ class OrganizationEventsTraceMetaEndpointTest(OrganizationEventsTraceEndpointBas
         )
 
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                url,
-                format="json",
-            )
+            response = self.client_get(url=url)
 
         assert response.status_code == 404, response.content
 
-    def test_bad_ids(self):
+    def test_bad_ids(self) -> None:
         # Fake trace id
         self.url = reverse(
             self.url_name,
@@ -1670,10 +1137,7 @@ class OrganizationEventsTraceMetaEndpointTest(OrganizationEventsTraceEndpointBas
         )
 
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                format="json",
-            )
+            response = self.client_get(url=self.url)
 
         assert response.status_code == 200, response.content
         data = response.data
@@ -1694,73 +1158,98 @@ class OrganizationEventsTraceMetaEndpointTest(OrganizationEventsTraceEndpointBas
                 },
             )
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.load_trace()
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"project": -1},
-                format="json",
-            )
+            response = self.client_get(data={"project": -1}, url=self.url)
         assert response.status_code == 200, response.content
         data = response.data
         assert data["projects"] == 4
         assert data["transactions"] == 8
         assert data["errors"] == 0
         assert data["performance_issues"] == 2
-        assert data["span_count"] == 19
-        assert data["span_count_map"]["http.server"] == 19
+        assert data["span_count"] == 0
+        assert data["span_count_map"] == {}
 
-    def test_no_team(self):
+    def test_simple_with_eap_as_source_of_truth(self) -> None:
+        self.load_trace()
+        first_group = self.create_group(project=self.project)
+        second_group = self.create_group(project=self.project)
+        self.store_eap_items(
+            [
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=first_group.id,
+                    trace_id=self.trace_id,
+                    issue_occurrence_id=uuid4().hex,
+                ),
+                self.create_eap_occurrence(
+                    project=self.project,
+                    group_id=second_group.id,
+                    trace_id=self.trace_id,
+                    issue_occurrence_id=uuid4().hex,
+                ),
+            ]
+        )
+        with self.options(
+            {
+                EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION: True,
+                EAP_OCCURRENCES_USE_EXPERIMENTAL_DATA_ALLOWLIST_OPTION: [
+                    "api.trace.count_performance_issues"
+                ],
+            }
+        ):
+            with self.feature(self.FEATURES):
+                response = self.client_get(data={"project": -1}, url=self.url)
+
+        assert response.status_code == 200, response.content
+        data = response.data
+        assert data["projects"] == 4
+        assert data["transactions"] == 8
+        assert data["errors"] == 0
+        assert data["performance_issues"] == 2
+        assert data["span_count"] == 0
+        assert data["span_count_map"] == {}
+
+    def test_no_team(self) -> None:
         self.load_trace()
         self.team.delete()
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                format="json",
-            )
+            response = self.client_get(url=self.url)
         assert response.status_code == 200, response.content
         data = response.data
         assert data["projects"] == 4
         assert data["transactions"] == 8
         assert data["errors"] == 0
         assert data["performance_issues"] == 2
-        assert data["span_count"] == 19
-        assert data["span_count_map"]["http.server"] == 19
+        assert data["span_count"] == 0
+        assert data["span_count_map"] == {}
 
-    def test_with_errors(self):
+    def test_with_errors(self) -> None:
         self.load_trace()
         self.load_errors(self.gen1_project, self.gen1_span_ids[0])
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"project": -1},
-                format="json",
-            )
+            response = self.client_get(data={"project": -1}, url=self.url)
         assert response.status_code == 200, response.content
         data = response.data
         assert data["projects"] == 5
         assert data["transactions"] == 8
         assert data["errors"] == 3
         assert data["performance_issues"] == 2
-        assert data["span_count"] == 19
-        assert data["span_count_map"]["http.server"] == 19
+        assert data["span_count"] == 0
+        assert data["span_count_map"] == {}
 
-    def test_with_default(self):
+    def test_with_default(self) -> None:
         self.load_trace()
         self.load_default()
         with self.feature(self.FEATURES):
-            response = self.client.get(
-                self.url,
-                data={"project": -1},
-                format="json",
-            )
+            response = self.client_get(data={"project": -1}, url=self.url)
         assert response.status_code == 200, response.content
         data = response.data
         assert data["projects"] == 4
         assert data["transactions"] == 8
         assert data["errors"] == 1
         assert data["performance_issues"] == 2
-        assert data["span_count"] == 19
-        assert data["span_count_map"]["http.server"] == 19
-        assert len(data["transaction_child_count_map"]) == 8
+        assert data["span_count"] == 0
+        assert data["span_count_map"] == {}
+        assert len(data["transaction_child_count_map"]) == 0

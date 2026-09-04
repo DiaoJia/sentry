@@ -1,16 +1,13 @@
 import moment from 'moment-timezone';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Link from 'sentry/components/links/link';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {LinkButton} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
 
-import PageHeader from 'admin/components/pageHeader';
-import RelocationBadge from 'admin/components/relocationBadge';
-import ResultGrid from 'admin/components/resultGrid';
+import {PageHeader} from 'admin/components/pageHeader';
+import {RelocationBadge} from 'admin/components/relocationBadge';
+import {ResultGrid} from 'admin/components/resultGrid';
 import type {Relocation} from 'admin/types';
-import titleCase from 'getsentry/utils/titleCase';
-
-type Props = RouteComponentProps<unknown, unknown>;
+import {titleCase} from 'getsentry/utils/titleCase';
 
 const getRow = (row: Relocation) => {
   return [
@@ -30,7 +27,7 @@ const getRow = (row: Relocation) => {
       {titleCase(row.step)}
     </td>,
     <td key="pause" style={{textAlign: 'center'}}>
-      {row.scheduledPauseAtStep ? `${titleCase(row.scheduledPauseAtStep)}` : '--'}
+      {row.scheduledPauseAtStep ? titleCase(row.scheduledPauseAtStep) : '--'}
     </td>,
     <td key="owner" style={{textAlign: 'right'}}>
       {row.owner ? (
@@ -56,15 +53,14 @@ const getRow = (row: Relocation) => {
   ];
 };
 
-function Relocations(props: Props) {
+export function Relocations() {
   return (
     <div>
       <PageHeader title="Relocations">
-        <LinkButton priority="primary" to="/_admin/relocations/new/" size="sm">
+        <LinkButton variant="primary" to="/_admin/relocations/new/" size="sm">
           Create New Relocation
         </LinkButton>
       </PageHeader>
-
       <ResultGrid
         inPanel
         isRegional
@@ -95,8 +91,8 @@ function Relocations(props: Props) {
         columnsForRow={getRow}
         hasSearch
         defaultSort="date"
-        rowsFromData={(data, region) => {
-          if (region === undefined) {
+        rowsFromData={(data, cell) => {
+          if (cell === undefined) {
             return [];
           }
           return data
@@ -104,14 +100,11 @@ function Relocations(props: Props) {
             .map((rawRow: any) => {
               return {
                 ...rawRow,
-                region,
+                region: cell,
               };
             });
         }}
-        {...props}
       />
     </div>
   );
 }
-
-export default Relocations;

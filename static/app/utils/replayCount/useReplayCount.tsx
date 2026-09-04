@@ -1,16 +1,18 @@
 import {useCallback} from 'react';
 
-import type {ApiResult} from 'sentry/api';
 import type {Organization} from 'sentry/types/organization';
-import useAggregatedQueryKeys from 'sentry/utils/api/useAggregatedQueryKeys';
-import type {ApiQueryKey} from 'sentry/utils/queryClient';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {useAggregatedQueryKeys} from 'sentry/utils/api/useAggregatedQueryKeys';
+import {useHasReplayAccess} from 'sentry/utils/replays/hooks/useHasReplayAccess';
 
 interface Props {
   bufferLimit: number;
-  dataSource: string;
+  dataSource: 'events' | 'transactions' | 'search_issues';
   fieldName: string;
   organization: Organization;
   statsPeriod: string;
+  end?: string;
+  start?: string;
 }
 
 type CountValue = undefined | number;
@@ -39,66 +41,76 @@ function mapToBool<V>(obj: Record<string, V>): Record<string, boolean> {
  * Import one of the configured helpers instead:
  *   - `useReplayExists()`
  *   - `useReplayCountForIssues()`
- *   - `useReplayCountForTransactions()`
  *   - `useReplayCountForFeedbacks()`
  *
  * @private
  */
-export default function useReplayCount({
+export function useReplayCount({
   bufferLimit,
   dataSource,
   fieldName,
   organization,
   statsPeriod,
+  start,
+  end,
 }: Props) {
+  const hasReplayAccess = useHasReplayAccess();
+
+  const _statsPeriod = start && end ? undefined : statsPeriod;
+  const cachePeriod = start && end ? `${start}-${end}` : statsPeriod;
+
   const cache = useAggregatedQueryKeys<string, CountState>({
-    cacheKey: `/organizations/${organization.slug}/replay-count/|${dataSource}|${fieldName}|${statsPeriod}`,
+    cacheKey: `/organizations/${organization.slug}/replay-count/|${dataSource}|${fieldName}|${cachePeriod}`,
     bufferLimit,
-    getQueryKey: useCallback(
-      (ids: readonly string[]): ApiQueryKey => [
-        `/organizations/${organization.slug}/replay-count/`,
-        {
-          query: {
-            data_source: dataSource,
-            project: -1,
-            statsPeriod,
-            query:
-              fieldName === 'transaction'
-                ? `${fieldName}:[${ids.map(id => `"${id}"`).join(',')}]`
-                : `${fieldName}:[${ids.join(',')}]`,
-          },
-        },
-      ],
-      [dataSource, fieldName, organization, statsPeriod]
+    getQueryOptions: useCallback(
+      ids =>
+        apiOptions.as<CountState>()(
+          '/organizations/$organizationIdOrSlug/replay-count/',
+          {
+            path: {organizationIdOrSlug: organization.slug},
+            query: {
+              data_source: dataSource,
+              project: -1,
+              statsPeriod: _statsPeriod,
+              start,
+              end,
+              query:
+                fieldName === 'transaction'
+                  ? `${fieldName}:[${ids.map(id => `"${id}"`).join(',')}]`
+                  : `${fieldName}:[${ids.join(',')}]`,
+            },
+            staleTime: 0,
+          }
+        ),
+      [dataSource, fieldName, organization.slug, _statsPeriod, start, end]
     ),
-    responseReducer: useCallback(
-      (
-        prevState: undefined | CountState,
-        response: ApiResult,
-        aggregates: readonly string[]
-      ) => {
-        const defaults = Object.fromEntries(aggregates.map(id => [id, 0]));
-        return {...defaults, ...prevState, ...response[0]};
-      },
-      []
-    ),
+    responseReducer: useCallback((prevState, response, aggregates) => {
+      const defaults = Object.fromEntries(aggregates.map(id => [id, 0]));
+      return {...defaults, ...prevState, ...response.json};
+    }, []),
   });
 
   const getMany = useCallback(
     (ids: readonly string[]) => {
+      if (!hasReplayAccess) {
+        return {};
+      }
       cache.buffer(ids);
       return filterKeysInList(cache.data ?? {}, ids);
     },
-    [cache]
+    [cache, hasReplayAccess]
   );
 
   const getOne = useCallback(
     (id: string) => {
+      if (!hasReplayAccess) {
+        return;
+      }
       cache.buffer([id]);
 
       return cache.data?.[id];
     },
-    [cache]
+    [cache, hasReplayAccess]
   );
 
   const hasMany = useCallback(

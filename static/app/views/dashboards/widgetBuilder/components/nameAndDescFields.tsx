@@ -1,18 +1,19 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import {TextArea} from 'sentry/components/core/textarea';
-import TextField from 'sentry/components/forms/fields/textField';
+import {Button} from '@sentry/scraps/button';
+
+import {TextField} from 'sentry/components/forms/fields/textField';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {WidgetBuilderVersion} from 'sentry/utils/analytics/dashboardsAnalyticsEvents';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {DisplayType} from 'sentry/views/dashboards/types';
 import {SectionHeader} from 'sentry/views/dashboards/widgetBuilder/components/common/sectionHeader';
+import {WidgetBuilderDescriptionField} from 'sentry/views/dashboards/widgetBuilder/components/descriptionField';
 import {useWidgetBuilderContext} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
-import useDashboardWidgetSource from 'sentry/views/dashboards/widgetBuilder/hooks/useDashboardWidgetSource';
-import useIsEditingWidget from 'sentry/views/dashboards/widgetBuilder/hooks/useIsEditingWidget';
+import {useDashboardWidgetSource} from 'sentry/views/dashboards/widgetBuilder/hooks/useDashboardWidgetSource';
+import {useIsEditingWidget} from 'sentry/views/dashboards/widgetBuilder/hooks/useIsEditingWidget';
 import {BuilderStateAction} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
 
 interface WidgetBuilderNameAndDescriptionProps {
@@ -20,7 +21,7 @@ interface WidgetBuilderNameAndDescriptionProps {
   setError?: (error: Record<string, any>) => void;
 }
 
-function WidgetBuilderNameAndDescription({
+export function WidgetBuilderNameAndDescription({
   error,
   setError,
 }: WidgetBuilderNameAndDescriptionProps) {
@@ -29,23 +30,37 @@ function WidgetBuilderNameAndDescription({
   const [isDescSelected, setIsDescSelected] = useState(state.description ? true : false);
   const isEditing = useIsEditingWidget();
   const source = useDashboardWidgetSource();
+  const isTextWidget = state.displayType === DisplayType.TEXT;
 
   return (
     <Fragment>
-      <SectionHeader title={t('Widget Name & Description')} />
+      <SectionHeader
+        title={t('Display Name')}
+        tooltipText={t('This will appear in the header of your widget.')}
+      />
       <StyledTextField
-        name={t('Widget Name')}
+        autoComplete="off"
+        name="widget-name"
         size="md"
         placeholder={t('Name')}
-        title={t('Widget Name')}
-        aria-label={t('Widget Name')}
+        title={t('Name')}
+        aria-label={t('Name')}
         value={state.title}
         onChange={(newTitle: any) => {
           // clear error once user starts typing
-          setError?.({...error, title: undefined});
-          dispatch({type: BuilderStateAction.SET_TITLE, payload: newTitle});
+          if (error?.title) {
+            setError?.({...error, title: undefined});
+          }
+          dispatch(
+            {type: BuilderStateAction.SET_TITLE, payload: newTitle},
+            {updateUrl: false}
+          );
         }}
-        onBlur={() => {
+        onBlur={value => {
+          dispatch(
+            {type: BuilderStateAction.SET_TITLE, payload: value},
+            {updateUrl: true}
+          );
           trackAnalytics('dashboards_views.widget_builder.change', {
             from: source,
             widget_type: state.dataset ?? '',
@@ -60,53 +75,25 @@ function WidgetBuilderNameAndDescription({
         error={error?.title}
         inline={false}
       />
-      {!isDescSelected && (
+      {!isTextWidget && !isDescSelected && (
         <Button
-          priority="link"
-          aria-label={t('Add Widget Description')}
+          variant="link"
+          aria-label={t('Add Description')}
           onClick={() => {
             setIsDescSelected(true);
           }}
-          data-test-id={'add-description'}
+          data-test-id="add-description"
         >
-          {t('+ Add Widget Description')}
+          {t('+ Add Description')}
         </Button>
       )}
-      {isDescSelected && (
-        <DescriptionTextArea
-          placeholder={t('Description')}
-          aria-label={t('Widget Description')}
-          autosize
-          rows={4}
-          value={state.description}
-          onChange={e => {
-            dispatch({type: BuilderStateAction.SET_DESCRIPTION, payload: e.target.value});
-          }}
-          onBlur={() => {
-            trackAnalytics('dashboards_views.widget_builder.change', {
-              from: source,
-              widget_type: state.dataset ?? '',
-              builder_version: WidgetBuilderVersion.SLIDEOUT,
-              field: 'description',
-              value: '',
-              new_widget: !isEditing,
-              organization,
-            });
-          }}
-        />
-      )}
+      {!isTextWidget && isDescSelected && <WidgetBuilderDescriptionField />}
     </Fragment>
   );
 }
 
-export default WidgetBuilderNameAndDescription;
-
 const StyledTextField = styled(TextField)`
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
   padding: 0;
   border: none;
-`;
-
-const DescriptionTextArea = styled(TextArea)`
-  margin: ${space(2)} 0;
 `;

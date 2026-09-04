@@ -5,7 +5,7 @@ import {CopyToClipboardButton} from 'sentry/components/copyToClipboardButton';
 import {RecursiveStructuredData} from 'sentry/components/structuredEventData/recursiveStructuredData';
 import {ExpandedStateContextProvider} from 'sentry/components/structuredEventData/useExpandedState';
 import {getDefaultExpanded} from 'sentry/components/structuredEventData/utils';
-import {space} from 'sentry/styles/space';
+import {t} from 'sentry/locale';
 
 export type StructedEventDataConfig = {
   isBoolean?: (value: unknown) => boolean;
@@ -75,7 +75,6 @@ interface StructuredDataProps extends BaseProps {
   maxDefaultDepth: NonNullable<BaseProps['maxDefaultDepth']>;
   withAnnotatedText: boolean;
   autoCollapseLimit?: BaseProps['autoCollapseLimit'];
-  objectKey?: string;
   // TODO(TS): What possible types can `value` be?
   value?: any;
   withOnlyFormattedText?: boolean;
@@ -88,7 +87,6 @@ export function StructuredData({
   maxDefaultDepth,
   autoCollapseLimit,
   meta,
-  objectKey,
   onToggleExpand,
   value = null,
   withAnnotatedText,
@@ -115,7 +113,6 @@ export function StructuredData({
       <RecursiveStructuredData
         config={config}
         meta={meta}
-        objectKey={objectKey}
         path="$"
         value={value}
         withAnnotatedText={withAnnotatedText}
@@ -136,7 +133,7 @@ export interface StructuredEventDataProps extends BaseProps {
   withAnnotatedText?: boolean;
 }
 
-export default function StructuredEventData({
+export function StructuredEventData({
   children,
   config,
   data = null,
@@ -168,8 +165,8 @@ export default function StructuredEventData({
       {children}
       {showCopyButton && (
         <StyledCopyButton
-          borderless
-          iconSize="xs"
+          aria-label={t('Copy to clipboard')}
+          variant="transparent"
           onCopy={onCopy}
           size="xs"
           text={JSON.stringify(data, null, '\t')}
@@ -181,8 +178,8 @@ export default function StructuredEventData({
 
 const StyledCopyButton = styled(CopyToClipboardButton)`
   position: absolute;
-  right: ${space(1.5)};
-  top: ${space(0.75)};
+  right: ${p => p.theme.space.lg};
+  top: ${p => p.theme.space.sm};
 `;
 
 const StructuredDataWrapper = styled('pre')`

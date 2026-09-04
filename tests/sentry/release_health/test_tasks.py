@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from unittest import mock
 
 import pytest
@@ -9,13 +10,15 @@ from django.utils import timezone
 
 from sentry.models.grouprelease import GroupRelease
 from sentry.models.project import Project
+from sentry.models.release import Release
 from sentry.models.releaseprojectenvironment import ReleaseProjectEnvironment
 from sentry.models.repository import Repository
 from sentry.release_health.release_monitor.base import BaseReleaseMonitorBackend
 from sentry.release_health.release_monitor.metrics import MetricReleaseMonitorBackend
 from sentry.release_health.tasks import (
+    adopt_releases,
+    get_process_projects_with_sessions_countdown,
     has_been_adopted,
-    iter_adopted_releases,
     monitor_release_adoption,
     process_projects_with_sessions,
     valid_and_adopted_release,
@@ -33,11 +36,12 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
 
     backend_class: type[BaseReleaseMonitorBackend]
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         backend = self.backend_class()
         self.backend = mock.patch("sentry.release_health.tasks.release_monitor", backend)
         self.backend.__enter__()
+        # no global option mocking needed
         self.project = self.create_project()
         self.project1 = self.create_project()
         self.project2 = self.create_project()
@@ -114,10 +118,10 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             group_id=self.event.group.id, project_id=self.project.id, release_id=self.release.id
         )
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.backend.__exit__(None, None, None)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.bulk_store_sessions([self.build_session(project_id=self.project1) for _ in range(11)])
         self.bulk_store_sessions(
             [
@@ -181,7 +185,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             adopted__gte=now,
         ).exists()
 
-    def test_simple_no_sessions(self):
+    def test_simple_no_sessions(self) -> None:
         now = timezone.now()
         assert ReleaseProjectEnvironment.objects.filter(
             project_id=self.project1.id,
@@ -241,7 +245,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             adopted__gte=now,
         ).exists()
 
-    def test_release_is_unadopted_with_sessions(self):
+    def test_release_is_unadopted_with_sessions(self) -> None:
         # Releases that are returned with sessions but no longer meet the threshold get unadopted
         self.bulk_store_sessions([self.build_session(project_id=self.project1) for _ in range(1)])
         self.bulk_store_sessions(
@@ -311,7 +315,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             unadopted=None,
         ).exists()
 
-    def test_release_is_unadopted_without_sessions(self):
+    def test_release_is_unadopted_without_sessions(self) -> None:
         # This test should verify that releases that have no sessions (i.e. no result from snuba)
         # get marked as unadopted
         now = timezone.now()
@@ -339,7 +343,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             unadopted__gte=now,
         ).exists()
 
-    def test_multi_proj_env_release_counter(self):
+    def test_multi_proj_env_release_counter(self) -> None:
         self.bulk_store_sessions(
             [
                 self.build_session(
@@ -413,7 +417,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             adopted__gte=now,
         ).exists()
 
-    def test_monitor_release_adoption(self):
+    def test_monitor_release_adoption(self) -> None:
         now = timezone.now()
         self.org2 = self.create_organization(
             name="Yet Another Test Org",
@@ -474,7 +478,41 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             unadopted=None,
         ).exists()
 
-    def test_missing_rpe_is_created(self):
+    def test_monitor_release_adoption_jitters_project_processing(self) -> None:
+        org2 = self.create_organization()
+        project_ids = [self.project1.id, self.project2.id]
+        org_projects = {
+            self.organization.id: project_ids,
+            org2.id: [self.create_project(organization=org2).id],
+        }
+
+        with (
+            mock.patch(
+                "sentry.release_health.tasks.release_monitor.fetch_projects_with_recent_sessions",
+                return_value=org_projects,
+            ),
+            mock.patch(
+                "sentry.release_health.tasks.process_projects_with_sessions.apply_async"
+            ) as mock_apply_async,
+        ):
+            monitor_release_adoption()
+
+        assert mock_apply_async.call_args_list == [
+            mock.call(
+                args=[org_id, project_ids],
+                countdown=get_process_projects_with_sessions_countdown(org_id),
+            )
+            for org_id, project_ids in org_projects.items()
+        ]
+
+    def test_process_projects_with_sessions_countdown_uses_jitter_option(self) -> None:
+        with self.options({"release-health.monitor-release-adoption-jitter-seconds": 1}):
+            assert get_process_projects_with_sessions_countdown(1) == 0
+
+        with self.options({"release-health.monitor-release-adoption-jitter-seconds": 0}):
+            assert get_process_projects_with_sessions_countdown(self.organization.id) == 0
+
+    def test_missing_rpe_is_created(self) -> None:
         self.bulk_store_sessions(
             [
                 self.build_session(
@@ -521,7 +559,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
             environment__name="",
         ).exists()
 
-    def test_has_releases_is_set(self):
+    def test_has_releases_is_set(self) -> None:
         no_release_project = self.create_project()
         assert not no_release_project.flags.has_releases
 
@@ -536,7 +574,7 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
         no_release_project.refresh_from_db()
         assert no_release_project.flags.has_releases
 
-    def test_no_env(self):
+    def test_no_env(self) -> None:
         no_env_project = self.create_project()
         assert not no_env_project.flags.has_releases
 
@@ -548,45 +586,163 @@ class BaseTestReleaseMonitor(TestCase, BaseMetricsTestCase):
         no_env_project.refresh_from_db()
         assert not no_env_project.flags.has_releases
 
+    def test_updates_last_seen_on_health_data(self) -> None:
+        # Set last_seen sufficiently in the past so it qualifies for an update (>60s old)
+        past = timezone.now() - timedelta(minutes=5)
+        self.rpe.update(last_seen=past)
+
+        # Ingest a session for the same project/release/environment
+        self.bulk_store_sessions(
+            [
+                self.build_session(
+                    project_id=self.project1,
+                    release=self.release,
+                    environment=self.environment,
+                )
+            ]
+        )
+
+        before_call = timezone.now()
+        # Disable flag must be False to allow updates in this test
+        # Patch sampling to ensure deterministic update during test
+        with (
+            mock.patch("sentry.release_health.tasks.LAST_SEEN_UPDATE_SAMPLE_RATE", 1.0),
+            self.options({"release-health.disable-release-last-seen-update": False}),
+        ):
+            process_projects_with_sessions(self.organization.id, [self.project1.id])
+
+        updated = ReleaseProjectEnvironment.objects.get(id=self.rpe.id)
+        assert updated.last_seen >= before_call
+
 
 class TestMetricReleaseMonitor(BaseTestReleaseMonitor, BaseMetricsTestCase):
     backend_class = MetricReleaseMonitorBackend
 
 
-def test_iter_adopted_releases():
-    """Test the totals object is flattened into a list of tuple of values."""
-    assert (
-        list(iter_adopted_releases({1: {"": {"releases": {"0.1": 1}, "total_sessions": 1}}})) == []
-    )
-
-    assert list(
-        iter_adopted_releases(
-            {
-                1: {"prod": {"releases": {"0.1": 1, "0.3": 9}, "total_sessions": 10}},
-                2: {"prod": {"releases": {"0.1": 1, "0.2": 4}, "total_sessions": 5}},
-            }
+class TestAdoptReleasesPath(TestMetricReleaseMonitor):
+    def test_adopt_releases_respects_environment_and_threshold(self) -> None:
+        # Empty environment should be ignored
+        adopt_releases(
+            self.organization.id,
+            {self.project1.id: {"": {"releases": {"0.1": 1}, "total_sessions": 1}}},
         )
-    ) == [
-        {"project_id": 1, "environment": "prod", "version": "0.1"},
-        {"project_id": 1, "environment": "prod", "version": "0.3"},
-        {"project_id": 2, "environment": "prod", "version": "0.1"},
-        {"project_id": 2, "environment": "prod", "version": "0.2"},
-    ]
 
-    assert (
-        list(iter_adopted_releases({1: {"prod": {"releases": {"0.1": 1}, "total_sessions": 100}}}))
-        == []
-    )
+        assert not ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id, environment__name=""
+        ).exists()
+
+        # Valid env with releases meeting 10% threshold should be adopted
+        adopt_releases(
+            self.organization.id,
+            {
+                self.project1.id: {
+                    "prod": {"releases": {"0.1": 1, "0.3": 9}, "total_sessions": 10}
+                },
+                self.project2.id: {"prod": {"releases": {"0.1": 1, "0.2": 4}, "total_sessions": 5}},
+            },
+        )
+
+        assert ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id,
+            release__version="0.1",
+            environment__name="prod",
+            adopted__isnull=False,
+        ).exists()
+
+        assert ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id,
+            release__version="0.3",
+            environment__name="prod",
+            adopted__isnull=False,
+        ).exists()
+
+        assert ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project2.id,
+            release__version="0.1",
+            environment__name="prod",
+            adopted__isnull=False,
+        ).exists()
+
+        assert ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project2.id,
+            release__version="0.2",
+            environment__name="prod",
+            adopted__isnull=False,
+        ).exists()
+
+        # Below threshold should not adopt
+        adopt_releases(
+            self.organization.id,
+            {self.project1.id: {"prod": {"releases": {"0.1": 1}, "total_sessions": 100}}},
+        )
+
+        assert not ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id,
+            release__version="0.1",
+            environment__name="prod",
+            adopted__gt=timezone.now(),
+        ).exists()
+
+    def test_auto_creation_disabled_does_not_create_release(self) -> None:
+        # With the feature flag and the project opting out, a release referenced
+        # only by sessions must not be auto-created.
+        self.project1.update_option("sentry:enable_auto_release_creation", False)
+
+        with self.feature("organizations:auto-release-creation"):
+            adopt_releases(
+                self.organization.id,
+                {self.project1.id: {"prod": {"releases": {"9.9.9": 10}, "total_sessions": 10}}},
+            )
+
+        assert not Release.objects.filter(
+            organization_id=self.organization.id, version="9.9.9"
+        ).exists()
+        assert not ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id, release__version="9.9.9"
+        ).exists()
+
+    def test_auto_creation_disabled_associates_existing_release(self) -> None:
+        # An existing release (e.g. created via the CLI) is still associated when
+        # auto-creation is disabled.
+        self.project1.update_option("sentry:enable_auto_release_creation", False)
+        existing = self.create_release(project=self.project1, version="9.9.9")
+
+        with self.feature("organizations:auto-release-creation"):
+            adopt_releases(
+                self.organization.id,
+                {self.project1.id: {"prod": {"releases": {"9.9.9": 10}, "total_sessions": 10}}},
+            )
+
+        assert ReleaseProjectEnvironment.objects.filter(
+            project_id=self.project1.id,
+            release_id=existing.id,
+            environment__name="prod",
+            adopted__isnull=False,
+        ).exists()
+
+    def test_auto_creation_disabled_without_feature_flag(self) -> None:
+        # Without the feature flag the project option is ignored and the release is
+        # auto-created as before.
+        self.project1.update_option("sentry:enable_auto_release_creation", False)
+
+        adopt_releases(
+            self.organization.id,
+            {self.project1.id: {"prod": {"releases": {"9.9.9": 10}, "total_sessions": 10}}},
+        )
+
+        assert Release.objects.filter(
+            organization_id=self.organization.id, version="9.9.9"
+        ).exists()
 
 
-def test_valid_environment():
+def test_valid_environment() -> None:
     """A valid environment is one that has at least one session and a non-empty name."""
     assert valid_environment("production", 20)
     assert not valid_environment("", 20)
     assert not valid_environment("production", 0)
 
 
-def test_valid_and_adopted_release():
+def test_valid_and_adopted_release() -> None:
     """A valid release has a valid name and at least 10% of the environment's sessions."""
     assert valid_and_adopted_release("release", 10, 100)
     assert not valid_and_adopted_release("", 10, 100)
@@ -594,7 +750,7 @@ def test_valid_and_adopted_release():
     assert not valid_and_adopted_release("release", 10, 101)
 
 
-def test_has_been_adopted():
+def test_has_been_adopted() -> None:
     """An adopted session has at least 10% of the environment's sessions."""
     assert has_been_adopted(10, 1)
     assert has_been_adopted(100, 10)

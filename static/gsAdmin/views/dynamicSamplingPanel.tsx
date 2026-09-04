@@ -3,24 +3,28 @@ import styled from '@emotion/styled';
 import isEmpty from 'lodash/isEmpty';
 import startCase from 'lodash/startCase';
 
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import {Tooltip} from 'sentry/components/core/tooltip';
 import {DateTime} from 'sentry/components/dateTime';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import {PanelTable} from 'sentry/components/panels/panelTable';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconArrow, IconOpen} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {handleXhrErrorResponse} from 'sentry/utils/handleXhrErrorResponse';
-import useApi from 'sentry/utils/useApi';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
 
 import {SearchInput} from 'admin/components/resultGrid';
 
@@ -47,11 +51,10 @@ type RuleV2 = {
   };
   id: number;
   samplingValue: {
-    type: 'factor' | 'sampleRate' | 'reservoir';
+    type: 'factor' | 'sampleRate' | 'minimumSampleRate';
     value: number;
-    limit?: number;
   };
-  type: 'trace' | 'transaction';
+  type: 'trace' | 'transaction' | 'project';
   timeRange?: {
     end: string;
     start: string;
@@ -72,7 +75,15 @@ enum RuleType {
   REBALANCE_TRANSACTIONS = 'Rebalance Transactions', // Boost Low Volume Transactions
   BOOST_REPLAY_ID = 'Boost Replay ID',
   INVESTIGATION_RULE = 'Investigation Rule',
+  MINIMUM_SAMPLE_RATE_TARGET = 'Minimum Sample Rate',
 }
+
+const DS_RULE_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: 'auto'},
+  {key: 'type', width: 'auto'},
+  {key: 'value', width: 'auto'},
+  {key: 'target', width: 'auto'},
+];
 
 const getRuleType = ({id}: RuleV2): RuleType | undefined => {
   const RESERVED_IDS = {
@@ -82,6 +93,7 @@ const getRuleType = ({id}: RuleV2): RuleType | undefined => {
     1003: RuleType.BOOST_KEY_TRANSACTIONS,
     1004: RuleType.RECALIBRATION_RULE,
     1005: RuleType.BOOST_REPLAY_ID,
+    1006: RuleType.MINIMUM_SAMPLE_RATE_TARGET,
   };
 
   if (id in RESERVED_IDS) {
@@ -175,11 +187,11 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
   const regionHost = organization?.links.regionUrl;
 
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>();
-  const [selectedConfigId, setSelectedConfigId] = useState<string>('');
+  const [selectedConfigId, setSelectedConfigId] = useState('');
 
   async function invalidateProjectConfig() {
     try {
-      await api.requestPromise(`/internal/project-config/`, {
+      await api.requestPromise('/internal/project-config/', {
         host: regionHost,
         method: 'POST',
         data: {projectId},
@@ -187,7 +199,7 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
       addSuccessMessage('Project config successfully invalidated');
     } catch (error) {
       const message = 'Unable to invalidate project config';
-      handleXhrErrorResponse(message, error);
+      handleXhrErrorResponse(message, error as RequestError);
       addErrorMessage(message);
     }
   }
@@ -210,7 +222,7 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
               return id;
             }
 
-            return undefined;
+            return;
           }
         );
 
@@ -218,7 +230,7 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
         setSelectedConfigId(defaultConfigId?.[0] ?? '');
       } catch (error) {
         const message = 'Unable to fetch project config';
-        handleXhrErrorResponse(message, error);
+        handleXhrErrorResponse(message, error as RequestError);
         addErrorMessage(message);
       }
     }
@@ -240,7 +252,9 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
           <PanelHeaderRight>
             {selectedConfigId && (
               <CompactSelect
-                triggerProps={{size: 'xs', prefix: 'DSN'}}
+                trigger={triggerProps => (
+                  <OverlayTrigger.Button {...triggerProps} size="xs" prefix="DSN" />
+                )}
                 value={selectedConfigId}
                 options={Object.keys(projectConfig.configs).map(id => ({
                   value: id,
@@ -274,7 +288,7 @@ export function DynamicSamplingPanel({projectId, organization}: Props) {
 }
 
 function DynamicSamplingPanelBody({config: dsnConfig}: {config: DSNConfig | null}) {
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const rules = dsnConfig?.config?.sampling?.rules ?? [];
 
@@ -284,9 +298,9 @@ function DynamicSamplingPanelBody({config: dsnConfig}: {config: DSNConfig | null
 
   return (
     <PanelBody>
-      <SearchBar>
+      <Flex align="start" padding="md">
         {baseSampleRate > 0 && (
-          <BaseSampleRateWrapper type="info">
+          <BaseSampleRateWrapper variant="info">
             Base sample rate: {Math.round(baseSampleRate * 100 * 10000) / 10000}%
           </BaseSampleRateWrapper>
         )}
@@ -298,7 +312,7 @@ function DynamicSamplingPanelBody({config: dsnConfig}: {config: DSNConfig | null
           value={searchQuery}
           onChange={event => setSearchQuery(event.target.value?.toLowerCase())}
         />
-      </SearchBar>
+      </Flex>
       <DynamicSamplingRulesTable
         baseSampleRate={baseSampleRate}
         rules={rules}
@@ -322,11 +336,11 @@ function DynamicSamplingRulesTable({
   const round = (value: number) => Math.round(value * 10000) / 10000;
 
   const formatSamplingRateValue = (samplingValue: any) => {
-    if (samplingValue.type === 'sampleRate') {
+    if (
+      samplingValue.type === 'sampleRate' ||
+      samplingValue.type === 'minimumSampleRate'
+    ) {
       return `${round(samplingValue.value * 100)}%`;
-    }
-    if (samplingValue.type === 'reservoir') {
-      return `100%`;
     }
     return `* ${round(samplingValue.value)}`;
   };
@@ -335,11 +349,11 @@ function DynamicSamplingRulesTable({
     if (getRuleType(rule) === RuleType.BOOST_LOW_VOLUME_PROJECTS) {
       return 0;
     }
-    if (rule.samplingValue.type === 'sampleRate') {
+    if (
+      rule.samplingValue.type === 'sampleRate' ||
+      rule.samplingValue.type === 'minimumSampleRate'
+    ) {
       return round(rule.samplingValue.value - baseSampleRate);
-    }
-    if (rule.samplingValue.type === 'reservoir') {
-      return 1;
     }
     return round(rule.samplingValue.value - 1);
   };
@@ -362,20 +376,23 @@ function DynamicSamplingRulesTable({
   return (
     <Fragment>
       <DSRulesTable
-        headers={['Name', 'Type', 'Value', 'Target']}
-        isEmpty={!dynamicSamplingRules.length}
-        emptyMessage="No dynamic sampling rules to display"
+        columns={DS_RULE_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>Name</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>Type</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>Value</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>Target</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
+        {dynamicSamplingRules.length === 0 && (
+          <SimpleTable.Empty>No dynamic sampling rules to display</SimpleTable.Empty>
+        )}
         {dynamicSamplingRules.map(row => (
-          <Fragment key={row.id}>
-            <NameColumn>
+          <SimpleTable.Row key={row.id}>
+            <SimpleTable.RowCell direction="column" align="start" gap="xs">
               {row.type}
-              {defined(row.samplingValue.limit) && (
-                <NameColumnDetail data-test-id="limit">
-                  <strong>Limit:</strong>
-                  <span>{row.samplingValue.limit}</span>
-                </NameColumnDetail>
-              )}
               {defined(row.timeRange) && (
                 <div data-test-id="timerange">
                   <NameColumnDetail>
@@ -392,9 +409,9 @@ function DynamicSamplingRulesTable({
                   </NameColumnDetail>
                 </div>
               )}
-            </NameColumn>
-            <div>{row.formattedRateType}</div>
-            <ValueCell>
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell>{row.formattedRateType}</SimpleTable.RowCell>
+            <SimpleTable.RowCell justify="end" paddingRight="3xl" gap="md">
               <Tooltip isHoverable title={row.samplingValue.value}>
                 {row.formattedRateValue}
               </Tooltip>
@@ -404,11 +421,15 @@ function DynamicSamplingRulesTable({
                   row.impact > 0 ? 'increases' : 'decreases'
                 } sample rate of matching events`}
               >
-                <ImpactIndicatorIcon impact={row.impact} size="xs" />
+                <ImpactIndicatorIcon
+                  direction={row.impact > 0 ? 'up' : 'down'}
+                  impact={row.impact}
+                  size="xs"
+                />
               </Tooltip>
-            </ValueCell>
-            <div>{row.target}</div>
-          </Fragment>
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell>{row.target}</SimpleTable.RowCell>
+          </SimpleTable.Row>
         ))}
       </DSRulesTable>
     </Fragment>
@@ -417,54 +438,32 @@ function DynamicSamplingRulesTable({
 
 const ImpactIndicatorIcon = styled(IconArrow)<{impact: number}>`
   display: ${p => (p.impact === 0 ? 'none' : 'inline-block')};
-  color: ${p => (p.impact > 0 ? p.theme.green300 : p.theme.red300)};
-  transform: ${p => (p.impact > 0 ? 'rotate(45deg)' : 'rotate(135deg)')};
-`;
-
-const SearchBar = styled('div')`
-  display: flex;
-  align-items: flex-start;
-  padding: ${space(1)};
+  color: ${p => (p.impact > 0 ? p.theme.colors.green400 : p.theme.colors.red400)};
 `;
 
 const PanelHeaderRight = styled('div')`
   display: flex;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   text-transform: none;
 `;
 
-const ValueCell = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  gap: ${space(1)};
-  padding-right: ${space(4)};
-`;
-
 const BaseSampleRateWrapper = styled(Alert)`
-  padding: ${space(1)};
-  margin-right: ${space(1)};
-  font-size: ${p => p.theme.fontSize.md};
+  margin-right: ${p => p.theme.space.md};
+  font-size: ${p => p.theme.font.size.md};
   font-weight: 600;
-  width: max-content;
   flex-basis: 50%;
 `;
 
-const DSRulesTable = styled(PanelTable)`
+const DSRulesTable = styled(SimpleTable)`
   border: none;
   border-radius: 0 0 4px 4px;
   margin-bottom: 0;
 `;
 
-const NameColumn = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(0.5)};
-`;
-
 const NameColumnDetail = styled('div')`
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   > strong {
-    margin-right: ${space(0.5)};
+    margin-right: ${p => p.theme.space.xs};
   }
 `;

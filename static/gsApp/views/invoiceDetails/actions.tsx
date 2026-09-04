@@ -1,24 +1,24 @@
 import {Fragment, useEffect} from 'react';
 import styled from '@emotion/styled';
 
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
+import {Flex} from '@sentry/scraps/layout';
+
 import {
   addErrorMessage,
   addLoadingMessage,
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Input} from 'sentry/components/core/input';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import {decodeScalar} from 'sentry/utils/queryString';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 import {useLocation} from 'sentry/utils/useLocation';
 
 import {openInvoicePaymentModal} from 'getsentry/actionCreators/modal';
 import type {Invoice} from 'getsentry/types';
-import trackGetsentryAnalytics from 'getsentry/utils/trackGetsentryAnalytics';
+import {trackGetsentryAnalytics} from 'getsentry/utils/trackGetsentryAnalytics';
 
 type Props = {
   invoice: Invoice;
@@ -26,7 +26,7 @@ type Props = {
   reloadInvoice: () => void;
 };
 
-function InvoiceDetailsActions({organization, invoice, reloadInvoice}: Props) {
+export function InvoiceDetailsActions({organization, invoice, reloadInvoice}: Props) {
   const api = useApi();
   const location = useLocation();
 
@@ -60,7 +60,7 @@ function InvoiceDetailsActions({organization, invoice, reloadInvoice}: Props) {
     }
   }
 
-  function handlePayNow(event: React.MouseEvent<Element>) {
+  function handlePayNow(event: React.MouseEvent) {
     event.preventDefault();
     openInvoicePaymentModal({invoice, organization, reloadInvoice});
   }
@@ -90,52 +90,40 @@ function InvoiceDetailsActions({organization, invoice, reloadInvoice}: Props) {
 
   return (
     <Fragment>
-      <ActionContainer className="no-print">
+      <Flex justify="end" align="start" className="no-print">
         <EmailForm method="post" action="" onSubmit={handleSend}>
           {invoice.isPaid && (
             <Fragment>
               <Input type="email" name="email" placeholder="you@example.com" />
-              <StyledButton type="submit" priority="primary">
+              <StyledButton type="submit" variant="primary">
                 {t('Email Receipt')}
               </StyledButton>
             </Fragment>
           )}
           {showPayNowButton && (
-            <StyledButton
-              priority="primary"
-              onClick={handlePayNow}
-              data-test-id="pay-now"
-            >
+            <StyledButton variant="primary" onClick={handlePayNow} data-test-id="pay-now">
               {t('Pay Now')}
             </StyledButton>
           )}
           <StyledLinkButton href={invoice.receipt.url}>{t('Save PDF')}</StyledLinkButton>
         </EmailForm>
-      </ActionContainer>
+      </Flex>
     </Fragment>
   );
 }
-
-export default InvoiceDetailsActions;
-
-const ActionContainer = styled('div')`
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
-`;
 
 const EmailForm = styled('form')`
   display: grid;
   grid-auto-flow: column;
   align-items: start;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 
   /* override selector in PanelBody > form */
   && {
     margin: 0;
   }
 
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
+  @media (max-width: ${p => p.theme.breakpoints.sm}) {
     grid-auto-flow: row;
     width: 100%;
   }

@@ -6,19 +6,21 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
-import sentry_sdk
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.http.request import HttpRequest
 from rest_framework.request import Request
 
 from sentry import features, roles
+from sentry.api.exceptions import DataSecrecyError
+from sentry.auth.scope_declaration import check_scope_declaration, check_scope_declarations
 from sentry.auth.services.access.service import access_service
 from sentry.auth.services.auth import AuthenticatedToken, RpcAuthState, RpcMemberSsoState
 from sentry.auth.staff import is_active_staff
 from sentry.auth.superuser import get_superuser_scopes, is_active_superuser
 from sentry.auth.system import is_system_auth
 from sentry.constants import ObjectStatus
+from sentry.data_secrecy.logic import should_allow_superuser_access
 from sentry.models.organization import Organization
 from sentry.models.organizationmember import OrganizationMember
 from sentry.models.organizationmemberteam import OrganizationMemberTeam
@@ -28,10 +30,12 @@ from sentry.organizations.services.organization import RpcTeamMember, RpcUserOrg
 from sentry.organizations.services.organization.serial import summarize_member
 from sentry.roles import organization_roles
 from sentry.roles.manager import OrganizationRole, TeamRole
+from sentry.seer.agent_token import is_agent_auth
 from sentry.sentry_apps.models.sentry_app import SentryApp
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
 from sentry.utils import metrics
+from sentry.utils.tracing import set_span_data, set_span_tag, start_span
 
 __all__ = (
     "from_user",
@@ -125,6 +129,7 @@ class Access(abc.ABC):
         Return bool representing if the user has the given scope.
         >>> access.has_project('org:read')
         """
+        check_scope_declaration(scope)
         return scope in self.scopes
 
     def get_organization_role(self) -> OrganizationRole | None:
@@ -189,6 +194,19 @@ class Access(abc.ABC):
     @abc.abstractmethod
     def has_any_project_scope(self, project: Project, scopes: Collection[str]) -> bool:
         pass
+
+
+def _intersect_member_and_token_scopes(
+    member_scopes: Collection[str], token_scopes: Iterable[str] | None
+) -> frozenset[str]:
+    member_scopes = frozenset(member_scopes)
+    if token_scopes is None:
+        return member_scopes
+
+    token_scopes = frozenset(token_scopes)
+    token_only_scopes = token_scopes & settings.SENTRY_TOKEN_ONLY_SCOPES
+
+    return (token_scopes & member_scopes) | token_only_scopes
 
 
 @dataclass
@@ -267,14 +285,16 @@ class DbAccess(Access):
         if not teams:
             return frozenset()
 
-        with sentry_sdk.start_span(op="get_project_access_in_teams") as span:
+        with start_span(
+            op="get_project_access_in_teams", name="get_project_access_in_teams"
+        ) as span:
             projects = frozenset(
                 Project.objects.filter(status=ObjectStatus.ACTIVE, teams__in=teams)
                 .distinct()
                 .values_list("id", flat=True)
             )
-            span.set_data("Project Count", len(projects))
-            span.set_data("Team Count", len(teams))
+            set_span_data(span, "Project Count", len(projects))
+            set_span_data(span, "Team Count", len(teams))
 
         return projects
 
@@ -304,6 +324,7 @@ class DbAccess(Access):
 
         >>> access.has_team_scope(team, 'team:read')
         """
+        check_scope_declaration(scope)
         if not self.has_team_access(team):
             return False
         if self.has_scope(scope):
@@ -339,21 +360,24 @@ class DbAccess(Access):
 
         For performance's sake, prefer this over multiple calls to `has_project_scope`.
         """
+        check_scope_declarations(scopes)
         if not self.has_project_access(project):
             return False
         if any(self.has_scope(scope) for scope in scopes):
             return True
 
         if self._member and features.has("organizations:team-roles", self._member.organization):
-            with sentry_sdk.start_span(op="check_access_for_all_project_teams") as span:
+            with start_span(
+                op="check_access_for_all_project_teams", name="check_access_for_all_project_teams"
+            ) as span:
                 memberships = [
                     self._team_memberships[team]
                     for team in project.teams.all()
                     if team in self._team_memberships
                 ]
-                span.set_tag("organization", self._member.organization.id)
-                span.set_tag("organization.slug", self._member.organization.slug)
-                span.set_data("membership_count", len(memberships))
+                set_span_tag(span, "organization", self._member.organization.id)
+                set_span_tag(span, "organization.slug", self._member.organization.slug)
+                set_span_data(span, "membership_count", len(memberships))
 
             for membership in memberships:
                 team_scopes = membership.get_scopes()
@@ -438,8 +462,9 @@ class RpcBackedAccess(Access):
         if self.scopes_upper_bound is None:
             return frozenset(self.rpc_user_organization_context.member.scopes)
 
-        return frozenset(self.rpc_user_organization_context.member.scopes) & frozenset(
-            self.scopes_upper_bound
+        return _intersect_member_and_token_scopes(
+            self.rpc_user_organization_context.member.scopes,
+            self.scopes_upper_bound,
         )
 
     # TODO(cathy): remove this
@@ -501,6 +526,7 @@ class RpcBackedAccess(Access):
         return None
 
     def has_team_scope(self, team: Team, scope: str) -> bool:
+        check_scope_declaration(scope)
         if not self.has_team_access(team):
             return False
         if self.has_scope(scope):
@@ -549,6 +575,7 @@ class RpcBackedAccess(Access):
 
         For performance's sake, prefer this over multiple calls to `has_project_scope`.
         """
+        check_scope_declarations(scopes)
         if not self.has_project_access(project):
             return False
         if any(self.has_scope(scope) for scope in scopes):
@@ -557,14 +584,18 @@ class RpcBackedAccess(Access):
         if self.rpc_user_organization_context.member and features.has(
             "organizations:team-roles", self.rpc_user_organization_context.organization
         ):
-            with sentry_sdk.start_span(op="check_access_for_all_project_teams") as span:
+            with start_span(
+                op="check_access_for_all_project_teams", name="check_access_for_all_project_teams"
+            ) as span:
                 project_teams_id = set(project.teams.values_list("id", flat=True))
                 orgmember_teams = self.rpc_user_organization_context.member.member_teams
-                span.set_tag("organization", self.rpc_user_organization_context.organization.id)
-                span.set_tag(
-                    "organization.slug", self.rpc_user_organization_context.organization.slug
+                set_span_tag(
+                    span, "organization", self.rpc_user_organization_context.organization.id
                 )
-                span.set_data("membership_count", len(orgmember_teams))
+                set_span_tag(
+                    span, "organization.slug", self.rpc_user_organization_context.organization.slug
+                )
+                set_span_data(span, "membership_count", len(orgmember_teams))
 
             for member_team in orgmember_teams:
                 if not member_team.role:
@@ -834,12 +865,14 @@ class OrganizationlessAccess(Access):
         return frozenset()
 
     def has_team_scope(self, team: Team, scope: str) -> bool:
+        check_scope_declaration(scope)
         return False
 
     def get_team_role(self, team: Team) -> TeamRole | None:
         return None
 
     def has_any_project_scope(self, project: Project, scopes: Collection[str]) -> bool:
+        check_scope_declarations(scopes)
         if not self.has_project_access(project):
             return False
 
@@ -863,6 +896,7 @@ class SystemAccess(OrganizationlessAccess):
         return True
 
     def has_scope(self, scope: str) -> bool:
+        check_scope_declaration(scope)
         return True
 
     def has_team_access(self, team: Team) -> bool:
@@ -903,6 +937,11 @@ def from_request_org_and_scopes(
     Note that `scopes` is usually None because request.auth is not set at `get_authorization_header`
     when the request is made from the frontend using cookies
     """
+    if is_agent_auth(request.auth):
+        if rpc_user_org_context is None:
+            return DEFAULT
+        return from_agent_auth(request.auth, rpc_user_org_context)
+
     is_staff = is_active_staff(request)
 
     if not rpc_user_org_context:
@@ -913,6 +952,10 @@ def from_request_org_and_scopes(
             is_staff=is_staff,
             scopes=scopes,
         )
+
+    if getattr(request, "actual_user", None) is not None:
+        if not should_allow_superuser_access(rpc_user_org_context):
+            raise DataSecrecyError()
 
     if getattr(request.user, "is_sentry_app", False):
         return _from_rpc_sentry_app(rpc_user_org_context)
@@ -998,6 +1041,11 @@ def from_user_and_rpc_user_org_context(
 def from_request(
     request: Request, organization: Organization | None = None, scopes: Iterable[str] | None = None
 ) -> Access:
+    if is_agent_auth(request.auth):
+        if organization is None:
+            return DEFAULT
+        return from_auth(request.auth, organization)
+
     is_staff = is_active_staff(request)
 
     if not organization:
@@ -1009,7 +1057,11 @@ def from_request(
             is_staff=is_staff,
         )
 
-    if getattr(request.user, "is_sentry_app", False):
+    if getattr(request, "actual_user", None) is not None:
+        if not should_allow_superuser_access(organization):
+            raise DataSecrecyError()
+
+    if request.user.is_authenticated and request.user.is_sentry_app:
         return _from_sentry_app(request.user, organization=organization)
 
     if is_active_superuser(request):
@@ -1051,9 +1103,7 @@ def from_request(
 
 
 # only used internally
-def _from_sentry_app(
-    user: User | AnonymousUser, organization: Organization | None = None
-) -> Access:
+def _from_sentry_app(user: User, organization: Organization | None = None) -> Access:
     if not organization:
         return NoAccess()
 
@@ -1125,10 +1175,7 @@ def from_member(
     is_superuser: bool = False,
     is_staff: bool = False,
 ) -> Access:
-    if scopes is not None:
-        scope_intersection = frozenset(scopes) & member.get_scopes()
-    else:
-        scope_intersection = member.get_scopes()
+    scope_intersection = _intersect_member_and_token_scopes(member.get_scopes(), scopes)
 
     if (is_superuser or is_staff) and member.user_id is not None:
         # "permissions" is a bit of a misnomer -- these are all admin level permissions, and the intent is that if you
@@ -1167,9 +1214,23 @@ def from_rpc_member(
 def from_auth(auth: AuthenticatedToken, organization: Organization) -> Access:
     if is_system_auth(auth):
         return SystemAccess()
-    elif auth.organization_id == organization.id:
+    if is_agent_auth(auth):
+        access: Access = DEFAULT
+        if auth.user_id is not None and auth.organization_id == organization.id:
+            try:
+                member = OrganizationMember.objects.get(
+                    user_id=auth.user_id, organization_id=organization.id
+                )
+            except OrganizationMember.DoesNotExist:
+                pass
+            else:
+                member.organization = organization
+                access = from_member(member, scopes=auth.get_scopes())
+        return access
+    auth_organization_id = auth.organization_id
+    if auth_organization_id is not None and auth_organization_id == organization.id:
         return OrganizationGlobalAccess(
-            auth.organization_id, settings.SENTRY_SCOPES, sso_is_valid=True
+            auth_organization_id, settings.SENTRY_SCOPES, sso_is_valid=True
         )
     else:
         return DEFAULT
@@ -1180,6 +1241,11 @@ def from_rpc_auth(
 ) -> Access:
     if is_system_auth(auth):
         return SystemAccess()
+    if is_agent_auth(auth):
+        # Agents are non-user actors with member-derived, capped authority -- never the
+        # org-global access an org token gets. Dispatched here so the cap holds at the
+        # shared userless-auth choke, not only in determine_access.
+        return from_agent_auth(auth, rpc_user_org_context)
     if auth.organization_id == rpc_user_org_context.organization.id:
         return ApiBackedOrganizationGlobalAccess(
             rpc_user_organization_context=rpc_user_org_context,
@@ -1194,6 +1260,27 @@ def from_rpc_auth(
         )
     else:
         return DEFAULT
+
+
+def from_agent_auth(
+    auth: AuthenticatedToken, rpc_user_org_context: RpcUserOrganizationContext
+) -> Access:
+    """Access for a Seer agent capability token: a non-user actor acting on behalf of a
+    member. Unlike an org token, the agent is not org-global — its authority is the
+    delegating member's, capped by the token's scopes, so project access follows the
+    member's teams. The context MUST be resolved for the delegating user_id."""
+    # Bound to the org it was minted for; never honored elsewhere, even if the
+    # delegating user is also a member of the requested org.
+    if auth.organization_id != rpc_user_org_context.organization.id:
+        return DEFAULT
+    if auth.user_id != rpc_user_org_context.user_id:
+        return DEFAULT
+    # No membership (never a member, or revoked since mint) -> no access. Required
+    # explicitly because RpcBackedAccess would otherwise hand back the full token
+    # scopes uncapped when member is None.
+    if rpc_user_org_context.member is None:
+        return DEFAULT
+    return from_rpc_member(rpc_user_org_context, scopes=auth.get_scopes())
 
 
 DEFAULT = NoAccess()

@@ -1,6 +1,6 @@
 from datetime import timedelta
 from functools import cached_property
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.core import mail
 from django.test import override_settings
@@ -19,32 +19,32 @@ from sentry.users.web.accounts import recover_confirm
 @control_silo_test
 class TestAccounts(TestCase):
     @cached_property
-    def path(self):
+    def path(self) -> str:
         return reverse("sentry-account-recover")
 
-    def password_recover_path(self, user_id, hash_):
+    def password_recover_path(self, user_id: int, hash_: str) -> str:
         return reverse("sentry-account-recover-confirm", kwargs={"user_id": user_id, "hash": hash_})
 
-    def relocation_recover_path(self, user_id, hash_):
+    def relocation_recover_path(self, user_id: int, hash_: str) -> str:
         return reverse(
             "sentry-account-relocate-confirm", kwargs={"user_id": user_id, "hash": hash_}
         )
 
-    def relocation_reclaim_path(self, user_id):
+    def relocation_reclaim_path(self, user_id: int) -> str:
         return reverse("sentry-account-relocate-reclaim", kwargs={"user_id": user_id})
 
-    def test_get_renders_form(self):
+    def test_get_renders_form(self) -> None:
         resp = self.client.get(self.path)
         assert resp.status_code == 200
         self.assertTemplateUsed("sentry/account/recover/index.html")
 
-    def test_post_unknown_user(self):
+    def test_post_unknown_user(self) -> None:
         resp = self.client.post(self.path, {"user": "nobody"})
         assert resp.status_code == 200
         self.assertTemplateUsed("sentry/account/recover/sent.html")
         assert 0 == len(LostPasswordHash.objects.all())
 
-    def test_post_success(self):
+    def test_post_success(self) -> None:
         user = self.create_user()
 
         resp = self.client.post(self.path, {"user": user.email})
@@ -52,7 +52,7 @@ class TestAccounts(TestCase):
         self.assertTemplateUsed("sentry/account/recover/sent.html")
         assert 1 == len(LostPasswordHash.objects.all())
 
-    def test_post_managed_user(self):
+    def test_post_managed_user(self) -> None:
         user = self.create_user()
         user.is_managed = True
         user.save()
@@ -63,7 +63,16 @@ class TestAccounts(TestCase):
         self.assertContains(resp, "The account you are trying to recover is managed")
         assert 0 == len(LostPasswordHash.objects.all())
 
-    def test_post_multiple_users(self):
+    def test_post_suspended_user_no_email_sent(self) -> None:
+        user = self.create_user()
+        user.update(is_suspended=True)
+
+        resp = self.client.post(self.path, {"user": user.email})
+        assert resp.status_code == 200
+        self.assertTemplateUsed("sentry/account/recover/sent.html")
+        assert 0 == len(LostPasswordHash.objects.all())
+
+    def test_post_multiple_users(self) -> None:
         user = self.create_user(email="bob")
         user.email = "bob@example.com"
         user.save()
@@ -77,7 +86,7 @@ class TestAccounts(TestCase):
         self.assertTemplateUsed("sentry/account/recover/index.html")
         assert 0 == len(LostPasswordHash.objects.all())
 
-    def test_leaking_recovery_hash(self):
+    def test_leaking_recovery_hash(self) -> None:
         user = self.create_user()
 
         resp = self.client.post(self.path, {"user": user.email})
@@ -95,12 +104,29 @@ class TestAccounts(TestCase):
         assert resp.has_header(header_name)
         assert resp[header_name] == "strict-origin-when-cross-origin"
 
+    def test_recover_verifies_primary_email(self) -> None:
+        user = self.create_user()
+        user_email = UserEmail.objects.get(email=user.email)
+        user_email.is_verified = False
+        user_email.save()
+
+        lost_password = LostPasswordHash.objects.create(user=user)
+
+        resp = self.client.post(
+            self.password_recover_path(lost_password.user_id, lost_password.hash),
+            {"password": "test_password"},
+        )
+        assert resp.status_code == 302
+
+        user_email.refresh_from_db()
+        assert user_email.is_verified
+
     @override_settings(
         AUTH_PASSWORD_VALIDATORS=[
             {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"}
         ]
     )
-    def test_unable_to_set_weak_password_via_recover_form(self):
+    def test_unable_to_set_weak_password_via_recover_form(self) -> None:
         lost_password = LostPasswordHash.objects.create(user=self.user)
 
         resp = self.client.post(
@@ -110,7 +136,30 @@ class TestAccounts(TestCase):
         assert resp.status_code == 200
         assert b"The password is too similar to the username." in resp.content
 
-    def test_relocate_recovery_no_inputs(self):
+    def test_suspended_user_cannot_recover_password(self) -> None:
+        user = self.create_user()
+        old_password = user.password
+        user.update(is_suspended=True)
+
+        lost_password = LostPasswordHash.objects.create(user=user)
+
+        resp = self.client.get(
+            self.password_recover_path(lost_password.user_id, lost_password.hash),
+        )
+        assert resp.status_code == 200
+        self.assertTemplateUsed("sentry/account/recover/failure.html")
+
+        resp = self.client.post(
+            self.password_recover_path(lost_password.user_id, lost_password.hash),
+            {"password": "new_password_123"},
+        )
+        assert resp.status_code == 200
+        self.assertTemplateUsed("sentry/account/recover/failure.html")
+
+        user.refresh_from_db()
+        assert user.password == old_password
+
+    def test_relocate_recovery_no_inputs(self) -> None:
         user = self.create_user()
         user_email = UserEmail.objects.get(email=user.email)
         user_email.is_verified = False
@@ -134,7 +183,7 @@ class TestAccounts(TestCase):
 
         assert not UserEmail.objects.get(email=user.email).is_verified
 
-    def test_relocate_expired_lost_password_hash(self):
+    def test_relocate_expired_lost_password_hash(self) -> None:
         user = self.create_user()
         user_email = UserEmail.objects.get(email=user.email)
         user_email.is_verified = False
@@ -159,7 +208,9 @@ class TestAccounts(TestCase):
         assert not UserEmail.objects.get(email=user.email).is_verified
 
     @patch("sentry.signals.terms_accepted.send_robust")
-    def test_relocate_recovery_post_multiple_orgs(self, terms_accepted_signal_mock):
+    def test_relocate_recovery_post_multiple_orgs(
+        self, terms_accepted_signal_mock: MagicMock
+    ) -> None:
         user = self.create_user(email="test@example.com")
         user_email = UserEmail.objects.get(email=user.email)
         user_email.is_verified = False
@@ -210,13 +261,16 @@ class TestAccounts(TestCase):
                     ip_address="127.0.0.1",
                     sender=recover_confirm,
                 ),
-            ]
+            ],
+            any_order=True,
         )
 
         assert UserEmail.objects.get(email=user.email).is_verified
 
     @patch("sentry.signals.terms_accepted.send_robust")
-    def test_relocate_recovery_post_another_user_with_same_email(self, terms_accepted_signal_mock):
+    def test_relocate_recovery_post_another_user_with_same_email(
+        self, terms_accepted_signal_mock: MagicMock
+    ) -> None:
         same_email_user = self.create_user(username="same_email_as_first", email="test@example.com")
         same_email_user_email = UserEmail.objects.get(
             email=same_email_user.email, user_id=same_email_user.id
@@ -268,7 +322,7 @@ class TestAccounts(TestCase):
             email=same_email_user_email.email, user_id=same_email_user.id
         ).is_verified
 
-    def test_relocate_recovery_unchecked_tos(self):
+    def test_relocate_recovery_unchecked_tos(self) -> None:
         user = self.create_user()
         user_email = UserEmail.objects.get(email=user.email)
         user_email.is_verified = False
@@ -301,7 +355,7 @@ class TestAccounts(TestCase):
 
         assert not UserEmail.objects.get(email=user.email).is_verified
 
-    def test_relocate_recovery_invalid_password(self):
+    def test_relocate_recovery_invalid_password(self) -> None:
         user = self.create_user()
         user_email = UserEmail.objects.get(email=user.email)
         user_email.is_verified = False
@@ -336,7 +390,7 @@ class TestAccounts(TestCase):
 
                 assert not UserEmail.objects.get(email=user.email).is_verified
 
-    def test_relocate_recovery_colliding_username(self):
+    def test_relocate_recovery_colliding_username(self) -> None:
         colliding_username = "colliding"
         self.create_user(username=colliding_username)
 
@@ -372,7 +426,7 @@ class TestAccounts(TestCase):
 
         assert not UserEmail.objects.get(email=user.email).is_verified
 
-    def test_relocate_reclaim_success(self):
+    def test_relocate_reclaim_success(self) -> None:
         user = self.create_user(email="member@example.com", is_unclaimed=True)
         lost_password = LostPasswordHash.objects.create(user=user)
         org = self.create_organization(name="test-org")
@@ -400,7 +454,7 @@ class TestAccounts(TestCase):
             assert resp[header_name] == "strict-origin-when-cross-origin"
             self.assertTemplateUsed("sentry/account/relocate/sent.html")
 
-    def test_relocate_reclaim_user_not_found(self):
+    def test_relocate_reclaim_user_not_found(self) -> None:
         user = self.create_user(email="member@example.com", is_unclaimed=True)
         lost_password = LostPasswordHash.objects.create(user=user)
         org = self.create_organization(name="test-org")
@@ -417,7 +471,7 @@ class TestAccounts(TestCase):
         assert resp[header_name] == "strict-origin-when-cross-origin"
         self.assertTemplateUsed("sentry/account/relocate/error.html")
 
-    def test_relocate_reclaim_already_claimed(self):
+    def test_relocate_reclaim_already_claimed(self) -> None:
         user = self.create_user(email="member@example.com", is_unclaimed=False)
         lost_password = LostPasswordHash.objects.create(user=user)
         org = self.create_organization(name="test-org")
@@ -434,7 +488,7 @@ class TestAccounts(TestCase):
         assert resp[header_name] == "strict-origin-when-cross-origin"
         self.assertTemplateUsed("sentry/account/relocate/claimed.html")
 
-    def test_relocate_reclaim_user_not_in_any_orgs(self):
+    def test_relocate_reclaim_user_not_in_any_orgs(self) -> None:
         user = self.create_user(email="member@example.com", is_unclaimed=True)
         lost_password = LostPasswordHash.objects.create(user=user)
 
@@ -449,7 +503,7 @@ class TestAccounts(TestCase):
         assert resp[header_name] == "strict-origin-when-cross-origin"
         self.assertTemplateUsed("sentry/account/relocate/error.html")
 
-    def test_confirm_email(self):
+    def test_confirm_email(self) -> None:
         self.login_as(self.user)
 
         useremail = UserEmail(user=self.user, email="new@example.com")
@@ -474,7 +528,7 @@ class TestAccounts(TestCase):
         assert len(messages) == 1
         assert messages[0].message == "Thanks for confirming your email"
 
-    def test_confirm_email_userid_mismatch(self):
+    def test_confirm_email_userid_mismatch(self) -> None:
         victim_user = self.create_user(email="victim@example.com")
         self.login_as(victim_user)
 
@@ -505,7 +559,7 @@ class TestAccounts(TestCase):
             == "There was an error confirming your email. Please try again or visit your Account Settings to resend the verification email."
         )
 
-    def test_confirm_email_invalid_hash(self):
+    def test_confirm_email_invalid_hash(self) -> None:
         self.login_as(self.user)
 
         useremail = UserEmail(user=self.user, email="new@example.com")
@@ -533,7 +587,7 @@ class TestAccounts(TestCase):
             == "There was an error confirming your email. Please try again or visit your Account Settings to resend the verification email."
         )
 
-    def test_confirm_email_unauthenticated(self):
+    def test_confirm_email_unauthenticated(self) -> None:
         useremail = UserEmail(user=self.user, email="new@example.com")
         useremail.save()
 

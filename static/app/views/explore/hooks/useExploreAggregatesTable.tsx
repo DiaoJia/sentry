@@ -1,26 +1,36 @@
 import {useCallback, useMemo} from 'react';
 
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import type {NewQuery} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
-import EventView from 'sentry/utils/discover/eventView';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import {
-  useExploreAggregateFields,
-  useExploreDataset,
-  useExploreSortBys,
-} from 'sentry/views/explore/contexts/pageParamsContext';
+import {defined} from 'sentry/utils/defined';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {QueryError} from 'sentry/utils/discover/genericDiscoverQuery';
 import {isGroupBy} from 'sentry/views/explore/contexts/pageParamsContext/aggregateFields';
+import {defaultAggregateSortBys} from 'sentry/views/explore/contexts/pageParamsContext/aggregateSortBys';
 import {formatSort} from 'sentry/views/explore/contexts/pageParamsContext/sortBys';
-import type {SpansRPCQueryExtras} from 'sentry/views/explore/hooks/useProgressiveQuery';
+import type {RPCQueryExtras} from 'sentry/views/explore/hooks/useProgressiveQuery';
 import {useProgressiveQuery} from 'sentry/views/explore/hooks/useProgressiveQuery';
+import {validateAggregateSort} from 'sentry/views/explore/queryParams/aggregateSortBy';
+import {
+  useQueryParamsAggregateCursor,
+  useQueryParamsAggregateFields,
+  useQueryParamsAggregateSortBys,
+  useQueryParamsExtrapolate,
+} from 'sentry/views/explore/queryParams/context';
+import {isVisualize} from 'sentry/views/explore/queryParams/visualize';
+import {useSpansDataset} from 'sentry/views/explore/spans/spansQueryParams';
+import {
+  areAllVisualizesInvalidConditionalFilters,
+  getConditionalFilterInvalidSeriesMessageForVisualizes,
+} from 'sentry/views/explore/utils/conditionalAggregate';
 import {useSpansQuery} from 'sentry/views/insights/common/queries/useSpansQuery';
+import {SpanFields} from 'sentry/views/insights/types';
 
 interface UseExploreAggregatesTableOptions {
   enabled: boolean;
   limit: number;
   query: string;
-  queryExtras?: SpansRPCQueryExtras;
+  queryExtras?: RPCQueryExtras;
 }
 
 export interface AggregatesTableResult {
@@ -33,7 +43,10 @@ export function useExploreAggregatesTable({
   enabled,
   limit,
   query,
+  queryExtras,
 }: UseExploreAggregatesTableOptions) {
+  const extrapolate = useQueryParamsExtrapolate();
+
   const canTriggerHighAccuracy = useCallback(
     (results: ReturnType<typeof useSpansQuery<any[]>>) => {
       const canGoToHigherAccuracyTier = results.meta?.dataScanned === 'partial';
@@ -44,9 +57,10 @@ export function useExploreAggregatesTable({
   );
   return useProgressiveQuery<typeof useExploreAggregatesTableImp>({
     queryHookImplementation: useExploreAggregatesTableImp,
-    queryHookArgs: {enabled, limit, query},
+    queryHookArgs: {enabled, limit, query, queryExtras},
     queryOptions: {
       canTriggerHighAccuracy,
+      disableExtrapolation: !extrapolate,
     },
   });
 }
@@ -59,14 +73,19 @@ function useExploreAggregatesTableImp({
 }: UseExploreAggregatesTableOptions): AggregatesTableResult {
   const {selection} = usePageFilters();
 
-  const dataset = useExploreDataset();
-  const aggregateFields = useExploreAggregateFields();
-  const sorts = useExploreSortBys();
+  const dataset = useSpansDataset();
+  const aggregateCursor = useQueryParamsAggregateCursor();
+  const aggregateFields = useQueryParamsAggregateFields({validate: true});
+  const unvalidatedAggregateFields = useQueryParamsAggregateFields();
+  const aggregateSortBys = useQueryParamsAggregateSortBys();
 
   const fields = useMemo(() => {
     // When rendering the table, we want the group bys first
     // then the aggregates.
-    const allFields: string[] = [];
+    const allFields: string[] = [
+      `any(${SpanFields.TRACE})`,
+      `any(${SpanFields.TIMESTAMP})`,
+    ];
 
     for (const aggregateField of aggregateFields) {
       if (isGroupBy(aggregateField)) {
@@ -85,30 +104,61 @@ function useExploreAggregatesTableImp({
     return allFields.filter(Boolean);
   }, [aggregateFields]);
 
+  const hasValidVisualize = useMemo(
+    () => aggregateFields.some(aggregateField => !isGroupBy(aggregateField)),
+    [aggregateFields]
+  );
+
+  const skippedForInvalidConditionalFilter = useMemo(
+    () =>
+      areAllVisualizesInvalidConditionalFilters(
+        unvalidatedAggregateFields.filter(isVisualize)
+      ),
+    [unvalidatedAggregateFields]
+  );
+
+  const invalidConditionalFilterMessage = useMemo(
+    () =>
+      getConditionalFilterInvalidSeriesMessageForVisualizes(
+        unvalidatedAggregateFields.filter(isVisualize)
+      ),
+    [unvalidatedAggregateFields]
+  );
+
+  // Drop orderbys that point at series removed by validation (e.g. invalid `_if`),
+  // otherwise the remaining query can fail. Fall back to the first valid y-axis.
+  const resolvedSortBys = useMemo(() => {
+    const validSortBys = aggregateSortBys.filter(sort =>
+      validateAggregateSort(sort, aggregateFields)
+    );
+    if (validSortBys.length) {
+      return validSortBys;
+    }
+    return defaultAggregateSortBys(
+      aggregateFields.filter(isVisualize).map(aggregateField => aggregateField.yAxis)
+    );
+  }, [aggregateFields, aggregateSortBys]);
+
   const eventView = useMemo(() => {
-    const search = new MutableSearch(query);
-
-    // Filtering out all spans with op like 'ui.interaction*' which aren't
-    // embedded under transactions. The trace view does not support rendering
-    // such spans yet.
-    search.addFilterValues('!transaction.span_id', ['00']);
-
     const discoverQuery: NewQuery = {
       id: undefined,
       name: 'Explore - Span Aggregates',
       fields,
-      orderby: sorts.map(formatSort),
-      query: search.formatString(),
+      orderby: resolvedSortBys.map(formatSort),
+      query,
       version: 2,
       dataset,
     };
 
     return EventView.fromNewQueryWithPageFilters(discoverQuery, selection);
-  }, [dataset, fields, sorts, query, selection]);
+  }, [dataset, fields, resolvedSortBys, query, selection]);
 
   const result = useSpansQuery({
-    enabled,
+    // Skip only when every series failed an `_if` filter. Invalid equations still
+    // query with whatever remains (prior behavior).
+    enabled: enabled && (hasValidVisualize || !skippedForInvalidConditionalFilter),
     eventView,
+    cursor: aggregateCursor,
     initialData: [],
     limit,
     referrer: 'api.explore.spans-aggregates-table',
@@ -116,7 +166,31 @@ function useExploreAggregatesTableImp({
     queryExtras,
   });
 
-  return useMemo(() => {
+  return useMemo((): AggregatesTableResult => {
+    if (skippedForInvalidConditionalFilter) {
+      return {
+        eventView,
+        fields,
+        result: {
+          ...result,
+          data: [],
+          error: new QueryError(invalidConditionalFilterMessage),
+          isError: true,
+          isFetched: true,
+          isFetching: false,
+          isLoading: false,
+          isPending: false,
+          isSuccess: false,
+          status: 'error' as const,
+        } as AggregatesTableResult['result'],
+      };
+    }
     return {eventView, fields, result};
-  }, [eventView, fields, result]);
+  }, [
+    eventView,
+    fields,
+    invalidConditionalFilterMessage,
+    result,
+    skippedForInvalidConditionalFilter,
+  ]);
 }

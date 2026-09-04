@@ -1,20 +1,23 @@
 import * as qs from 'query-string';
 
-import ConfigStore from 'sentry/stores/configStore';
-import type {Hooks} from 'sentry/types/hooks';
+import {CUSTOM_REFERRER_KEY} from 'sentry/constants';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {Organization} from 'sentry/types/organization';
+import type {Overrides} from 'sentry/types/overrides';
 import type {User} from 'sentry/types/user';
-import getDaysSinceDate from 'sentry/utils/getDaysSinceDate';
+import {getDaysSinceDate} from 'sentry/utils/getDaysSinceDate';
 import {uniqueId} from 'sentry/utils/guid';
-import localStorage from 'sentry/utils/localStorage';
-import sessionStorage from 'sentry/utils/sessionStorage';
+import {localStorageWrapper} from 'sentry/utils/localStorage';
+import {sessionStorageWrapper} from 'sentry/utils/sessionStorage';
+import {readStorageValue} from 'sentry/utils/useSessionStorage';
 
 import type {Subscription} from 'getsentry/types';
+import {isTrial} from 'getsentry/utils/billing';
 
-import trackAmplitudeEvent from './trackAmplitudeEvent';
-import trackMarketingEvent from './trackMarketingEvent';
-import trackPendoEvent from './trackPendoEvent';
-import trackReloadEvent from './trackReloadEvent';
+import {trackAmplitudeEvent} from './trackAmplitudeEvent';
+import {trackMarketingEvent} from './trackMarketingEvent';
+import {trackPendoEvent} from './trackPendoEvent';
+import {trackReloadEvent} from './trackReloadEvent';
 
 /**
  * Fields that are listed here which are passed to trackAnalyticsEvent's data
@@ -26,7 +29,7 @@ function coerceNumber(value: string | undefined | null) {
   const originalValue = value;
 
   if (value === undefined) {
-    return undefined;
+    return;
   }
 
   if (value === null) {
@@ -58,27 +61,34 @@ const ANALYTICS_SESSION = 'ANALYTICS_SESSION';
 
 const startAnalyticsSession = () => {
   const sessionId = uniqueId();
-  sessionStorage.setItem(ANALYTICS_SESSION, sessionId);
+  sessionStorageWrapper.setItem(ANALYTICS_SESSION, sessionId);
   return sessionId;
 };
 
-const getAnalyticsSessionId = () => sessionStorage.getItem(ANALYTICS_SESSION);
+const getAnalyticsSessionId = () => sessionStorageWrapper.getItem(ANALYTICS_SESSION);
 
-const hasAnalyticsDebug = () => localStorage.getItem('DEBUG_ANALYTICS_GETSENTRY') === '1';
+const hasAnalyticsDebug = () => localStorageWrapper.getItem('DEBUG_ANALYTICS') === '1';
 
 const getCustomReferrer = () => {
   try {
     // pull the referrer from the query parameter of the page
     const {referrer} = qs.parse(window.location.search) || {};
+    // pull the referrer from session storage.
+    const storedReferrer = readStorageValue(CUSTOM_REFERRER_KEY, null) as string | null;
+    // ?referrer takes precedence, but still unset session stored referrer.
+    if (storedReferrer) {
+      sessionStorageWrapper.removeItem(CUSTOM_REFERRER_KEY);
+    }
     if (referrer && typeof referrer === 'string') {
       return referrer;
     }
+    return storedReferrer;
   } catch {
     // ignore if this fails to parse
     // this can happen if we have an invalid query string
     // e.g. unencoded "%"
   }
-  return undefined;
+  return;
 };
 
 const getOrganizationId = (
@@ -120,7 +130,7 @@ const getOrganizationAge = (
 const getUserAge = (user: User): number => {
   return getDaysSinceDate(user.dateJoined);
 };
-type RawTrackEventHook = Hooks['analytics:raw-track-event'];
+type RawTrackEventHook = Overrides['analytics:raw-track-event'];
 type Params = Parameters<RawTrackEventHook>[0] & {
   subscription?: Subscription;
 };
@@ -136,10 +146,13 @@ function isFullOrganization(
   return !!organization && typeof organization !== 'string';
 }
 
-export default function rawTrackAnalyticsEvent(
+export function rawTrackAnalyticsEvent(
   {eventKey, eventName, organization, subscription, ...data}: Params,
   options?: Options
 ) {
+  if (!eventKey && !eventName) {
+    return;
+  }
   try {
     // apply custom function map parameters
     const {mapValuesFn} = options || {};
@@ -171,7 +184,7 @@ export default function rawTrackAnalyticsEvent(
     }
 
     // add in previous referrer if different than custom referrer
-    const prevReferrer = sessionStorage.getItem('previous_referrer');
+    const prevReferrer = sessionStorageWrapper.getItem('previous_referrer');
     if (prevReferrer && prevReferrer !== customReferrer) {
       data.previous_referrer = prevReferrer;
     }
@@ -188,7 +201,7 @@ export default function rawTrackAnalyticsEvent(
         data.can_trial = subscription.canTrial;
       }
       if (data.is_trial === undefined) {
-        data.is_trial = subscription.isTrial;
+        data.is_trial = isTrial(subscription);
       }
       // we can add more fields but we should be carefull about which ones to add
       // since Amplitude is an external vendor
@@ -203,15 +216,17 @@ export default function rawTrackAnalyticsEvent(
     // Prepare reloads data payload. If the organization_id is passed we include
     // that in the data payload.
     const user = ConfigStore.get('user');
-    const reloadData = {
-      user_id: coerceNumber(user?.id),
-      org_id: organization_id,
-      allow_no_schema: true,
-      sent_at: (time || Date.now()).toString(),
-      ...data,
-    };
 
-    trackReloadEvent(eventKey, reloadData);
+    if (eventKey) {
+      const reloadData = {
+        user_id: coerceNumber(user?.id),
+        org_id: organization_id,
+        allow_no_schema: true,
+        sent_at: (time || Date.now()).toString(),
+        ...data,
+      };
+      trackReloadEvent(eventKey, reloadData);
+    }
     if (eventName && organization_id !== undefined) {
       const orgAge = getOrganizationAge(organization);
       const userAge = getUserAge(user);

@@ -1,24 +1,28 @@
 import {useTheme} from '@emotion/react';
 
+import {getInterval, getSeriesSelection} from 'sentry/components/charts/utils';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {parseFunction} from 'sentry/utils/discover/fields';
 import {decodeScalar} from 'sentry/utils/queryString';
+import {useFetchSpanTimeSeries} from 'sentry/utils/timeSeries/useFetchEventsTimeSeries';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {useLocation} from 'sentry/utils/useLocation';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import {useReleaseStats} from 'sentry/utils/useReleaseStats';
 import {Line} from 'sentry/views/dashboards/widgets/timeSeriesWidget/plottables/line';
 import {TimeSeriesWidgetVisualization} from 'sentry/views/dashboards/widgets/timeSeriesWidget/timeSeriesWidgetVisualization';
-import {useEAPSpans} from 'sentry/views/insights/common/queries/useDiscover';
-import {useEAPSeries} from 'sentry/views/insights/common/queries/useDiscoverSeries';
-import {SpanIndexedField} from 'sentry/views/insights/types';
+import {useSpans} from 'sentry/views/insights/common/queries/useDiscover';
+import type {SpanProperty} from 'sentry/views/insights/types';
+import {SpanFields} from 'sentry/views/insights/types';
 import {
   filterToColor,
   type SpanOperationBreakdownFilter,
 } from 'sentry/views/performance/transactionSummary/filter';
 import {transformData} from 'sentry/views/performance/transactionSummary/transactionOverview/durationPercentileChart/utils';
 import {EAPWidgetType} from 'sentry/views/performance/transactionSummary/transactionOverview/eapChartsWidget';
-import {eapSeriesDataToTimeSeries} from 'sentry/views/performance/transactionSummary/transactionOverview/utils';
+import {EAP_WEB_VITALS} from 'sentry/views/performance/transactionSummary/transactionVitals/constants';
 
-import DurationPercentileChart from './durationPercentileChart/chart';
+import {Chart as DurationPercentileChart} from './durationPercentileChart/chart';
 
 const REFERRER = 'transaction-summary-charts-widget';
 
@@ -51,12 +55,22 @@ export function useWidgetChartVisualization({
     query,
   });
 
+  const webVitalsVisualization = useWebVitalsVisualization({
+    enabled: selectedWidget === EAPWidgetType.WEB_VITALS,
+    transactionName,
+    query,
+  });
+
   if (selectedWidget === EAPWidgetType.DURATION_BREAKDOWN) {
     return durationBreakdownVisualization;
   }
 
   if (selectedWidget === EAPWidgetType.DURATION_PERCENTILES) {
     return durationPercentilesVisualization;
+  }
+
+  if (selectedWidget === EAPWidgetType.WEB_VITALS) {
+    return webVitalsVisualization;
   }
 
   return <TimeSeriesWidgetVisualization.LoadingPlaceholder />;
@@ -74,10 +88,10 @@ function useDurationBreakdownVisualization({
   query,
 }: DurationBreakdownVisualizationOptions) {
   const location = useLocation();
-  const spanCategoryUrlParam = decodeScalar(
-    location.query?.[SpanIndexedField.SPAN_CATEGORY]
-  );
+  const navigate = useNavigate();
+  const spanCategoryUrlParam = decodeScalar(location.query?.[SpanFields.SPAN_CATEGORY]);
   const {selection} = usePageFilters();
+  const legendSelection = getSeriesSelection(location);
 
   const {releases: releasesWithDate} = useReleaseStats(selection);
   const releases =
@@ -90,7 +104,7 @@ function useDurationBreakdownVisualization({
   newQuery.addFilterValue('transaction', transactionName);
   newQuery.addFilterValue('is_transaction', '1');
 
-  // If a span category is selected, the chart will focus on that span category rather than just the service entry span
+  // If a span category is selected, the chart will focus on that span category rather than just the segment span
   if (spanCategoryUrlParam) {
     newQuery.addFilterValue('span.category', spanCategoryUrlParam);
     newQuery.removeFilterValue('is_transaction', '1');
@@ -100,19 +114,18 @@ function useDurationBreakdownVisualization({
     data: spanSeriesData,
     isPending: isSpanSeriesPending,
     isError: isSpanSeriesError,
-  } = useEAPSeries(
+  } = useFetchSpanTimeSeries(
     {
       yAxis: [
         'avg(span.duration)',
         'p100(span.duration)',
         'p99(span.duration)',
         'p95(span.duration)',
-        'p90(span.duration)',
         'p75(span.duration)',
         'p50(span.duration)',
       ],
-      search: newQuery,
-      transformAliasToInputFormat: true,
+      query: newQuery,
+      interval: getInterval(selection.datetime, 'high'),
       enabled,
     },
     REFERRER
@@ -126,14 +139,28 @@ function useDurationBreakdownVisualization({
     return <TimeSeriesWidgetVisualization.LoadingPlaceholder />;
   }
 
-  const timeSeries = eapSeriesDataToTimeSeries(spanSeriesData);
-  const plottables = timeSeries.map(series => new Line(series));
+  const plottables =
+    spanSeriesData?.timeSeries.map(series => {
+      const name = `${parseFunction(series.yAxis)?.name}()`;
+      return new Line(series, {name, alias: name});
+    }) ?? [];
 
   return (
     <TimeSeriesWidgetVisualization
       plottables={plottables}
       releases={releases}
       showReleaseAs="bubble"
+      legendSelection={legendSelection}
+      onLegendSelectionChange={selected => {
+        const unselected = Object.keys(selected).filter(key => !selected[key]);
+        navigate({
+          ...location,
+          query: {
+            ...location.query,
+            unselectedSeries: unselected,
+          },
+        });
+      }}
     />
   );
 }
@@ -153,9 +180,7 @@ function useDurationPercentilesVisualization({
   const {selection} = usePageFilters();
   const theme = useTheme();
 
-  const spanCategoryUrlParam = decodeScalar(
-    location.query?.[SpanIndexedField.SPAN_CATEGORY]
-  );
+  const spanCategoryUrlParam = decodeScalar(location.query?.[SpanFields.SPAN_CATEGORY]);
 
   const newQuery = new MutableSearch(query);
   newQuery.addFilterValue('transaction', transactionName);
@@ -165,7 +190,7 @@ function useDurationPercentilesVisualization({
     data: durationPercentilesData,
     isPending: isDurationPercentilesPending,
     isError: isDurationPercentilesError,
-  } = useEAPSpans(
+  } = useSpans(
     {
       fields: [
         'p50(span.duration)',
@@ -195,6 +220,80 @@ function useDurationPercentilesVisualization({
     <DurationPercentileChart
       series={transformData(durationPercentilesData, false, /p(\d+)\(/)}
       colors={colors}
+    />
+  );
+}
+
+type WebVitalsVisualizationOptions = {
+  enabled: boolean;
+  query: string;
+  transactionName: string;
+};
+
+function useWebVitalsVisualization({
+  enabled,
+  transactionName,
+  query,
+}: WebVitalsVisualizationOptions) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const {selection} = usePageFilters();
+  const legendSelection = getSeriesSelection(location);
+
+  const {releases: releasesWithDate} = useReleaseStats(selection);
+  const releases =
+    releasesWithDate?.map(({date, version}) => ({
+      timestamp: date,
+      version,
+    })) ?? [];
+
+  const newQuery = new MutableSearch(query);
+  newQuery.addFilterValue('transaction', transactionName);
+  newQuery.addFilterValue('is_transaction', '1');
+
+  const {
+    data: spanSeriesData,
+    isPending: isSpanSeriesPending,
+    isError: isSpanSeriesError,
+  } = useFetchSpanTimeSeries(
+    {
+      yAxis: EAP_WEB_VITALS.map(vital => `p75(${vital})` as SpanProperty),
+      query: newQuery,
+      interval: getInterval(selection.datetime, 'high'),
+      enabled,
+    },
+    REFERRER
+  );
+
+  if (!enabled) {
+    return null;
+  }
+
+  if (isSpanSeriesPending || isSpanSeriesError) {
+    return <TimeSeriesWidgetVisualization.LoadingPlaceholder />;
+  }
+
+  const plottables =
+    spanSeriesData?.timeSeries.map(series => {
+      return new Line(series);
+    }) ?? [];
+
+  return (
+    <TimeSeriesWidgetVisualization
+      plottables={plottables}
+      releases={releases}
+      showReleaseAs="bubble"
+      legendSelection={legendSelection}
+      onLegendSelectionChange={selected => {
+        const unselected = Object.keys(selected).filter(key => !selected[key]);
+        navigate({
+          ...location,
+          query: {
+            ...location.query,
+            unselectedSeries: unselected,
+          },
+        });
+      }}
     />
   );
 }

@@ -3,31 +3,38 @@ import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 import moment from 'moment-timezone';
-import logoUnknown from 'sentry-logos/logo-unknown.svg';
 
-import {UserAvatar} from 'sentry/components/core/avatar/userAvatar';
+import {UserAvatar} from '@sentry/scraps/avatar';
+
 import {DeviceName} from 'sentry/components/deviceName';
 import {
   ContextIcon,
-  type ContextIconProps,
   getLogoImage,
+  type ContextIconProps,
 } from 'sentry/components/events/contexts/contextIcon';
+import {getAccessibilityContextData} from 'sentry/components/events/contexts/knownContext/accessibility';
 import {getAppContextData} from 'sentry/components/events/contexts/knownContext/app';
+import {getARTContextData} from 'sentry/components/events/contexts/knownContext/art';
 import {getBrowserContextData} from 'sentry/components/events/contexts/knownContext/browser';
 import {getCloudResourceContextData} from 'sentry/components/events/contexts/knownContext/cloudResource';
 import {getCultureContextData} from 'sentry/components/events/contexts/knownContext/culture';
+import {getDartContextData} from 'sentry/components/events/contexts/knownContext/dartContext';
 import {getDeviceContextData} from 'sentry/components/events/contexts/knownContext/device';
+import {getFlutterContextData} from 'sentry/components/events/contexts/knownContext/flutterContext';
 import {getGPUContextData} from 'sentry/components/events/contexts/knownContext/gpu';
+import {getGPUCrashContextData} from 'sentry/components/events/contexts/knownContext/gpuCrash';
 import {getMemoryInfoContext} from 'sentry/components/events/contexts/knownContext/memoryInfo';
 import {getMissingInstrumentationContextData} from 'sentry/components/events/contexts/knownContext/missingInstrumentation';
 import {getOperatingSystemContextData} from 'sentry/components/events/contexts/knownContext/os';
 import {getProfileContextData} from 'sentry/components/events/contexts/knownContext/profile';
+import {getReactNativeContextData} from 'sentry/components/events/contexts/knownContext/reactNativeContext';
 import {getReplayContextData} from 'sentry/components/events/contexts/knownContext/replay';
 import {getRuntimeContextData} from 'sentry/components/events/contexts/knownContext/runtime';
 import {getStateContextData} from 'sentry/components/events/contexts/knownContext/state';
 import {getThreadPoolInfoContext} from 'sentry/components/events/contexts/knownContext/threadPoolInfo';
 import {getTraceContextData} from 'sentry/components/events/contexts/knownContext/trace';
 import {getUserContextData} from 'sentry/components/events/contexts/knownContext/user';
+import {getWERContextData} from 'sentry/components/events/contexts/knownContext/wer';
 import {
   getPlatformContextData,
   getPlatformContextIcon,
@@ -35,14 +42,14 @@ import {
   PLATFORM_CONTEXT_KEYS,
 } from 'sentry/components/events/contexts/platformContext/utils';
 import {userContextToActor} from 'sentry/components/events/interfaces/utils';
-import StructuredEventData from 'sentry/components/structuredEventData';
+import {StructuredEventData} from 'sentry/components/structuredEventData';
+import {SvgIcon} from 'sentry/icons/svgIcon';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {KeyValueListData, KeyValueListDataItem} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
 /**
  * Generates the class name used for contexts
@@ -81,9 +88,9 @@ export function generateIconName(
   const formattedName = name
     .split(/\d/)[0]!
     .toLowerCase()
-    .replace(/[^a-z0-9\-]+/g, '-')
-    .replace(/\-+$/, '')
-    .replace(/^\-+/, '');
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+$/, '')
+    .replace(/^-+/, '');
 
   if (formattedName === 'edge' && version) {
     const majorVersion = version.split('.')[0]!;
@@ -100,7 +107,7 @@ export function generateIconName(
 }
 
 export function getRelativeTimeFromEventDateCreated(
-  eventDateCreated: string,
+  eventDateCreated: string | undefined,
   timestamp?: string,
   showTimestamp = true
 ) {
@@ -114,7 +121,14 @@ export function getRelativeTimeFromEventDateCreated(
     return timestamp;
   }
 
-  const relativeTime = `(${dateTime.from(eventDateCreated, true)} ${t(
+  // Without a valid reference date (e.g. the event isn't available) we can't
+  // compute a relative time, so just show the timestamp on its own.
+  const referenceDate = moment(eventDateCreated);
+  if (!eventDateCreated || !referenceDate.isValid()) {
+    return timestamp;
+  }
+
+  const relativeTime = `(${dateTime.from(referenceDate, true)} ${t(
     'before this event'
   )})`;
 
@@ -132,6 +146,7 @@ export function getRelativeTimeFromEventDateCreated(
 
 type KnownDataDetails = Omit<KeyValueListDataItem, 'key'> | undefined;
 
+// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
 export function getKnownData<Data, DataType>({
   data,
   knownDataTypes,
@@ -191,7 +206,7 @@ export function getKnownStructuredData(
 
 /**
  * Returns the type of a given context, after coercing from its type and alias.
- * - 'type' refers the the `type` key on it's data blob. This is usually overridden by the SDK for known types, but not always.
+ * - 'type' refers to the `type` key on it's data blob. This is usually overridden by the SDK for known types, but not always.
  * - 'alias' refers to the key on event.contexts. This can be set by the user, but we have to depend on it for some contexts.
  */
 export function getContextType({alias, type}: {alias: string; type?: string}): string {
@@ -245,6 +260,8 @@ export function getContextTitle({
   switch (contextType) {
     case 'app':
       return t('App');
+    case 'art':
+      return t('Android Runtime');
     case 'device':
       return t('Device');
     case 'browser':
@@ -255,10 +272,14 @@ export function getContextTitle({
       return t('Feedback');
     case 'os':
       return t('Operating System');
+    case 'wer':
+      return t('Windows Error Reporting');
     case 'user':
       return t('User');
     case 'gpu':
       return t('Graphics Processing Unit');
+    case 'gpu_crash':
+      return t('GPU Crash');
     case 'runtime':
       return t('Runtime');
     case 'trace':
@@ -292,22 +313,31 @@ export function getContextTitle({
       return t('OTA Updates');
     case 'react_native_context':
       return t('React Native');
+    case 'accessibility':
+      return t('Accessibility');
+    case 'flutter_context':
+      return t('Flutter');
+    case 'dart_context':
+      return t('Dart');
     default:
       return contextType;
   }
 }
 
-export function getContextMeta(event: Event, contextType: string): Record<string, any> {
-  const defaultMeta = event._meta?.contexts?.[contextType] ?? {};
+export function getContextMeta(
+  event: Event | undefined,
+  contextType: string
+): Record<string, any> {
+  const defaultMeta = event?._meta?.contexts?.[contextType] ?? {};
   switch (contextType) {
     case 'memory_info': // Current
     case 'Memory Info': // Legacy
-      return event._meta?.contexts?.['Memory Info'] ?? defaultMeta;
+      return event?._meta?.contexts?.['Memory Info'] ?? defaultMeta;
     case 'threadpool_info': // Current
     case 'ThreadPool Info': // Legacy
-      return event._meta?.contexts?.['ThreadPool Info'] ?? defaultMeta;
+      return event?._meta?.contexts?.['ThreadPool Info'] ?? defaultMeta;
     case 'user':
-      return event._meta?.user ?? defaultMeta;
+      return event?._meta?.user ?? defaultMeta;
     default:
       return defaultMeta;
   }
@@ -318,7 +348,6 @@ export function getContextIcon({
   type,
   value = {},
   contextIconProps = {},
-  theme,
 }: {
   alias: string;
   theme: Theme;
@@ -349,21 +378,21 @@ export function getContextIcon({
       break;
     case 'user': {
       const user = userContextToActor(value);
-      const iconSize = theme.iconNumberSizes[contextIconProps?.size ?? 'xl'];
-      return <UserAvatar user={user} size={iconSize} gravatar={false} />;
+      const iconSize = SvgIcon.ICON_SIZES[contextIconProps?.size ?? 'xl'];
+      return <UserAvatar user={user} size={parseInt(iconSize, 10)} />;
     }
     case 'gpu':
       iconName = generateIconName(value?.vendor_name ? value?.vendor_name : value?.name);
       break;
-    default:
-      break;
+  }
+  if (contextType === 'wer') {
+    iconName = 'windows';
   }
   if (iconName.length === 0) {
     return null;
   }
 
-  const imageName = getLogoImage(iconName);
-  if (imageName === logoUnknown) {
+  if (getLogoImage(iconName) === null) {
     return null;
   }
   return <ContextIcon name={iconName} {...contextIconProps} />;
@@ -379,9 +408,9 @@ export function getFormattedContextData({
 }: {
   contextType: string;
   contextValue: any;
-  event: Event;
   location: Location;
   organization: Organization;
+  event?: Event;
   project?: Project;
 }): KeyValueListData {
   const meta = getContextMeta(event, contextType);
@@ -393,6 +422,8 @@ export function getFormattedContextData({
   switch (contextType) {
     case 'app':
       return getAppContextData({data: contextValue, event, meta});
+    case 'art':
+      return getARTContextData({data: contextValue, meta});
     case 'device':
       return getDeviceContextData({data: contextValue, event, meta});
     case 'memory_info': // Current
@@ -404,10 +435,14 @@ export function getFormattedContextData({
       return getOperatingSystemContextData({data: contextValue, meta});
     case 'runtime':
       return getRuntimeContextData({data: contextValue, meta});
+    case 'wer':
+      return getWERContextData({data: contextValue, meta});
     case 'user':
       return getUserContextData({data: contextValue, meta});
     case 'gpu':
       return getGPUContextData({data: contextValue, meta});
+    case 'gpu_crash':
+      return getGPUCrashContextData({data: contextValue, meta});
     case 'trace':
       return getTraceContextData({
         data: contextValue,
@@ -438,6 +473,14 @@ export function getFormattedContextData({
       return getCultureContextData({data: contextValue, meta});
     case 'missing_instrumentation':
       return getMissingInstrumentationContextData({data: contextValue, meta});
+    case 'accessibility':
+      return getAccessibilityContextData({data: contextValue, meta});
+    case 'react_native_context':
+      return getReactNativeContextData({data: contextValue, meta});
+    case 'flutter_context':
+      return getFlutterContextData({data: contextValue, meta});
+    case 'dart_context':
+      return getDartContextData({data: contextValue, meta});
     default:
       return getContextKeys({data: contextValue}).map(ctxKey => ({
         key: ctxKey,
@@ -568,8 +611,6 @@ export function getContextSummary({
         subtitleType = t('Version');
       }
       break;
-    default:
-      break;
   }
   return {
     title,
@@ -579,8 +620,9 @@ export function getContextSummary({
 }
 
 const RelativeTime = styled('span')`
-  color: ${p => p.theme.subText};
-  margin-left: ${space(0.5)};
+  color: ${p => p.theme.tokens.content.secondary};
+  margin-left: ${p => p.theme.space.xs};
 `;
 
-export const CONTEXT_DOCS_LINK = `https://docs.sentry.io/platform-redirect/?next=/enriching-events/context/`;
+export const CONTEXT_DOCS_LINK =
+  'https://docs.sentry.io/platform-redirect/?next=/enriching-events/context/';

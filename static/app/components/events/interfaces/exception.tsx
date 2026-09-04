@@ -1,7 +1,6 @@
 import {Fragment} from 'react';
 
-import {CommitRow} from 'sentry/components/commitRow';
-import ErrorBoundary from 'sentry/components/errorBoundary';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import {StacktraceContext} from 'sentry/components/events/interfaces/stackTraceContext';
 import {SuspectCommits} from 'sentry/components/events/suspectCommits';
 import {TraceEventDataSection} from 'sentry/components/events/traceEventDataSection';
@@ -10,10 +9,10 @@ import type {Event, ExceptionType} from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import {SectionDivider} from 'sentry/views/issueDetails/foldSection';
 
 import {ExceptionContent} from './crashContent/exception';
-import NoStackTraceMessage from './noStackTraceMessage';
+import {NoStackTraceMessage} from './noStackTraceMessage';
 import {isStacktraceNewestFirst} from './utils';
 
 type Props = {
@@ -22,7 +21,6 @@ type Props = {
   group: Group | undefined;
   projectSlug: Project['slug'];
   groupingCurrentLevel?: Group['metadata']['current_level'];
-  hideGuide?: boolean;
 };
 
 export function Exception({
@@ -33,8 +31,6 @@ export function Exception({
   groupingCurrentLevel,
 }: Props) {
   const eventHasThreads = !!event.entries.some(entry => entry.type === EntryType.THREADS);
-  const hasStreamlinedUI = useHasStreamlinedUI();
-
   // in case there are threads in the event data, we don't render the
   // exception block.  Instead the exception is contained within the
   // thread interface.
@@ -65,6 +61,7 @@ export function Exception({
         title={t('Stack Trace')}
         type={EntryType.EXCEPTION}
         projectSlug={projectSlug}
+        event={event}
         eventId={event.id}
         platform={event.platform ?? 'other'}
         hasMinified={!!data.values?.some(value => value.rawStacktrace)}
@@ -105,18 +102,22 @@ export function Exception({
               groupingCurrentLevel={groupingCurrentLevel}
               meta={meta}
             />
-            {hasStreamlinedUI && group && (
-              <ErrorBoundary
-                mini
-                message={t('There was an error loading the suspect commits')}
-              >
-                <SuspectCommits
-                  projectSlug={projectSlug}
-                  eventId={event.id}
-                  group={group}
-                  commitRow={CommitRow}
-                />
-              </ErrorBoundary>
+            {group && (
+              <Fragment>
+                {data.values && data.values.length > 1 && (
+                  <SectionDivider orientation="horizontal" />
+                )}
+                <ErrorBoundary
+                  mini
+                  message={t('There was an error loading the suspect commits')}
+                >
+                  <SuspectCommits
+                    projectSlug={projectSlug}
+                    eventId={event.id}
+                    group={group}
+                  />
+                </ErrorBoundary>
+              </Fragment>
             )}
           </Fragment>
         )}

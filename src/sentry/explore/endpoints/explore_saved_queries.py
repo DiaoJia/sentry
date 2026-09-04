@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects, OrganizationEndpoint
 from sentry.api.paginator import GenericOffsetPaginator
 from sentry.api.serializers import serialize
@@ -27,15 +27,21 @@ from sentry.apidocs.parameters import (
     GlobalParams,
     VisibilityParams,
 )
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
 from sentry.apidocs.utils import inline_sentry_response_serializer
-from sentry.explore.endpoints.bases import ExploreSavedQueryPermission
+from sentry.explore.endpoints.bases import (
+    ExploreSavedQueryPermission,
+    filter_to_accessible_explore_queries,
+)
 from sentry.explore.endpoints.serializers import ExploreSavedQuerySerializer
 from sentry.explore.models import (
     ExploreSavedQuery,
+    ExploreSavedQueryDataset,
     ExploreSavedQueryLastVisited,
     ExploreSavedQueryStarred,
 )
 from sentry.locks import locks
+from sentry.models.organization import Organization
 from sentry.search.utils import tokenize_query
 from sentry.utils.locking import UnableToAcquireLock
 
@@ -95,6 +101,33 @@ PREBUILT_SAVED_QUERIES = [
                     },
                 ],
                 "orderby": "-timestamp",
+            }
+        ],
+    },
+    {
+        "prebuilt_id": 5,
+        "prebuilt_version": 1,
+        "name": "LLM Calls",
+        "dataset": "spans",
+        "query": [
+            {
+                "fields": [
+                    "id",
+                    "gen_ai.output.messages",
+                    "gen_ai.response.model",
+                    "gen_ai.cost.total_tokens",
+                    "timestamp",
+                ],
+                "query": "gen_ai.operation.type:ai_client has:gen_ai.output.messages",
+                "mode": "samples",
+                "visualize": [
+                    {
+                        "chartType": 0,
+                        "yAxes": ["count(span.duration)"],
+                    },
+                ],
+                "orderby": "-timestamp",
+                "groupby": ["gen_ai.response.model"],
             }
         ],
     },
@@ -203,7 +236,7 @@ def sync_prebuilt_queries(organization):
                 continue
             if prebuilt_query["prebuilt_id"] in saved_prebuilt_query_ids:
                 saved_prebuilt_query = saved_prebuilt_queries.get(
-                    prebuilt_id=prebuilt_query["prebuilt_id"]  # type: ignore[misc]
+                    prebuilt_id=prebuilt_query["prebuilt_id"]
                 )
                 if prebuilt_query["prebuilt_version"] > saved_prebuilt_query.prebuilt_version:
                     queries_to_update.append(
@@ -241,7 +274,22 @@ def sync_prebuilt_queries_starred(organization, user_id):
     This ensures that prebuilt queries are starred by default for all users.
     """
     with transaction.atomic(router.db_for_write(ExploreSavedQueryStarred)):
-        prebuilt_query_ids_without_starred_status = (
+        prebuilt_starred = list(
+            ExploreSavedQueryStarred.objects.filter(
+                organization=organization,
+                user_id=user_id,
+                starred=True,
+                explore_saved_query__prebuilt_id__isnull=False,
+            )
+            .order_by("position")
+            .select_related("explore_saved_query")
+        )
+        starred_names = [s.explore_saved_query.name for s in prebuilt_starred]
+        # If the user's prebuilt stars are still in alphabetical order, treat them
+        # as not customized and keep new prebuilts in alphabetical order too.
+        is_default_order = starred_names == sorted(starred_names)
+
+        missing_queries = (
             ExploreSavedQuery.objects.filter(
                 organization=organization,
                 prebuilt_id__isnull=False,
@@ -252,24 +300,25 @@ def sync_prebuilt_queries_starred(organization, user_id):
                     user_id=user_id,
                 ).values_list("explore_saved_query_id", flat=True)
             )
-            .order_by("prebuilt_id")  # Ensures prebuilt queries are starred in the correct order
-            .values_list("id", flat=True)
+            .order_by("name")
         )
-        for prebuilt_query_id in prebuilt_query_ids_without_starred_status:
-            # Not using bulk_create because we need to handle position with insert_starred_query
-            ExploreSavedQueryStarred.objects.insert_starred_query(
-                organization, user_id, ExploreSavedQuery.objects.get(id=prebuilt_query_id)
-            )
+        for query in missing_queries:
+            if is_default_order:
+                ExploreSavedQueryStarred.objects.insert_starred_query_alphabetically(
+                    organization, user_id, query
+                )
+            else:
+                ExploreSavedQueryStarred.objects.insert_starred_query(organization, user_id, query)
 
 
 @extend_schema(tags=["Discover"])
-@region_silo_endpoint
+@cell_silo_endpoint
 class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
     publish_status = {
-        "GET": ApiPublishStatus.PRIVATE,
-        "POST": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.EXPERIMENTAL,
+        "POST": ApiPublishStatus.EXPERIMENTAL,
     }
-    owner = ApiOwner.PERFORMANCE
+    owner = ApiOwner.EXPLORE
     permission_classes = (ExploreSavedQueryPermission,)
 
     def has_feature(self, organization, request):
@@ -297,7 +346,9 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
         },
         examples=ExploreExamples.EXPLORE_SAVED_QUERIES_QUERY_RESPONSE,
     )
-    def get(self, request: Request, organization) -> Response:
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[list[ExploreSavedQueryResponse]]:
         """
         Retrieve a list of saved queries that are associated with the given organization.
         """
@@ -332,6 +383,16 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
             .prefetch_related("projects")
             .extra(select={"lower_name": "lower(name)"})
         )
+        # Hide saved queries whose project scope the caller cannot access. The detail endpoint
+        # enforces this via `check_object_permissions`; without this filter the list endpoint
+        # would leak the body of queries belonging to projects the caller has no access to.
+        queryset = filter_to_accessible_explore_queries(request, queryset)
+
+        if not features.has(
+            "organizations:expose-migrated-discover-queries", organization, actor=request.user
+        ):
+            queryset = queryset.exclude(dataset=ExploreSavedQueryDataset.SEGMENT_SPANS)
+
         query = request.query_params.get("query")
         if query:
             tokens = tokenize_query(query)
@@ -439,6 +500,10 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
             )
             order_by = ["position", "-date_added"]
 
+        # Entries with null last visited need a deterministic tiebreaker,
+        # hence adding id to serve this purpose.
+        order_by.append("-id")
+
         queryset = queryset.order_by(*order_by)
 
         def data_fn(offset, limit):
@@ -447,7 +512,9 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
         return self.paginate(
             request=request,
             paginator=GenericOffsetPaginator(data_fn=data_fn),
-            on_results=lambda x: serialize(x, request.user),
+            on_results=lambda x: serialize(
+                x, request.user, serializer=ExploreSavedQueryModelSerializer()
+            ),
             default_per_page=25,
         )
 
@@ -463,7 +530,9 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
         },
         examples=ExploreExamples.EXPLORE_SAVED_QUERY_POST_RESPONSE,
     )
-    def post(self, request: Request, organization) -> Response:
+    def post(
+        self, request: Request, organization: Organization
+    ) -> Response[ExploreSavedQueryResponse] | Response[ValidationErrorResponse]:
         """
         Create a new trace explorersaved query for the given organization.
         """
@@ -486,7 +555,7 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
         )
 
         if not serializer.is_valid():
-            return Response(serializer.errors, status=400)
+            return Response(as_validation_errors(serializer), status=400)
 
         data = serializer.validated_data
 
@@ -508,4 +577,4 @@ class ExploreSavedQueriesEndpoint(OrganizationEndpoint):
         except Exception as err:
             sentry_sdk.capture_exception(err)
 
-        return Response(serialize(model), status=201)
+        return Response(serialize(model, serializer=ExploreSavedQueryModelSerializer()), status=201)

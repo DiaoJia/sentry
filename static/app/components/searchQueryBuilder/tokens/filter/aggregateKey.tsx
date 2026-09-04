@@ -5,8 +5,12 @@ import {mergeProps} from '@react-aria/utils';
 import type {ListState} from '@react-stately/list';
 import type {Node} from '@react-types/shared';
 
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
-import {useSearchQueryBuilder} from 'sentry/components/searchQueryBuilder/context';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+
+import {
+  useSearchQueryBuilderConfig,
+  useSearchQueryBuilderState,
+} from 'sentry/components/searchQueryBuilder/context';
 import {SearchQueryBuilderParametersCombobox} from 'sentry/components/searchQueryBuilder/tokens/filter/parametersCombobox';
 import {UnstyledButton} from 'sentry/components/searchQueryBuilder/tokens/filter/unstyledButton';
 import {useAggregateParamVisual} from 'sentry/components/searchQueryBuilder/tokens/filter/useAggregateParamVisual';
@@ -17,7 +21,6 @@ import type {
 } from 'sentry/components/searchSyntax/parser';
 import {getKeyLabel, getKeyName} from 'sentry/components/searchSyntax/utils';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 type AggregateKeyProps = {
   filterRef: React.RefObject<HTMLDivElement | null>;
@@ -49,7 +52,8 @@ export function AggregateKey({
   filterRef,
 }: AggregateKeyProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const {dispatch, focusOverride, disabled} = useSearchQueryBuilder();
+  const {dispatch, focusOverride} = useSearchQueryBuilderState();
+  const {disabled} = useSearchQueryBuilderConfig();
 
   const [isEditing, setIsEditing] = useState(false);
 
@@ -102,6 +106,13 @@ export function AggregateKey({
                 );
               }
             }}
+            onKeyDown={(e, {state: passedState}) => {
+              // we need to force this open for aggregate filters e.g. count_if()
+              if (e.key === ',') {
+                passedState.open();
+                return;
+              }
+            }}
           />
         </Parameters>
         <UnfocusedText>{')'}</UnfocusedText>
@@ -126,25 +137,25 @@ export function AggregateKey({
 }
 
 const KeyButton = styled(UnstyledButton)`
-  padding: 0 ${space(0.25)} 0 ${space(0.5)};
+  padding: 0 ${p => p.theme.space['2xs']} 0 ${p => p.theme.space.xs};
   height: 100%;
   border-left: 1px solid transparent;
   border-right: 1px solid transparent;
   border-radius: 3px 0 0 3px;
 
   :focus {
-    background-color: ${p => p.theme.translucentGray100};
-    border-right: 1px solid ${p => p.theme.innerBorder};
-    border-left: 1px solid ${p => p.theme.innerBorder};
+    background-color: ${p => p.theme.colors.gray100};
+    border-right: 1px solid ${p => p.theme.tokens.border.secondary};
+    border-left: 1px solid ${p => p.theme.tokens.border.secondary};
   }
 `;
 
 const FnName = styled('span')`
-  color: ${p => p.theme.green400};
+  color: ${p => p.theme.colors.green500};
 `;
 
 const UnfocusedText = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const Parameters = styled('span')`
@@ -152,7 +163,7 @@ const Parameters = styled('span')`
 `;
 
 const KeyEditing = styled('div')`
-  padding: 0 ${space(0.25)} 0 ${space(0.5)};
+  padding: 0 ${p => p.theme.space['2xs']} 0 ${p => p.theme.space.xs};
   max-width: 100%;
   display: flex;
   align-items: center;
@@ -162,7 +173,7 @@ const KeyEditing = styled('div')`
 
   :focus-within {
     ${Parameters} {
-      background-color: ${p => p.theme.purple100};
+      background-color: ${p => p.theme.tokens.background.transparent.accent.muted};
       height: 100%;
     }
   }

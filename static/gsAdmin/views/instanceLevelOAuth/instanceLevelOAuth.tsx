@@ -1,11 +1,12 @@
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {DateTime} from 'sentry/components/dateTime';
-import Link from 'sentry/components/links/link';
+import {Button} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
 
-import PageHeader from 'admin/components/pageHeader';
-import ResultGrid from 'admin/components/resultGrid';
-import NewInstanceLevelOAuthClient from 'admin/views/instanceLevelOAuth/components/newInstanceLevelOAuthClient';
+import {DateTime} from 'sentry/components/dateTime';
+
+import {PageHeader} from 'admin/components/pageHeader';
+import {ResultGrid} from 'admin/components/resultGrid';
+import {NewInstanceLevelOAuthClient} from 'admin/views/instanceLevelOAuth/components/newInstanceLevelOAuthClient';
 
 const getRow = (row: any) => [
   <td key="name">
@@ -21,7 +22,9 @@ const getRow = (row: any) => [
   </td>,
 ];
 
-function InstanceLevelOAuth() {
+export function InstanceLevelOAuth() {
+  const {openModal} = useModal();
+
   return (
     <div>
       <PageHeader title="Instance Level OAuth Clients">
@@ -51,5 +54,3 @@ function InstanceLevelOAuth() {
     </div>
   );
 }
-
-export default InstanceLevelOAuth;

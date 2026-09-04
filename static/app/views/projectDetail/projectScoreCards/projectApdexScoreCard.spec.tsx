@@ -2,9 +2,9 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ProjectApdexScoreCard from 'sentry/views/projectDetail/projectScoreCards/projectApdexScoreCard';
+import {ProjectApdexScoreCard} from 'sentry/views/projectDetail/projectScoreCards/projectApdexScoreCard';
 
-describe('ProjectDetail > ProjectApdex', function () {
+describe('ProjectDetail > ProjectApdex', () => {
   let currentDataEndpointMock: jest.Mock;
   let previousDataEndpointMock: jest.Mock;
   const organization = OrganizationFixture();
@@ -20,21 +20,22 @@ describe('ProjectDetail > ProjectApdex', function () {
     },
   };
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders apdex', async function () {
+  it('renders apdex', async () => {
     previousDataEndpointMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/events/`,
       body: {
         data: [
           {
-            'apdex()': 0.678,
+            'apdex(span.duration,300)': 0.678,
           },
         ],
       },
       status: 200,
+      match: [MockApiClient.matchQuery({statsPeriodStart: '28d'})],
     });
 
     currentDataEndpointMock = MockApiClient.addMockResponse({
@@ -42,7 +43,7 @@ describe('ProjectDetail > ProjectApdex', function () {
       body: {
         data: [
           {
-            'apdex()': 0.781,
+            'apdex(span.duration,300)': 0.781,
           },
         ],
       },
@@ -61,17 +62,18 @@ describe('ProjectDetail > ProjectApdex', function () {
 
     expect(await screen.findByText('Apdex')).toBeInTheDocument();
     expect(await screen.findByText('0.781')).toBeInTheDocument();
-    expect(await screen.findByText('0.102')).toBeInTheDocument();
+    expect(await screen.findByText('0.1029')).toBeInTheDocument();
 
     expect(currentDataEndpointMock).toHaveBeenNthCalledWith(
       1,
       `/organizations/${organization.slug}/events/`,
       expect.objectContaining({
         query: {
+          dataset: 'spans',
           environment: [],
-          field: ['apdex()'],
+          field: ['apdex(span.duration,300)'],
           project: ['1'],
-          query: 'event.type:transaction count():>0',
+          query: 'is_transaction:true count():>0',
           statsPeriod: '14d',
         },
       })
@@ -82,18 +84,19 @@ describe('ProjectDetail > ProjectApdex', function () {
       `/organizations/${organization.slug}/events/`,
       expect.objectContaining({
         query: {
+          dataset: 'spans',
           environment: [],
-          field: ['apdex()'],
+          field: ['apdex(span.duration,300)'],
           project: ['1'],
-          query: 'event.type:transaction count():>0',
-          start: '2017-09-19T02:41:20',
-          end: '2017-10-03T02:41:20',
+          query: 'is_transaction:true count():>0',
+          statsPeriodStart: '28d',
+          statsPeriodEnd: '14d',
         },
       })
     );
   });
 
-  it('renders without performance', async function () {
+  it('renders without performance', async () => {
     const endpointMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/events/`,
       body: {

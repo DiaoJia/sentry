@@ -1,16 +1,22 @@
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from sentry import eventstore, eventstream
+from sentry import buffer, eventstream
+from sentry.issues.models.groupderiveddata import GroupDerivedData
 from sentry.models.group import Group
 from sentry.models.groupenvironment import GroupEnvironment
 from sentry.models.groupmeta import GroupMeta
 from sentry.models.groupredirect import GroupRedirect
 from sentry.models.userreport import UserReport
+from sentry.services import eventstore
 from sentry.similarity import _make_index_backend, features
-from sentry.tasks.merge import merge_groups
+from sentry.tasks.merge import merge_groups, start_merge_groups
+from sentry.tasks.post_process import fetch_buffered_group_stats
+from sentry.taskworker.selfchain_idempotency import already_spawned, mark_spawned
 from sentry.testutils.cases import SnubaTestCase, TestCase
 from sentry.testutils.helpers.datetime import before_now
+from sentry.testutils.helpers.redis import mock_redis_buffer
 from sentry.utils import redis
 
 # Use the default redis client as a cluster client in the similarity index
@@ -20,7 +26,7 @@ index = _make_index_backend(redis.clusters.get("default").get_local_client(0))
 @patch.object(features, "index", new=index)
 class MergeGroupTest(TestCase, SnubaTestCase):
     @patch("sentry.eventstream.backend")
-    def test_merge_calls_eventstream(self, mock_eventstream):
+    def test_merge_calls_eventstream(self, mock_eventstream) -> None:
         group1 = self.create_group(self.project)
         group2 = self.create_group(self.project)
 
@@ -31,7 +37,52 @@ class MergeGroupTest(TestCase, SnubaTestCase):
 
         mock_eventstream.end_merge.assert_called_once_with(eventstream_state)
 
-    def test_merge_group_environments(self):
+    @patch("sentry.tasks.merge.current_task")
+    def test_selfchain_skips_when_already_spawned(self, mock_current_task) -> None:
+        # A prior delivery of this activation already spawned its continuation.
+        mock_current_task.return_value = SimpleNamespace(id="merge-act-skip")
+        mark_spawned("merge_groups", "merge-act-skip")
+
+        with patch.object(merge_groups, "delay") as mock_delay:
+            # Ids need not exist: the guard short-circuits before any DB access.
+            result = merge_groups([111, 222], 333, transaction_id="txn")
+
+        assert result is True
+        assert mock_delay.call_count == 0
+
+    @patch("sentry.tasks.merge.current_task")
+    def test_selfchain_marks_and_dedupes_across_deliveries(self, mock_current_task) -> None:
+        group1 = self.create_group(self.project)
+        group2 = self.create_group(self.project)
+        target = self.create_group(self.project)
+        mock_current_task.return_value = SimpleNamespace(id="merge-act-dedupe")
+
+        with patch.object(merge_groups, "delay") as mock_delay:
+            # First delivery processes group1, leaves group2 -> spawns the continuation once.
+            merge_groups([group1.id, group2.id], target.id)
+            assert mock_delay.call_count == 1
+            assert already_spawned("merge_groups", "merge-act-dedupe") is True
+
+            # Broker re-pend: same activation id, same original payload -> no-op, no new spawn.
+            merge_groups([group1.id, group2.id], target.id)
+            assert mock_delay.call_count == 1
+
+    @patch("sentry.tasks.merge.mark_spawned")
+    @patch("sentry.tasks.merge.current_task", return_value=None)
+    def test_selfchain_noop_without_activation(self, mock_current_task, mock_mark) -> None:
+        # Synchronous/eager path (e.g. the initial direct call) has no current activation, so the
+        # guard is inert and existing behavior is preserved.
+        group1 = self.create_group(self.project)
+        group2 = self.create_group(self.project)
+        target = self.create_group(self.project)
+
+        with patch.object(merge_groups, "delay") as mock_delay:
+            merge_groups([group1.id, group2.id], target.id)
+            assert mock_delay.call_count == 1
+
+        assert mock_mark.call_count == 0
+
+    def test_merge_group_environments(self) -> None:
         group1 = self.create_group(self.project)
 
         GroupEnvironment.objects.create(group_id=group1.id, environment_id=1)
@@ -51,7 +102,7 @@ class MergeGroupTest(TestCase, SnubaTestCase):
             .values_list("environment_id", flat=True)
         ) == [1, 2]
 
-    def test_merge_with_event_integrity(self):
+    def test_merge_with_event_integrity(self) -> None:
         project = self.create_project()
         event1 = self.store_event(
             data={
@@ -91,7 +142,7 @@ class MergeGroupTest(TestCase, SnubaTestCase):
         assert event2.group_id == group2.id
         assert event2.data["extra"]["foo"] == "baz"
 
-    def test_merge_creates_redirect(self):
+    def test_merge_creates_redirect(self) -> None:
         groups = [self.create_group() for _ in range(0, 3)]
 
         with self.tasks():
@@ -111,7 +162,7 @@ class MergeGroupTest(TestCase, SnubaTestCase):
         assert not Group.objects.filter(id=groups[1].id).exists()
         assert GroupRedirect.objects.filter(group_id=groups[2].id).count() == 2
 
-    def test_merge_updates_tag_values_seen(self):
+    def test_merge_updates_tag_values_seen(self) -> None:
         project = self.create_project()
         event1 = self.store_event(
             data={
@@ -141,7 +192,7 @@ class MergeGroupTest(TestCase, SnubaTestCase):
 
         assert not Group.objects.filter(id=other.id).exists()
 
-    def test_merge_with_group_meta(self):
+    def test_merge_with_group_meta(self) -> None:
         project1 = self.create_project()
         event1 = self.store_event(data={}, project_id=project1.id)
         group1 = event1.group
@@ -176,7 +227,7 @@ class MergeGroupTest(TestCase, SnubaTestCase):
         assert GroupMeta.objects.get_value(group2, "github:tid") == "134"
         assert GroupMeta.objects.get_value(group2, "other:tid") == "abc"
 
-    def test_user_report_merge(self):
+    def test_user_report_merge(self) -> None:
         project1 = self.create_project()
         event1 = self.store_event(data={}, project_id=project1.id)
         group1 = event1.group
@@ -193,3 +244,106 @@ class MergeGroupTest(TestCase, SnubaTestCase):
         assert not Group.objects.filter(id=group1.id).exists()
 
         assert UserReport.objects.get(id=ur.id).group_id == group2.id
+
+    @mock_redis_buffer()
+    def test_merge_includes_pending_buffer_increments(self) -> None:
+        project = self.create_project()
+        old_group = self.create_group(project)
+        new_group = self.create_group(project)
+
+        old_group.update(times_seen=100)
+        new_group.update(times_seen=50)
+
+        buffer.backend.incr(Group, {"times_seen": 10}, {"id": old_group.id})
+        buffer.backend.incr(Group, {"times_seen": 5}, {"id": old_group.id})
+
+        buffer.backend.incr(Group, {"times_seen": 3}, {"id": new_group.id})
+
+        with self.tasks():
+            merge_groups([old_group.id], new_group.id)
+
+        assert Group.objects.filter(id=old_group.id).exists() is False
+
+        new_group.refresh_from_db()
+        assert new_group.times_seen == 165  # 50 + 100 + 15
+        fetch_buffered_group_stats(new_group)
+        assert new_group.times_seen_pending == 3
+        assert new_group.times_seen_with_pending == 168
+
+    def test_merge_invalidates_derived_data(self) -> None:
+        project = self.create_project()
+        old_group = self.create_group(project)
+        new_group = self.create_group(project)
+
+        # new_group has a log entry that its GDD cursor already reflects.
+        new_entry = self.create_group_action_log_entry(
+            group=new_group, date_added=before_now(minutes=5)
+        )
+        derived = GroupDerivedData.objects.create(
+            group=new_group,
+            cursor_date=new_entry.date_added,
+            cursor_id=new_entry.id,
+        )
+        # old_group has a historical entry that will be reassigned to
+        # new_group by the merge — a history rewrite from new_group's view.
+        old_entry = self.create_group_action_log_entry(
+            group=old_group, date_added=before_now(minutes=10)
+        )
+
+        with self.tasks():
+            merge_groups([old_group.id], new_group.id)
+
+        assert Group.objects.filter(id=old_group.id).exists() is False
+
+        # The derived data is rebuilt to reflect both merged log entries.
+        rebuilt = GroupDerivedData.objects.get(group_id=new_group.id)
+        assert rebuilt.id == derived.id  # soft rebuild: same row, updated
+        old_entry.refresh_from_db()
+        # Latest entry (new_entry) determines the final cursor.
+        assert rebuilt.cursor_date == new_entry.date_added
+        assert rebuilt.cursor_id == new_entry.id
+
+    @mock_redis_buffer()
+    def test_merge_original_group_id(self) -> None:
+        project = self.create_project()
+        old_group = self.create_group(project)
+        new_group = self.create_group(project)
+
+        gale = self.create_group_action_log_entry(group=old_group)
+
+        with self.tasks():
+            merge_groups([old_group.id], new_group.id)
+
+        assert Group.objects.filter(id=old_group.id).exists() is False
+
+        gale.refresh_from_db()
+        assert gale.group_id == new_group.id
+        assert gale.original_group_id == old_group.id
+
+
+class StartMergeGroupsTest(TestCase):
+    def test_delegates_to_merge_groups(self) -> None:
+        group1 = self.create_group(self.project)
+        group2 = self.create_group(self.project)
+        target = self.create_group(self.project)
+
+        with patch.object(merge_groups, "delay") as mock_delay:
+            result = start_merge_groups(
+                from_object_ids=[group1.id, group2.id],
+                to_object_id=target.id,
+                transaction_id="txn-123",
+                eventstream_state={"key": "value"},
+            )
+
+        assert result is True
+        mock_delay.assert_called_once_with(
+            from_object_ids=[group1.id, group2.id],
+            to_object_id=target.id,
+            transaction_id="txn-123",
+            eventstream_state={"key": "value"},
+        )
+
+    def test_validates_missing_params(self) -> None:
+        assert start_merge_groups(from_object_ids=None, to_object_id=1) is False
+        assert start_merge_groups(from_object_ids=[], to_object_id=1) is False
+        assert start_merge_groups(from_object_ids=[1], to_object_id=None) is False

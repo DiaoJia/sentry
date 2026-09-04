@@ -18,15 +18,47 @@ import {
   TokenKind,
 } from 'sentry/components/arithmeticBuilder/token';
 import {TokenGrid} from 'sentry/components/arithmeticBuilder/token/grid';
+import {FieldKind, getFieldDefinition} from 'sentry/utils/fields';
+
+const aggregations = ['avg', 'avg_if', 'sum', 'epm', 'count', 'count_unique', 'count_if'];
+
+const functionArguments = [
+  {name: 'span.duration', kind: FieldKind.MEASUREMENT},
+  {name: 'span.self_time', kind: FieldKind.MEASUREMENT},
+  {name: 'span.op', kind: FieldKind.TAG},
+  {name: 'span.description', kind: FieldKind.TAG},
+];
+
+const getSpanFieldDefinition = (key: string) => {
+  const argument = functionArguments.find(
+    functionArgument => functionArgument.name === key
+  );
+
+  return getFieldDefinition(key, 'span', argument?.kind);
+};
+
+const getSuggestedKey = (key: string) => {
+  switch (key) {
+    case 'duration':
+    case 'self_time':
+    case 'op':
+    case 'description':
+      return `span.${key}`;
+    default:
+      return null;
+  }
+};
 
 interface TokensProp {
   expression: string;
   dispatch?: Dispatch<ArithmeticBuilderAction>;
+  references?: Set<string>;
 }
 
 function Tokens(props: TokensProp) {
   const {state, dispatch} = useArithmeticBuilderAction({
     initialExpression: props.expression,
+    references: props.references,
   });
 
   const wrappedDispatch = useCallback(
@@ -42,8 +74,11 @@ function Tokens(props: TokensProp) {
       value={{
         dispatch: wrappedDispatch,
         focusOverride: state.focusOverride,
-        aggregateFunctions: [{name: 'avg'}, {name: 'sum'}, {name: 'count'}],
-        functionArguments: [{name: 'span.duration'}, {name: 'span.self_time'}],
+        aggregations,
+        functionArguments,
+        getFieldDefinition: getSpanFieldDefinition,
+        getSuggestedKey,
+        references: props.references,
       }}
     >
       <TokenGrid tokens={state.expression.tokens} />
@@ -59,9 +94,9 @@ function getLastInput() {
   return input!;
 }
 
-describe('token', function () {
-  describe('ArithmeticTokenFreeText', function () {
-    it('renders default place holder', async function () {
+describe('token', () => {
+  describe('ArithmeticTokenFreeText', () => {
+    it('renders default place holder', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -75,7 +110,7 @@ describe('token', function () {
       expect(input).toHaveValue('');
     });
 
-    it('allow selecting function on mouse', async function () {
+    it('allow selecting function using mouse', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -86,16 +121,20 @@ describe('token', function () {
       await userEvent.click(input);
 
       // typing should reduce the options avilable in the autocomplete
-      expect(screen.getAllByRole('option')).toHaveLength(4);
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
       await userEvent.type(input, 'avg');
       expect(screen.getAllByRole('option')).toHaveLength(2);
 
       await userEvent.click(screen.getByRole('option', {name: 'avg'}));
 
       expect(await screen.findByLabelText('avg(span.duration)')).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
     });
 
-    it('allow selecting function using keyboard', async function () {
+    it('allow selecting function using keyboard', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -105,20 +144,39 @@ describe('token', function () {
 
       await userEvent.click(input);
       // typing should reduce the options avilable in the autocomplete
-      expect(screen.getAllByRole('option')).toHaveLength(4);
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
       await userEvent.type(input, 'avg');
       expect(screen.getAllByRole('option')).toHaveLength(2);
 
-      // need to go down twice because parenthesis is always on top
-      await userEvent.type(input, '{ArrowDown}{ArrowDown}{Enter}');
+      await userEvent.type(input, '{ArrowDown}{Enter}');
       expect(
         await screen.findByRole('row', {
           name: 'avg(span.duration)',
         })
       ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
     });
 
-    it('allows selection parenthesis using mouse', async function () {
+    it('fills in every argument when selecting avg_if', async () => {
+      render(<Tokens expression="" />);
+
+      const input = screen.getByRole('combobox', {name: 'Add a term'});
+
+      await userEvent.click(input);
+      await userEvent.type(input, 'avg_if');
+      await userEvent.click(screen.getByRole('option', {name: 'avg_if'}));
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'avg_if(span.duration,span.op,equals,db)',
+        })
+      ).toBeInTheDocument();
+    });
+
+    it('allows selecting function with no arguments using mouse', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -129,18 +187,60 @@ describe('token', function () {
       await userEvent.click(input);
 
       // typing should reduce the options avilable in the autocomplete
-      expect(screen.getAllByRole('option')).toHaveLength(4);
-      await userEvent.type(input, 'avg');
-      expect(screen.getAllByRole('option')).toHaveLength(2);
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
+      await userEvent.type(input, 'epm');
+      expect(screen.getAllByRole('option')).toHaveLength(1);
+
+      await userEvent.click(screen.getByRole('option', {name: 'epm'}));
+      expect(await screen.findByLabelText('epm()')).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+    });
+
+    it('allows selecting function with no arguments using keyboard', async () => {
+      render(<Tokens expression="" />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+
+      // typing should reduce the options avilable in the autocomplete
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
+      await userEvent.type(input, 'epm');
+      expect(screen.getAllByRole('option')).toHaveLength(1);
+
+      await userEvent.type(input, '{ArrowDown}{Enter}');
+      expect(await screen.findByLabelText('epm()')).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+    });
+
+    it('allows selecting parenthesis using mouse', async () => {
+      render(<Tokens expression="" />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+
+      // typing should reduce the options avilable in the autocomplete
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
 
       const options = within(screen.getByRole('listbox'));
       await userEvent.click(options.getByTestId('icon-parenthesis'));
 
       const row = await screen.findByLabelText('open_paren:0');
       expect(within(row).getByTestId('icon-parenthesis')).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('allows selection parenthesis using keyboard', async function () {
+    it('allows selecting parenthesis using keyboard', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -151,17 +251,17 @@ describe('token', function () {
       await userEvent.click(input);
 
       // typing should reduce the options avilable in the autocomplete
-      expect(screen.getAllByRole('option')).toHaveLength(4);
-      await userEvent.type(input, 'avg');
-      expect(screen.getAllByRole('option')).toHaveLength(2);
+      expect(screen.getAllByRole('option')).toHaveLength(aggregations.length + 1);
 
       await userEvent.type(input, '{ArrowDown}{Enter}');
 
       const row = await screen.findByRole('row');
       expect(within(row).getByTestId('icon-parenthesis')).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes function token when they reach the open parenthesis', async function () {
+    it('autocompletes function token when they reach the open parenthesis', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -177,9 +277,13 @@ describe('token', function () {
           name: 'avg(span.duration)',
         })
       ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
     });
 
-    it('autocompletes function token when they reach the open parenthesis even if there is more text', async function () {
+    it('autocompletes function token when they reach the open parenthesis even if there is more text', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -197,9 +301,34 @@ describe('token', function () {
       ).toBeInTheDocument();
 
       expect(input).toHaveValue('foo bar');
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
     });
 
-    it('autocompletes addition', async function () {
+    it('autocompletes function token with no arguments when they reach the open parenthesis', async () => {
+      render(<Tokens expression="" />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      await userEvent.type(input, 'epm(');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.keyboard('{Escape}');
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'epm()',
+        })
+      ).toBeInTheDocument();
+    });
+
+    it('autocompletes addition', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -213,9 +342,11 @@ describe('token', function () {
 
       const operator = screen.getByTestId('icon-add');
       expect(operator).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes subtract', async function () {
+    it('autocompletes subtract', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -229,9 +360,11 @@ describe('token', function () {
 
       const operator = screen.getByTestId('icon-subtract');
       expect(operator).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes multiply', async function () {
+    it('autocompletes multiply', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -245,9 +378,11 @@ describe('token', function () {
 
       const operator = screen.getByTestId('icon-multiply');
       expect(operator).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes divide', async function () {
+    it('autocompletes divide', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -261,9 +396,11 @@ describe('token', function () {
 
       const operator = screen.getByTestId('icon-divide');
       expect(operator).toBeInTheDocument();
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes open parenthesis', async function () {
+    it('autocompletes open parenthesis', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -278,9 +415,11 @@ describe('token', function () {
       const parenthesis = screen.getByTestId('icon-parenthesis');
       expect(parenthesis).toBeInTheDocument();
       expect(parenthesis).toHaveAttribute('data-paren-side', 'left');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
     });
 
-    it('autocompletes close parenthesis', async function () {
+    it('autocompletes close parenthesis', async () => {
       render(<Tokens expression="" />);
 
       const input = screen.getByRole('combobox', {
@@ -295,11 +434,53 @@ describe('token', function () {
       const parenthesis = screen.getByTestId('icon-parenthesis');
       expect(parenthesis).toBeInTheDocument();
       expect(parenthesis).toHaveAttribute('data-paren-side', 'right');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+    });
+
+    it('allows selecting reference using mouse', async () => {
+      render(<Tokens expression="" references={new Set(['A', 'B'])} />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+
+      // 3 originally because of the parens
+      expect(screen.getAllByRole('option')).toHaveLength(3);
+
+      await userEvent.click(screen.getByRole('option', {name: 'A'}));
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.type(getLastInput(), '{Escape}');
+
+      expect(await screen.findByRole('row', {name: 'A'})).toBeInTheDocument();
+    });
+
+    it('automatically replaces freetext token with reference when typing a match', async () => {
+      render(<Tokens expression="" references={new Set(['A', 'B'])} />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(screen.getAllByRole('option')).toHaveLength(3);
+      expect(screen.getByRole('option', {name: 'A'})).toBeInTheDocument();
+      await userEvent.type(input, 'A');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.type(getLastInput(), '{Escape}');
+
+      expect(await screen.findByRole('row', {name: 'A'})).toBeInTheDocument();
     });
   });
 
-  describe('ArithmeticTokenFunction', function () {
-    it('allow changing attribute on click', async function () {
+  describe('ArithmeticTokenFunction', () => {
+    it('allow changing attribute on click', async () => {
       render(<Tokens expression="avg(span.duration)" />);
 
       expect(
@@ -325,6 +506,9 @@ describe('token', function () {
 
       await userEvent.click(screen.getByRole('option', {name: 'span.self_time'}));
 
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.type(getLastInput(), '{Escape}');
+
       await waitFor(() => {
         expect(
           screen.getByRole('row', {
@@ -334,7 +518,7 @@ describe('token', function () {
       });
     });
 
-    it('allows changing attribute using combo box', async function () {
+    it('allows changing attribute using combo box', async () => {
       render(<Tokens expression="avg(span.duration)" />);
 
       expect(
@@ -360,6 +544,9 @@ describe('token', function () {
 
       await userEvent.type(input, '{ArrowDown}{Enter}');
 
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.type(getLastInput(), '{Escape}');
+
       expect(
         await screen.findByRole('row', {
           name: 'avg(span.self_time)',
@@ -367,7 +554,7 @@ describe('token', function () {
       ).toBeInTheDocument();
     });
 
-    it('allows changing attribute using enter key', async function () {
+    it('allows changing attribute using enter key', async () => {
       render(<Tokens expression="avg(span.duration)" />);
 
       expect(
@@ -404,7 +591,39 @@ describe('token', function () {
       ).toBeInTheDocument();
     });
 
-    it('doesnt change argument on enter if input is empty', async function () {
+    it('maps key to suggested key on enter', async () => {
+      render(<Tokens expression="avg(span.duration)" />);
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'avg(span.duration)',
+        })
+      ).toBeInTheDocument();
+
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveAttribute('placeholder', 'span.duration');
+      expect(input).toHaveValue('');
+
+      await userEvent.type(input, 'self_time{Enter}');
+
+      const lastInput = getLastInput();
+      await waitFor(() => expect(lastInput).toHaveFocus());
+      await userEvent.type(lastInput, '{Escape}');
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'avg(span.self_time)',
+        })
+      ).toBeInTheDocument();
+    });
+
+    it('doesnt change argument on enter if input is empty', async () => {
       render(<Tokens expression="avg(span.duration)" />);
 
       expect(
@@ -437,7 +656,7 @@ describe('token', function () {
       ).toBeInTheDocument();
     });
 
-    it('can delete function tokens with the delete button', async function () {
+    it('can delete function tokens with the delete button', async () => {
       render(<Tokens expression="avg(span.duration)" />);
 
       expect(
@@ -458,10 +677,415 @@ describe('token', function () {
         })
       ).not.toBeInTheDocument();
     });
+
+    it('filters only compatible number attributes for some functions', async () => {
+      render(<Tokens expression="avg(span.duration)" />);
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      await userEvent.click(input);
+      const options = screen.getAllByRole('option');
+      expect(options).toHaveLength(2);
+      expect(options[0]).toHaveTextContent('span.duration');
+      expect(options[1]).toHaveTextContent('span.self_time');
+      await userEvent.type(input, 'time');
+      expect(screen.getByRole('option')).toHaveTextContent('span.self_time');
+    });
+
+    it('filters only compatible string attributes for some functions', async () => {
+      render(<Tokens expression="count_unique(span.op)" />);
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      await userEvent.click(input);
+      const options = screen.getAllByRole('option');
+      expect(options).toHaveLength(2);
+      expect(options[0]).toHaveTextContent('span.op');
+      expect(options[1]).toHaveTextContent('span.description');
+      await userEvent.type(input, 'desc');
+      expect(screen.getByRole('option')).toHaveTextContent('span.description');
+    });
+
+    it('shows "spans" placeholder for count argument input', async () => {
+      render(<Tokens expression="count(span.duration)" />);
+
+      const input = await screen.findByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      expect(input).toHaveAttribute('placeholder', 'spans');
+    });
+
+    it('shows "span.duration" placeholder for avg argument input', async () => {
+      render(<Tokens expression="avg(span.duration)" />);
+
+      const input = await screen.findByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      expect(input).toHaveAttribute('placeholder', 'span.duration');
+    });
+
+    it('shows "spans" as the dropdown label for count argument', async () => {
+      render(<Tokens expression="count(span.duration)" />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      await userEvent.click(input);
+
+      const options = screen.getAllByRole('option');
+      expect(options).toHaveLength(1);
+      expect(options[0]).toHaveTextContent('spans');
+    });
+
+    it('resolves typed "spans" to "span.duration" for count', async () => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="count(span.duration)" dispatch={dispatch} />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+
+      await userEvent.click(input);
+      await userEvent.clear(input);
+      await userEvent.type(input, 'spans{Enter}');
+
+      await waitFor(() => {
+        expect(dispatch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'REPLACE_TOKEN',
+            text: 'count(span.duration)',
+          })
+        );
+      });
+    });
+
+    it('dispatches span.duration when selecting dropdown option for count', async () => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="count(span.duration)" dispatch={dispatch} />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      await userEvent.click(input);
+      await userEvent.click(screen.getByRole('option', {name: 'spans'}));
+
+      await waitFor(() => {
+        expect(dispatch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'REPLACE_TOKEN',
+            text: 'count(span.duration)',
+          })
+        );
+      });
+    });
+
+    it('shows "span.duration" as the dropdown label for avg argument', async () => {
+      render(<Tokens expression="avg(span.duration)" />);
+
+      const input = screen.getByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      await userEvent.click(input);
+
+      const options = screen.getAllByRole('option');
+      expect(options).toHaveLength(2);
+      expect(options[0]).toHaveTextContent('span.duration');
+      expect(options[1]).toHaveTextContent('span.self_time');
+    });
+
+    it('skips input when function has no arguments', async () => {
+      render(<Tokens expression="epm()" />);
+      await waitFor(() => {
+        expect(
+          screen.queryByRole('combobox', {
+            name: 'Select an attribute',
+          })
+        ).not.toBeInTheDocument();
+      });
+    });
+
+    it('renders multi-argument function and allows navigating between arguments', async () => {
+      render(<Tokens expression="count_if(span.op,equals,browser)" />);
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'count_if(span.op,equals,browser)',
+        })
+      ).toBeInTheDocument();
+
+      const args = within(
+        screen.getByRole('grid', {name: 'Enter arguments'})
+      ).queryAllByRole('gridcell');
+
+      expect(args).toHaveLength(3);
+
+      const firstArg = within(
+        screen.getByRole('grid', {name: 'Enter arguments'})
+      ).getByRole('combobox', {name: 'Select an attribute'});
+
+      expect(firstArg).toHaveAttribute('placeholder', 'span.op');
+
+      const secondArg = within(
+        screen.getByRole('grid', {name: 'Enter arguments'})
+      ).getByRole('combobox', {name: 'Select an option'});
+      expect(secondArg).toHaveAttribute('placeholder', 'equals');
+
+      const thirdArg = within(
+        screen.getByRole('grid', {name: 'Enter arguments'})
+      ).getByRole('textbox', {name: 'Add a value'});
+      expect(thirdArg).toHaveValue('browser');
+
+      await userEvent.click(firstArg);
+      await userEvent.type(firstArg, 'span.description');
+      expect(screen.getByRole('option', {name: 'span.description'})).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('option', {name: 'span.description'}));
+
+      await waitFor(() => {
+        expect(secondArg).toHaveFocus();
+      });
+
+      expect(
+        screen.queryByRole('option', {name: 'span.description'})
+      ).not.toBeInTheDocument();
+
+      await userEvent.keyboard('not');
+      await userEvent.click(screen.getByRole('option', {name: 'is not equal to'}));
+
+      await waitFor(() => {
+        expect(thirdArg).toHaveFocus();
+      });
+      await userEvent.keyboard('db');
+      expect(thirdArg).toHaveValue('db');
+    });
+
+    it('suggests attributes for each argument of avg_if', async () => {
+      render(<Tokens expression="avg_if(span.duration,span.op,equals,queue.process)" />);
+
+      const argumentsGrid = await screen.findByRole('grid', {name: 'Enter arguments'});
+
+      const [numberArg, stringArg] = within(argumentsGrid).getAllByRole('combobox', {
+        name: 'Select an attribute',
+      });
+      const conditionArg = within(argumentsGrid).getByRole('combobox', {
+        name: 'Select an option',
+      });
+      const valueArg = within(argumentsGrid).getByRole('textbox', {
+        name: 'Add a value',
+      });
+
+      await userEvent.click(numberArg!);
+      expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual([
+        'span.duration',
+        'span.self_time',
+      ]);
+
+      await userEvent.click(stringArg!);
+      expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual([
+        'span.op',
+        'span.description',
+      ]);
+
+      await userEvent.click(conditionArg);
+      expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual([
+        'is equal to',
+        'is not equal to',
+      ]);
+
+      expect(valueArg).toHaveValue('queue.process');
+    });
   });
 
-  describe('ArithmeticTokenOperator', function () {
-    it('renders addition operator', async function () {
+  it('shifts focus between args correctly', async () => {
+    render(<Tokens expression="count_if(span.op,equals,browser)" />);
+
+    expect(
+      await screen.findByRole('row', {
+        name: 'count_if(span.op,equals,browser)',
+      })
+    ).toBeInTheDocument();
+
+    const args = within(
+      screen.getByRole('grid', {name: 'Enter arguments'})
+    ).queryAllByRole('gridcell');
+
+    expect(args).toHaveLength(3);
+
+    const firstArg = within(
+      screen.getByRole('grid', {name: 'Enter arguments'})
+    ).getByRole('combobox', {name: 'Select an attribute'});
+
+    const secondArg = within(
+      screen.getByRole('grid', {name: 'Enter arguments'})
+    ).getByRole('combobox', {name: 'Select an option'});
+
+    await userEvent.click(firstArg);
+    await userEvent.type(firstArg, 'span.description');
+    expect(screen.getByRole('option', {name: 'span.description'})).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('option', {name: 'span.description'}));
+
+    await waitFor(() => {
+      expect(secondArg).toHaveFocus();
+    });
+
+    expect(
+      screen.queryByRole('option', {name: 'span.description'})
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(firstArg);
+
+    await waitFor(() => {
+      expect(firstArg).toHaveFocus();
+    });
+    await userEvent.type(firstArg, 'span.op');
+    expect(screen.getByRole('option', {name: 'span.op'})).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('option', {name: 'span.op'}));
+
+    await waitFor(() => {
+      expect(secondArg).toHaveFocus();
+    });
+
+    expect(screen.queryByRole('option', {name: 'span.op'})).not.toBeInTheDocument();
+  });
+
+  describe('ArithmeticTokenLiteral', () => {
+    it.each(['1', '1.', '1.0', '+1', '+1.', '+1.0', '-1', '-1.', '-1.0'])(
+      'renders literal %s',
+      async expression => {
+        const dispatch = jest.fn();
+        render(<Tokens expression={expression} dispatch={dispatch} />);
+
+        expect(await screen.findByRole('row', {name: expression})).toBeInTheDocument();
+
+        const input = screen.getByRole('textbox', {
+          name: 'Add a literal',
+        });
+        expect(input).toBeInTheDocument();
+      }
+    );
+
+    it('completes literal with space', async () => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="1" dispatch={dispatch} />);
+
+      expect(await screen.findByRole('row', {name: '1'})).toBeInTheDocument();
+
+      const input = screen.getByRole('textbox', {
+        name: 'Add a literal',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue('1');
+      await userEvent.type(input, '0 ');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+
+      await userEvent.type(getLastInput(), '{Escape}');
+      expect(await screen.findByRole('row', {name: '10'})).toBeInTheDocument();
+    });
+
+    it('completes literal with enter', async () => {
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const dispatch = jest.fn();
+      render(<Tokens expression="1" dispatch={dispatch} />);
+
+      expect(await screen.findByRole('row', {name: '1'})).toBeInTheDocument();
+
+      const input = screen.getByRole('textbox', {
+        name: 'Add a literal',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue('1');
+
+      await userEvent.type(input, '0');
+      await userEvent.type(input, '{Enter}');
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+
+      await userEvent.type(getLastInput(), '{Escape}');
+      expect(await screen.findByRole('row', {name: '10'})).toBeInTheDocument();
+      errorSpy.mockRestore();
+    });
+
+    it('completes literal with escape', async () => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="1" dispatch={dispatch} />);
+
+      expect(await screen.findByRole('row', {name: '1'})).toBeInTheDocument();
+
+      const input = screen.getByRole('textbox', {
+        name: 'Add a literal',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue('1');
+      await userEvent.type(input, '0{escape}');
+
+      expect(await screen.findByRole('row', {name: '10'})).toBeInTheDocument();
+    });
+
+    it.each([
+      ['+', 'icon-add'],
+      ['-', 'icon-subtract'],
+      ['*', 'icon-multiply'],
+      ['/', 'icon-divide'],
+      ['(', 'icon-parenthesis'],
+      [')', 'icon-parenthesis'],
+    ])('completes literal with token %s', async (token, dataTestId) => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="1" dispatch={dispatch} />);
+
+      expect(await screen.findByRole('row', {name: '1'})).toBeInTheDocument();
+
+      const input = screen.getByRole('textbox', {
+        name: 'Add a literal',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue('1');
+      await userEvent.type(input, '0');
+      await userEvent.type(input, token);
+
+      await waitFor(() => expect(getLastInput()).toHaveFocus());
+      await userEvent.type(getLastInput(), '{Escape}');
+
+      expect(await screen.findByRole('row', {name: '10'})).toBeInTheDocument();
+      expect(screen.getByTestId(dataTestId)).toBeInTheDocument();
+    });
+
+    it('completes literal on blur', async () => {
+      const dispatch = jest.fn();
+      render(<Tokens expression="1" dispatch={dispatch} />);
+
+      expect(await screen.findByRole('row', {name: '1'})).toBeInTheDocument();
+
+      const input = screen.getByRole('textbox', {
+        name: 'Add a literal',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue('1');
+      await userEvent.type(input, '00');
+
+      // Tab away to trigger blur without pressing Enter
+      await userEvent.tab();
+
+      expect(await screen.findByRole('row', {name: '100'})).toBeInTheDocument();
+    });
+  });
+
+  describe('ArithmeticTokenOperator', () => {
+    it('renders addition operator', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression="+" dispatch={dispatch} />);
 
@@ -485,7 +1109,7 @@ describe('token', function () {
       });
     });
 
-    it('renders subtract operator', async function () {
+    it('renders subtract operator', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression="-" dispatch={dispatch} />);
 
@@ -509,7 +1133,7 @@ describe('token', function () {
       });
     });
 
-    it('renders multiply operator', async function () {
+    it('renders multiply operator', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression="*" dispatch={dispatch} />);
 
@@ -533,7 +1157,7 @@ describe('token', function () {
       });
     });
 
-    it('renders divide operator', async function () {
+    it('renders divide operator', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression="/" dispatch={dispatch} />);
 
@@ -558,8 +1182,8 @@ describe('token', function () {
     });
   });
 
-  describe('ArithmeticTokenParenthesis', function () {
-    it('renders left parenthesis', async function () {
+  describe('ArithmeticTokenParenthesis', () => {
+    it('renders left parenthesis', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression="(" dispatch={dispatch} />);
 
@@ -584,7 +1208,7 @@ describe('token', function () {
       });
     });
 
-    it('renders right parenthesis', async function () {
+    it('renders right parenthesis', async () => {
       const dispatch = jest.fn();
       render(<Tokens expression=")" dispatch={dispatch} />);
 

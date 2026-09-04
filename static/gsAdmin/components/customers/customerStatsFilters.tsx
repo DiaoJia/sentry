@@ -2,26 +2,29 @@ import {Fragment, useCallback, useMemo} from 'react';
 import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Flex} from '@sentry/scraps/layout';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+
 import type {DateTimeObject} from 'sentry/components/charts/utils';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
 import {DateTime} from 'sentry/components/dateTime';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
-import type {ChangeData} from 'sentry/components/timeRangeSelector';
-import {TimeRangeSelector} from 'sentry/components/timeRangeSelector';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {
+  TimeRangeSelector,
+  TimeRangeSelectTrigger,
+  type ChangeData,
+} from 'sentry/components/timeRangeSelector';
 import {DATA_CATEGORY_INFO, DEFAULT_RELATIVE_PERIODS} from 'sentry/constants';
-import {space} from 'sentry/styles/space';
 import {DataCategoryExact} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import useRouter from 'sentry/utils/useRouter';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 const ON_DEMAND_PERIOD_KEY = 'onDemand';
 
-export type DataType =
-  (typeof DATA_CATEGORY_INFO)[keyof typeof DATA_CATEGORY_INFO]['apiName'];
-
 type Props = {
-  dataType: DataType;
-  onChange: (dataType: DataType) => void;
+  dataType: DataCategoryExact;
+  onChange: (dataType: DataCategoryExact) => void;
   organization: Organization;
   onDemandPeriodEnd?: string;
   onDemandPeriodStart?: string;
@@ -33,13 +36,12 @@ export function CustomerStatsFilters({
   onDemandPeriodStart,
   onDemandPeriodEnd,
 }: Props) {
-  const router = useRouter();
+  const location = useLocation();
+  const navigate = useNavigate();
   const onDemand = !!onDemandPeriodStart && !!onDemandPeriodEnd;
 
   const pageDateTime = useMemo((): DateTimeObject => {
-    const query = router.location.query;
-
-    const {start, end, statsPeriod} = normalizeDateTimeParams(query, {
+    const {start, end, statsPeriod} = normalizeDateTimeParams(location.query, {
       allowEmptyPeriod: true,
       allowAbsoluteDatetime: true,
       allowAbsolutePageDatetime: true,
@@ -57,7 +59,7 @@ export function CustomerStatsFilters({
     }
 
     return {};
-  }, [router.location.query]);
+  }, [location.query]);
 
   const handleDateChange = useCallback(
     (datetime: ChangeData) => {
@@ -66,10 +68,10 @@ export function CustomerStatsFilters({
       if (start && end) {
         const parser = utc ? moment.utc : moment;
 
-        router.push({
+        navigate({
           ...location,
           query: {
-            ...router.location.query,
+            ...location.query,
             statsPeriod: undefined,
             start: parser(start).format(),
             end: parser(end).format(),
@@ -79,10 +81,10 @@ export function CustomerStatsFilters({
         return;
       }
 
-      router.push({
+      navigate({
         ...location,
         query: {
-          ...router.location.query,
+          ...location.query,
           statsPeriod: relative === ON_DEMAND_PERIOD_KEY ? undefined : relative,
           start: undefined,
           end: undefined,
@@ -90,11 +92,12 @@ export function CustomerStatsFilters({
         },
       });
     },
-    [router]
+    [location, navigate]
   );
 
   const {start, end, period, utc} = pageDateTime;
 
+  // TODO(billing): Should we start calling On-Demand periods "Pay-as-you-go" periods?
   const onDemandLabel = (
     <Fragment>
       On-Demand (
@@ -103,14 +106,16 @@ export function CustomerStatsFilters({
   );
 
   return (
-    <Filters>
+    <Flex wrap="wrap" marginBottom="2xl" gap="xl" width="100%">
       <CompactSelect
-        triggerProps={{prefix: 'Data Type'}}
+        trigger={triggerProps => (
+          <OverlayTrigger.Button {...triggerProps} prefix="Data Type" />
+        )}
         value={dataType}
         options={Object.entries(DATA_CATEGORY_INFO)
           .filter(([_, categoryInfo]) => categoryInfo.statsInfo.showInternalStats)
           .map(([category, categoryInfo]) => ({
-            value: categoryInfo.apiName,
+            value: categoryInfo.name,
             label:
               category === DataCategoryExact.SPAN
                 ? 'Accepted Spans'
@@ -119,14 +124,15 @@ export function CustomerStatsFilters({
         onChange={opt => onChange(opt.value)}
       />
       <DateTimeRange
-        triggerProps={{prefix: 'Date Range'}}
-        triggerLabel={
-          !period && !start && !end
-            ? onDemand
-              ? onDemandLabel
-              : DEFAULT_RELATIVE_PERIODS['90d']
-            : undefined
-        }
+        trigger={triggerProps => (
+          <TimeRangeSelectTrigger {...triggerProps} prefix="Date Range">
+            {!period && !start && !end
+              ? onDemand
+                ? onDemandLabel
+                : DEFAULT_RELATIVE_PERIODS['90d']
+              : triggerProps.children}
+          </TimeRangeSelectTrigger>
+        )}
         relative={period ?? ''}
         start={start ?? null}
         end={end ?? null}
@@ -151,17 +157,9 @@ export function CustomerStatsFilters({
             : undefined
         }
       />
-    </Filters>
+    </Flex>
   );
 }
-
-const Filters = styled('div')`
-  display: flex;
-  width: 100%;
-  margin-bottom: ${space(3)};
-  gap: ${space(2)};
-  flex-wrap: wrap;
-`;
 
 const DateTimeRange = styled(TimeRangeSelector)`
   flex: 1;

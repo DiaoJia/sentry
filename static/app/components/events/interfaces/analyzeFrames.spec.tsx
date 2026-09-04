@@ -116,8 +116,8 @@ const makeEventWithFrames = (frames: Frame[]): Event => {
   return event;
 };
 
-describe('analyzeAnrFrames', function () {
-  it('detects anr root cause', function () {
+describe('analyzeAnrFrames', () => {
+  it('detects anr root cause', () => {
     const event = makeEventWithFrames([
       {
         filename: 'SharedPreferencesImpl.java',
@@ -143,11 +143,11 @@ describe('analyzeAnrFrames', function () {
       'SharedPreferences.apply will save data on background thread only if it happens before the activity/service finishes. Switch to SharedPreferences.commit and move commit to a background thread.'
     );
     expect(rootCause?.culprit).toBe(
-      '/^android\\.app\\.SharedPreferencesImpl\\$EditorImpl\\$[0-9]/'
+      '/^android\\.app\\.SharedPreferencesImpl\\$EditorImpl\\$\\d/'
     );
   });
 
-  it('regex matches function names', function () {
+  it('regex matches function names', () => {
     const event = makeEventWithFrames([
       {
         filename: 'sqlite.SQLiteConnection',
@@ -175,7 +175,7 @@ describe('analyzeAnrFrames', function () {
     expect(rootCause?.culprit).toBe('android.database.sqlite.SQLiteConnection');
   });
 
-  it('picks anr root cause of the topmost frame', function () {
+  it('picks anr root cause of the topmost frame', () => {
     const event = makeEventWithFrames([
       {
         filename: 'Instrumentation.java',
@@ -219,11 +219,11 @@ describe('analyzeAnrFrames', function () {
       'SharedPreferences.apply will save data on background thread only if it happens before the activity/service finishes. Switch to SharedPreferences.commit and move commit to a background thread.'
     );
     expect(rootCause?.culprit).toBe(
-      '/^android\\.app\\.SharedPreferencesImpl\\$EditorImpl\\$[0-9]/'
+      '/^android\\.app\\.SharedPreferencesImpl\\$EditorImpl\\$\\d/'
     );
   });
 
-  it('given lock address returns frame with matching lock address', function () {
+  it('given lock address returns frame with matching lock address', () => {
     const frame1 = {
       filename: 'Instrumentation.java',
       absPath: 'Instrumentation.java',
@@ -288,7 +288,7 @@ describe('analyzeAnrFrames', function () {
     ).toBeInTheDocument();
   });
 
-  it('when thread id is not provided, does not append "held by"', function () {
+  it('when thread id is not provided, does not append "held by"', () => {
     const frame = {
       filename: 'MainActivity.java',
       absPath: 'MainActivity.java',
@@ -324,7 +324,7 @@ describe('analyzeAnrFrames', function () {
     ).toBeInTheDocument();
   });
 
-  it('given main thread is locked returns it as root cause', function () {
+  it('given main thread is locked returns it as root cause', () => {
     const frame = {
       filename: 'MainActivity.java',
       absPath: 'MainActivity.java',

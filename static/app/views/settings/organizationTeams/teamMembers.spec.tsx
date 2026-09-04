@@ -17,7 +17,7 @@ jest.mock('sentry/actionCreators/modal', () => ({
   openTeamAccessRequestModal: jest.fn(),
 }));
 
-describe('TeamMembers', function () {
+describe('TeamMembers', () => {
   let createMock: jest.Mock;
 
   const organization = OrganizationFixture();
@@ -37,7 +37,7 @@ describe('TeamMembers', function () {
     route: '/settings/:orgId/teams/:teamId/members/',
   };
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/members/`,
@@ -66,9 +66,10 @@ describe('TeamMembers', function () {
     });
   });
 
-  it('can add member to team with open membership', async function () {
+  it('can add member to team with open membership', async () => {
     const org = OrganizationFixture({access: [], openMembership: true});
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -81,9 +82,10 @@ describe('TeamMembers', function () {
     expect(createMock).toHaveBeenCalled();
   });
 
-  it('can add multiple members with one click on dropdown', async function () {
+  it('can add multiple members with one click on dropdown', async () => {
     const org = OrganizationFixture({access: [], openMembership: true});
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -97,9 +99,10 @@ describe('TeamMembers', function () {
     expect(screen.getAllByTestId('add-member-menu')[0]).toBeVisible();
   });
 
-  it('can add member to team with team:admin permission', async function () {
+  it('can add member to team with team:admin permission', async () => {
     const org = OrganizationFixture({access: ['team:admin'], openMembership: false});
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -112,9 +115,10 @@ describe('TeamMembers', function () {
     expect(createMock).toHaveBeenCalled();
   });
 
-  it('can add member to team with org:write permission', async function () {
+  it('can add member to team with org:write permission', async () => {
     const org = OrganizationFixture({access: ['org:write'], openMembership: false});
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -127,9 +131,10 @@ describe('TeamMembers', function () {
     expect(createMock).toHaveBeenCalled();
   });
 
-  it('can request access to add member to team without permission', async function () {
+  it('can request access to add member to team without permission', async () => {
     const org = OrganizationFixture({access: [], openMembership: false});
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -142,14 +147,15 @@ describe('TeamMembers', function () {
     expect(openTeamAccessRequestModal).toHaveBeenCalled();
   });
 
-  it('can invite member from team dropdown with access', async function () {
+  it('can invite member from team dropdown with access', async () => {
     const {organization: org} = initializeOrg({
       organization: OrganizationFixture({
         access: ['team:admin'],
         openMembership: false,
       }),
     });
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -160,16 +166,18 @@ describe('TeamMembers', function () {
     await userEvent.click(screen.getByTestId('invite-member'));
 
     expect(openInviteMembersModal).toHaveBeenCalled();
+    expect(screen.queryByTestId('invite-member')).not.toBeInTheDocument();
   });
 
-  it('can invite member from team dropdown with access and `Open Membership` enabled', async function () {
+  it('can invite member from team dropdown with access and `Open Membership` enabled', async () => {
     const {organization: org} = initializeOrg({
       organization: OrganizationFixture({
         access: ['team:admin'],
         openMembership: true,
       }),
     });
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -182,11 +190,12 @@ describe('TeamMembers', function () {
     expect(openInviteMembersModal).toHaveBeenCalled();
   });
 
-  it('can invite member from team dropdown without access and `Open Membership` enabled', async function () {
+  it('can invite member from team dropdown without access and `Open Membership` enabled', async () => {
     const {organization: org} = initializeOrg({
       organization: OrganizationFixture({access: [], openMembership: true}),
     });
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -199,11 +208,12 @@ describe('TeamMembers', function () {
     expect(openInviteMembersModal).toHaveBeenCalled();
   });
 
-  it('can invite member from team dropdown without access and `Open Membership` disabled', async function () {
+  it('can invite member from team dropdown without access and `Open Membership` disabled', async () => {
     const {organization: org} = initializeOrg({
       organization: OrganizationFixture({access: [], openMembership: false}),
     });
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: org,
     });
@@ -216,17 +226,18 @@ describe('TeamMembers', function () {
     expect(openInviteMembersModal).toHaveBeenCalled();
   });
 
-  it('can remove member from team', async function () {
+  it('can remove member from team', async () => {
     const deleteMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/members/${members[0]!.id}/teams/${team.slug}/`,
       method: 'DELETE',
     });
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization,
     });
 
-    await screen.findAllByRole('button', {name: 'Add Member'});
+    await screen.findAllByRole('button', {name: 'Remove'});
 
     expect(deleteMock).not.toHaveBeenCalled();
     await userEvent.click(screen.getAllByRole('button', {name: 'Remove'})[0]!);
@@ -234,7 +245,7 @@ describe('TeamMembers', function () {
     expect(deleteMock).toHaveBeenCalled();
   });
 
-  it('can only remove self from team', async function () {
+  it('can only remove self from team', async () => {
     const me = MemberFixture({
       id: '123',
       email: 'foo@example.com',
@@ -251,12 +262,13 @@ describe('TeamMembers', function () {
     });
     const organizationMember = OrganizationFixture({access: []});
 
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: organizationMember,
     });
 
-    await screen.findAllByRole('button', {name: 'Add Member'});
+    await screen.findAllByTestId('letter_avatar-avatar');
 
     expect(deleteMock).not.toHaveBeenCalled();
 
@@ -270,7 +282,7 @@ describe('TeamMembers', function () {
     expect(deleteMock).toHaveBeenCalled();
   });
 
-  it('renders team-level roles without flag', async function () {
+  it('renders team-level roles without flag', async () => {
     const owner = MemberFixture({
       id: '123',
       email: 'foo@example.com',
@@ -283,7 +295,8 @@ describe('TeamMembers', function () {
       body: [...members, owner],
     });
 
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization,
     });
@@ -294,7 +307,7 @@ describe('TeamMembers', function () {
     expect(contributors).toHaveLength(2);
   });
 
-  it('renders team-level roles with flag', async function () {
+  it('renders team-level roles with flag', async () => {
     const manager = MemberFixture({
       id: '123',
       email: 'foo@example.com',
@@ -309,7 +322,8 @@ describe('TeamMembers', function () {
 
     const orgWithTeamRoles = OrganizationFixture({features: ['team-roles']});
 
-    render(<TeamMembers team={team} />, {
+    render(<TeamMembers />, {
+      outletContext: {team},
       initialRouterConfig,
       organization: orgWithTeamRoles,
     });
@@ -320,7 +334,7 @@ describe('TeamMembers', function () {
     expect(contributors).toHaveLength(2);
   });
 
-  it('cannot add or remove members if team is idp:provisioned', async function () {
+  it('cannot add or remove members if team is idp:provisioned', async () => {
     const team2 = TeamFixture({
       flags: {
         'idp:provisioned': true,
@@ -354,7 +368,8 @@ describe('TeamMembers', function () {
       body: team2,
     });
 
-    render(<TeamMembers team={team2} />, {
+    render(<TeamMembers />, {
+      outletContext: {team: team2},
       initialRouterConfig,
       organization,
     });
@@ -365,7 +380,7 @@ describe('TeamMembers', function () {
     expect((await screen.findAllByRole('button', {name: 'Remove'})).at(0)).toBeDisabled();
   });
 
-  it('can add or remove members if non-idp team', async function () {
+  it('can add or remove members if non-idp team', async () => {
     const team2 = TeamFixture({
       flags: {
         'idp:provisioned': false,
@@ -399,7 +414,8 @@ describe('TeamMembers', function () {
       body: team2,
     });
 
-    render(<TeamMembers team={team2} />, {
+    render(<TeamMembers />, {
+      outletContext: {team: team2},
       initialRouterConfig,
       organization,
     });
@@ -408,5 +424,16 @@ describe('TeamMembers', function () {
       (await screen.findAllByRole('button', {name: 'Add Member'})).at(0)
     ).toBeEnabled();
     expect((await screen.findAllByRole('button', {name: 'Remove'})).at(0)).toBeEnabled();
+  });
+
+  it('renders a "Pending" tag for pending team members', async () => {
+    render(<TeamMembers />, {
+      outletContext: {team},
+      initialRouterConfig,
+      organization,
+    });
+
+    // MembersFixure has a single pending member
+    expect(await screen.findByText('Pending')).toBeInTheDocument();
   });
 });

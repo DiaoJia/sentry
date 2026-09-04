@@ -2,8 +2,11 @@ from typing import Any
 
 from django.utils import timezone
 
-from sentry.rules.age import AgeComparisonType, age_comparison_map
 from sentry.rules.filters.age_comparison import timeranges
+from sentry.workflow_engine.handlers.condition.utils.age import (
+    AgeComparisonType,
+    age_comparison_map,
+)
 from sentry.workflow_engine.models.data_condition import Condition
 from sentry.workflow_engine.registry import condition_handler_registry
 from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
@@ -13,6 +16,7 @@ from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
 class AgeComparisonConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.ACTION_FILTER
     subgroup = DataConditionHandler.Subgroup.ISSUE_ATTRIBUTES
+    label_template = "The issue is {comparison_type} than {value} {time}"
 
     comparison_json_schema = {
         "type": "object",
@@ -30,8 +34,8 @@ class AgeComparisonConditionHandler(DataConditionHandler[WorkflowEventData]):
 
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
-        event = event_data.event
-        first_seen = event.group.first_seen
+        group = event_data.group
+        first_seen = group.first_seen
         current_time = timezone.now()
         comparison_type = comparison["comparison_type"]
         time = comparison["time"]

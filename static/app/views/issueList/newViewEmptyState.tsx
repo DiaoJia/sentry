@@ -1,20 +1,15 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import Link from 'sentry/components/links/link';
-import Panel from 'sentry/components/panels/panel';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Stack} from '@sentry/scraps/layout';
+
+import {Panel} from 'sentry/components/panels/panel';
 import {ProvidedFormattedQuery} from 'sentry/components/searchQueryBuilder/formattedQuery';
-import {IconWarning} from 'sentry/icons';
-import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {SavedSearchVisibility} from 'sentry/types/group';
+import {t} from 'sentry/locale';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import {useFetchSavedSearchesForOrg} from 'sentry/views/issueList/queries/useFetchSavedSearchesForOrg';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 type SearchSuggestion = {
   label: string;
@@ -69,17 +64,8 @@ function Query({label, query}: SearchSuggestion) {
 }
 
 export function NewViewEmptyState() {
-  const organization = useOrganization();
-  const {data: savedSearches = [], isPending} = useFetchSavedSearchesForOrg({
-    orgSlug: organization.slug,
-  });
-
-  const personalSavedSearches = savedSearches.filter(
-    search => search.visibility === SavedSearchVisibility.OWNER
-  );
-
   return (
-    <Wrapper>
+    <Stack justify="center" align="center" marginTop="3xl">
       <Card>
         <CardHeading>{t('Suggested Queries')}</CardHeading>
         <p>{t('Here are a few to get you started.')}</p>
@@ -89,89 +75,30 @@ export function NewViewEmptyState() {
           ))}
         </QueryGrid>
       </Card>
-      {personalSavedSearches.length > 0 && !isPending && (
-        <Card>
-          <CardHeading>
-            {t('My Saved Searches')}
-            <Tooltip
-              title={
-                <Fragment>
-                  <Bold>
-                    {t('Saved searches are deprecated and will be removed soon.')}
-                  </Bold>
-                  {tct(
-                    'Organization saved searches have been converted to Issue Views and are available in the [allViews:All Views] page.',
-                    {
-                      allViews: (
-                        <TooltipSubLink to="/organizations/organization-slug/issues/views/" />
-                      ),
-                    }
-                  )}
-                </Fragment>
-              }
-              skipWrapper
-              isHoverable
-            >
-              <IconWarning color="subText" />
-            </Tooltip>
-          </CardHeading>
-          <p>{t('Your personal saved searches.')}</p>
-          <QueryGrid>
-            {personalSavedSearches.map(savedSearch => (
-              <Query
-                key={savedSearch.id}
-                label={savedSearch.name}
-                query={savedSearch.query}
-              />
-            ))}
-          </QueryGrid>
-        </Card>
-      )}
-    </Wrapper>
+    </Stack>
   );
 }
 
-const Bold = styled('div')`
-  font-weight: ${p => p.theme.fontWeightBold};
-`;
-
-const TooltipSubLink = styled(Link)`
-  color: ${p => p.theme.subText};
-  text-decoration: underline;
-
-  :hover {
-    color: ${p => p.theme.subText};
-  }
-`;
-
-const Wrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  margin-top: ${space(4)};
-`;
-
 const Card = styled(Panel)`
   width: 80%;
-  background-color: ${p => p.theme.backgroundSecondary};
-  padding: ${space(2)};
+  background-color: ${p => p.theme.tokens.background.secondary};
+  padding: ${p => p.theme.space.xl};
 `;
 
 const CardHeading = styled('h2')`
-  font-size: ${p => p.theme.fontSize.xl};
-  font-weight: ${p => p.theme.fontWeightBold};
-  margin-bottom: ${space(1)};
+  font-size: ${p => p.theme.font.size.xl};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin-bottom: ${p => p.theme.space.md};
   display: flex;
   align-items: center;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
 `;
 
 const QueryGrid = styled('ul')`
   display: grid;
   grid-template-columns: 1fr 4fr;
-  column-gap: ${space(2)};
-  margin: 0 -${space(2)};
+  column-gap: ${p => p.theme.space.xl};
+  margin: 0 -${p => p.theme.space.xl};
   padding: 0;
 `;
 
@@ -190,7 +117,7 @@ const QueryRow = styled('li')`
       bottom: 0;
       left: 0;
       right: 0;
-      border-bottom: 1px solid ${p => p.theme.innerBorder};
+      border-bottom: 1px solid ${p => p.theme.tokens.border.secondary};
     }
   }
 `;
@@ -200,18 +127,18 @@ const QueryButton = styled('button')`
   display: grid;
   grid-template-columns: subgrid;
   grid-column: 1/-1;
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   background: none;
   border: none;
   margin: 0;
   width: 100%;
   text-align: left;
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
   border-radius: 0;
 
   &:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px ${p => p.theme.button.default.focusBorder};
+    box-shadow: 0 0 0 2px ${p => p.theme.tokens.focus.default};
   }
 `;
 

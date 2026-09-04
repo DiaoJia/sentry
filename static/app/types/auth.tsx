@@ -110,9 +110,9 @@ export type ChallengeData = {
   authenticateRequests: SignRequest;
   registerRequests: RegisterRequest;
   registeredKeys: RegisteredKey[];
-  webAuthnAuthenticationData: string;
+  webAuthnAuthenticationData: string | undefined;
   // for WebAuthn register
-  webAuthnRegisterData: string;
+  webAuthnRegisterData: string | undefined;
 };
 
 type EnrolledAuthenticator = {
@@ -136,15 +136,24 @@ export type UserEnrolledAuthenticator = {
 /**
  * XXX(ts): This actually all comes from getsentry. We should definitely
  * refactor this into a more proper 'hook' mechanism in the future
+ * @public
  */
 export type AuthConfig = {
   canRegister: boolean;
-  githubLoginLink: string;
-  googleLoginLink: string;
   hasNewsletter: boolean;
+  pendingMfa: {
+    mfaMethods: Array<{id: 'recovery' | 'sms' | 'totp' | 'u2f'}>;
+    mfaRequired: true;
+  } | null;
   serverHostname: string;
-  vstsLoginLink: string;
+  githubLoginLink?: string;
+  googleLoginLink?: string;
+  loginBannerMarkdown?: string;
+  vstsLoginLink?: string;
+  warning?: string;
 };
+
+export type AuthConfigResponse = AuthConfig | {nextUri: string};
 
 // Users can have SSO providers of their own (social login with github)
 // and organizations can have SSO configuration for SAML/google domain/okta.
@@ -169,6 +178,7 @@ export enum UserIdentityCategory {
   SOCIAL_IDENTITY = 'social-identity',
   GLOBAL_IDENTITY = 'global-identity',
   ORG_IDENTITY = 'org-identity',
+  GITHUB_COPILOT_IDENTITY = 'github-copilot-identity',
 }
 
 export enum UserIdentityStatus {

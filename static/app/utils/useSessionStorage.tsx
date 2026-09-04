@@ -1,10 +1,14 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useState, type SetStateAction} from 'react';
 
-import sessionStorageWrapper from 'sentry/utils/sessionStorage';
+import {sessionStorageWrapper} from 'sentry/utils/sessionStorage';
 
 const isBrowser = typeof window !== 'undefined';
 
-function readStorageValue<T>(key: string, initialValue: T) {
+export function readStorageValue<T>(key: string | null, initialValue: T): T {
+  if (key === null) {
+    return initialValue;
+  }
+
   const value = sessionStorageWrapper.getItem(key);
 
   // We check for 'undefined' because the value may have
@@ -23,10 +27,35 @@ function readStorageValue<T>(key: string, initialValue: T) {
   }
 }
 
+export function writeStorageValue(key: string | null, value: unknown): void {
+  if (key === null) {
+    return;
+  }
+  try {
+    sessionStorageWrapper.setItem(key, JSON.stringify(value));
+  } catch {
+    // Best effort and just update the in-memory value.
+  }
+}
+
+export function removeStorageValue(key: string | null): void {
+  if (key === null) {
+    return;
+  }
+  try {
+    sessionStorageWrapper.removeItem(key);
+  } catch {
+    // Best effort
+  }
+}
+
+/**
+ * Hook for managing a react state backed by sessionStorage. When `key` is null the storage persistence is disabled.
+ */
 export function useSessionStorage<T>(
-  key: string,
+  key: string | null,
   initialValue: T
-): [T, (value: T) => void, () => void] {
+): [T, (value: SetStateAction<T>) => void, () => void] {
   const [state, setState] = useState<T>(() => readStorageValue(key, initialValue));
 
   useEffect(() => {
@@ -36,21 +65,27 @@ export function useSessionStorage<T>(
   }, [key]);
 
   const wrappedSetState = useCallback(
-    (value: T) => {
-      setState(value);
+    (valueOrUpdater: SetStateAction<T>) => {
+      setState(prev => {
+        // Cast needed: TS can't narrow SetStateAction<T> via typeof when T
+        // could itself be a function type.
+        const next =
+          typeof valueOrUpdater === 'function'
+            ? (valueOrUpdater as (prev: T) => T)(prev)
+            : valueOrUpdater;
 
-      try {
-        sessionStorageWrapper.setItem(key, JSON.stringify(value));
-      } catch {
-        // Best effort and just update the in-memory value.
-      }
+        writeStorageValue(key, next);
+        return next;
+      });
     },
     [key]
   );
 
   const removeItem = useCallback(() => {
-    setState(initialValue);
-    sessionStorageWrapper.removeItem(key);
+    setState(() => {
+      removeStorageValue(key);
+      return initialValue;
+    });
   }, [key, initialValue]);
 
   if (!isBrowser) {

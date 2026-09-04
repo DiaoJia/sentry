@@ -5,15 +5,16 @@
 
 import abc
 
-from sentry.hybridcloud.rpc.resolvers import ByOrganizationId
-from sentry.hybridcloud.rpc.service import RpcService, regional_rpc_method
+from sentry.hybridcloud.rpc.resolvers import ByCellName, ByOrganizationId
+from sentry.hybridcloud.rpc.service import RpcService, cell_rpc_method
 from sentry.sentry_apps.services.hook import RpcServiceHook
+from sentry.sentry_apps.services.hook.model import RpcInstallationOrganizationPair
 from sentry.silo.base import SiloMode
 
 
 class HookService(RpcService):
     key = "hook"
-    local_mode = SiloMode.REGION
+    local_mode = SiloMode.CELL
 
     @classmethod
     def get_local_implementation(cls) -> RpcService:
@@ -21,7 +22,7 @@ class HookService(RpcService):
 
         return DatabaseBackedHookService()
 
-    @regional_rpc_method(ByOrganizationId())
+    @cell_rpc_method(ByOrganizationId())
     @abc.abstractmethod
     def create_service_hook(
         self,
@@ -36,7 +37,7 @@ class HookService(RpcService):
     ) -> RpcServiceHook:
         pass
 
-    @regional_rpc_method(ByOrganizationId())
+    @cell_rpc_method(ByOrganizationId())
     @abc.abstractmethod
     def update_webhook_and_events(
         self,
@@ -46,6 +47,39 @@ class HookService(RpcService):
         webhook_url: str | None,
         events: list[str],
     ) -> list[RpcServiceHook]:
+        """
+        Update ALL webhooks for a given sentry app (region determined by organization_id).
+        """
+        pass
+
+    @cell_rpc_method(ByOrganizationId())
+    @abc.abstractmethod
+    def create_or_update_webhook_and_events_for_installation(
+        self,
+        *,
+        installation_id: int,
+        organization_id: int,
+        webhook_url: str | None,
+        events: list[str],
+        application_id: int,
+    ) -> list[RpcServiceHook]:
+        """
+        Update the webhook and events for a given sentry app installation.
+        """
+        pass
+
+    @cell_rpc_method(ByCellName())
+    @abc.abstractmethod
+    def bulk_create_service_hooks_for_app(
+        self,
+        *,
+        cell_name: str,
+        application_id: int,
+        events: list[str],
+        installation_organization_ids: list[RpcInstallationOrganizationPair],
+        url: str,
+    ) -> list[RpcServiceHook]:
+        """Meant for bulk creating ServiceHooks for all installations of a given Sentry App in a given region"""
         pass
 
 

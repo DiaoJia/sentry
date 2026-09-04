@@ -1,17 +1,17 @@
 import {ConfigFixture} from 'sentry-fixture/config';
 import {UserFixture} from 'sentry-fixture/user';
 
-import ConfigStore from 'sentry/stores/configStore';
-import GuideStore from 'sentry/stores/guideStore';
-import ModalStore from 'sentry/stores/modalStore';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {GuideStore} from 'sentry/stores/guideStore';
+import {ModalStore} from 'sentry/stores/modalStore';
 import {trackAnalytics} from 'sentry/utils/analytics';
 
 jest.mock('sentry/utils/analytics');
 
-describe('GuideStore', function () {
+describe('GuideStore', () => {
   let data!: Parameters<typeof GuideStore.fetchSucceeded>[0];
 
-  beforeEach(function () {
+  beforeEach(() => {
     jest.clearAllMocks();
     ConfigStore.loadInitialData(
       ConfigFixture({
@@ -25,56 +25,53 @@ describe('GuideStore', function () {
     GuideStore.init();
     data = [
       {
-        guide: 'issue',
+        guide: 'trace_view',
         seen: false,
       },
       {guide: 'issue_stream', seen: true},
     ];
-    GuideStore.registerAnchor('issue_header_stats');
-    GuideStore.registerAnchor('issue_sidebar_owners');
-    GuideStore.registerAnchor('breadcrumbs');
     GuideStore.registerAnchor('issue_stream');
+    GuideStore.registerAnchor('trace_view_guide_row');
+    GuideStore.registerAnchor('trace_view_guide_row_details');
   });
 
   afterEach(() => {
     GuideStore.teardown();
   });
 
-  it('should move through the steps in the guide', function () {
+  it('should move through the steps in the guide', () => {
     GuideStore.fetchSucceeded(data);
     // Should pick the first non-seen guide in alphabetic order.
     expect(GuideStore.getState().currentStep).toBe(0);
-    expect(GuideStore.getState().currentGuide?.guide).toBe('issue');
+    expect(GuideStore.getState().currentGuide?.guide).toBe('trace_view');
     // Should prune steps that don't have anchors.
-    expect(GuideStore.getState().currentGuide?.steps).toHaveLength(3);
+    expect(GuideStore.getState().currentGuide?.steps).toHaveLength(2);
 
     GuideStore.nextStep();
     expect(GuideStore.getState().currentStep).toBe(1);
-    GuideStore.nextStep();
-    expect(GuideStore.getState().currentStep).toBe(2);
     GuideStore.closeGuide();
     expect(GuideStore.getState().currentGuide).toBeNull();
   });
 
-  it('should force show a guide with #assistant', function () {
+  it('should force show a guide with #assistant', () => {
     data = [
       {
-        guide: 'issue',
+        guide: 'issue_stream',
         seen: true,
       },
-      {guide: 'issue_stream', seen: false},
+      {guide: 'trace_view', seen: false},
     ];
 
     GuideStore.fetchSucceeded(data);
     window.location.hash = '#assistant';
     window.dispatchEvent(new Event('load'));
-    expect(GuideStore.getState().currentGuide?.guide).toBe('issue');
-    GuideStore.closeGuide();
     expect(GuideStore.getState().currentGuide?.guide).toBe('issue_stream');
+    GuideStore.closeGuide();
+    expect(GuideStore.getState().currentGuide?.guide).toBe('trace_view');
     window.location.hash = '';
   });
 
-  it('should force hide', function () {
+  it('should force hide', () => {
     expect(GuideStore.state.forceHide).toBe(false);
     GuideStore.setForceHide(true);
     expect(GuideStore.state.forceHide).toBe(true);
@@ -82,13 +79,13 @@ describe('GuideStore', function () {
     expect(GuideStore.state.forceHide).toBe(false);
   });
 
-  it('should record analytics events when guide is cued', function () {
+  it('should record analytics events when guide is cued', () => {
     const spy = jest.spyOn(GuideStore, 'recordCue');
     GuideStore.fetchSucceeded(data);
-    expect(spy).toHaveBeenCalledWith('issue');
+    expect(spy).toHaveBeenCalledWith('trace_view');
 
     expect(trackAnalytics).toHaveBeenCalledWith('assistant.guide_cued', {
-      guide: 'issue',
+      guide: 'trace_view',
       organization: null,
     });
 
@@ -102,10 +99,10 @@ describe('GuideStore', function () {
     spy.mockRestore();
   });
 
-  it('only shows guides with server data and content', function () {
+  it('only shows guides with server data and content', () => {
     data = [
       {
-        guide: 'issue',
+        guide: 'issue_stream',
         seen: true,
       },
       {
@@ -119,7 +116,7 @@ describe('GuideStore', function () {
     expect(GuideStore.state.guides[0]!.guide).toBe(data[0]!.guide);
   });
 
-  it('hides when a modal is open', function () {
+  it('hides when a modal is open', () => {
     expect(GuideStore.getState().forceHide).toBe(false);
 
     ModalStore.openModal(() => <div />, {});
@@ -131,7 +128,7 @@ describe('GuideStore', function () {
     expect(GuideStore.getState().forceHide).toBe(false);
   });
 
-  it('should return a stable reference from getState', function () {
+  it('should return a stable reference from getState', () => {
     ModalStore.openModal(() => <div />, {});
     const state = GuideStore.getState();
     expect(Object.is(state, GuideStore.getState())).toBe(true);

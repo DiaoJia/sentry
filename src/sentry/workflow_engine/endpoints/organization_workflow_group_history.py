@@ -7,7 +7,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.serializers import serialize
 from sentry.api.utils import get_date_range_from_params
 from sentry.apidocs.constants import RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
@@ -17,14 +17,14 @@ from sentry.models.organization import Organization
 from sentry.workflow_engine.endpoints.organization_workflow_index import (
     OrganizationWorkflowEndpoint,
 )
-from sentry.workflow_engine.endpoints.serializers import (
+from sentry.workflow_engine.endpoints.serializers.workflow_group_history_serializer import (
     WorkflowGroupHistorySerializer,
     fetch_workflow_groups_paginated,
 )
 from sentry.workflow_engine.models import Workflow
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationWorkflowGroupHistoryEndpoint(OrganizationWorkflowEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.EXPERIMENTAL,
@@ -47,12 +47,13 @@ class OrganizationWorkflowGroupHistoryEndpoint(OrganizationWorkflowEndpoint):
     def get(self, request: Request, organization: Organization, workflow: Workflow) -> Response:
         per_page = self.get_per_page(request)
         cursor = self.get_cursor_from_request(request)
+        sort = request.GET.getlist("sort")
         try:
             start, end = get_date_range_from_params(request.GET)
         except InvalidParams:
             raise ParseError(detail="Invalid start and end dates")
 
-        results = fetch_workflow_groups_paginated(workflow, start, end, cursor, per_page)
+        results = fetch_workflow_groups_paginated(workflow, start, end, cursor, per_page, sort)
 
         response = Response(
             serialize(results.results, request.user, WorkflowGroupHistorySerializer())

@@ -3,15 +3,16 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import ProjectEndpoint
 from sentry.api.exceptions import ResourceDoesNotExist
+from sentry.api.utils import to_valid_int_id
 from sentry.models.grouphash import GroupHash
 from sentry.models.grouptombstone import GroupTombstone
 from sentry.models.project import Project
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class GroupTombstoneDetailsEndpoint(ProjectEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -32,12 +33,13 @@ class GroupTombstoneDetailsEndpoint(ProjectEndpoint):
         :auth: required
         """
 
+        tombstone_id_int = to_valid_int_id("tombstone_id", tombstone_id, raise_404=True)
         try:
-            tombstone = GroupTombstone.objects.get(project_id=project.id, id=tombstone_id)
+            tombstone = GroupTombstone.objects.get(project_id=project.id, id=tombstone_id_int)
         except GroupTombstone.DoesNotExist:
             raise ResourceDoesNotExist
 
-        GroupHash.objects.filter(project_id=project.id, group_tombstone_id=tombstone_id).update(
+        GroupHash.objects.filter(project_id=project.id, group_tombstone_id=tombstone_id_int).update(
             # will allow new events to be captured
             group_tombstone_id=None
         )

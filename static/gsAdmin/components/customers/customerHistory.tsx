@@ -1,27 +1,23 @@
-import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
-import {space} from 'sentry/styles/space';
-import {DataCategory} from 'sentry/types/core';
-import oxfordizeArray from 'sentry/utils/oxfordizeArray';
+import {Stack, Container} from '@sentry/scraps/layout';
 
-import ResultGrid from 'admin/components/resultGrid';
+import {DataCategory} from 'sentry/types/core';
+import {oxfordizeArray} from 'sentry/utils/oxfordizeArray';
+
+import {ResultGrid} from 'admin/components/resultGrid';
 import {RESERVED_BUDGET_QUOTA} from 'getsentry/constants';
-import type {
-  BillingHistory,
-  ReservedBudget,
-  ReservedBudgetMetricHistory,
-} from 'getsentry/types';
+import type {BillingHistory, ReservedBudgetMetricHistory} from 'getsentry/types';
 import {formatReservedWithUnits, formatUsageWithUnits} from 'getsentry/utils/billing';
 import {getPlanCategoryName, sortCategories} from 'getsentry/utils/dataCategory';
-import formatCurrency from 'getsentry/utils/formatCurrency';
+import {formatCurrency} from 'getsentry/utils/formatCurrency';
 import {displayPriceWithCents} from 'getsentry/views/amCheckout/utils';
 
 type Props = Partial<React.ComponentProps<typeof ResultGrid>> & {
   orgId: string;
 };
 
-function CustomerHistory({orgId, ...props}: Props) {
+export function CustomerHistory({orgId, ...props}: Props) {
   return (
     <ResultGrid
       path={`/_admin/customers/${orgId}/`}
@@ -32,7 +28,7 @@ function CustomerHistory({orgId, ...props}: Props) {
       columns={[
         <th key="period">Period</th>,
         <th key="onDemand" style={{width: 200, textAlign: 'right'}}>
-          On-Demand
+          Pay-as-you-go
         </th>,
         <th key="reserved" style={{width: 200, textAlign: 'right'}}>
           Reserved
@@ -46,7 +42,7 @@ function CustomerHistory({orgId, ...props}: Props) {
       ]}
       columnsForRow={(row: BillingHistory) => {
         const sortedCategories = sortCategories(row.categories);
-        const reservedBudgets: ReservedBudget[] = row.reservedBudgets ?? [];
+        const reservedBudgets = row.reservedBudgets ?? [];
         const reservedBudgetMetricHistories: Record<string, ReservedBudgetMetricHistory> =
           {};
         const reservedBudgetNameMapping: Record<string, string> = {};
@@ -62,22 +58,20 @@ function CustomerHistory({orgId, ...props}: Props) {
           hadCustomDynamicSampling: shouldUseDynamicSamplingNames,
         };
 
-        if (row.hasReservedBudgets) {
-          reservedBudgets.forEach(budget => {
-            const categoryNames: string[] = [];
-            Object.entries(budget.categories).forEach(([category, history]) => {
-              reservedBudgetMetricHistories[category] = history;
-              categoryNames.push(
-                getPlanCategoryName({
-                  plan: row.planDetails,
-                  category: category as DataCategory,
-                  ...displayOptions,
-                })
-              );
-            });
-            reservedBudgetNameMapping[budget.id] = oxfordizeArray(categoryNames);
+        reservedBudgets.forEach(budget => {
+          const categoryNames: string[] = [];
+          Object.entries(budget.categories).forEach(([category, history]) => {
+            reservedBudgetMetricHistories[category] = history;
+            categoryNames.push(
+              getPlanCategoryName({
+                plan: row.planDetails,
+                category: category as DataCategory,
+                ...displayOptions,
+              })
+            );
           });
-        }
+          reservedBudgetNameMapping[budget.id] = oxfordizeArray(categoryNames);
+        });
 
         return [
           <td key="period">
@@ -101,34 +95,35 @@ function CustomerHistory({orgId, ...props}: Props) {
               : formatCurrency(row.onDemandMaxSpend)}
           </td>,
           <td key="reserved" style={{textAlign: 'right'}}>
-            <UsageColumn>
+            <Stack gap="xs">
               {sortedCategories
                 .filter(({reserved}) => reserved !== RESERVED_BUDGET_QUOTA)
                 .map(({category, reserved}) => (
                   <div key={category}>
                     {formatReservedWithUnits(reserved, category)}
-                    <DisplayName>
+                    <Container as="span" marginLeft="xs">
                       {getPlanCategoryName({
                         plan: row.planDetails,
                         category,
                         ...displayOptions,
                       })}
-                    </DisplayName>
+                    </Container>
                   </div>
                 ))}
-              {row.hasReservedBudgets &&
-                reservedBudgets.map(budget => {
-                  return (
-                    <div key={budget.id}>
-                      {displayPriceWithCents({cents: budget.reservedBudget})} for
-                      <DisplayName>{reservedBudgetNameMapping[budget.id]!}</DisplayName>
-                    </div>
-                  );
-                })}
-            </UsageColumn>
+              {reservedBudgets.map(budget => {
+                return (
+                  <div key={budget.id}>
+                    {displayPriceWithCents({cents: budget.reservedBudget})} for
+                    <Container as="span" marginLeft="xs">
+                      {reservedBudgetNameMapping[budget.id]!}
+                    </Container>
+                  </div>
+                );
+              })}
+            </Stack>
           </td>,
           <td key="gifted" style={{textAlign: 'right'}}>
-            <UsageColumn>
+            <Stack gap="xs">
               {sortedCategories
                 .filter(category => category.reserved !== RESERVED_BUDGET_QUOTA)
                 .map(({category, free}) => (
@@ -136,40 +131,41 @@ function CustomerHistory({orgId, ...props}: Props) {
                     {formatReservedWithUnits(free, category, {
                       isGifted: true,
                     })}
-                    <DisplayName>
+                    <Container as="span" marginLeft="xs">
                       {getPlanCategoryName({
                         plan: row.planDetails,
                         category,
                         ...displayOptions,
                       })}
-                    </DisplayName>
+                    </Container>
                   </div>
                 ))}
-              {row.hasReservedBudgets &&
-                reservedBudgets.map(budget => {
-                  return (
-                    <div key={budget.id}>
-                      {displayPriceWithCents({cents: budget.freeBudget})} for
-                      <DisplayName>{reservedBudgetNameMapping[budget.id]!}</DisplayName>
-                    </div>
-                  );
-                })}
-            </UsageColumn>
+              {reservedBudgets.map(budget => {
+                return (
+                  <div key={budget.id}>
+                    {displayPriceWithCents({cents: budget.freeBudget})} for
+                    <Container as="span" marginLeft="xs">
+                      {reservedBudgetNameMapping[budget.id]!}
+                    </Container>
+                  </div>
+                );
+              })}
+            </Stack>
           </td>,
           <td key="usage" style={{textAlign: 'right'}}>
-            <UsageColumn>
+            <Stack gap="xs">
               {sortedCategories.map(({category, usage}) => (
                 <div key={category}>
                   {formatUsageWithUnits(usage, category, {
                     useUnitScaling: true,
                   })}
-                  <DisplayName>
+                  <Container as="span" marginLeft="xs">
                     {getPlanCategoryName({
                       plan: row.planDetails,
                       category,
                       ...displayOptions,
                     })}
-                  </DisplayName>
+                  </Container>
                   {reservedBudgetMetricHistories[category] && (
                     <span>
                       {' ('}
@@ -181,7 +177,7 @@ function CustomerHistory({orgId, ...props}: Props) {
                   )}
                 </div>
               ))}
-            </UsageColumn>
+            </Stack>
           </td>,
         ];
       }}
@@ -189,15 +185,3 @@ function CustomerHistory({orgId, ...props}: Props) {
     />
   );
 }
-
-const UsageColumn = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(0.5)};
-`;
-
-const DisplayName = styled('span')`
-  margin-left: ${space(0.5)};
-`;
-
-export default CustomerHistory;

@@ -1,10 +1,14 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import {useNavigate} from 'sentry/utils/useNavigate';
-import TypeSelector from 'sentry/views/dashboards/widgetBuilder/components/typeSelector';
+import {getDatasetConfig} from 'sentry/views/dashboards/datasetConfig/base';
+import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
+import {
+  getVisualizationTypeDisabledReason,
+  WidgetBuilderTypeSelector as TypeSelector,
+} from 'sentry/views/dashboards/widgetBuilder/components/typeSelector';
 import {WidgetBuilderProvider} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
 
 jest.mock('sentry/utils/useNavigate', () => ({
@@ -14,14 +18,76 @@ jest.mock('sentry/utils/useNavigate', () => ({
 const mockUseNavigate = jest.mocked(useNavigate);
 
 describe('TypeSelector', () => {
-  let router!: ReturnType<typeof RouterFixture>;
-  let organization!: ReturnType<typeof OrganizationFixture>;
-  beforeEach(function () {
-    router = RouterFixture();
-    organization = OrganizationFixture({});
+  it('gates trace metrics tables behind the release flag', () => {
+    const config = getDatasetConfig(WidgetType.TRACEMETRICS);
+
+    expect(
+      getVisualizationTypeDisabledReason(
+        DisplayType.TABLE,
+        config,
+        WidgetType.TRACEMETRICS
+      )
+    ).toBe('Tables are not yet available for the Trace Metrics dataset.');
+    expect(
+      getVisualizationTypeDisabledReason(
+        DisplayType.TABLE,
+        config,
+        WidgetType.TRACEMETRICS,
+        true
+      )
+    ).toBeUndefined();
   });
 
-  it('changes the visualization type', async function () {
+  it('changes the visualization type', async () => {
+    const mockNavigate = jest.fn();
+    mockUseNavigate.mockReturnValue(mockNavigate);
+
+    render(
+      <WidgetBuilderProvider>
+        <TypeSelector />
+      </WidgetBuilderProvider>
+    );
+
+    // click dropdown
+    await userEvent.click(await screen.findByText('Table'));
+    // select new option
+    await userEvent.click(await screen.findByText('Bar (Time Series)'));
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({displayType: 'bar'}),
+      }),
+      expect.anything()
+    );
+  });
+
+  it('displays error message when there is an error', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <TypeSelector error={{displayType: 'Please select a type'}} />
+      </WidgetBuilderProvider>
+    );
+
+    expect(await screen.findByText('Please select a type')).toBeInTheDocument();
+  });
+
+  it('shows text widget option', async () => {
+    mockUseNavigate.mockReturnValue(jest.fn());
+
+    render(
+      <WidgetBuilderProvider>
+        <TypeSelector />
+      </WidgetBuilderProvider>,
+      {
+        organization: OrganizationFixture(),
+      }
+    );
+
+    await userEvent.click(await screen.findByText('Table'));
+    expect(screen.getByText('Text (Markdown)')).toBeInTheDocument();
+  });
+
+  it('resets the widget builder state when the display type is changed on an issue widget', async () => {
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
@@ -30,38 +96,89 @@ describe('TypeSelector', () => {
         <TypeSelector />
       </WidgetBuilderProvider>,
       {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/dashboard/1/',
+            query: {displayType: 'line', dataset: WidgetType.ISSUE},
+          },
+        },
       }
     );
 
-    // click dropdown
+    await userEvent.click(await screen.findByText('Line'));
     await userEvent.click(await screen.findByText('Table'));
-    // select new option
-    await userEvent.click(await screen.findByText('Bar'));
 
     expect(mockNavigate).toHaveBeenCalledWith(
       expect.objectContaining({
-        ...router.location,
-        query: expect.objectContaining({displayType: 'bar'}),
+        query: expect.objectContaining({
+          displayType: 'table',
+        }),
+      }),
+      expect.anything()
+    );
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          dataset: WidgetType.ISSUE,
+        }),
+      }),
+      expect.anything()
+    );
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          field: ['issue', 'assignee', 'title'],
+        }),
       }),
       expect.anything()
     );
   });
 
-  it('displays error message when there is an error', async function () {
+  it('resets the widget builder state to dataset defaults when display type is changed from text widget', async () => {
+    const mockNavigate = jest.fn();
+    mockUseNavigate.mockReturnValue(mockNavigate);
+
     render(
       <WidgetBuilderProvider>
-        <TypeSelector error={{displayType: 'Please select a type'}} />
+        <TypeSelector />
       </WidgetBuilderProvider>,
       {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
+        initialRouterConfig: {
+          location: {
+            pathname: '/organizations/org-slug/dashboard/1/',
+            query: {displayType: 'text'},
+          },
+        },
+        organization: OrganizationFixture(),
       }
     );
 
-    expect(await screen.findByText('Please select a type')).toBeInTheDocument();
+    await userEvent.click(await screen.findByText('Text (Markdown)'));
+    await userEvent.click(await screen.findByText('Table'));
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          displayType: 'table',
+        }),
+      }),
+      expect.anything()
+    );
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          dataset: WidgetType.ERRORS,
+        }),
+      }),
+      expect.anything()
+    );
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({
+          field: ['count_unique(user)'],
+        }),
+      }),
+      expect.anything()
+    );
   });
 });

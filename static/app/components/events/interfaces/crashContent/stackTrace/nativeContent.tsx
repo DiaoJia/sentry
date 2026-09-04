@@ -1,24 +1,21 @@
 import {Fragment, useCallback, useState} from 'react';
 import styled from '@emotion/styled';
 
-import NativeFrame from 'sentry/components/events/interfaces/nativeFrame';
+import {NativeFrame} from 'sentry/components/events/interfaces/nativeFrame';
 import {
   findImageForAddress,
   getHiddenFrameIndices,
   getLastFrameIndex,
   isRepeatedFrame,
   parseAddress,
-  stackTracePlatformIcon,
 } from 'sentry/components/events/interfaces/utils';
-import Panel from 'sentry/components/panels/panel';
+import {Panel} from 'sentry/components/panels/panel';
 import type {Event, Frame} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import type {StacktraceType} from 'sentry/types/stacktrace';
-import {defined} from 'sentry/utils';
 
 import {OmittedFrames} from './omittedFrames';
-import StacktracePlatformIcon from './platformIcon';
 
 function isFrameUsedForGrouping(
   frame: Frame,
@@ -40,11 +37,8 @@ type Props = {
   platform: PlatformKey;
   className?: string;
   groupingCurrentLevel?: Group['metadata']['current_level'];
-  hideIcon?: boolean;
   includeSystemFrames?: boolean;
-  inlined?: boolean;
   isHoverPreviewed?: boolean;
-  maxDepth?: number;
   meta?: Record<any, any>;
 };
 
@@ -55,17 +49,25 @@ export function NativeContent({
   event,
   newestFirst,
   isHoverPreviewed,
-  inlined,
-  hideIcon,
   groupingCurrentLevel,
   includeSystemFrames = true,
-  maxDepth,
   meta,
 }: Props) {
   const frames = data.frames ?? [];
 
+  const isDartAsyncSuspensionFrame = useCallback((frame: Frame): boolean => {
+    return (
+      frame.filename === '<asynchronous suspension>' ||
+      frame.absPath === '<asynchronous suspension>'
+    );
+  }, []);
+
   const frameIsVisible = useCallback(
     (frame: Frame, nextFrame: Frame) => {
+      if (!includeSystemFrames && isDartAsyncSuspensionFrame(frame)) {
+        return false;
+      }
+
       return (
         includeSystemFrames ||
         frame.inApp ||
@@ -75,7 +77,7 @@ export function NativeContent({
         isFrameUsedForGrouping(frame, groupingCurrentLevel)
       );
     },
-    [includeSystemFrames, groupingCurrentLevel]
+    [includeSystemFrames, groupingCurrentLevel, isDartAsyncSuspensionFrame]
   );
 
   function setInitialFrameMap(): Record<number, boolean> {
@@ -124,7 +126,7 @@ export function NativeContent({
 
   const lastFrameIndex = getLastFrameIndex(frames);
   const frameCountMap = getInitialFrameCounts();
-  const hiddenFrameIndices: number[] = getHiddenFrameIndices({
+  const hiddenFrameIndices = getHiddenFrameIndices({
     data,
     toggleFrameMap,
     frameCountMap,
@@ -173,9 +175,7 @@ export function NativeContent({
           frame,
           prevFrame,
           nextFrame,
-          emptySourceNotation: inlined
-            ? false
-            : lastFrameIndex === frameIndex && frameIndex === 0,
+          emptySourceNotation: lastFrameIndex === frameIndex && frameIndex === 0,
           platform,
           onShowFramesToggle: (e: React.MouseEvent<HTMLElement>) => {
             handleToggleFrames(e, frameIndex);
@@ -217,9 +217,6 @@ export function NativeContent({
     })
     .filter((frame): frame is React.ReactElement => !!frame);
 
-  if (defined(maxDepth)) {
-    convertedFrames = convertedFrames.slice(-maxDepth);
-  }
   if (newestFirst) {
     convertedFrames = convertedFrames.toReversed();
   }
@@ -230,15 +227,9 @@ export function NativeContent({
 
   return (
     <Wrapper>
-      {hideIcon ? null : (
-        <StacktracePlatformIcon
-          platform={stackTracePlatformIcon(platform, data.frames ?? [])}
-        />
-      )}
       <ContentPanel
         className={wrapperClassName}
         data-test-id="native-stack-trace-content"
-        hideIcon={hideIcon}
       >
         <Frames data-test-id="stack-trace">{convertedFrames}</Frames>
       </ContentPanel>
@@ -250,9 +241,8 @@ const Wrapper = styled('div')`
   position: relative;
 `;
 
-const ContentPanel = styled(Panel)<{hideIcon?: boolean}>`
+const ContentPanel = styled(Panel)`
   position: relative;
-  border-top-left-radius: ${p => (p.hideIcon ? p.theme.borderRadius : 0)};
   overflow: hidden;
 `;
 

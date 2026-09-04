@@ -1,7 +1,11 @@
 import type {LocationRange} from 'peggy';
 
-import type {TermOperator, TokenResult} from './parser';
-import {allOperators, Token} from './parser';
+import {
+  Token,
+  wildcardOperators,
+  type TokenResult,
+  type WildcardOperator,
+} from './parser';
 
 /**
  * Used internally within treeResultLocator to stop recursion once we've
@@ -22,11 +26,11 @@ class TokenResultFoundError extends Error {
  */
 const skipTokenMarker = Symbol('Returned to skip visiting a token');
 
-type VisitorFn = (opts: {
+type VisitorFn<T> = (opts: {
   /**
    * Call this to return the provided value as the result of treeResultLocator
    */
-  returnResult: (result: any) => TokenResultFoundError;
+  returnResult: (result: T) => TokenResultFoundError;
   /**
    * Return this to skip visiting any inner tokens
    */
@@ -37,12 +41,37 @@ type VisitorFn = (opts: {
   token: TokenResult<Token>;
 }) => null | TokenResultFoundError | typeof skipTokenMarker;
 
-type TreeResultLocatorOpts = {
+function isRawFilterKeyWithColon(key: string): boolean {
+  return key.includes(':') && /^[\w.:-]+$/.test(key);
+}
+
+export function quoteFilterKey(key: string): string {
+  const negated = key.startsWith('!');
+  const keyWithoutNegation = negated ? key.slice(1) : key;
+
+  if (isRawFilterKeyWithColon(keyWithoutNegation)) {
+    return `${negated ? '!' : ''}"${keyWithoutNegation}"`;
+  }
+
+  return key;
+}
+
+/**
+ * Strips a trailing array-membership operator (`[`, `[*`, or `[*]`) from a filter
+ * key, returning the base attribute key. The `[*]` operator is query syntax, not
+ * part of the key's identity, so this normalizes the key for lookups/matching.
+ */
+export function stripArrayMembershipOperator(key: string): string {
+  const stripped = key.replace(/\[\*?\]?$/, '');
+  return stripped || key;
+}
+
+type TreeResultLocatorOpts<T> = {
   /**
    * The value to return when returnValue was never called and all nodes of the
    * search tree were visited.
    */
-  noResultValue: any;
+  noResultValue: T;
   /**
    * The tree to visit
    */
@@ -52,7 +81,7 @@ type TreeResultLocatorOpts = {
    * visiting. May also indicate that we want to skip any further traversal of
    * inner nodes.
    */
-  visitorTest: VisitorFn;
+  visitorTest: VisitorFn<T>;
 };
 
 /**
@@ -68,7 +97,7 @@ export function treeResultLocator<T>({
   tree,
   visitorTest,
   noResultValue,
-}: TreeResultLocatorOpts): T {
+}: TreeResultLocatorOpts<T>): T {
   const returnResult = (result: any) => new TokenResultFoundError(result);
 
   const nodeVisitor = (token: TokenResult<Token> | null) => {
@@ -116,6 +145,15 @@ export function treeResultLocator<T>({
       case Token.KEY_EXPLICIT_STRING_TAG:
         nodeVisitor(token.key);
         break;
+      case Token.KEY_EXPLICIT_ARRAY_TAG:
+        nodeVisitor(token.key);
+        break;
+      case Token.KEY_ARRAY_INCLUDES:
+        nodeVisitor(token.key);
+        break;
+      case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+        nodeVisitor(token.key);
+        break;
       case Token.KEY_EXPLICIT_NUMBER_FLAG:
         nodeVisitor(token.key);
         break;
@@ -149,82 +187,6 @@ export function treeResultLocator<T>({
   return noResultValue;
 }
 
-type TreeTransformerOpts = {
-  /**
-   * The function used to transform each node
-   */
-  transform: (token: TokenResult<Token>) => any;
-  /**
-   * The tree to transform
-   */
-  tree: Array<TokenResult<Token>>;
-};
-
-/**
- * Utility function to visit every Token node within an AST tree and apply
- * a transform to those nodes.
- */
-export function treeTransformer({tree, transform}: TreeTransformerOpts) {
-  const nodeVisitor = (token: TokenResult<Token> | null): any => {
-    if (token === null) {
-      return null;
-    }
-
-    switch (token.type) {
-      case Token.FILTER:
-        return transform({
-          ...token,
-          key: nodeVisitor(token.key),
-          value: nodeVisitor(token.value),
-        });
-      case Token.KEY_EXPLICIT_TAG:
-        return transform({
-          ...token,
-          key: nodeVisitor(token.key),
-        });
-      case Token.KEY_AGGREGATE:
-        return transform({
-          ...token,
-          name: nodeVisitor(token.name),
-          args: token.args ? nodeVisitor(token.args) : token.args,
-          argsSpaceBefore: nodeVisitor(token.argsSpaceBefore),
-          argsSpaceAfter: nodeVisitor(token.argsSpaceAfter),
-        });
-      case Token.KEY_EXPLICIT_NUMBER_TAG:
-        return transform({
-          ...token,
-          key: nodeVisitor(token.key),
-        });
-      case Token.KEY_EXPLICIT_STRING_TAG:
-        return transform({
-          ...token,
-          key: nodeVisitor(token.key),
-        });
-      case Token.LOGIC_GROUP:
-        return transform({
-          ...token,
-          inner: token.inner.map(nodeVisitor),
-        });
-      case Token.KEY_AGGREGATE_ARGS:
-        return transform({
-          ...token,
-          args: token.args.map(v => ({...v, value: nodeVisitor(v.value)})),
-        });
-      case Token.VALUE_NUMBER_LIST:
-      case Token.VALUE_TEXT_LIST:
-        return transform({
-          ...token,
-          items: token.items.map(v => ({...v, value: nodeVisitor(v.value)})),
-        });
-
-      default:
-        return transform(token);
-    }
-  };
-
-  return tree.map(nodeVisitor);
-}
-
 type GetKeyNameOpts = {
   /**
    * Include arguments in aggregate key names
@@ -242,14 +204,17 @@ export const getKeyName = (
     | Token.KEY_SIMPLE
     | Token.KEY_EXPLICIT_TAG
     | Token.KEY_AGGREGATE
+    | Token.KEY_EXPLICIT_BOOLEAN_TAG
     | Token.KEY_EXPLICIT_NUMBER_TAG
     | Token.KEY_EXPLICIT_STRING_TAG
+    | Token.KEY_EXPLICIT_ARRAY_TAG
+    | Token.KEY_ARRAY_INCLUDES
     | Token.KEY_EXPLICIT_FLAG
     | Token.KEY_EXPLICIT_NUMBER_FLAG
     | Token.KEY_EXPLICIT_STRING_FLAG
   >,
   options: GetKeyNameOpts = {}
-) => {
+): string => {
   const {aggregateWithArgs} = options;
   switch (key.type) {
     case Token.KEY_SIMPLE:
@@ -260,10 +225,18 @@ export const getKeyName = (
       return aggregateWithArgs
         ? `${key.name.value}(${key.args ? key.args.text : ''})`
         : key.name.value;
+    case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+      return key.text;
     case Token.KEY_EXPLICIT_NUMBER_TAG:
       return key.text;
     case Token.KEY_EXPLICIT_STRING_TAG:
       return key.text;
+    case Token.KEY_EXPLICIT_ARRAY_TAG:
+      return key.text;
+    case Token.KEY_ARRAY_INCLUDES:
+      // Identity is the inner key's name (the backend key form); only the `[*]`
+      // membership suffix is dropped here — stringifyToken re-adds it.
+      return getKeyName(key.key);
     case Token.KEY_EXPLICIT_FLAG:
       return key.text;
     case Token.KEY_EXPLICIT_NUMBER_FLAG:
@@ -286,13 +259,16 @@ export const getKeyLabel = (
     | Token.KEY_SIMPLE
     | Token.KEY_EXPLICIT_TAG
     | Token.KEY_AGGREGATE
+    | Token.KEY_EXPLICIT_BOOLEAN_TAG
     | Token.KEY_EXPLICIT_NUMBER_TAG
     | Token.KEY_EXPLICIT_STRING_TAG
+    | Token.KEY_EXPLICIT_ARRAY_TAG
+    | Token.KEY_ARRAY_INCLUDES
     | Token.KEY_EXPLICIT_FLAG
     | Token.KEY_EXPLICIT_NUMBER_FLAG
     | Token.KEY_EXPLICIT_STRING_FLAG
   >
-) => {
+): string => {
   switch (key.type) {
     case Token.KEY_SIMPLE:
       return key.value;
@@ -300,10 +276,16 @@ export const getKeyLabel = (
       return key.text;
     case Token.KEY_AGGREGATE:
       return key.name.value;
+    case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+      return key.key.value;
     case Token.KEY_EXPLICIT_NUMBER_TAG:
       return key.key.value;
     case Token.KEY_EXPLICIT_STRING_TAG:
       return key.key.value;
+    case Token.KEY_EXPLICIT_ARRAY_TAG:
+      return key.key.value;
+    case Token.KEY_ARRAY_INCLUDES:
+      return getKeyLabel(key.key);
     case Token.KEY_EXPLICIT_FLAG:
       return key.text;
     case Token.KEY_EXPLICIT_NUMBER_FLAG:
@@ -326,10 +308,6 @@ export function isWithinToken(
   return position >= node.location.start.offset && position <= node.location.end.offset;
 }
 
-export function isOperator(value: string): value is TermOperator {
-  return allOperators.includes(value as TermOperator);
-}
-
 function stringifyTokenFilter(token: TokenResult<Token.FILTER>) {
   let stringifiedToken = '';
 
@@ -339,10 +317,15 @@ function stringifyTokenFilter(token: TokenResult<Token.FILTER>) {
 
   stringifiedToken += stringifyToken(token.key);
   stringifiedToken += ':';
+
   stringifiedToken += token.operator;
   stringifiedToken += stringifyToken(token.value);
 
   return stringifiedToken;
+}
+
+export function isWildcardOperator(value: unknown): value is WildcardOperator {
+  return wildcardOperators.includes(value as never);
 }
 
 export function stringifyToken(token: TokenResult<Token>): string {
@@ -374,7 +357,7 @@ export function stringifyToken(token: TokenResult<Token>): string {
       return `[${numberListItems.join(',')}]`;
     }
     case Token.KEY_SIMPLE:
-      return token.value;
+      return token.quoted ? `"${token.value}"` : token.value;
     case Token.KEY_AGGREGATE:
       return token.text;
     case Token.KEY_AGGREGATE_ARGS:
@@ -382,17 +365,23 @@ export function stringifyToken(token: TokenResult<Token>): string {
     case Token.KEY_AGGREGATE_PARAMS:
       return token.text;
     case Token.KEY_EXPLICIT_TAG:
-      return `${token.prefix}[${token.key.value}]`;
+      return `${token.prefix}[${stringifyToken(token.key)}]`;
+    case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+      return `${token.prefix}[${stringifyToken(token.key)},boolean]`;
     case Token.KEY_EXPLICIT_NUMBER_TAG:
-      return `${token.prefix}[${token.key.value},number]`;
+      return `${token.prefix}[${stringifyToken(token.key)},number]`;
     case Token.KEY_EXPLICIT_STRING_TAG:
-      return `${token.prefix}[${token.key.value},string]`;
+      return `${token.prefix}[${stringifyToken(token.key)},string]`;
+    case Token.KEY_EXPLICIT_ARRAY_TAG:
+      return `${token.prefix}[${stringifyToken(token.key)},array]`;
+    case Token.KEY_ARRAY_INCLUDES:
+      return `${stringifyToken(token.key)}[${token.index}]`;
     case Token.KEY_EXPLICIT_FLAG:
-      return `flags[${token.key.value}]`;
+      return `flags[${stringifyToken(token.key)}]`;
     case Token.KEY_EXPLICIT_NUMBER_FLAG:
-      return `flags[${token.key.value},number]`;
+      return `flags[${stringifyToken(token.key)},number]`;
     case Token.KEY_EXPLICIT_STRING_FLAG:
-      return `flags[${token.key.value},string]`;
+      return `flags[${stringifyToken(token.key)},string]`;
     case Token.VALUE_TEXT:
       return token.quoted ? `"${token.value}"` : token.value;
     case Token.VALUE_RELATIVE_DATE:

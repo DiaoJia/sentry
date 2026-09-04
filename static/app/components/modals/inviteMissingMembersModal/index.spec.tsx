@@ -5,12 +5,13 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {TeamFixture} from 'sentry-fixture/team';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 
-import {makeCloseButton} from 'sentry/components/globalModal/components';
+import {makeCloseButton} from '@sentry/scraps/modal';
+
 import type {InviteMissingMembersModalProps} from 'sentry/components/modals/inviteMissingMembersModal';
 import {InviteMissingMembersModal} from 'sentry/components/modals/inviteMissingMembersModal';
-import TeamStore from 'sentry/stores/teamStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 import type {OrgRole} from 'sentry/types/organization';
 
 const roles = [
@@ -32,7 +33,7 @@ const mockRefObject = {
   current: document.body as HTMLDivElement,
 };
 
-describe('InviteMissingMembersModal', function () {
+describe('InviteMissingMembersModal', () => {
   const team = TeamFixture();
   const org = OrganizationFixture({access: ['member:write']});
   TeamStore.loadInitialData([team]);
@@ -51,7 +52,7 @@ describe('InviteMissingMembersModal', function () {
     modalContainerRef: mockRefObject,
   };
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: `/organizations/${org.slug}/members/me/`,
@@ -60,7 +61,7 @@ describe('InviteMissingMembersModal', function () {
     });
   });
 
-  it('does not render if no missing members', function () {
+  it('does not render if no missing members', () => {
     render(<InviteMissingMembersModal {...modalProps} />);
 
     expect(
@@ -68,7 +69,7 @@ describe('InviteMissingMembersModal', function () {
     ).not.toBeInTheDocument();
   });
 
-  it('does not render without org:write', function () {
+  it('does not render without org:write', () => {
     const organization = OrganizationFixture({access: []});
     render(<InviteMissingMembersModal {...modalProps} organization={organization} />);
 
@@ -77,7 +78,7 @@ describe('InviteMissingMembersModal', function () {
     ).not.toBeInTheDocument();
   });
 
-  it('disables invite button if no members selected', async function () {
+  it('disables invite button if no members selected', async () => {
     render(<InviteMissingMembersModal {...modalProps} missingMembers={missingMembers} />);
 
     expect(
@@ -90,7 +91,7 @@ describe('InviteMissingMembersModal', function () {
     expect(screen.getByText('Invite missing members')).toBeInTheDocument();
   });
 
-  it('enables and disables invite button when toggling one checkbox', async function () {
+  it('enables and disables invite button when toggling one checkbox', async () => {
     render(<InviteMissingMembersModal {...modalProps} missingMembers={missingMembers} />);
 
     expect(
@@ -109,7 +110,7 @@ describe('InviteMissingMembersModal', function () {
     expect(screen.getByText('Invite missing members')).toBeInTheDocument();
   });
 
-  it('can deselect and select all rows', async function () {
+  it('can deselect and select all rows', async () => {
     render(<InviteMissingMembersModal {...modalProps} missingMembers={missingMembers} />);
 
     expect(
@@ -127,7 +128,7 @@ describe('InviteMissingMembersModal', function () {
     expect(screen.getByText('Invite all 5 missing members')).toBeInTheDocument();
   });
 
-  it('can invite all members', async function () {
+  it('can invite all members', async () => {
     render(
       <InviteMissingMembersModal
         {...modalProps}
@@ -163,7 +164,7 @@ describe('InviteMissingMembersModal', function () {
     });
   });
 
-  it('can invite multiple members', async function () {
+  it('can invite multiple members', async () => {
     render(
       <InviteMissingMembersModal
         {...modalProps}

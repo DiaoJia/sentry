@@ -6,7 +6,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.apidocs.constants import RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
 from sentry.apidocs.parameters import GlobalParams, MonitorParams
 from sentry.apidocs.utils import inline_sentry_response_serializer
@@ -16,7 +16,7 @@ from .base import ProjectMonitorEndpoint
 from .base_monitor_checkin_index import MonitorCheckInMixin
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Crons"])
 class ProjectMonitorCheckInIndexEndpoint(ProjectMonitorEndpoint, MonitorCheckInMixin):
     publish_status = {
@@ -25,7 +25,8 @@ class ProjectMonitorCheckInIndexEndpoint(ProjectMonitorEndpoint, MonitorCheckInM
     owner = ApiOwner.CRONS
 
     @extend_schema(
-        operation_id="Retrieve Check-Ins for a Monitor by Project",
+        operation_id="listProjectMonitorCheckins",
+        summary="Retrieve Check-Ins for a Monitor by Project",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             GlobalParams.PROJECT_ID_OR_SLUG,
@@ -40,7 +41,9 @@ class ProjectMonitorCheckInIndexEndpoint(ProjectMonitorEndpoint, MonitorCheckInM
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def get(self, request: Request, project, monitor) -> Response:
+    def get(
+        self, request: Request, project, monitor
+    ) -> Response[list[MonitorCheckInSerializerResponse]]:
         """
         Retrieve a list of check-ins for a monitor
         """

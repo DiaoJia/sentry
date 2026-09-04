@@ -3,17 +3,26 @@ from django.urls import reverse
 
 from fixtures.apidocs_test_case import APIDocsTestCase
 from sentry.models.commit import Commit
+from sentry.models.commitauthor import CommitAuthor
 from sentry.models.releasecommit import ReleaseCommit
 
 
 class ProjectReleaseCommitsListDocsTest(APIDocsTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         project = self.create_project(name="foo")
         release = self.create_release(project=project, version="1")
         release.add_project(project)
         repo = self.create_repo(project=project, name=project.name)
+        # One commit with a mapped author (populated author) and one without ({}),
+        # so the response validates both author shapes.
+        author = CommitAuthor.objects.create(
+            organization_id=project.organization_id, name="Test Author", email=self.user.email
+        )
         commit = Commit.objects.create(
-            organization_id=project.organization_id, repository_id=repo.id, key="a" * 40
+            organization_id=project.organization_id,
+            repository_id=repo.id,
+            key="a" * 40,
+            author=author,
         )
         commit2 = Commit.objects.create(
             organization_id=project.organization_id, repository_id=repo.id, key="b" * 40
@@ -35,7 +44,7 @@ class ProjectReleaseCommitsListDocsTest(APIDocsTestCase):
 
         self.login_as(user=self.user)
 
-    def test_get(self):
+    def test_get(self) -> None:
         response = self.client.get(self.url)
         request = RequestFactory().get(self.url)
 

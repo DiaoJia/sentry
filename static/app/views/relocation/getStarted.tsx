@@ -1,103 +1,136 @@
 import {useState} from 'react';
 import styled from '@emotion/styled';
+import {useQueryClient} from '@tanstack/react-query';
 import {motion} from 'framer-motion';
+import {z} from 'zod';
+
+import {defaultFormOptions, useScrapsForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import {Input} from 'sentry/components/core/input';
-import {Select} from 'sentry/components/core/select';
 import {t} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
-import testableTransition from 'sentry/utils/testableTransition';
-import useApi from 'sentry/utils/useApi';
-import ContinueButton from 'sentry/views/relocation/components/continueButton';
-import StepHeading from 'sentry/views/relocation/components/stepHeading';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getSignupLocalities} from 'sentry/utils/cells';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {StepHeading} from 'sentry/views/relocation/components/stepHeading';
 
 import type {StepProps} from './types';
 
 const PROMO_CODE_ERROR_MSG = t(
   'That promotional code has already been claimed, does not have enough remaining uses, is no longer valid, or never existed.'
 );
+const PROMO_CODE_FALLBACK_ERROR_MSG = t(
+  'Could not validate the promotional code. Try again.'
+);
 
-// Best-effort region name prettification.
-function prettyRegionName(name: string): string {
-  if (name === 'de') {
-    return '🇪🇺 European Union (EU)';
-  }
-  if (name === 'us') {
-    return '🇺🇸 United States of America (US)';
-  }
-  return name;
-}
+const getStartedSchema = z.object({
+  orgSlugs: z.string().trim().min(3, t('Enter at least one organization slug')),
+  localityName: z.string().min(1, t('Select a datacenter location')),
+  promoCode: z.string(),
+});
 
-function GetStarted({relocationState, onUpdateRelocationState, onComplete}: StepProps) {
-  const api = useApi();
-  const {orgSlugs, regionUrl, promoCode} = relocationState;
+export function GetStarted({
+  relocationState,
+  onUpdateRelocationState,
+  onComplete,
+}: StepProps) {
+  const queryClient = useQueryClient();
+  const {orgSlugs, localityName, promoCode} = relocationState;
   const [showPromoCode, setShowPromoCode] = useState(!!promoCode);
-  const selectableRegions = ConfigStore.get('relocationConfig')?.selectableRegions || [];
-  const regions = ConfigStore.get('regions').filter(region =>
-    selectableRegions.includes(region.name)
-  );
+  const localityOptions = getSignupLocalities();
 
-  const handleContinue = async (event: any) => {
-    event.preventDefault();
-    if (promoCode) {
-      try {
-        await api.requestPromise(`/promocodes-external/${promoCode}`, {
-          method: 'GET',
-        });
-      } catch (error) {
-        if (error.status === 403) {
-          addErrorMessage(PROMO_CODE_ERROR_MSG);
-          return;
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {orgSlugs, localityName, promoCode},
+    validators: {onDynamic: getStartedSchema},
+    onSubmit: ({value}) => {
+      const parsedValue = getStartedSchema.parse(value);
+      const completeStep = () => {
+        if (parsedValue.orgSlugs !== value.orgSlugs) {
+          onUpdateRelocationState({orgSlugs: parsedValue.orgSlugs});
         }
-      }
-    }
-    onComplete();
-  };
+        onComplete();
+      };
+
+      return parsedValue.promoCode
+        ? queryClient
+            .fetchQuery(
+              apiOptions.as<unknown>()('/promocodes-external/$code', {
+                path: {code: parsedValue.promoCode},
+                staleTime: 0,
+              })
+            )
+            .then(completeStep)
+            .catch(error => {
+              addErrorMessage(
+                error instanceof RequestError && error.status === 403
+                  ? PROMO_CODE_ERROR_MSG
+                  : PROMO_CODE_FALLBACK_ERROR_MSG
+              );
+            })
+        : completeStep();
+    },
+  });
+
   return (
     <Wrapper data-test-id="get-started">
       <StepHeading step={1}>{t('Basic information needed to get started')}</StepHeading>
       <motion.div
-        transition={testableTransition()}
         variants={{
           initial: {y: 30, opacity: 0},
           animate: {y: 0, opacity: 1},
           exit: {opacity: 0},
         }}
       >
-        <Form onSubmit={handleContinue}>
+        <form.AppForm form={form}>
           <p>
             {t(
               'In order to best facilitate the process some basic information will be required to ensure success with the relocation process of you self-hosted instance'
             )}
           </p>
-          <RequiredLabel>{t('Organization slugs being relocated')}</RequiredLabel>
-          <Input
-            type="text"
-            name="orgs"
-            aria-label={t('org-slugs')}
-            onChange={evt => {
-              onUpdateRelocationState({orgSlugs: evt.target.value});
-            }}
-            minLength={3}
-            placeholder="org-slug-1, org-slug-2, ..."
-            value={orgSlugs}
-          />
-          <Label>{t('Choose a datacenter location')}</Label>
-          <RegionSelect
-            value={regionUrl}
-            name="region"
-            aria-label={t('region')}
-            placeholder="Select Location"
-            options={regions.map(r => ({label: prettyRegionName(r.name), value: r.url}))}
-            onChange={(opt: any) => {
-              onUpdateRelocationState({regionUrl: opt.value});
-            }}
-          />
-          {regionUrl && (
-            <p>{t('This is an important decision and cannot be changed.')}</p>
-          )}
+          <Stack gap="xl">
+            <form.AppField name="orgSlugs">
+              {field => (
+                <field.Layout.Stack
+                  label={t('Organization slugs being relocated')}
+                  required
+                >
+                  <field.Input
+                    aria-label={t('org-slugs')}
+                    value={field.state.value}
+                    onChange={value => {
+                      field.handleChange(value);
+                      onUpdateRelocationState({orgSlugs: value});
+                    }}
+                    placeholder="org-slug-1, org-slug-2, ..."
+                  />
+                </field.Layout.Stack>
+              )}
+            </form.AppField>
+            <form.AppField name="localityName">
+              {field => (
+                <field.Layout.Stack label={t('Choose a datacenter location')} required>
+                  <field.Select
+                    aria-label={t('region')}
+                    value={field.state.value}
+                    options={localityOptions}
+                    placeholder={t('Select Location')}
+                    onChange={value => {
+                      field.handleChange(value);
+                      onUpdateRelocationState({localityName: value});
+                    }}
+                  />
+                </field.Layout.Stack>
+              )}
+            </form.AppField>
+          </Stack>
+          <form.Subscribe selector={state => state.values.localityName}>
+            {selectedLocalityName =>
+              selectedLocalityName ? (
+                <p>{t('This is an important decision and cannot be changed.')}</p>
+              ) : null
+            }
+          </form.Subscribe>
           <DatacenterTextBlock>
             {t(
               "Choose where to store your organization's data. Please note, you won't be able to change locations once your relocation has been initiated. "
@@ -112,92 +145,57 @@ function GetStarted({relocationState, onUpdateRelocationState, onComplete}: Step
             .
           </DatacenterTextBlock>
           {showPromoCode ? (
-            <div>
-              <Label>{t('Promo Code')}</Label>
-              <PromoCodeInput
-                type="text"
-                name="promocode"
-                aria-label={t('promocode')}
-                onChange={evt => {
-                  onUpdateRelocationState({promoCode: evt.target.value});
-                }}
-                placeholder=""
-                value={promoCode}
-              />
-            </div>
+            <form.AppField name="promoCode">
+              {field => (
+                <field.Layout.Stack label={t('Promo Code')}>
+                  <field.Input
+                    aria-label={t('promocode')}
+                    value={field.state.value}
+                    onChange={value => {
+                      field.handleChange(value);
+                      onUpdateRelocationState({promoCode: value});
+                    }}
+                  />
+                </field.Layout.Stack>
+              )}
+            </form.AppField>
           ) : (
             <TogglePromoCode onClick={() => setShowPromoCode(true)}>
               Got a promo code? <u>Click here to redeem it!</u>
             </TogglePromoCode>
           )}
-          <ContinueButton
-            disabled={!orgSlugs || !regionUrl}
-            priority="primary"
-            type="submit"
-          />
-        </Form>
+          <Flex justify="end">
+            <form.SubmitButton>{t('Continue')}</form.SubmitButton>
+          </Flex>
+        </form.AppForm>
       </motion.div>
     </Wrapper>
   );
 }
 
-export default GetStarted;
-
 const Wrapper = styled('div')`
+  box-sizing: border-box;
   margin-left: auto;
   margin-right: auto;
-  padding: ${space(4)};
-  background-color: ${p => p.theme.surface400};
+  padding: ${p => p.theme.space['3xl']};
+  background-color: ${p => p.theme.tokens.background.primary};
   z-index: 100;
   box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
   border-radius: 10px;
+  width: 100%;
   max-width: 769px;
-  max-height: 525px;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   h2 {
-    color: ${p => p.theme.gray500};
+    color: ${p => p.theme.colors.gray800};
   }
-`;
-
-const Form = styled('form')`
-  position: relative;
-`;
-
-const Label = styled('label')`
-  display: block;
-  text-transform: uppercase;
-  color: ${p => p.theme.gray500};
-  margin-top: ${space(2)};
-`;
-
-const RequiredLabel = styled('label')`
-  display: block;
-  text-transform: uppercase;
-  color: ${p => p.theme.gray500};
-  margin-top: ${space(2)};
-  &:after {
-    content: '•';
-    width: 6px;
-    color: ${p => p.theme.red300};
-  }
-`;
-
-const RegionSelect = styled(Select)`
-  button {
-    width: 709px;
-  }
-`;
-
-const PromoCodeInput = styled(Input)`
-  padding-bottom: ${space(2)};
 `;
 
 const TogglePromoCode = styled('a')`
   display: block;
   cursor: pointer;
-  padding-bottom: ${space(2)};
+  padding-bottom: ${p => p.theme.space.xl};
 `;
 
 const DatacenterTextBlock = styled('p')`
-  margin-top: ${space(1)};
+  margin-top: ${p => p.theme.space.md};
 `;

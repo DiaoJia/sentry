@@ -1,29 +1,29 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {ProjectFixture} from 'sentry-fixture/project';
+import {DetailedProjectFixture} from 'sentry-fixture/project';
 
-import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import HighlightsSettingsForm from 'sentry/components/events/highlights/highlightsSettingsForm';
+import {HighlightsSettingsForm} from 'sentry/components/events/highlights/highlightsSettingsForm';
 import * as analytics from 'sentry/utils/analytics';
 
-describe('HighlightsSettingForm', function () {
+describe('HighlightsSettingForm', () => {
   const organization = OrganizationFixture();
   const highlightTags = ['environment', 'handled', 'release', 'url'];
   const highlightContext = {
     user: ['email'],
     browser: ['name', 'version'],
   };
-  const project = ProjectFixture({highlightContext, highlightTags});
+  const project = DetailedProjectFixture({highlightContext, highlightTags});
   const analyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: `/projects/${organization.slug}/${project.slug}/`,
       body: {...project, highlightTags, highlightContext},
     });
   });
 
-  it('should render with highlights from detailed project', async function () {
+  it('should render with highlights from detailed project', async () => {
     render(<HighlightsSettingsForm projectSlug={project.slug} />, {organization});
     await screen.findByText('Highlights');
 
@@ -36,7 +36,7 @@ describe('HighlightsSettingForm', function () {
     expect(contextInput).toHaveValue(JSON.stringify(highlightContext, null, 2));
   });
 
-  it('should allow the Highlight Tags field to mutate highlights', async function () {
+  it('should allow the Highlight Tags field to mutate highlights', async () => {
     render(<HighlightsSettingsForm projectSlug={project.slug} />, {organization});
     await screen.findByText('Highlights');
 
@@ -53,19 +53,21 @@ describe('HighlightsSettingForm', function () {
 
     await userEvent.type(tagInput, `\n${newTag}`);
     await userEvent.click(screen.getByText('Highlights'));
-    expect(updateProjectMock).toHaveBeenCalledWith(
-      url,
-      expect.objectContaining({
-        data: {highlightTags: [...highlightTags, newTag]},
-      })
-    );
+    await waitFor(() => {
+      expect(updateProjectMock).toHaveBeenCalledWith(
+        url,
+        expect.objectContaining({
+          data: {highlightTags: [...highlightTags, newTag]},
+        })
+      );
+    });
     expect(analyticsSpy).toHaveBeenCalledWith(
       'highlights.project_settings.updated_manually',
       expect.anything()
     );
   });
 
-  it('should allow the Highlight Context field to mutate highlights', async function () {
+  it('should allow the Highlight Context field to mutate highlights', async () => {
     render(<HighlightsSettingsForm projectSlug={project.slug} />, {organization});
     await screen.findByText('Highlights');
 
@@ -84,11 +86,36 @@ describe('HighlightsSettingForm', function () {
     await userEvent.paste(JSON.stringify(newContext));
     await userEvent.click(screen.getByText('Highlights'));
 
-    expect(updateProjectMock).toHaveBeenCalledWith(
+    await waitFor(() => {
+      expect(updateProjectMock).toHaveBeenCalledWith(
+        url,
+        expect.objectContaining({
+          data: {highlightContext: newContext},
+        })
+      );
+    });
+  });
+
+  it('should reject highlight context values that are valid JSON but not context mappings', async () => {
+    render(<HighlightsSettingsForm projectSlug={project.slug} />, {organization});
+    await screen.findByText('Highlights');
+
+    const url = `/projects/${organization.slug}/${project.slug}/`;
+    const updateProjectMock = MockApiClient.addMockResponse({
       url,
-      expect.objectContaining({
-        data: {highlightContext: newContext},
-      })
-    );
+      method: 'PUT',
+      body: {...project, highlightTags, highlightContext},
+    });
+
+    const contextInput = screen.getByRole('textbox', {name: 'Highlighted Context'});
+
+    await userEvent.clear(contextInput);
+    await userEvent.paste('123');
+    await userEvent.click(screen.getByText('Highlights'));
+
+    await waitFor(() => {
+      expect(contextInput).toHaveAttribute('aria-invalid', 'true');
+    });
+    expect(updateProjectMock).not.toHaveBeenCalled();
   });
 });

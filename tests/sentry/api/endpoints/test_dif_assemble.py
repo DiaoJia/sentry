@@ -1,9 +1,11 @@
 from hashlib import sha1
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from django.core.files.base import ContentFile
 from django.urls import reverse
 
+from sentry.api.endpoints.debug_files import _clone_proguard_debug_file_for_reupload
 from sentry.models.apitoken import ApiToken
 from sentry.models.debugfile import ProjectDebugFile
 from sentry.models.files.file import File
@@ -20,11 +22,14 @@ from sentry.tasks.assemble import (
     set_assemble_status,
 )
 from sentry.testutils.cases import APITestCase
+from sentry.testutils.objectstore import debug_files_test_both_backends
 from sentry.testutils.silo import assume_test_silo_mode
+from sentry.testutils.skips import requires_objectstore
 
 
+@debug_files_test_both_backends
 class DifAssembleEndpoint(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.organization = self.create_organization(owner=self.user)
         with assume_test_silo_mode(SiloMode.CONTROL):
             self.token = ApiToken.objects.create(user=self.user, scope_list=["project:write"])
@@ -36,7 +41,7 @@ class DifAssembleEndpoint(APITestCase):
             "sentry-api-0-assemble-dif-files", args=[self.organization.slug, self.project.slug]
         )
 
-    def test_assemble_json_schema(self):
+    def test_assemble_json_schema(self) -> None:
         response = self.client.post(
             self.url, data={"lol": "test"}, HTTP_AUTHORIZATION=f"Bearer {self.token.token}"
         )
@@ -63,7 +68,25 @@ class DifAssembleEndpoint(APITestCase):
         assert response.status_code == 200, response.content
         assert response.data[checksum]["state"] == ChunkFileState.NOT_FOUND
 
-    def test_assemble_check(self):
+    def test_assemble_rejects_invalid_debug_id(self) -> None:
+        checksum = sha1(b"1").hexdigest()
+
+        response = self.client.post(
+            self.url,
+            data={
+                checksum: {
+                    "name": "dif",
+                    "debug_id": "invalid-debug-id",
+                    "chunks": [],
+                }
+            },
+            HTTP_AUTHORIZATION=f"Bearer {self.token.token}",
+        )
+
+        assert response.status_code == 400, response.content
+        assert response.data["error"] == "'invalid-debug-id' does not match '^[A-Fa-f0-9-]+$'"
+
+    def test_assemble_check(self) -> None:
         content = b"foo bar"
         fileobj = ContentFile(content)
         file1 = File.objects.create(name="baz.dSYM", type="default", size=7)
@@ -139,7 +162,7 @@ class DifAssembleEndpoint(APITestCase):
         assert set(response.data[not_found_checksum]["missingChunks"]) == {not_found_checksum}
 
     @patch("sentry.tasks.assemble.assemble_dif")
-    def test_assemble(self, mock_assemble_dif):
+    def test_assemble(self, mock_assemble_dif: MagicMock) -> None:
         content1 = b"foo"
         fileobj1 = ContentFile(content1)
         checksum1 = sha1(content1).hexdigest()
@@ -209,7 +232,7 @@ class DifAssembleEndpoint(APITestCase):
         file_blob_index = FileBlobIndex.objects.all()
         assert len(file_blob_index) == 3
 
-    def test_dif_response(self):
+    def test_dif_response(self) -> None:
         sym_file = self.load_fixture("crash.sym")
         blob1 = FileBlob.from_file_with_organization(ContentFile(sym_file), self.organization)
         total_checksum = sha1(sym_file).hexdigest()
@@ -232,7 +255,7 @@ class DifAssembleEndpoint(APITestCase):
             response.data[total_checksum]["dif"]["uuid"] == "67e9247c-814e-392b-a027-dbde6748fcbf"
         )
 
-    def test_dif_error_response(self):
+    def test_dif_error_response(self) -> None:
         sym_file = b"fail"
         blob1 = FileBlob.from_file_with_organization(ContentFile(sym_file), self.organization)
         total_checksum = sha1(sym_file).hexdigest()
@@ -251,3 +274,252 @@ class DifAssembleEndpoint(APITestCase):
         assert response.status_code == 200, response.content
         assert response.data[total_checksum]["state"] == ChunkFileState.ERROR
         assert "unsupported object file format" in response.data[total_checksum]["detail"]
+
+    def test_reuses_existing_proguard_file_with_new_debug_id(self) -> None:
+        file_contents = b"proguard mapping"
+        checksum = sha1(file_contents).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(file_contents), self.organization)
+        chunks = [blob.checksum]
+
+        assemble_dif(
+            project_id=self.project.id,
+            name="/proguard/mapping-00000000-0000-0000-0000-000000000000.txt",
+            checksum=checksum,
+            chunks=chunks,
+        )
+
+        first_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="00000000-0000-0000-0000-000000000000",
+        )
+
+        response = self.client.post(
+            self.url,
+            data={
+                checksum: {
+                    "name": "/proguard/mapping-11111111-1111-1111-1111-111111111111.txt",
+                    "chunks": chunks,
+                }
+            },
+            HTTP_AUTHORIZATION=f"Bearer {self.token.token}",
+        )
+
+        assert response.status_code == 200, response.content
+        assert response.data[checksum]["state"] == ChunkFileState.OK
+        assert response.data[checksum]["dif"]["uuid"] == "11111111-1111-1111-1111-111111111111"
+
+        second_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="11111111-1111-1111-1111-111111111111",
+        )
+
+        assert first_dif.file_id == second_dif.file_id
+        assert File.objects.filter(type="project.dif", checksum=checksum).count() == 1
+
+    def test_reupload_proguard_with_same_debug_id_is_idempotent(self) -> None:
+        file_contents = b"proguard mapping"
+        checksum = sha1(file_contents).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(file_contents), self.organization)
+        chunks = [blob.checksum]
+
+        assemble_dif(
+            project_id=self.project.id,
+            name="/proguard/mapping-00000000-0000-0000-0000-000000000000.txt",
+            checksum=checksum,
+            chunks=chunks,
+        )
+
+        response = self.client.post(
+            self.url,
+            data={
+                checksum: {
+                    "name": "/proguard/mapping-00000000-0000-0000-0000-000000000000.txt",
+                    "chunks": chunks,
+                }
+            },
+            HTTP_AUTHORIZATION=f"Bearer {self.token.token}",
+        )
+
+        assert response.status_code == 200, response.content
+        assert response.data[checksum]["state"] == ChunkFileState.OK
+        assert (
+            ProjectDebugFile.objects.filter(
+                project_id=self.project.id,
+                debug_id="00000000-0000-0000-0000-000000000000",
+            ).count()
+            == 1
+        )
+
+    def test_proguard_reupload_errors_for_non_proguard_file(self) -> None:
+        sym_file = self.load_fixture("crash.sym")
+        checksum = sha1(sym_file).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(sym_file), self.organization)
+        chunks = [blob.checksum]
+
+        assemble_dif(
+            project_id=self.project.id,
+            name="crash.sym",
+            checksum=checksum,
+            chunks=chunks,
+        )
+
+        response = self.client.post(
+            self.url,
+            data={
+                checksum: {
+                    "name": "/proguard/mapping-11111111-1111-1111-1111-111111111111.txt",
+                    "chunks": chunks,
+                }
+            },
+            HTTP_AUTHORIZATION=f"Bearer {self.token.token}",
+        )
+
+        assert response.status_code == 200, response.content
+        assert response.data[checksum]["state"] == ChunkFileState.ERROR
+        assert response.data[checksum]["detail"] == "This file is not a ProGuard mapping."
+
+
+@requires_objectstore
+class DifAssembleProguardCloneBackendTransitionTest(APITestCase):
+    """Cover ProGuard clone requests where the source row's backend differs from
+    the active write backend, i.e. the rollout/rollback transition windows that
+    `debug_files_test_both_backends` cannot reach (it ties source creation and
+    the clone to the same flag state)."""
+
+    def setUp(self) -> None:
+        self.organization = self.create_organization(owner=self.user)
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.token = ApiToken.objects.create(user=self.user, scope_list=["project:write"])
+        self.team = self.create_team(organization=self.organization)
+        self.project = self.create_project(
+            teams=[self.team], organization=self.organization, name="foo"
+        )
+        self.url = reverse(
+            "sentry-api-0-assemble-dif-files", args=[self.organization.slug, self.project.slug]
+        )
+
+    def _assemble_source(self, checksum: str, chunks: list[str]) -> None:
+        assemble_dif(
+            project_id=self.project.id,
+            name="/proguard/mapping-00000000-0000-0000-0000-000000000000.txt",
+            checksum=checksum,
+            chunks=chunks,
+        )
+
+    def _clone_request(self, checksum: str, chunks: list[str]):
+        return self.client.post(
+            self.url,
+            data={
+                checksum: {
+                    "name": "/proguard/mapping-11111111-1111-1111-1111-111111111111.txt",
+                    "chunks": chunks,
+                }
+            },
+            HTTP_AUTHORIZATION=f"Bearer {self.token.token}",
+        )
+
+    def test_clone_file_backed_source_remains_file_backed(self) -> None:
+        """A file-backed source produces a file-backed clone regardless of the active write flag."""
+
+        file_contents = b"proguard mapping"
+        checksum = sha1(file_contents).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(file_contents), self.organization)
+        chunks = [blob.checksum]
+
+        with self.feature({"organizations:objectstore-debugfiles-write": False}):
+            self._assemble_source(checksum, chunks)
+
+        first_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="00000000-0000-0000-0000-000000000000",
+        )
+        assert first_dif.file_id is not None
+        assert first_dif.storage_path is None
+
+        with self.feature({"organizations:objectstore-debugfiles-write": True}):
+            response = self._clone_request(checksum, chunks)
+
+        assert response.status_code == 200, response.content
+        assert response.data[checksum]["state"] == ChunkFileState.OK
+        assert response.data[checksum]["dif"]["uuid"] == "11111111-1111-1111-1111-111111111111"
+
+        second_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="11111111-1111-1111-1111-111111111111",
+        )
+        assert second_dif.file_id == first_dif.file_id
+        assert second_dif.storage_path is None
+        assert second_dif.get_file().read() == file_contents
+
+    def test_clone_dual_written_source_remains_dual_written(self) -> None:
+        """A dual-written source produces a clone with its own Objectstore object."""
+
+        file_contents = b"proguard mapping"
+        checksum = sha1(file_contents).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(file_contents), self.organization)
+        chunks = [blob.checksum]
+
+        with self.feature({"organizations:objectstore-debugfiles-write": True}):
+            self._assemble_source(checksum, chunks)
+
+        first_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="00000000-0000-0000-0000-000000000000",
+        )
+        assert first_dif.file_id is not None
+        assert first_dif.storage_path is not None
+
+        with self.feature({"organizations:objectstore-debugfiles-write": False}):
+            response = self._clone_request(checksum, chunks)
+
+        assert response.status_code == 200, response.content
+        assert response.data[checksum]["state"] == ChunkFileState.OK
+        assert response.data[checksum]["dif"]["uuid"] == "11111111-1111-1111-1111-111111111111"
+
+        second_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="11111111-1111-1111-1111-111111111111",
+        )
+        assert second_dif.file_id == first_dif.file_id
+        assert second_dif.storage_path is not None
+        assert second_dif.storage_path != first_dif.storage_path
+        assert second_dif.get_file().read() == file_contents
+
+    def test_clone_objectstore_source_cleans_up_after_database_error(self) -> None:
+        file_contents = b"proguard mapping"
+        checksum = sha1(file_contents).hexdigest()
+        blob = FileBlob.from_file_with_organization(ContentFile(file_contents), self.organization)
+
+        with self.feature({"organizations:objectstore-debugfiles-write": True}):
+            self._assemble_source(checksum, [blob.checksum])
+
+        source_dif = ProjectDebugFile.objects.get(
+            project_id=self.project.id,
+            debug_id="00000000-0000-0000-0000-000000000000",
+        )
+        source_fileobj = MagicMock(spec=["read", "close"])
+        objectstore_session = MagicMock()
+        objectstore_session.put.return_value = "cloned-storage-path"
+
+        with (
+            patch.object(source_dif, "get_file", return_value=source_fileobj),
+            patch.object(source_dif, "get_objectstore_session", return_value=objectstore_session),
+            patch(
+                "sentry.api.endpoints.debug_files.ProjectDebugFile.objects.create",
+                side_effect=RuntimeError,
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            _clone_proguard_debug_file_for_reupload(
+                self.project,
+                source_dif,
+                "11111111-1111-1111-1111-111111111111",
+                True,
+            )
+
+        objectstore_session.put.assert_called_once_with(
+            source_fileobj,
+            content_type=source_dif.get_content_type(),
+            filename="11111111-1111-1111-1111-111111111111.txt",
+        )
+        objectstore_session.delete.assert_called_once_with("cloned-storage-path")

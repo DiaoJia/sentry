@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Union
+from typing import Literal, Union, overload
 
 from parsimonious.exceptions import ParseError
 from parsimonious.grammar import Grammar
@@ -122,15 +122,19 @@ divide               = ~r"[/÷]"
 
 function_value         = function_name open_paren spaces function_args? spaces closed_paren
 function_args          = aggregate_param (spaces comma spaces aggregate_param)*
-aggregate_param        = quoted_aggregate_param / raw_aggregate_param
+aggregate_param        = backtick_search_param / quoted_aggregate_param / raw_aggregate_param
 raw_aggregate_param    = ~r"[^()\t\n, \"]+"
 quoted_aggregate_param = '"' ('\\"' / ~r'[^\t\n\"]')* '"'
+backtick_search_param  = backtick search_value backtick
 # Different from a field value, since a function arg may not be a valid field
 function_name          = ~r"[a-zA-Z_0-9]+"
 numeric_value          = ~r"[+-]?[0-9]+\.?[0-9]*"
 field_value            = ~r"[a-zA-Z_\.]+"
+# Search value is any text except a backtick which will exit back to normal parsing
+search_value           = ~r"[^`]*"
 
 comma                = ","
+backtick             = "`"
 open_paren           = "("
 closed_paren         = ")"
 spaces               = " "*
@@ -176,12 +180,14 @@ class ArithmeticVisitor(NodeVisitor):
         "count_if",
         "count_unique",
         "failure_count",
+        "failure_rate",
         "min",
         "max",
         "avg",
         "sum",
         "p50",
         "p75",
+        "p90",
         "p95",
         "p99",
         "p100",
@@ -191,18 +197,37 @@ class ArithmeticVisitor(NodeVisitor):
         "eps",
         "epm",
         "count_miserable",
-        "count_web_vitals",
         "percentile_range",
+        # Web vitals uses these functions
+        "count_web_vitals",
+        "performance_score",
+        "opportunity_score",
+        # Frontend overview uses these functions
+        "tpm",
+        "p50_if",
+        "p75_if",
+        "p90_if",
+        "p95_if",
+        "p99_if",
+        "sum_if",
+        "avg_if",
+        "division_if",
+        "failure_rate_if",
+        "failure_count_if",
+        # Mobile vitals uses these functions
+        "ttid_contribution_rate",
+        "ttfd_contribution_rate",
+        # AI Agents overview uses these functions
+        "trace_status_rate",
     }
 
-    def __init__(self, max_operators: int | None, custom_measurements: set[str] | None):
+    def __init__(self, max_operators: int | None):
         super().__init__()
         self.operators: int = 0
         self.terms: int = 0
         self.max_operators = max_operators if max_operators else self.DEFAULT_MAX_OPERATORS
         self.fields: set[str] = set()
         self.functions: set[str] = set()
-        self.custom_measurements: set[str] = custom_measurements or set()
 
     def visit_term(self, _, children):
         maybe_factor, remaining_adds = children
@@ -274,7 +299,7 @@ class ArithmeticVisitor(NodeVisitor):
 
     def visit_field_value(self, node, _):
         field = node.text
-        if field not in self.field_allowlist and field not in self.custom_measurements:
+        if field not in self.field_allowlist:
             raise ArithmeticValidationError(f"{field} not allowed in arithmetic")
         self.fields.add(field)
         return field
@@ -292,12 +317,27 @@ class ArithmeticVisitor(NodeVisitor):
         return children or node
 
 
+@overload
 def parse_arithmetic(
     equation: str,
     max_operators: int | None = None,
-    custom_measurements: set[str] | None = None,
+    *,
+    validate_single_operator: Literal[True],
+) -> tuple[Operation, list[str], list[str]]: ...
+
+
+@overload
+def parse_arithmetic(
+    equation: str,
+    max_operators: int | None = None,
+) -> tuple[Operation | float | str, list[str], list[str]]: ...
+
+
+def parse_arithmetic(
+    equation: str,
+    max_operators: int | None = None,
     validate_single_operator: bool = False,
-) -> tuple[Operation, list[str], list[str]]:
+) -> tuple[Operation | float | str, list[str], list[str]]:
     """Given a string equation try to parse it into a set of Operations"""
     try:
         tree = arithmetic_grammar.parse(equation)
@@ -305,7 +345,7 @@ def parse_arithmetic(
         raise ArithmeticParseError(
             "Unable to parse your equation, make sure it is well formed arithmetic"
         )
-    visitor = ArithmeticVisitor(max_operators, custom_measurements)
+    visitor = ArithmeticVisitor(max_operators)
     result = visitor.visit(tree)
     # total count is the exception to the no mixing rule
     if (
@@ -326,7 +366,6 @@ def resolve_equation_list(
     aggregates_only: bool = False,
     auto_add: bool = False,
     plain_math: bool = False,
-    custom_measurements: set[str] | None = None,
 ) -> tuple[list[str], list[ParsedEquation]]:
     """Given a list of equation strings, resolve them to their equivalent snuba json query formats
     :param equations: list of equations strings that haven't been parsed yet
@@ -341,7 +380,7 @@ def resolve_equation_list(
     resolved_columns: list[str] = selected_columns[:]
     for index, equation in enumerate(equations):
         parsed_equation, fields, functions = parse_arithmetic(
-            equation, None, custom_measurements, validate_single_operator=True
+            equation, None, validate_single_operator=True
         )
 
         if (len(fields) == 0 and len(functions) == 0) and not plain_math:
@@ -399,3 +438,11 @@ def categorize_columns(columns) -> tuple[list[str], list[str]]:
 
 def is_equation_alias(alias: str) -> bool:
     return EQUATION_ALIAS_REGEX.match(alias) is not None
+
+
+def get_equation_alias_index(alias: str) -> int | None:
+    """Extract the index from an equation alias like 'equation[5]' -> 5"""
+    match = re.match(r"^equation\[(\d+)\]$", alias)
+    if match:
+        return int(match.group(1))
+    return None

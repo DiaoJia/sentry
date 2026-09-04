@@ -1,8 +1,9 @@
 import logging
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from sentry.event_manager import EventManager
-from sentry.issues.grouptype import MetricIssuePOC
+from sentry.incidents.grouptype import MetricIssue
 from sentry.models.activity import Activity
 from sentry.testutils.cases import TestCase
 from sentry.types.activity import ActivityType
@@ -12,7 +13,7 @@ from tests.sentry.event_manager.test_event_manager import make_event
 
 
 class ActivityTest(TestCase):
-    def test_get_activities_for_group_none(self):
+    def test_get_activities_for_group_none(self) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
 
@@ -20,7 +21,31 @@ class ActivityTest(TestCase):
         assert len(act_for_group) == 1
         assert act_for_group[0].type == ActivityType.FIRST_SEEN.value
 
-    def test_get_activities_for_group_priority(self):
+    def test_get_activities_for_group_excludes_hidden(self) -> None:
+        project = self.create_project(name="test_activities_group")
+        group = self.create_group(project)
+        user1 = self.create_user()
+
+        visible = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SET_RESOLVED,
+            user=user1,
+            send_notification=False,
+        )
+        # Internal signal that drives workflow handlers; it must never reach the feed.
+        Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SMART_ASSIGNMENT_COMPLETED,
+            send_notification=False,
+        )
+
+        act_for_group = Activity.objects.get_activities_for_group(group=group, num=100)
+        types = {a.type for a in act_for_group}
+        assert ActivityType.SMART_ASSIGNMENT_COMPLETED.value not in types
+        assert visible.id in {a.id for a in act_for_group}
+        assert act_for_group[-1].type == ActivityType.FIRST_SEEN.value
+
+    def test_get_activities_for_group_priority(self) -> None:
         manager = EventManager(make_event(level=logging.FATAL))
         project = self.create_project(name="test_activities_group")
         event = manager.save(project.id)
@@ -53,7 +78,7 @@ class ActivityTest(TestCase):
         assert act_for_group[-1].type == ActivityType.FIRST_SEEN.value
         assert act_for_group[-1].data["priority"] == PriorityLevel.HIGH.to_str()
 
-    def test_get_activities_for_group_simple_priority_ff_on_dups(self):
+    def test_get_activities_for_group_simple_priority_ff_on_dups(self) -> None:
         manager = EventManager(make_event(level=logging.FATAL))
         project = self.create_project(name="test_activities_group")
         event = manager.save(project.id)
@@ -94,7 +119,7 @@ class ActivityTest(TestCase):
         assert act_for_group[-1].type == ActivityType.FIRST_SEEN.value
         assert act_for_group[-1].data["priority"] == PriorityLevel.HIGH.to_str()
 
-    def test_get_activities_for_group_simple(self):
+    def test_get_activities_for_group_simple(self) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
         user1 = self.create_user()
@@ -122,7 +147,7 @@ class ActivityTest(TestCase):
         assert act_for_group[1] == activities[-2]
         assert act_for_group[-1].type == ActivityType.FIRST_SEEN.value
 
-    def test_get_activities_for_group_collapse_same(self):
+    def test_get_activities_for_group_collapse_same(self) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
         user1 = self.create_user()
@@ -219,7 +244,7 @@ class ActivityTest(TestCase):
         assert act_for_group[5] == activities[0]
         assert act_for_group[-1].type == ActivityType.FIRST_SEEN.value
 
-    def test_get_activities_for_group_flip_flop(self):
+    def test_get_activities_for_group_flip_flop(self) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
         user1 = self.create_user()
@@ -325,7 +350,7 @@ class ActivityTest(TestCase):
     @patch("sentry.tasks.activity.send_activity_notifications.delay")
     def test_skips_status_change_notifications_if_disabled(
         self, mock_send_activity_notifications: MagicMock
-    ):
+    ) -> None:
         project = self.create_project(name="test_activities_group")
         group = self.create_group(project)
 
@@ -337,10 +362,113 @@ class ActivityTest(TestCase):
         mock_send_activity_notifications.assert_called_once_with(activity.id)
         mock_send_activity_notifications.reset_mock()
 
-        group.type = MetricIssuePOC.type_id
+        group.type = MetricIssue.type_id
         group.save()
-        _ = Activity.objects.create_group_activity(
-            group=group, type=ActivityType.SET_RESOLVED, data=None, send_notification=True
-        )
+
+        # Mock the MetricIssue to disable status change notifications
+        with patch.object(MetricIssue, "enable_status_change_workflow_notifications", False):
+            _ = Activity.objects.create_group_activity(
+                group=group, type=ActivityType.SET_RESOLVED, data=None, send_notification=True
+            )
 
         mock_send_activity_notifications.assert_not_called()
+
+    @patch("sentry.tasks.activity.send_activity_notifications.delay")
+    def test_skips_workflow_notifications_if_disabled(
+        self, mock_send_activity_notifications: MagicMock
+    ) -> None:
+        project = self.create_project(name="test_activities_group")
+        group = self.create_group(project)
+
+        # Create an assignment activity that would normally trigger a notification
+        activity = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.ASSIGNED,
+            data={"assignee": self.user},
+            send_notification=True,
+        )
+
+        mock_send_activity_notifications.assert_called_once_with(activity.id)
+        mock_send_activity_notifications.reset_mock()
+
+        group.type = MetricIssue.type_id
+        group.save()
+
+        # Mock the MetricIssue to disable workflow notifications
+        with patch.object(MetricIssue, "enable_workflow_notifications", False):
+            _ = Activity.objects.create_group_activity(
+                group=group,
+                type=ActivityType.ASSIGNED,
+                data={"assignee": self.user},
+                send_notification=True,
+            )
+
+        mock_send_activity_notifications.assert_not_called()
+
+    def test_create_group_activity_with_custom_datetime(self) -> None:
+        project = self.create_project(name="test_custom_datetime")
+        group = self.create_group(project)
+        user = self.create_user()
+
+        custom_datetime = datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
+
+        activity = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SET_RESOLVED,
+            user=user,
+            data={"reason": "test"},
+            send_notification=False,
+            datetime=custom_datetime,
+        )
+
+        assert activity.datetime == custom_datetime
+        assert activity.type == ActivityType.SET_RESOLVED.value
+        assert activity.user_id == user.id
+
+    def test_create_group_activity_without_custom_datetime(self) -> None:
+        project = self.create_project(name="test_default_datetime")
+        group = self.create_group(project)
+        user = self.create_user()
+
+        before = datetime.now(timezone.utc)
+
+        activity = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SET_IGNORED,
+            user=user,
+            send_notification=False,
+        )
+
+        after = datetime.now(timezone.utc)
+
+        assert before <= activity.datetime <= after
+
+    def test_create_group_activity_with_ident(self) -> None:
+        project = self.create_project(name="test_with_ident")
+        group = self.create_group(project)
+
+        # `ident` is typically a related row's id (e.g. a GroupResolution id) passed as an int.
+        activity = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SET_RESOLVED_IN_RELEASE,
+            data={"version": ""},
+            send_notification=False,
+            ident=12345,
+        )
+
+        # Activity.ident is a CharField, so the value is persisted as a string.
+        activity.refresh_from_db()
+        assert activity.ident == "12345"
+
+    def test_create_group_activity_without_ident(self) -> None:
+        project = self.create_project(name="test_without_ident")
+        group = self.create_group(project)
+
+        activity = Activity.objects.create_group_activity(
+            group=group,
+            type=ActivityType.SET_RESOLVED,
+            send_notification=False,
+        )
+
+        activity.refresh_from_db()
+        assert activity.ident is None

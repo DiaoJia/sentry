@@ -1,19 +1,19 @@
 import styled from '@emotion/styled';
 
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {Link} from '@sentry/scraps/link';
+
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {IconBusiness, IconCheckmark, IconWarning} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 
 import TrialStarter from 'getsentry/components/trialStarter';
 import UpgradeOrTrialButton from 'getsentry/components/upgradeOrTrialButton';
 import type {Subscription} from 'getsentry/types';
-import {getTrialLength, hasJustStartedPlanTrial} from 'getsentry/utils/billing';
+import {getTrialLength, hasJustStartedPlanTrial, isTrial} from 'getsentry/utils/billing';
 
-import withSubscription from './withSubscription';
+import {withSubscription} from './withSubscription';
 
 type MemberInviteProps = {
   children: (opts: {
@@ -35,9 +35,9 @@ function MemberInviteModalCustomization({
   children,
   subscription,
 }: MemberInviteProps) {
-  const {totalMembers, canTrial, isTrial, totalLicenses} = subscription;
+  const {totalMembers, canTrial, totalLicenses} = subscription;
   const usedSeats = totalMembers ?? 0;
-  const isOverMemberLimit: boolean = totalLicenses > 0 && usedSeats >= totalLicenses;
+  const isOverMemberLimit = totalLicenses > 0 && usedSeats >= totalLicenses;
 
   const renderPassthrough = () =>
     children({
@@ -68,7 +68,7 @@ function MemberInviteModalCustomization({
     }
 
     const allowedToStartTrial = organization.access.includes('org:billing');
-    const isExpired = !canTrial && !isTrial;
+    const isExpired = !canTrial && !isTrial(subscription);
     const trialLength = getTrialLength(organization);
 
     const trialStartText = t('Start your %s day Business Plan trial today!', trialLength);
@@ -78,7 +78,7 @@ function MemberInviteModalCustomization({
         source="member_invite_modal"
         subscription={subscription}
         organization={organization}
-        upgradePriority="default"
+        upgradePriority="secondary"
       />
     );
 
@@ -150,7 +150,7 @@ function MemberInviteModalCustomization({
       }
       return (
         <TrialInfo>
-          <IconBusiness gradient withShine size="md" />
+          <IconBusiness size="md" />
           {trialStartText}
           {upgradeOrTrialButton}
         </TrialInfo>
@@ -180,18 +180,18 @@ const TrialInfo = styled('div')<{status?: string}>`
   display: grid;
   min-height: 50px;
   grid-template-columns: 20px 1fr max-content;
-  gap: ${space(1.5)};
-  padding: ${space(1.5)};
-  margin: ${space(2)} 0;
+  gap: ${p => p.theme.space.lg};
+  padding: ${p => p.theme.space.lg};
+  margin: ${p => p.theme.space.xl} 0;
   align-items: center;
-  font-size: ${p => p.theme.fontSize.md};
-  background: ${p => p.theme.backgroundSecondary};
+  font-size: ${p => p.theme.font.size.md};
+  background: ${p => p.theme.tokens.background.secondary};
   border-radius: 3px;
-  ${p => p.status === 'error' && `color: ${p.theme.red300}`};
+  ${p => p.status === 'error' && `color: ${p.theme.colors.red400}`};
 
   > :first-child {
     justify-self: center;
-    ${p => p.status === 'success' && `color: ${p.theme.green300}`};
+    ${p => p.status === 'success' && `color: ${p.theme.colors.green400}`};
   }
 `;
 

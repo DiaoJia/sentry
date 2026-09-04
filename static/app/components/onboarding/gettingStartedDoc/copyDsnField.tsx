@@ -1,27 +1,35 @@
 import styled from '@emotion/styled';
 
+import type {ContentBlock} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/types';
+import {
+  docsFlowProjectIdParams,
+  docsFlowVariantParams,
+  DSN_COPIED_EVENT,
+  resolveDocsFlowEvent,
+} from 'sentry/components/onboarding/gettingStartedDoc/docsFlowAnalytics';
 import type {DocsParams} from 'sentry/components/onboarding/gettingStartedDoc/types';
-import TextCopyInput from 'sentry/components/textCopyInput';
-import {tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {TextCopyInput} from 'sentry/components/textCopyInput';
+import {t, tct} from 'sentry/locale';
 import {trackAnalytics} from 'sentry/utils/analytics';
 
-export function CopyDsnField({params}: {params: DocsParams<any>}) {
+function CopyDsnField({params}: {params: DocsParams<any>}) {
   return (
     <Wrapper>
       <p>
         {tct(
           "If you already have the configuration for Sentry in your application, and just need this project's ([projectSlug]) DSN, you can find it below:",
           {
-            projectSlug: <code>{params.projectSlug}</code>,
+            projectSlug: <code>{params.project.slug}</code>,
           }
         )}
       </p>
       <TextCopyInput
         onCopy={() =>
-          trackAnalytics('onboarding.dsn-copied', {
+          trackAnalytics(resolveDocsFlowEvent(DSN_COPIED_EVENT, params.docsFlow), {
             organization: params.organization,
             platform: params.platformKey,
+            ...docsFlowProjectIdParams(params.docsFlow, params.project.id),
+            ...docsFlowVariantParams(params.docsFlow),
           })
         }
       >
@@ -31,10 +39,28 @@ export function CopyDsnField({params}: {params: DocsParams<any>}) {
   );
 }
 
+/**
+ * Returns a `custom` content block for `CopyDsnField` with a `markdown`
+ * representation so the DSN is included in copied markdown output.
+ */
+export function copyDsnFieldBlock(params: DocsParams<any>): ContentBlock {
+  return {
+    type: 'custom',
+    content: <CopyDsnField params={params} />,
+    markdown: [
+      t(
+        "If you already have the configuration for Sentry in your application, and just need this project's (%s) DSN, you can find it below:",
+        params.project.slug
+      ),
+      `\`\`\`\n${params.dsn.public}\n\`\`\``,
+    ].join('\n\n'),
+  };
+}
+
 const Wrapper = styled('div')`
-  padding-top: ${space(2)};
-  border-top: 1px solid ${p => p.theme.border};
+  padding-top: ${p => p.theme.space.xl};
+  border-top: 1px solid ${p => p.theme.tokens.border.primary};
   display: flex;
   flex-direction: column;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;

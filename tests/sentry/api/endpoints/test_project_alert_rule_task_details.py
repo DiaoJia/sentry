@@ -13,7 +13,7 @@ from sentry.workflow_engine.migration_helpers.alert_rule import (
 
 
 class ProjectAlertRuleTaskDetailsTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.login_as(user=self.user)
         team = self.create_team()
         project1 = self.create_project(teams=[team], name="foo", fire_project_created=True)
@@ -31,11 +31,11 @@ class ProjectAlertRuleTaskDetailsTest(APITestCase):
             },
         )
 
-    def set_value(self, status, rule_id=None):
+    def set_value(self, status: str, rule_id: int | None = None) -> None:
         client = RedisRuleStatus(self.uuid)
         client.set_value(status, rule_id)
 
-    def test_status_pending(self):
+    def test_status_pending(self) -> None:
         self.login_as(user=self.user)
         self.set_value("pending")
         response = self.client.get(self.url, format="json")
@@ -44,7 +44,7 @@ class ProjectAlertRuleTaskDetailsTest(APITestCase):
         assert response.data["status"] == "pending"
         assert response.data["alertRule"] is None
 
-    def test_status_failed(self):
+    def test_status_failed(self) -> None:
         self.login_as(user=self.user)
         self.set_value("failed", self.rule.id)
         response = self.client.get(self.url, format="json")
@@ -53,9 +53,19 @@ class ProjectAlertRuleTaskDetailsTest(APITestCase):
         assert response.data["status"] == "failed"
         assert response.data["alertRule"] is None
 
-    def test_status_success(self):
+    def test_status_success(self) -> None:
         self.set_value("success", self.rule.id)
         self.login_as(user=self.user)
+
+        critical_trigger = self.create_alert_rule_trigger(alert_rule=self.rule, label="critical")
+        critical_trigger_action = self.create_alert_rule_trigger_action(
+            alert_rule_trigger=critical_trigger
+        )
+        migrate_alert_rule(self.rule)
+        migrate_metric_data_conditions(critical_trigger)
+        migrate_metric_action(critical_trigger_action)
+        migrate_resolve_threshold_data_condition(self.rule)
+
         response = self.client.get(self.url, format="json")
 
         assert response.status_code == 200, response.content
@@ -65,36 +75,16 @@ class ProjectAlertRuleTaskDetailsTest(APITestCase):
         assert rule_data["id"] == str(self.rule.id)
         assert rule_data["name"] == self.rule.name
 
-    def test_workflow_engine_serializer(self):
-        self.set_value("success", self.rule.id)
-        self.login_as(user=self.user)
-
-        self.critical_trigger = self.create_alert_rule_trigger(
-            alert_rule=self.rule, label="critical"
-        )
-        self.critical_trigger_action = self.create_alert_rule_trigger_action(
-            alert_rule_trigger=self.critical_trigger
-        )
-        _, _, _, self.detector, _, _, _, _ = migrate_alert_rule(self.rule)
-        self.critical_detector_trigger, _, _ = migrate_metric_data_conditions(self.critical_trigger)
-
-        self.critical_action, _, _ = migrate_metric_action(self.critical_trigger_action)
-        self.resolve_trigger_data_condition = migrate_resolve_threshold_data_condition(self.rule)
-
-        with self.feature("organizations:workflow-engine-rule-serializers"):
-            response = self.client.get(self.url, format="json")
-
-        assert response.status_code == 200, response.content
-        assert response.data["status"] == "success"
-
-        rule_data = response.data["alertRule"]
-        assert rule_data["id"] == str(self.rule.id)
-        assert rule_data["name"] == self.rule.name
-
-    def test_wrong_no_alert_rule(self):
+    def test_wrong_no_alert_rule(self) -> None:
         rule_id = self.rule.id
         self.set_value("success", rule_id)
         self.rule.delete()
+        self.login_as(user=self.user)
+        response = self.client.get(self.url, format="json")
+        assert response.status_code == 404
+
+    def test_no_detector(self) -> None:
+        self.set_value("success", self.rule.id)
         self.login_as(user=self.user)
         response = self.client.get(self.url, format="json")
         assert response.status_code == 404

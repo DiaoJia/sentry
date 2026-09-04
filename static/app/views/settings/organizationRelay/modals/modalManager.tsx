@@ -8,10 +8,11 @@ import type {Client} from 'sentry/api';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {Relay} from 'sentry/types/relay';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 
-import createTrustedRelaysResponseError from './createTrustedRelaysResponseError';
-import Form from './form';
-import Modal from './modal';
+import {createTrustedRelaysResponseError} from './createTrustedRelaysResponseError';
+import {Form} from './form';
+import {Modal} from './modal';
 
 type FormProps = React.ComponentProps<typeof Form>;
 type Values = FormProps['values'];
@@ -32,10 +33,10 @@ type State = {
   values: Values;
 };
 
-class DialogManager<P extends Props = Props, S extends State = State> extends Component<
-  P,
-  S
-> {
+export class ModalManager<
+  P extends Props = Props,
+  S extends State = State,
+> extends Component<P, S> {
   state = this.getDefaultState();
 
   componentDidMount() {
@@ -93,7 +94,7 @@ class DialogManager<P extends Props = Props, S extends State = State> extends Co
     this.setValidForm(isFormValid);
   }
 
-  clearError<F extends keyof Values>(field: F) {
+  clearError(field: keyof Values) {
     this.setState(prevState => ({
       errors: omit(prevState.errors, field),
     }));
@@ -136,42 +137,45 @@ class DialogManager<P extends Props = Props, S extends State = State> extends Co
     );
 
     try {
-      const response = await api.requestPromise(`/organizations/${orgSlug}/`, {
-        method: 'PUT',
-        data: {trustedRelays},
-      });
+      const response = await api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/', {
+          path: {organizationIdOrSlug: orgSlug},
+        }),
+        {
+          method: 'PUT',
+          data: {trustedRelays},
+        }
+      );
       onSubmitSuccess(response);
       closeModal();
-    } catch (error) {
+    } catch (error: any) {
       this.handleErrorResponse(createTrustedRelaysResponseError(error));
     }
   };
 
-  handleValidate =
-    <F extends keyof Values>(field: F) =>
-    () => {
-      const isFieldValueEmpty = !this.state.values[field].replace(/\s/g, '');
+  handleValidate = (field: keyof Values) => () => {
+    const isFieldValueEmpty = !this.state.values[field].replace(/\s/g, '');
 
-      const fieldErrorAlreadyExist = this.state.errors[field];
+    const fieldErrorAlreadyExist = this.state.errors[field];
 
-      if (isFieldValueEmpty && fieldErrorAlreadyExist) {
-        return;
-      }
+    if (isFieldValueEmpty && fieldErrorAlreadyExist) {
+      return;
+    }
 
-      if (isFieldValueEmpty && !fieldErrorAlreadyExist) {
-        this.setState(prevState => ({
-          errors: {
-            ...prevState.errors,
-            [field]: t('Field Required'),
-          },
-        }));
-        return;
-      }
+    if (isFieldValueEmpty && !fieldErrorAlreadyExist) {
+      this.setState(prevState => ({
+        errors: {
+          ...prevState.errors,
+          [field]: t('Field Required'),
+        },
+      }));
+      return;
+    }
 
-      if (!isFieldValueEmpty && fieldErrorAlreadyExist) {
-        this.clearError(field);
-      }
-    };
+    if (!isFieldValueEmpty && fieldErrorAlreadyExist) {
+      this.clearError(field);
+    }
+  };
 
   handleValidateKey = () => {
     const {savedRelays} = this.props;
@@ -236,5 +240,3 @@ class DialogManager<P extends Props = Props, S extends State = State> extends Co
     );
   }
 }
-
-export default DialogManager;

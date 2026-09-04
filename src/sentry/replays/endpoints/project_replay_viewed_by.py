@@ -6,18 +6,18 @@ from drf_spectacular.utils import extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import features
-from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases.project import ProjectEndpoint, ProjectEventPermission
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases.project import ProjectEventPermission
 from sentry.apidocs.constants import RESPONSE_BAD_REQUEST, RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND
 from sentry.apidocs.examples.replay_examples import ReplayExamples
 from sentry.apidocs.parameters import GlobalParams, ReplayParams
 from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.models.project import Project
+from sentry.replays.endpoints.project_replay_endpoint import ProjectReplayEndpoint
+from sentry.replays.lib.kafka import publish_replay_event
 from sentry.replays.query import query_replay_viewed_by_ids
-from sentry.replays.usecases.events import publish_replay_event, viewed_event
+from sentry.replays.usecases.events import viewed_event
 from sentry.replays.usecases.query import execute_query, make_full_aggregation_query
 from sentry.users.services.user.serial import serialize_generic_user
 from sentry.users.services.user.service import user_service
@@ -31,15 +31,15 @@ class ReplayViewedByResponse(TypedDict):
     data: ReplayViewedByResponsePayload
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Replays"])
-class ProjectReplayViewedByEndpoint(ProjectEndpoint):
-    owner = ApiOwner.REPLAY
+class ProjectReplayViewedByEndpoint(ProjectReplayEndpoint):
     publish_status = {"GET": ApiPublishStatus.PUBLIC, "POST": ApiPublishStatus.PRIVATE}
     permission_classes = (ProjectEventPermission,)
 
     @extend_schema(
-        operation_id="List Users Who Have Viewed a Replay",
+        operation_id="listProjectReplayViewedBy",
+        summary="List Users Who Have Viewed a Replay",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             GlobalParams.PROJECT_ID_OR_SLUG,
@@ -53,12 +53,11 @@ class ProjectReplayViewedByEndpoint(ProjectEndpoint):
         },
         examples=ReplayExamples.GET_REPLAY_VIEWED_BY,
     )
-    def get(self, request: Request, project: Project, replay_id: str) -> Response:
+    def get(
+        self, request: Request, project: Project, replay_id: str
+    ) -> Response[ReplayViewedByResponse]:
         """Return a list of users who have viewed a replay."""
-        if not features.has(
-            "organizations:session-replay", project.organization, actor=request.user
-        ):
-            return Response(status=404)
+        self.check_replay_access(request, project)
 
         try:
             uuid.UUID(replay_id)
@@ -98,10 +97,7 @@ class ProjectReplayViewedByEndpoint(ProjectEndpoint):
         if not request.user.is_authenticated:
             return Response(status=400)
 
-        if not features.has(
-            "organizations:session-replay", project.organization, actor=request.user
-        ):
-            return Response(status=404)
+        self.check_replay_access(request, project)
 
         try:
             replay_id = str(uuid.UUID(replay_id))
@@ -139,7 +135,7 @@ class ProjectReplayViewedByEndpoint(ProjectEndpoint):
             request.user.id,
             finished_at_ts,
         )
-        publish_replay_event(message, is_async=False)
+        publish_replay_event(message)
         return Response(status=204)
 
 

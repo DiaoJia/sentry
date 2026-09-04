@@ -4,11 +4,16 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases.group import GroupEndpoint
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.helpers.deprecation import deprecated
+from sentry.api.helpers.projects import filter_projects_by_permissions
+from sentry.constants import CELL_API_DEPRECATION_DATE, ObjectStatus
+from sentry.issues.endpoints.bases.group import GroupEndpoint
 from sentry.issues.related.same_root_cause import same_root_cause_analysis
 from sentry.issues.related.trace_connected import trace_connected_analysis
 from sentry.models.group import Group
+from sentry.models.project import Project
+from sentry.ratelimits.config import RateLimitConfig
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 
 
@@ -18,20 +23,27 @@ class RequestSerializer(serializers.Serializer[None]):
     project_id = serializers.IntegerField(required=False)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class RelatedIssuesEndpoint(GroupEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {"GET": ApiPublishStatus.EXPERIMENTAL}
     enforce_rate_limit = True
-    rate_limits = {
-        "GET": {
-            RateLimitCategory.IP: RateLimit(limit=15, window=5),
-            RateLimitCategory.USER: RateLimit(limit=15, window=5),
-            RateLimitCategory.ORGANIZATION: RateLimit(limit=15, window=1),
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "GET": {
+                RateLimitCategory.IP: RateLimit(limit=15, window=5),
+                RateLimitCategory.USER: RateLimit(limit=15, window=5),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=15, window=1),
+            }
         }
-    }
+    )
 
     # We get a Group object since the endpoint is /issues/{issue_id}/related-issues
+    @deprecated(
+        CELL_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-group-related-issues",
+        url_names=["sentry-api-0-related-issues"],
+    )
     def get(self, request: Request, group: Group) -> Response:
         """
         Retrieve related issues for a Group
@@ -47,13 +59,23 @@ class RelatedIssuesEndpoint(GroupEndpoint):
         _data = serializer.validated_data
         related_type = _data["type"]
         try:
-            data, meta = (
-                same_root_cause_analysis(group)
-                if related_type == "same_root_cause"
-                else trace_connected_analysis(
-                    group, event_id=_data.get("event_id"), project_id=_data.get("project_id")
+            if related_type == "same_root_cause":
+                data, meta = same_root_cause_analysis(group)
+            else:
+                # A trace can span any project in the organization
+                org_projects = Project.objects.filter(
+                    organization_id=group.project.organization_id, status=ObjectStatus.ACTIVE
                 )
-            )
+                data, meta = trace_connected_analysis(
+                    group,
+                    projects=filter_projects_by_permissions(
+                        projects=list(org_projects),
+                        request=request,
+                        include_all_accessible=True,
+                    ),
+                    event_id=_data.get("event_id"),
+                    project_id=_data.get("project_id"),
+                )
             return Response({"type": related_type, "data": data, "meta": meta})
         except AssertionError:
             return Response({}, status=400)

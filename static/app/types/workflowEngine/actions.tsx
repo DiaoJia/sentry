@@ -1,14 +1,11 @@
-import type {IssueConfigField} from 'sentry/types/integrations';
+import type {JsonFormAdapterFieldConfig} from 'sentry/components/backendJsonFormAdapter/types';
+import type {ObjectStatus} from 'sentry/types/core';
 
 export interface Action {
-  config: {
-    target_type: ActionTarget | null;
-    sentry_app_identifier?: SentryAppIdentifier;
-    target_display?: string;
-    target_identifier?: string;
-  };
-  data: Record<string, unknown>;
+  config: ActionConfig;
+  data: Record<string, any>;
   id: string;
+  status: ObjectStatus;
   type: ActionType;
   integrationId?: string;
 }
@@ -16,22 +13,29 @@ export interface Action {
 export interface TicketCreationAction extends Action {
   [key: string]: any;
   data: {
-    additional_fields?: Record<string, unknown>;
-    dynamic_form_fields?: IssueConfigField[];
+    additional_fields?: Record<string, any>;
+    dynamic_form_fields?: JsonFormAdapterFieldConfig[];
   };
   integrationId: string;
 }
 
+export interface ActionConfig {
+  targetDisplay: string | null;
+  targetIdentifier: string | null;
+  targetType: ActionTarget | null;
+}
+
 export enum ActionTarget {
-  SPECIFIC = 0,
-  USER = 1,
-  TEAM = 2,
-  SENTRY_APP = 3,
-  ISSUE_OWNERS = 4,
+  SPECIFIC = 'specific',
+  USER = 'user',
+  TEAM = 'team',
+  SENTRY_APP = 'sentry_app',
+  ISSUE_OWNERS = 'issue_owners',
 }
 
 export enum ActionType {
   SLACK = 'slack',
+  SLACK_STAGING = 'slack_staging',
   MSTEAMS = 'msteams',
   DISCORD = 'discord',
   PAGERDUTY = 'pagerduty',
@@ -51,11 +55,6 @@ export enum ActionGroup {
   NOTIFICATION = 'notification',
   TICKET_CREATION = 'ticket_creation',
   OTHER = 'other',
-}
-
-export enum SentryAppIdentifier {
-  SENTRY_APP_INSTALLATION_UUID = 'sentry_app_installation_uuid',
-  SENTRY_APP_ID = 'sentry_app_id',
 }
 
 export interface ActionHandler {

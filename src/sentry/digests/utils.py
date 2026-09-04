@@ -5,19 +5,16 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import TypedDict
 
-from django.db.models import Q
-
 from sentry.digests.notifications import Digest
 from sentry.digests.types import Record
-from sentry.eventstore.models import Event
 from sentry.integrations.types import ExternalProviders
 from sentry.models.group import Group
 from sentry.models.project import Project
 from sentry.models.projectownership import ProjectOwnership
 from sentry.models.rule import Rule
-from sentry.models.rulesnooze import RuleSnooze
 from sentry.notifications.types import ActionTargetType, FallthroughChoiceType
 from sentry.notifications.utils.participants import get_send_to
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.types.actor import Actor
 
 
@@ -78,8 +75,10 @@ def get_digest_as_context(digest: Digest) -> _DigestContext:
 
 
 def get_events_by_participant(
-    participants_by_provider_by_event: Mapping[Event, Mapping[ExternalProviders, set[Actor]]]
-) -> Mapping[Actor, set[Event]]:
+    participants_by_provider_by_event: Mapping[
+        Event | GroupEvent, Mapping[ExternalProviders, set[Actor]]
+    ],
+) -> Mapping[Actor, set[Event | GroupEvent]]:
     """Invert a mapping of events to participants to a mapping of participants to events."""
     output = defaultdict(set)
     for event, participants_by_provider in participants_by_provider_by_event.items():
@@ -92,7 +91,9 @@ def get_events_by_participant(
 
 def get_personalized_digests(
     digest: Digest,
-    participants_by_provider_by_event: Mapping[Event, Mapping[ExternalProviders, set[Actor]]],
+    participants_by_provider_by_event: Mapping[
+        Event | GroupEvent, Mapping[ExternalProviders, set[Actor]]
+    ],
 ) -> Mapping[Actor, Digest]:
     events_by_participant = get_events_by_participant(participants_by_provider_by_event)
 
@@ -100,14 +101,14 @@ def get_personalized_digests(
 
     for participant, events in events_by_participant.items():
         if participant is not None:
-            custom_digest = build_custom_digest(digest, events, participant)
+            custom_digest = build_custom_digest(digest, events)
             if custom_digest:
                 actor_to_digest[participant] = custom_digest
 
     return actor_to_digest
 
 
-def get_event_from_groups_in_digest(digest: Digest) -> Iterable[Event]:
+def get_event_from_groups_in_digest(digest: Digest) -> Iterable[Event | GroupEvent]:
     """Gets a random event from each group in the digest."""
     return {
         group_records[0].value.event
@@ -116,19 +117,10 @@ def get_event_from_groups_in_digest(digest: Digest) -> Iterable[Event]:
     }
 
 
-def build_custom_digest(
-    original_digest: Digest, events: Iterable[Event], participant: Actor
-) -> Digest:
+def build_custom_digest(original_digest: Digest, events: Iterable[Event | GroupEvent]) -> Digest:
     """Given a digest and a set of events, filter the digest to only records that include the events."""
     user_digest: Digest = {}
-    rule_snoozes = RuleSnooze.objects.filter(
-        Q(user_id=participant.id) | Q(user_id__isnull=True), rule__in=original_digest.keys()
-    ).values_list("rule", flat=True)
-    snoozed_rule_ids = {rule for rule in rule_snoozes}
-
     for rule, rule_groups in original_digest.items():
-        if rule.id in snoozed_rule_ids:
-            continue
         user_rule_groups = {}
         for group, group_records in rule_groups.items():
             user_group_records = [
@@ -147,7 +139,7 @@ def get_participants_by_event(
     target_type: ActionTargetType = ActionTargetType.ISSUE_OWNERS,
     target_identifier: int | None = None,
     fallthrough_choice: FallthroughChoiceType | None = None,
-) -> Mapping[Event, Mapping[ExternalProviders, set[Actor]]]:
+) -> Mapping[Event | GroupEvent, Mapping[ExternalProviders, set[Actor]]]:
     """
     This is probably the slowest part in sending digests because we do a lot of
     DB calls while we iterate over every event. It would be great if we could
@@ -174,7 +166,7 @@ def sort_records(records: Sequence[Record]) -> Sequence[Record]:
     return sorted(records, key=sort_func, reverse=True)
 
 
-def get_groups(digest: Digest) -> Sequence[tuple[Rule, Group, Event]]:
+def get_groups(digest: Digest) -> Sequence[tuple[Rule, Group, Event | GroupEvent]]:
     """
     Split a digest into groups and return it as a tuple of: the applicable
     rule, the group, and the group's first event.

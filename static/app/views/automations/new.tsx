@@ -1,108 +1,288 @@
-import {useState} from 'react';
-import styled from '@emotion/styled';
+import {useCallback, useMemo} from 'react';
+import {useTheme} from '@emotion/react';
+import * as Sentry from '@sentry/react';
+import {useQueryClient} from '@tanstack/react-query';
+import orderBy from 'lodash/orderBy';
+import {Observer} from 'mobx-react-lite';
+import {parseAsNativeArrayOf, parseAsString, useQueryState} from 'nuqs';
 
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Flex, Stack} from '@sentry/scraps/layout';
+
+import {addSuccessMessage} from 'sentry/actionCreators/indicator';
 import {Breadcrumbs} from 'sentry/components/breadcrumbs';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
+import {FormModel} from 'sentry/components/forms/model';
+import type {OnSubmitCallback} from 'sentry/components/forms/types';
 import * as Layout from 'sentry/components/layouts/thirds';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {Card} from 'sentry/components/workflowEngine/ui/card';
-import {
-  StickyFooter,
-  StickyFooterLabel,
-} from 'sentry/components/workflowEngine/ui/footer';
-import {useWorkflowEngineFeatureGate} from 'sentry/components/workflowEngine/useWorkflowEngineFeatureGate';
-import {IconAdd} from 'sentry/icons';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {FullHeightFormDeprecated} from 'sentry/components/workflowEngine/form/fullHeightForm';
+import {useFormField} from 'sentry/components/workflowEngine/form/useFormField';
+import {StickyFooter} from 'sentry/components/workflowEngine/ui/footer';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import EditConnectedMonitors from 'sentry/views/automations/components/editConnectedMonitors';
-import {makeAutomationBasePathname} from 'sentry/views/automations/pathnames';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {
+  AutomationBuilderContext,
+  useAutomationBuilderReducer,
+} from 'sentry/views/automations/components/automationBuilderContext';
+import {AutomationBuilderErrorContext} from 'sentry/views/automations/components/automationBuilderErrorContext';
+import {AutomationFeedbackButton} from 'sentry/views/automations/components/automationFeedbackButton';
+import {AutomationForm} from 'sentry/views/automations/components/automationForm';
+import type {AutomationFormData} from 'sentry/views/automations/components/automationFormData';
+import {
+  getNewAutomationData,
+  validateAutomationBuilderState,
+} from 'sentry/views/automations/components/automationFormData';
+import {EditableAutomationName} from 'sentry/views/automations/components/editableAutomationName';
+import {getAutomationAnalyticsPayload} from 'sentry/views/automations/components/forms/common/getAutomationAnalyticsPayload';
+import {AutomationFormProvider} from 'sentry/views/automations/components/forms/context';
+import {useCreateAutomation} from 'sentry/views/automations/hooks';
+import {useAutomationBuilderErrors} from 'sentry/views/automations/hooks/useAutomationBuilderErrors';
+import {
+  makeAutomationBasePathname,
+  makeAutomationDetailsPathname,
+} from 'sentry/views/automations/pathnames';
+import {resolveDetectorIdsForProjects} from 'sentry/views/automations/utils/resolveDetectorIdsForProjects';
+import {TopBar} from 'sentry/views/navigation/topBar';
+
+function AutomationDocumentTitle() {
+  const title = useFormField('name');
+  return (
+    <SentryDocumentTitle title={title ? t('%s - New Alert', title) : t('New Alert')} />
+  );
+}
 
 function AutomationBreadcrumbs() {
   const organization = useOrganization();
   return (
     <Breadcrumbs
       crumbs={[
-        {label: t('Automations'), to: makeAutomationBasePathname(organization.slug)},
-        {label: t('New Automation')},
+        {
+          label: t('Alerts'),
+          to: makeAutomationBasePathname(organization.slug),
+        },
+        {label: <EditableAutomationName />},
       ]}
     />
   );
 }
 
-export default function AutomationNew() {
-  const location = useLocation();
-  const organization = useOrganization();
-  useWorkflowEngineFeatureGate({redirect: true});
+const INITIAL_FORM_DATA_DEFAULTS = {
+  allProjects: false,
+  name: '',
+  environment: null,
+  frequency: 0,
+  enabled: true,
+  projectIds: [],
+  detectorIds: [],
+};
 
-  const [connectedIds, setConnectedIds] = useState<Set<string>>(() => {
-    const connectedIdsQuery = location.query.connectedIds as
-      | string
-      | string[]
-      | undefined;
-    if (!connectedIdsQuery) {
-      return new Set<string>();
-    }
-    const connectedIdsArray = Array.isArray(connectedIdsQuery)
-      ? connectedIdsQuery
-      : [connectedIdsQuery];
-    return new Set(connectedIdsArray);
-  });
-
-  return (
-    <SentryDocumentTitle title={t('New Automation')} noSuffix>
-      <Layout.Page>
-        <StyledLayoutHeader>
-          <Layout.HeaderContent>
-            <AutomationBreadcrumbs />
-            <Layout.Title>{t('New Automation')}</Layout.Title>
-          </Layout.HeaderContent>
-        </StyledLayoutHeader>
-        <Layout.Body>
-          <Layout.Main fullWidth>
-            <Flex direction="column" gap={space(1.5)}>
-              <Card>
-                <EditConnectedMonitors
-                  connectedIds={connectedIds}
-                  setConnectedIds={setConnectedIds}
-                />
-              </Card>
-              <span>
-                <Button icon={<IconAdd />}>{t('Create New Monitor')}</Button>
-              </span>
-            </Flex>
-          </Layout.Main>
-        </Layout.Body>
-      </Layout.Page>
-      <StickyFooter>
-        <StickyFooterLabel>{t('Step 1 of 2')}</StickyFooterLabel>
-        <Flex gap={space(1)}>
-          <LinkButton
-            priority="default"
-            to={makeAutomationBasePathname(organization.slug)}
-          >
-            {t('Cancel')}
-          </LinkButton>
-          <LinkButton
-            priority="primary"
-            to={{
-              pathname: `${makeAutomationBasePathname(organization.slug)}new/settings/`,
-              ...(connectedIds.size > 0 && {
-                query: {connectedIds: Array.from(connectedIds)},
-              }),
-            }}
-          >
-            {t('Next')}
-          </LinkButton>
-        </Flex>
-      </StickyFooter>
-    </SentryDocumentTitle>
+function useInitialFormData() {
+  const {selection} = usePageFilters();
+  const [connectedIds] = useQueryState(
+    'connectedIds',
+    parseAsNativeArrayOf(parseAsString)
   );
+  const [projectId] = useQueryState('project', parseAsString);
+  const {projects} = useProjects();
+
+  // If URL params are passed, use them
+  if (connectedIds.length > 0) {
+    return {
+      ...INITIAL_FORM_DATA_DEFAULTS,
+      detectorIds: connectedIds,
+    };
+  }
+  if (projectId) {
+    return {
+      ...INITIAL_FORM_DATA_DEFAULTS,
+      projectIds: [projectId],
+    };
+  }
+
+  // If any specific projects are selected, use the first one
+  const intitialSelectedProject = selection.projects.find(p => p > 0);
+  if (intitialSelectedProject) {
+    return {
+      ...INITIAL_FORM_DATA_DEFAULTS,
+      projectIds: [String(intitialSelectedProject)],
+    };
+  }
+
+  // Otherwise use the first project that the user has access to
+  const sortedUserProjects = orderBy(
+    projects,
+    ['isMember', 'isBookmarked'],
+    ['desc', 'desc']
+  );
+  const firstUserProject = sortedUserProjects[0];
+  return {
+    ...INITIAL_FORM_DATA_DEFAULTS,
+    projectIds: firstUserProject ? [firstUserProject.id] : [],
+  };
 }
 
-const StyledLayoutHeader = styled(Layout.Header)`
-  background-color: ${p => p.theme.background};
-`;
+export default function AutomationNewSettings() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const organization = useOrganization();
+  const model = useMemo(() => new FormModel(), []);
+  const {state, actions} = useAutomationBuilderReducer();
+  const theme = useTheme();
+  const maxWidth = theme.breakpoints.lg;
+  const initialData = useInitialFormData();
+
+  const {
+    errors: automationBuilderErrors,
+    setErrors: setAutomationBuilderErrors,
+    removeError,
+  } = useAutomationBuilderErrors();
+
+  const {mutateAsync: createAutomation, error} = useCreateAutomation();
+
+  const handleSubmit = useCallback<OnSubmitCallback>(
+    async (data, onSubmitSuccess, onSubmitError, _event, formModel) => {
+      const automationFormData = data as AutomationFormData;
+      const errors = validateAutomationBuilderState(state, automationFormData);
+      setAutomationBuilderErrors(errors);
+
+      if (Object.keys(errors).length > 0) {
+        const analyticsPayload = getAutomationAnalyticsPayload(
+          getNewAutomationData({
+            data: automationFormData,
+            state,
+          })
+        );
+        Sentry.logger.warn('Create alert form validation failed', {
+          errors,
+          details: analyticsPayload,
+        });
+        trackAnalytics('automation.created', {
+          organization,
+          ...analyticsPayload,
+          source: 'full',
+          success: false,
+        });
+        return;
+      }
+
+      formModel.setFormSaving();
+
+      const formData = await resolveDetectorIdsForProjects({
+        formData: automationFormData,
+        onSubmitError,
+        organization,
+        projectIds: data.projectIds,
+        queryClient,
+      });
+      if (!formData) {
+        return;
+      }
+      const newAutomationData = getNewAutomationData({
+        data: formData,
+        state,
+      });
+      const analyticsPayload = getAutomationAnalyticsPayload(newAutomationData);
+
+      try {
+        const automation = await createAutomation(newAutomationData);
+        onSubmitSuccess(formModel.getData());
+        addSuccessMessage(t('Alert created'));
+        trackAnalytics('automation.created', {
+          organization,
+          ...analyticsPayload,
+          source: 'full',
+          success: true,
+        });
+        navigate(makeAutomationDetailsPathname(organization.slug, automation.id));
+      } catch (err) {
+        onSubmitError(err);
+        Sentry.logger.warn('Create alert request failure', {
+          error: err,
+          details: analyticsPayload,
+        });
+        trackAnalytics('automation.created', {
+          organization,
+          ...analyticsPayload,
+          source: 'full',
+          success: false,
+        });
+      }
+    },
+    [
+      state,
+      setAutomationBuilderErrors,
+      organization,
+      queryClient,
+      createAutomation,
+      navigate,
+    ]
+  );
+
+  return (
+    <FullHeightFormDeprecated
+      hideFooter
+      initialData={initialData}
+      onSubmit={handleSubmit}
+      model={model}
+    >
+      <AutomationFormProvider>
+        <AutomationDocumentTitle />
+        <Stack flex={1}>
+          <TopBar.Slot name="title">
+            <AutomationBreadcrumbs />
+          </TopBar.Slot>
+          <AutomationFeedbackButton />
+          <Layout.Body maxWidth={maxWidth}>
+            <Layout.Main width="full">
+              <AutomationBuilderErrorContext.Provider
+                value={{
+                  errors: automationBuilderErrors,
+                  setErrors: setAutomationBuilderErrors,
+                  removeError,
+                  mutationErrors: error?.responseJSON,
+                }}
+              >
+                <AutomationBuilderContext.Provider
+                  value={{
+                    state,
+                    actions,
+                    showTriggerLogicTypeSelector: false,
+                  }}
+                >
+                  <AutomationForm model={model} />
+                </AutomationBuilderContext.Provider>
+              </AutomationBuilderErrorContext.Provider>
+            </Layout.Main>
+          </Layout.Body>
+        </Stack>
+        <StickyFooter>
+          <Flex
+            width="100%"
+            maxWidth={`calc(${maxWidth} - ${theme.space.xl} - ${theme.space.xl})`}
+            align="center"
+            gap="md"
+            justify="end"
+          >
+            <LinkButton
+              variant="secondary"
+              to={makeAutomationBasePathname(organization.slug)}
+            >
+              {t('Cancel')}
+            </LinkButton>
+            <Observer>
+              {() => (
+                <Button variant="primary" type="submit" busy={model.isSaving}>
+                  {t('Create Alert')}
+                </Button>
+              )}
+            </Observer>
+          </Flex>
+        </StickyFooter>
+      </AutomationFormProvider>
+    </FullHeightFormDeprecated>
+  );
+}

@@ -3,13 +3,12 @@ import {IssueType} from 'sentry/types/group';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const frontendConfig: IssueCategoryConfigMapping = {
+export const frontendConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
       delete: {
-        enabled: false,
-        disabledReason: t('Not yet supported for user experience issues'),
+        enabled: true,
       },
       deleteAndDiscard: {
         enabled: false,
@@ -49,6 +48,7 @@ const frontendConfig: IssueCategoryConfigMapping = {
     issueSummary: {enabled: false},
   },
   [IssueType.PERFORMANCE_UNCOMPRESSED_ASSET]: {
+    defaultTimePeriod: {sinceFirstSeen: true},
     spanEvidence: {enabled: true},
     evidence: null,
     resources: {
@@ -62,6 +62,7 @@ const frontendConfig: IssueCategoryConfigMapping = {
     autofix: true,
   },
   [IssueType.PERFORMANCE_RENDER_BLOCKING_ASSET]: {
+    defaultTimePeriod: {sinceFirstSeen: true},
     spanEvidence: {enabled: true},
     evidence: null,
     resources: {
@@ -79,6 +80,9 @@ const frontendConfig: IssueCategoryConfigMapping = {
     issueSummary: {enabled: true},
     autofix: true,
   },
+  [IssueType.WEB_VITALS]: {
+    defaultTimePeriod: {sinceFirstSeen: true},
+    issueSummary: {enabled: true},
+    autofix: true,
+  },
 };
-
-export default frontendConfig;

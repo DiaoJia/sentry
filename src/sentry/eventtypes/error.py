@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from sentry.utils.safe import get_path, trim
@@ -72,7 +72,7 @@ class ErrorEvent(BaseEvent):
 
         return rv
 
-    def compute_title(self, metadata: Metadata) -> str:
+    def compute_title(self, metadata: Mapping[str, str | None]) -> str:
         title = metadata.get("type")
         if title is not None:
             value = metadata.get("value")
@@ -93,10 +93,10 @@ def _find_main_exception(data: MutableMapping[str, Any]) -> str | None:
     # With chained exceptions, the SDK or our grouping logic can set the main_exception_id
     # to indicate which exception to use for title & subtitle
     main_exception_id = get_path(data, "main_exception_id")
-    return get_exception(exceptions, main_exception_id)
+    return _get_exception(exceptions, main_exception_id)
 
 
-def get_exception(exceptions: MutableMapping[str, Any], main_exception_id: str) -> str | None:
+def _get_exception(exceptions: MutableMapping[str, Any], main_exception_id: str) -> str | None:
     """Returns the exception from the event data."""
     # When there are multiple exceptions, we need to pick one to extract the metadata from.
     # If the event data has been marked with a main_exception_id, then we should be able to
@@ -110,7 +110,7 @@ def get_exception(exceptions: MutableMapping[str, Any], main_exception_id: str) 
             for exception in exceptions
             if get_path(exception, "mechanism", "exception_id") == main_exception_id
         )
-        if main_exception_id
+        if main_exception_id is not None
         else None
     )
 

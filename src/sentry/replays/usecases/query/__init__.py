@@ -116,7 +116,6 @@ def handle_search_filters(
         # are top level filters they are implicitly AND'ed in the WHERE/HAVING clause.  Otherwise
         # explicit operators are used.
         if isinstance(search_filter, SearchFilter):
-
             try:
                 condition = search_filter_to_condition(search_config, search_filter)
                 if condition is None:
@@ -234,6 +233,7 @@ def query_using_optimized_search(
     period_stop: datetime,
     request_user_id: int | None = None,
     preferred_source: PREFERRED_SOURCE = "scalar",
+    referrer: str | None = None,
 ):
     tenant_id = _make_tenant_id(organization)
 
@@ -256,7 +256,7 @@ def query_using_optimized_search(
         search_filters = handle_viewed_by_me_filters(search_filters, request_user_id)
 
     if preferred_source == "aggregated":
-        query, referrer, source = _query_using_aggregated_strategy(
+        query, strategy_referrer, source = _query_using_aggregated_strategy(
             search_filters,
             sort,
             project_ids,
@@ -264,7 +264,7 @@ def query_using_optimized_search(
             period_stop,
         )
     else:
-        query, referrer, source = _query_using_scalar_strategy(
+        query, strategy_referrer, source = _query_using_scalar_strategy(
             search_filters,
             sort,
             project_ids,
@@ -272,10 +272,12 @@ def query_using_optimized_search(
             period_stop,
         )
 
+    used_referrer = referrer or strategy_referrer
+
     query = query.set_limit(pagination.limit)
     query = query.set_offset(pagination.offset)
 
-    subquery_response = execute_query(query, tenant_id, referrer)
+    subquery_response = execute_query(query, tenant_id, used_referrer)
 
     # The query "has more rows" if the number of rows found matches the limit (which is
     # the requested limit + 1).
@@ -307,7 +309,7 @@ def query_using_optimized_search(
             request_user_id=request_user_id,
         ),
         tenant_id,
-        referrer="replays.query.browse_query",
+        referrer or "replays.query.browse_query",
     )["data"]
 
     return QueryResponse(
@@ -344,7 +346,11 @@ def _query_using_scalar_strategy(
 
     try:
         where = handle_search_filters(scalar_search_config, search_filters)
-        orderby = handle_ordering(agg_sort_config, sort or "-" + DEFAULT_SORT_FIELD)
+        orderby = handle_ordering(
+            agg_sort_config,
+            sort or "-" + DEFAULT_SORT_FIELD,
+            tiebreaker="replay_id",  # Ensure stable sort when ordering by column with duplicates
+        )
     except RetryAggregated:
         return _query_using_aggregated_strategy(
             search_filters,
@@ -378,7 +384,11 @@ def _query_using_aggregated_strategy(
     period_start: datetime,
     period_stop: datetime,
 ):
-    orderby = handle_ordering(agg_sort_config, sort or "-" + DEFAULT_SORT_FIELD)
+    orderby = handle_ordering(
+        agg_sort_config,
+        sort or "-" + DEFAULT_SORT_FIELD,
+        tiebreaker="replay_id",  # Ensure stable sort when ordering by column with duplicates
+    )
 
     having: list[Condition] = handle_search_filters(agg_search_config, search_filters)
     having.append(Condition(Function("min", parameters=[Column("segment_id")]), Op.EQ, 0))
@@ -413,17 +423,13 @@ def make_full_aggregation_query(
     Arguments:
         fields -- if non-empty, used to query a subset of fields. Corresponds to the keys in QUERY_ALIAS_COLUMN_MAP.
     """
-    from sentry.replays.query import QUERY_ALIAS_COLUMN_MAP, compute_has_viewed, select_from_fields
+    from sentry.replays.query import select_from_fields
 
-    def _select_from_fields() -> list[Column | Function]:
-        if fields:
-            return select_from_fields(list(set(fields)), user_id=request_user_id)
-        else:
-            return list(QUERY_ALIAS_COLUMN_MAP.values()) + [compute_has_viewed(request_user_id)]
+    select = select_from_fields(fields, user_id=request_user_id)
 
     return Query(
         match=Entity("replays"),
-        select=_select_from_fields(),
+        select=select,
         where=[
             Condition(Column("project_id"), Op.IN, project_ids),
             # Replay-ids were pre-calculated so no having clause and no aggregating significant
@@ -457,17 +463,29 @@ def execute_query(query: Query, tenant_id: dict[str, int], referrer: str) -> Map
         )
     except RateLimitExceeded as exc:
         sentry_sdk.set_tag("replay-rate-limit-exceeded", True)
-        sentry_sdk.set_tag("org_id", tenant_id.get("organization_id"))
+        sentry_sdk.set_attribute("replay-rate-limit-exceeded", True)
+
+        organization_id = tenant_id.get("organization_id")
+        sentry_sdk.set_tag("org_id", organization_id)
+        if organization_id is not None:
+            sentry_sdk.set_attribute("org_id", organization_id)
+
         sentry_sdk.set_extra("referrer", referrer)
+        sentry_sdk.set_attribute("referrer", referrer)
         sentry_sdk.capture_exception(exc)
         raise
 
 
-def handle_ordering(config: dict[str, Expression], sort: str) -> list[OrderBy]:
-    if sort.startswith("-"):
-        return [OrderBy(_get_sort_column(config, sort[1:]), Direction.DESC)]
-    else:
-        return [OrderBy(_get_sort_column(config, sort), Direction.ASC)]
+def handle_ordering(
+    config: dict[str, Expression], sort: str, tiebreaker: str | None = None
+) -> list[OrderBy]:
+    direction = Direction.DESC if sort.startswith("-") else Direction.ASC
+    bare_sort = sort[1:] if sort.startswith("-") else sort
+
+    orderby = [OrderBy(_get_sort_column(config, bare_sort), direction)]
+    if tiebreaker:
+        orderby.append(OrderBy(Column(tiebreaker), direction))
+    return orderby
 
 
 def _get_sort_column(config: dict[str, Expression], column_name: str) -> Function:

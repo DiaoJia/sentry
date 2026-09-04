@@ -6,7 +6,7 @@ from fixtures.apidocs_test_case import APIDocsTestCase
 
 
 class ProjectReleaseFilesListDocsTest(APIDocsTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         project = self.create_project(name="foo")
         file1 = self.create_file(
             name="blah.js",
@@ -32,13 +32,13 @@ class ProjectReleaseFilesListDocsTest(APIDocsTestCase):
 
         self.login_as(user=self.user)
 
-    def test_get(self):
+    def test_get(self) -> None:
         response = self.client.get(self.url)
         request = RequestFactory().get(self.url)
 
         self.validate_schema(request, response)
 
-    def test_post(self):
+    def test_post(self) -> None:
         data = {
             "name": "http://example.com/application.js",
             "header": "X-SourceMap: http://example.com",
@@ -55,8 +55,6 @@ class ProjectReleaseFilesListDocsTest(APIDocsTestCase):
             self.url,
             data=data,
             content_type="multipart/form-data",
-            SERVER_NAME="us.sentry.io",
-            secure=True,
         )
 
         self.validate_schema(request, response)

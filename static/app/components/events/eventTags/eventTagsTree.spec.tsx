@@ -1,7 +1,5 @@
 import {EventFixture} from 'sentry-fixture/event';
-import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
@@ -14,7 +12,7 @@ import {
 
 import {EventTags} from 'sentry/components/events/eventTags';
 
-describe('EventTagsTree', function () {
+describe('EventTagsTree', () => {
   const {organization, project} = initializeOrg();
   const tags = [
     {key: 'app', value: 'Sentry'},
@@ -65,7 +63,21 @@ describe('EventTagsTree', function () {
   const referrer = 'event-tags-table';
   let mockDetailedProject: jest.Mock;
 
-  beforeEach(function () {
+  async function hoverRow(element: HTMLElement) {
+    const row = element.closest('[data-test-id="tag-tree-row"]');
+    if (!row) {
+      throw new Error('Expected tag action to be inside a tag tree row');
+    }
+    await userEvent.hover(row);
+  }
+
+  async function clickAction(element: HTMLElement) {
+    await hoverRow(element);
+    // jsdom does not evaluate :hover styles, so bypass the hidden action's pointer-events check.
+    await userEvent.click(element, {pointerEventsCheck: 0});
+  }
+
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     mockDetailedProject = MockApiClient.addMockResponse({
       url: `/projects/${organization.slug}/${project.slug}/`,
@@ -73,15 +85,13 @@ describe('EventTagsTree', function () {
     });
   });
 
-  it('renders tag tree', async function () {
+  it('renders tag tree', async () => {
     render(<EventTags projectSlug={project.slug} event={event} />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(mockDetailedProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-    tags.forEach(({value}) => {
+    expect(await screen.findByText(tags[0]!.value)).toBeInTheDocument();
+    tags.slice(1).forEach(({value}) => {
       expect(screen.getByText(value)).toBeInTheDocument();
     });
 
@@ -107,50 +117,30 @@ describe('EventTagsTree', function () {
     expect(linkDropdowns).toHaveLength(tags.length);
 
     for (const link of linkDropdowns) {
-      await userEvent.click(link);
+      await clickAction(link);
       expect(
-        await within(link.parentElement!).findByLabelText(
-          'Search issues with this tag value'
-        )
+        await screen.findByLabelText('Search issues with this tag value')
       ).toBeInTheDocument();
       expect(
-        await within(link.parentElement!).findByLabelText(
-          'View other events with this tag value'
-        )
+        await screen.findByLabelText('View other events with this tag value')
       ).toBeInTheDocument();
       expect(
-        await within(link.parentElement!).findByLabelText('Copy tag value to clipboard')
+        await screen.findByLabelText('Copy tag value to clipboard')
       ).toBeInTheDocument();
     }
   });
 
-  it('renders release tag differently', async function () {
+  it('renders release tag differently', async () => {
     const releaseVersion = 'v1.0';
-
-    const reposRequest = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/repos/`,
-      body: [],
-    });
-    const releasesRequest = MockApiClient.addMockResponse({
-      url: `/projects/${organization.slug}/${project.slug}/releases/${releaseVersion}/`,
-      body: [],
-    });
-    const deploysRequest = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/releases/${releaseVersion}/deploys/`,
-      body: [],
-    });
 
     const releaseEvent = EventFixture({
       tags: [{key: 'release', value: releaseVersion}],
     });
     render(<EventTags projectSlug={project.slug} event={releaseEvent} />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(mockDetailedProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-    const versionText = screen.getByText<
+    const versionText = await screen.findByText<
       HTMLElement & {parentElement: HTMLAnchorElement}
     >(releaseVersion);
     const anchorLink = versionText.parentElement;
@@ -158,11 +148,8 @@ describe('EventTagsTree', function () {
     expect(anchorLink.href).toContain(
       `/mock-pathname/?rd=show&rdRelease=${releaseVersion}&rdSource=release-version-link`
     );
-    expect(reposRequest).toHaveBeenCalled();
-    expect(releasesRequest).toHaveBeenCalled();
-    expect(deploysRequest).toHaveBeenCalled();
     const dropdown = screen.getByLabelText('Tag Actions Menu');
-    await userEvent.click(dropdown);
+    await clickAction(dropdown);
     expect(screen.getByLabelText('View this release')).toBeInTheDocument();
   });
 
@@ -173,7 +160,7 @@ describe('EventTagsTree', function () {
       validateLink: () => {
         const linkElement = screen.getByRole('link', {name: 'abc123'});
         const href = linkElement.attributes.getNamedItem('href');
-        expect(href?.value).toContain(`/organizations/org-slug/insights/summary/`);
+        expect(href?.value).toContain('/organizations/org-slug/insights/summary/');
         expect(href?.value).toContain(`project=${project.id}`);
         expect(href?.value).toContain('transaction=abc123');
         expect(href?.value).toContain(`referrer=${referrer}`);
@@ -186,7 +173,7 @@ describe('EventTagsTree', function () {
         const linkElement = screen.getByRole('link', {name: 'def456'});
         expect(linkElement).toHaveAttribute(
           'href',
-          `/organizations/${organization.slug}/replays/def456/?referrer=${referrer}`
+          `/organizations/${organization.slug}/explore/replays/def456/?referrer=${referrer}`
         );
       },
     },
@@ -195,7 +182,7 @@ describe('EventTagsTree', function () {
       labelText: 'Visit this external link',
       validateLink: async () => {
         renderGlobalModal();
-        const linkElement = screen.getByText('https://example.com');
+        const linkElement = await screen.findByText('https://example.com');
         await userEvent.click(linkElement);
         expect(await screen.findByTestId('external-link-warning')).toBeInTheDocument();
       },
@@ -203,22 +190,22 @@ describe('EventTagsTree', function () {
   ])(
     "renders unique links for '$tag.key' tag",
     async ({tag, labelText, validateLink}) => {
-      const uniqueTagsEvent = EventFixture({tags: [tag], projectID: project.id});
+      const uniqueTagsEvent = EventFixture({
+        tags: [tag],
+        projectID: project.id,
+      });
       render(<EventTags projectSlug={project.slug} event={uniqueTagsEvent} />, {
         organization,
-        deprecatedRouterMocks: true,
       });
       expect(mockDetailedProject).toHaveBeenCalled();
-      expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-      const dropdown = screen.getByLabelText('Tag Actions Menu');
-      await userEvent.click(dropdown);
+      const dropdown = await screen.findByLabelText('Tag Actions Menu');
+      await clickAction(dropdown);
       expect(screen.getByLabelText(labelText)).toBeInTheDocument();
-      validateLink();
+      await (validateLink as () => Promise<void>)();
     }
   );
 
-  it('renders error message tooltips instead of dropdowns', async function () {
+  it('renders error message tooltips instead of dropdowns', async () => {
     const errorTagEvent = EventFixture({
       _meta: {
         tags: {
@@ -254,20 +241,17 @@ describe('EventTagsTree', function () {
     });
     render(<EventTags projectSlug={project.slug} event={errorTagEvent} />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(mockDetailedProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
     // Should only be one dropdown, others have errors
-    const dropdown = screen.getByLabelText('Tag Actions Menu');
+    const dropdown = await screen.findByLabelText('Tag Actions Menu');
     expect(dropdown).toBeInTheDocument();
 
     const errorRows = screen.queryAllByTestId('tag-tree-row-errors');
     expect(errorRows).toHaveLength(2);
   });
 
-  it('avoids rendering nullish tags', async function () {
+  it('avoids rendering nullish tags', async () => {
     const uniqueTagsEvent = EventFixture({
       tags: [
         {key: null, value: 'null tag'},
@@ -277,18 +261,30 @@ describe('EventTagsTree', function () {
     });
     render(<EventTags projectSlug={project.slug} event={uniqueTagsEvent} />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(mockDetailedProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-    expect(screen.getByText('boring-tag', {selector: 'div'})).toBeInTheDocument();
+    expect(await screen.findByText('boring-tag', {selector: 'div'})).toBeInTheDocument();
     expect(screen.getByText('boring tag')).toBeInTheDocument();
     expect(screen.queryByText('null tag')).not.toBeInTheDocument();
     expect(screen.queryByText('undefined tag')).not.toBeInTheDocument();
   });
 
-  it("renders 'Add to event highlights' option based on highlights", async function () {
+  it('renders tags rooted at object prototype property names', async () => {
+    const prototypeTagEvent = EventFixture({
+      tags: [{key: 'constructor.name', value: 'Event'}],
+    });
+
+    render(<EventTags projectSlug={project.slug} event={prototypeTagEvent} />, {
+      organization,
+    });
+
+    expect(mockDetailedProject).toHaveBeenCalled();
+    expect(await screen.findByText('constructor', {selector: 'div'})).toBeInTheDocument();
+    expect(screen.getByText('name', {selector: 'div'})).toBeInTheDocument();
+    expect(screen.getByText('Event')).toBeInTheDocument();
+  });
+
+  it("renders 'Add to event highlights' option based on highlights", async () => {
     const highlightsEvent = EventFixture({
       tags: [
         {key: 'useless-tag', value: 'not so much'},
@@ -303,28 +299,30 @@ describe('EventTagsTree', function () {
     });
     render(<EventTags projectSlug={highlightProject.slug} event={highlightsEvent} />, {
       organization,
-      deprecatedRouterMocks: true,
     });
     expect(mockHighlightProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
 
-    const normalTagRow = screen
-      .getByText('useless-tag', {selector: 'div'})
-      .closest('div[data-test-id=tag-tree-row]') as HTMLElement;
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
+    const normalTagRow = (
+      await screen.findByText('useless-tag', {selector: 'div'})
+    ).closest('div[data-test-id=tag-tree-row]') as HTMLElement;
     const normalTagDropdown = within(normalTagRow).getByLabelText('Tag Actions Menu');
-    await userEvent.click(normalTagDropdown);
+    await clickAction(normalTagDropdown);
     expect(screen.getByLabelText('Add to event highlights')).toBeInTheDocument();
 
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
     const highlightTagRow = screen
       .getByText('highlighted-tag', {selector: 'div'})
       .closest('div[data-test-id=tag-tree-row]') as HTMLElement;
     const highlightTagDropdown =
       within(highlightTagRow).getByLabelText('Tag Actions Menu');
-    await userEvent.click(highlightTagDropdown);
+    await clickAction(highlightTagDropdown);
     expect(screen.queryByLabelText('Add to event highlights')).not.toBeInTheDocument();
   });
 
-  it("renders 'Add to event highlights' option based on permissions", async function () {
+  it("renders 'Add to event highlights' option based on permissions", async () => {
     const readAccessOrganization = OrganizationFixture({
       access: ['org:read'],
     });
@@ -343,41 +341,40 @@ describe('EventTagsTree', function () {
     });
     render(<EventTags projectSlug={highlightProject.slug} event={highlightsEvent} />, {
       organization: readAccessOrganization,
-      deprecatedRouterMocks: true,
     });
     expect(mockHighlightProject).toHaveBeenCalled();
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-    const normalTagRow = screen
-      .getByText('useless-tag', {selector: 'div'})
-      .closest('div[data-test-id=tag-tree-row]') as HTMLElement;
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
+    const normalTagRow = (
+      await screen.findByText('useless-tag', {selector: 'div'})
+    ).closest('div[data-test-id=tag-tree-row]') as HTMLElement;
     const normalTagDropdown = within(normalTagRow).getByLabelText('Tag Actions Menu');
-    await userEvent.click(normalTagDropdown);
+    await clickAction(normalTagDropdown);
     expect(screen.queryByLabelText('Add to event highlights')).not.toBeInTheDocument();
   });
 
-  it('renders tag details link when on issue details route', async function () {
+  it('renders tag details link when on issue details route', async () => {
     const highlightsEvent = EventFixture({
       tags: [{key: 'useless-tag', value: 'not so much'}],
-    });
-    const issueDetailsRouter = RouterFixture({
-      location: LocationFixture({
-        pathname: `/organizations/${organization.slug}/issues/${event.groupID}/`,
-      }),
     });
 
     render(<EventTags projectSlug={project.slug} event={highlightsEvent} />, {
       organization,
-      router: issueDetailsRouter,
-      deprecatedRouterMocks: true,
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/issues/${event.groupID}/`,
+          query: {},
+        },
+        route: '/organizations/:orgId/issues/:groupId/',
+      },
     });
-    expect(await screen.findByTestId('loading-indicator')).not.toBeInTheDocument();
-
-    const normalTagRow = screen
-      .getByText('useless-tag', {selector: 'div'})
-      .closest('div[data-test-id=tag-tree-row]') as HTMLElement;
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
+    const normalTagRow = (
+      await screen.findByText('useless-tag', {selector: 'div'})
+    ).closest('div[data-test-id=tag-tree-row]') as HTMLElement;
     const normalTagDropdown = within(normalTagRow).getByLabelText('Tag Actions Menu');
-    await userEvent.click(normalTagDropdown);
+    await clickAction(normalTagDropdown);
     expect(await screen.findByLabelText('Tag breakdown')).toBeInTheDocument();
   });
 });

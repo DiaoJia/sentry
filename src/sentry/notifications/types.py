@@ -33,6 +33,10 @@ class NotificationSettingEnum(ValueEqualityEnum):
     QUOTA_PROFILE_DURATION_UI = "quotaProfileDurationUI"
     QUOTA_SEER_BUDGET = "quotaSeerBudget"
     QUOTA_SPEND_ALLOCATIONS = "quotaSpendAllocations"
+    QUOTA_LOG_BYTES = "quotaLogBytes"
+    QUOTA_TRACE_METRIC_BYTES = "quotaTraceMetricBytes"
+    QUOTA_SEER_USERS = "quotaSeerUsers"
+    QUOTA_SIZE_ANALYSIS = "quotaSizeAnalyses"
     SPIKE_PROTECTION = "spikeProtection"
     MISSING_MEMBERS = "missingMembers"
     REPORTS = "reports"
@@ -145,6 +149,22 @@ VALID_VALUES_FOR_KEY = {
         NotificationSettingsOptionEnum.ALWAYS,
         NotificationSettingsOptionEnum.NEVER,
     },
+    NotificationSettingEnum.QUOTA_LOG_BYTES: {
+        NotificationSettingsOptionEnum.ALWAYS,
+        NotificationSettingsOptionEnum.NEVER,
+    },
+    NotificationSettingEnum.QUOTA_TRACE_METRIC_BYTES: {
+        NotificationSettingsOptionEnum.ALWAYS,
+        NotificationSettingsOptionEnum.NEVER,
+    },
+    NotificationSettingEnum.QUOTA_SEER_USERS: {
+        NotificationSettingsOptionEnum.ALWAYS,
+        NotificationSettingsOptionEnum.NEVER,
+    },
+    NotificationSettingEnum.QUOTA_SIZE_ANALYSIS: {
+        NotificationSettingsOptionEnum.ALWAYS,
+        NotificationSettingsOptionEnum.NEVER,
+    },
     NotificationSettingEnum.QUOTA_THRESHOLDS: {
         NotificationSettingsOptionEnum.ALWAYS,
         NotificationSettingsOptionEnum.NEVER,
@@ -220,7 +240,7 @@ ACTION_CHOICES = [
 ]
 
 
-class FallthroughChoiceType(Enum):
+class FallthroughChoiceType(StrEnum):
     ALL_MEMBERS = "AllMembers"
     ACTIVE_MEMBERS = "ActiveMembers"
     NO_ONE = "NoOne"
@@ -259,3 +279,13 @@ class UnsubscribeContext:
     resource_id: int
     key: str
     referrer: str | None = None
+
+
+"""
+This is a special identifier that is used to indicate that the notification is a test notification.
+It is used to set the ID of models that are required in order to send a test notification.
+
+Note: This should eventually be deleted the test notification logic should instead utilize a notification platform
+which should provide an API for sending test notifications without "hacking" the notification system.
+"""
+TEST_NOTIFICATION_ID = -1

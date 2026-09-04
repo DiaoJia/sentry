@@ -7,7 +7,7 @@ from sentry.testutils.silo import no_silo_test
 
 @no_silo_test
 class CreateTeamTest(AcceptanceTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user("foo@example.com")
         self.org = self.create_organization(name="Rowdy Tiger", owner=None)
@@ -17,14 +17,14 @@ class CreateTeamTest(AcceptanceTestCase):
         self.login_as(self.user)
         self.path = f"/settings/{self.org.slug}/teams/"
 
-    def test_create(self):
+    def test_create(self) -> None:
         self.browser.get(self.path)
         self.browser.wait_until_test_id("team-list")
 
         # Open the modal
         self.browser.click('button[aria-label="Create Team"]')
         self.browser.wait_until("[role='dialog']")
-        self.browser.element('input[id="slug"]').send_keys("new-team")
+        self.browser.element('input[name="slug"]').send_keys("new-team")
         self.browser.click("[role='dialog'] button[aria-label='Create Team']")
 
         # Wait for modal to go away.

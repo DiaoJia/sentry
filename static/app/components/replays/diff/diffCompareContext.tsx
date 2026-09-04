@@ -1,14 +1,14 @@
 import {
   createContext,
+  useContext,
+  useState,
   type Dispatch,
   type ReactNode,
   type SetStateAction,
-  useContext,
-  useState,
 } from 'react';
 
 import type {Event} from 'sentry/types/event';
-import ReplayReader from 'sentry/utils/replays/replayReader';
+import {ReplayReader} from 'sentry/utils/replays/replayReader';
 import type {HydrationErrorFrame} from 'sentry/utils/replays/types';
 
 type ContextType = {

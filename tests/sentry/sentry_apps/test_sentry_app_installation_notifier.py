@@ -1,5 +1,5 @@
 from collections import namedtuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,7 +12,7 @@ from sentry.utils import json
 from sentry.utils.sentry_apps import SentryAppWebhookRequestsBuffer
 
 
-def raiseStatusFalse():
+def raiseStatusFalse() -> bool:
     return False
 
 
@@ -24,7 +24,7 @@ MockResponseInstance = MockResponse({}, {}, True, 200, raiseStatusFalse)
 
 @control_silo_test
 class TestInstallationNotifier(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.sentry_app = self.create_sentry_app(
@@ -43,7 +43,7 @@ class TestInstallationNotifier(TestCase):
         self.rpc_user = user_service.get_user(user_id=self.user.id)
 
     @patch("sentry.utils.sentry_apps.webhooks.safe_urlopen", return_value=MockResponseInstance)
-    def test_task_enqueued(self, safe_urlopen):
+    def test_task_enqueued(self, safe_urlopen: MagicMock) -> None:
         assert self.rpc_user, "Rpcuser should exist, unless explicitly noted in test"
         SentryAppInstallationNotifier(
             sentry_app_installation=self.install, user=self.rpc_user, action="created"
@@ -56,7 +56,11 @@ class TestInstallationNotifier(TestCase):
             "installation": {"uuid": self.install.uuid},
             "data": {
                 "installation": {
-                    "app": {"uuid": self.sentry_app.uuid, "slug": self.sentry_app.slug},
+                    "app": {
+                        "uuid": self.sentry_app.uuid,
+                        "slug": self.sentry_app.slug,
+                        "sentryAppId": self.sentry_app.id,
+                    },
                     "organization": {"slug": self.organization.slug, "id": self.organization.id},
                     "uuid": self.install.uuid,
                     "code": self.install.api_grant.code,
@@ -75,7 +79,7 @@ class TestInstallationNotifier(TestCase):
         }
 
     @patch("sentry.utils.sentry_apps.webhooks.safe_urlopen", return_value=MockResponseInstance)
-    def test_uninstallation_enqueued(self, safe_urlopen):
+    def test_uninstallation_enqueued(self, safe_urlopen: MagicMock) -> None:
         assert self.rpc_user, "Rpcuser should exist, unless explicitly noted in test"
 
         SentryAppInstallationNotifier(
@@ -89,7 +93,11 @@ class TestInstallationNotifier(TestCase):
             "installation": {"uuid": self.install.uuid},
             "data": {
                 "installation": {
-                    "app": {"uuid": self.sentry_app.uuid, "slug": self.sentry_app.slug},
+                    "app": {
+                        "uuid": self.sentry_app.uuid,
+                        "slug": self.sentry_app.slug,
+                        "sentryAppId": self.sentry_app.id,
+                    },
                     "organization": {"slug": self.organization.slug, "id": self.organization.id},
                     "uuid": self.install.uuid,
                     "code": self.install.api_grant.code,
@@ -108,7 +116,7 @@ class TestInstallationNotifier(TestCase):
         }
 
     @patch("sentry.utils.sentry_apps.webhooks.safe_urlopen")
-    def test_invalid_installation_action(self, safe_urlopen):
+    def test_invalid_installation_action(self, safe_urlopen: MagicMock) -> None:
         with pytest.raises(SentryAppSentryError):
             assert self.rpc_user, "Rpcuser should exist, unless explicitly noted in test"
             SentryAppInstallationNotifier(
@@ -118,7 +126,7 @@ class TestInstallationNotifier(TestCase):
         assert not safe_urlopen.called
 
     @patch("sentry.utils.sentry_apps.webhooks.safe_urlopen", return_value=MockResponseInstance)
-    def test_webhook_request_saved(self, safe_urlopen):
+    def test_webhook_request_saved(self, safe_urlopen: MagicMock) -> None:
         assert self.rpc_user, "Rpcuser should exist, unless explicitly noted in test"
         SentryAppInstallationNotifier(
             sentry_app_installation=self.install, user=self.rpc_user, action="created"

@@ -1,184 +1,192 @@
-import {useCallback, useMemo} from 'react';
-import {useSortable} from '@dnd-kit/sortable';
-import {CSS} from '@dnd-kit/utilities';
-import styled from '@emotion/styled';
-
-import {Button} from 'sentry/components/core/button';
-import type {SelectKey, SelectOption} from 'sentry/components/core/compactSelect';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {IconAdd} from 'sentry/icons/iconAdd';
-import {IconDelete} from 'sentry/icons/iconDelete';
-import {IconGrabbable} from 'sentry/icons/iconGrabbable';
-import {t} from 'sentry/locale';
-import {defined} from 'sentry/utils';
-import {DragNDropContext} from 'sentry/views/explore/contexts/dragNDropContext';
-import {
-  useExploreGroupBys,
-  useSetExploreGroupBys,
-} from 'sentry/views/explore/contexts/pageParamsContext';
-import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
-import type {Column} from 'sentry/views/explore/hooks/useDragNDropColumns';
-import {useGroupByFields} from 'sentry/views/explore/hooks/useGroupByFields';
+import {useCallback, useMemo, useState} from 'react';
+import {useDebouncedValue} from '@tanstack/react-pacer';
 
 import {
   ToolbarFooter,
-  ToolbarFooterButton,
-  ToolbarHeader,
-  ToolbarLabel,
-  ToolbarRow,
   ToolbarSection,
-} from './styles';
+} from 'sentry/views/explore/components/toolbar/styles';
+import {
+  ToolbarGroupByAddGroupBy,
+  ToolbarGroupByDropdown,
+  ToolbarGroupByHeader,
+} from 'sentry/views/explore/components/toolbar/toolbarGroupBy';
+import {DragNDropContext} from 'sentry/views/explore/contexts/dragNDropContext';
+import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
+import type {Column} from 'sentry/views/explore/hooks/useDragNDropColumns';
+import {useGroupByFields} from 'sentry/views/explore/hooks/useGroupByFields';
+import {useSpanItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
+import {useValidatedGroupBys} from 'sentry/views/explore/hooks/useValidatedGroupBys';
+import {useValidateSpansTab} from 'sentry/views/explore/spans/hooks/useValidateSpansTab';
+import {TraceItemDataset} from 'sentry/views/explore/types';
+import {
+  mergeValidatedGroupByTags,
+  shouldHideGroupByForValidation,
+} from 'sentry/views/explore/utils/groupByValidation';
+import type {EventValidationData} from 'sentry/views/explore/utils/validateEventParamsOptions';
 
-interface ToolbarGroupBy {
-  autoSwitchToAggregates: boolean;
+interface ToolbarGroupByProps {
+  groupBys: readonly string[];
+  setGroupBys: (groupBys: string[], mode?: Mode) => void;
 }
 
-export function ToolbarGroupBy({autoSwitchToAggregates}: ToolbarGroupBy) {
-  const {tags} = useTraceItemTags();
+export function ToolbarGroupBy({groupBys, setGroupBys}: ToolbarGroupByProps) {
+  const {
+    data: validatedSearchQueryData,
+    isFetching: validationFetching,
+    isLoading: validationLoading,
+    isPlaceholderData: validationIsPlaceholderData,
+  } = useValidateSpansTab();
+  const validationIsPending =
+    validationFetching || validationLoading || validationIsPlaceholderData;
 
-  const groupBys = useExploreGroupBys();
-  const setGroupBys = useSetExploreGroupBys();
-
-  const setColumns = useCallback(
-    (columns: string[], op: 'insert' | 'update' | 'delete' | 'reorder') => {
-      if (autoSwitchToAggregates && (op === 'insert' || op === 'update')) {
-        setGroupBys(columns, Mode.AGGREGATE);
+  const cleanupInvalidGroupBys = useCallback(
+    (validatedGroupBys: string[]) => {
+      if (validatedGroupBys.some(Boolean)) {
+        setGroupBys(validatedGroupBys);
       } else {
-        setGroupBys(columns);
+        setGroupBys(validatedGroupBys, Mode.SAMPLES);
       }
     },
-    [autoSwitchToAggregates, setGroupBys]
+    [setGroupBys]
+  );
+  const {visibleGroupBys} = useValidatedGroupBys({
+    groupBys,
+    validationData: validatedSearchQueryData,
+    validationIsPending,
+    onGroupBysCleanup: cleanupInvalidGroupBys,
+  });
+
+  const setGroupBysWithOp = useCallback(
+    (columns: string[], op: 'insert' | 'update' | 'delete' | 'reorder') => {
+      const hasValidGroupBy = columns.some(Boolean);
+
+      // insert/update keeps aggregate mode while a valid group by exists
+      if (op === 'insert' || (op === 'update' && hasValidGroupBy)) {
+        setGroupBys(columns, Mode.AGGREGATE);
+        return;
+      }
+
+      if (hasValidGroupBy) {
+        setGroupBys(columns);
+      } else {
+        // when the last group by is cleared, return to samples table
+        setGroupBys(columns, Mode.SAMPLES);
+      }
+    },
+    [setGroupBys]
   );
 
-  const options: Array<SelectOption<string>> = useGroupByFields({groupBys, tags});
-
   return (
-    <DragNDropContext columns={groupBys} setColumns={setColumns} defaultColumn={() => ''}>
-      {({editableColumns, insertColumn, updateColumnAtIndex, deleteColumnAtIndex}) => {
-        return (
-          <ToolbarSection data-test-id="section-group-by">
-            <ToolbarHeader>
-              <Tooltip
-                position="right"
-                title={t(
-                  'Aggregated data by a key attribute to calculate averages, percentiles, count and more'
-                )}
-              >
-                <ToolbarLabel>{t('Group By')}</ToolbarLabel>
-              </Tooltip>
-            </ToolbarHeader>
-            {editableColumns.map((column, i) => (
-              <ColumnEditorRow
-                key={column.id}
-                canDelete={editableColumns.length > 1}
-                column={column}
-                options={options}
-                onColumnChange={c => updateColumnAtIndex(i, c)}
-                onColumnDelete={() => deleteColumnAtIndex(i)}
-              />
-            ))}
-            <ToolbarFooter>
-              <ToolbarFooterButton
-                borderless
-                size="zero"
-                icon={<IconAdd />}
-                onClick={() => insertColumn()}
-                priority="link"
-                aria-label={t('Add Group')}
-              >
-                {t('Add Group')}
-              </ToolbarFooterButton>
-            </ToolbarFooter>
-          </ToolbarSection>
-        );
-      }}
+    <DragNDropContext columns={groupBys.slice()} setColumns={setGroupBysWithOp}>
+      {({editableColumns, insertColumn, updateColumnAtIndex, deleteColumnAtIndex}) => (
+        <ToolbarSection data-test-id="section-group-by">
+          <ToolbarGroupByHeader />
+          {editableColumns.map((column, i) => (
+            <ToolbarGroupByItem
+              key={column.id}
+              canDelete={editableColumns.length > 1}
+              column={column}
+              onColumnChange={c => updateColumnAtIndex(i, c)}
+              onColumnDelete={() => deleteColumnAtIndex(i)}
+              groupBys={visibleGroupBys}
+              validationIsPending={validationIsPending}
+              validatedSearchQueryData={validatedSearchQueryData}
+            />
+          ))}
+          <ToolbarFooter>
+            <ToolbarGroupByAddGroupBy add={() => insertColumn('')} disabled={false} />
+          </ToolbarFooter>
+        </ToolbarSection>
+      )}
     </DragNDropContext>
   );
 }
 
-interface ColumnEditorRowProps {
+interface ToolbarGroupByItemProps {
   canDelete: boolean;
   column: Column<string>;
+  groupBys: readonly string[];
   onColumnChange: (column: string) => void;
   onColumnDelete: () => void;
-  options: Array<SelectOption<string>>;
-  disabled?: boolean;
+  validationIsPending: boolean;
+  validatedSearchQueryData?: EventValidationData;
 }
 
-function ColumnEditorRow({
+function ToolbarGroupByItem({
+  groupBys,
   canDelete,
   column,
-  options,
   onColumnChange,
   onColumnDelete,
-  disabled = false,
-}: ColumnEditorRowProps) {
-  const {attributes, listeners, setNodeRef, transform, transition} = useSortable({
-    id: column.id,
+  validationIsPending,
+  validatedSearchQueryData,
+}: ToolbarGroupByItemProps) {
+  const [search, setSearch] = useState<string | undefined>(undefined);
+  const [debouncedSearch] = useDebouncedValue(search, {wait: 200});
+
+  const {attributes: numberTags, isLoading: numberTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'number'
+  );
+  const {attributes: stringTags, isLoading: stringTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'string'
+  );
+  const {attributes: booleanTags, isLoading: booleanTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'boolean'
+  );
+
+  const {validatedBooleanTags, validatedNumberTags, validatedStringTags} = useMemo(() => {
+    const validatedField = validatedSearchQueryData?.field.find(
+      field => field.valid && field.name === column.column
+    );
+
+    if (!validatedField) {
+      return {
+        validatedBooleanTags: booleanTags,
+        validatedNumberTags: numberTags,
+        validatedStringTags: stringTags,
+      };
+    }
+
+    return mergeValidatedGroupByTags({
+      booleanTags,
+      numberTags,
+      stringTags,
+      validatedFields: [validatedField],
+    });
+  }, [booleanTags, column, numberTags, stringTags, validatedSearchQueryData?.field]);
+
+  const options = useGroupByFields({
+    groupBys,
+    numberTags: validatedNumberTags,
+    stringTags: validatedStringTags,
+    booleanTags: validatedBooleanTags,
+    traceItemType: TraceItemDataset.SPANS,
   });
 
-  function handleColumnChange(option: SelectOption<SelectKey>) {
-    if (defined(option) && typeof option.value === 'string') {
-      onColumnChange(option.value);
-    }
-  }
-
-  const label = useMemo(() => {
-    const tag = options.find(option => option.value === column.column);
-    return <TriggerLabel>{tag?.label ?? column.column}</TriggerLabel>;
-  }, [column.column, options]);
+  const loading =
+    validationIsPending || numberTagsLoading || stringTagsLoading || booleanTagsLoading;
+  const displayColumn = shouldHideGroupByForValidation(
+    column.column,
+    validatedSearchQueryData?.field,
+    validationIsPending
+  )
+    ? {...column, column: ''}
+    : column;
 
   return (
-    <ToolbarRow
-      key={column.id}
-      ref={setNodeRef}
-      style={{transform: CSS.Transform.toString(transform), transition}}
-      {...attributes}
-    >
-      {canDelete ? (
-        <Button
-          aria-label={t('Drag to reorder')}
-          borderless
-          size="zero"
-          disabled={disabled}
-          icon={<IconGrabbable size="sm" />}
-          {...listeners}
-        />
-      ) : null}
-      <StyledCompactSelect
-        data-test-id="editor-column"
-        options={options}
-        triggerLabel={label}
-        disabled={disabled}
-        value={column.column ?? ''}
-        onChange={handleColumnChange}
-        searchable
-        triggerProps={{style: {width: '100%'}}}
-      />
-      {canDelete ? (
-        <Button
-          aria-label={t('Remove Column')}
-          borderless
-          size="zero"
-          icon={<IconDelete size="sm" />}
-          onClick={() => onColumnDelete()}
-        />
-      ) : null}
-    </ToolbarRow>
+    <ToolbarGroupByDropdown
+      column={displayColumn}
+      options={options}
+      groupBys={groupBys}
+      loading={loading}
+      onClose={() => setSearch(undefined)}
+      onSearch={setSearch}
+      canDelete={canDelete}
+      onColumnChange={onColumnChange}
+      onColumnDelete={onColumnDelete}
+    />
   );
 }
-
-const StyledCompactSelect = styled(CompactSelect)`
-  flex-grow: 1;
-  min-width: 0;
-`;
-
-const TriggerLabel = styled('span')`
-  ${p => p.theme.overflowEllipsis}
-  text-align: left;
-  line-height: normal;
-  position: relative;
-  font-weight: normal;
-`;

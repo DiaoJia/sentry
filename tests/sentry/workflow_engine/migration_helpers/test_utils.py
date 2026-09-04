@@ -1,12 +1,14 @@
 from sentry.incidents.models.alert_rule import AlertRuleTriggerAction
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
-from sentry.testutils.cases import APITestCase
+from sentry.testutils.cases import APITestCase, TestCase
 from sentry.testutils.helpers import install_slack
 from sentry.testutils.silo import assume_test_silo_mode_of
 from sentry.users.services.user.service import user_service
 from sentry.workflow_engine.migration_helpers.alert_rule import migrate_alert_rule
+from sentry.workflow_engine.migration_helpers.utils import get_resolve_thresholds
 from sentry.workflow_engine.models import AlertRuleWorkflow, Workflow
+from sentry.workflow_engine.types import DetectorPriorityLevel
 
 OPSGENIE_METADATA = {
     "api_key": "1234-ABCD",
@@ -16,7 +18,7 @@ OPSGENIE_METADATA = {
 
 
 class WorkflowNameTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.rpc_user = user_service.get_user(user_id=self.user.id)
         assert self.rpc_user
         self.og_team = self.create_team(organization=self.organization)
@@ -61,7 +63,7 @@ class WorkflowNameTest(APITestCase):
             self.org_integration.config = {"team_table": [self.og_team_table]}
             self.org_integration.save()
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         """
         Test that the action text is what we expect when we migrate an alert rule with only a critical trigger
         """
@@ -72,7 +74,7 @@ class WorkflowNameTest(APITestCase):
         assert self.rpc_user
         assert workflow.name == f"Email {self.rpc_user.email}"
 
-    def test_warning_and_critical(self):
+    def test_warning_and_critical(self) -> None:
         """
         Test that the action text is what we expect when we have both a critical and warning trigger
         """
@@ -94,7 +96,7 @@ class WorkflowNameTest(APITestCase):
             == f"Critical - Email {self.rpc_user.email}, Warning - Email {self.rpc_user.email}"
         )
 
-    def test_many_actions(self):
+    def test_many_actions(self) -> None:
         """
         Test that if we have more than 3 actions we format the name as expected
         """
@@ -130,7 +132,7 @@ class WorkflowNameTest(APITestCase):
             == f"Email {self.rpc_user.email}, Email {user2.email}, Email {user3.email}...(+1)"
         )
 
-    def test_with_integrations(self):
+    def test_with_integrations(self) -> None:
         """
         Test that we receive the text we expect for actions of various integration types
         """
@@ -173,10 +175,10 @@ class WorkflowNameTest(APITestCase):
         assert self.rpc_user
         assert (
             workflow.name
-            == f"Critical - Email {self.rpc_user.email}, Notify {self.og_team_table["team"]} via {self.opsgenie_integration.provider.title()}, Warning - Email #{self.og_team.slug}...(+2)"
+            == f"Critical - Email {self.rpc_user.email}, Notify {self.og_team_table['team']} via {self.opsgenie_integration.provider.title()}, Warning - Email #{self.og_team.slug}...(+2)"
         )
 
-    def test_missing_org_member(self):
+    def test_missing_org_member(self) -> None:
         user = self.create_user()
         alert_rule = self.create_alert_rule()
         trigger = self.create_alert_rule_trigger(alert_rule=alert_rule)
@@ -190,7 +192,7 @@ class WorkflowNameTest(APITestCase):
 
         assert workflow.name == "Email [removed]"
 
-    def test_missing_team(self):
+    def test_missing_team(self) -> None:
         team = self.create_team(organization=self.organization)
         alert_rule = self.create_alert_rule(organization=self.organization)
         trigger = self.create_alert_rule_trigger(alert_rule=alert_rule)
@@ -206,3 +208,61 @@ class WorkflowNameTest(APITestCase):
         workflow = Workflow.objects.get(id=alert_rule_workflow.workflow.id)
 
         assert workflow.name == "Email [removed]"
+
+
+class GetResolveThresholdsTest(TestCase):
+    def test_empty_input(self) -> None:
+        assert get_resolve_thresholds([]) == {}
+
+    def test_single_group_with_resolve_condition(self) -> None:
+        dcg = self.create_data_condition_group(organization=self.organization)
+        self.create_data_condition(
+            condition_group=dcg,
+            condition_result=DetectorPriorityLevel.OK,
+            comparison=5.0,
+            type="gte",
+        )
+
+        result = get_resolve_thresholds([dcg])
+        assert result == {dcg.id: 5.0}
+
+    def test_single_group_without_resolve_condition(self) -> None:
+        dcg = self.create_data_condition_group(organization=self.organization)
+        self.create_data_condition(
+            condition_group=dcg,
+            condition_result=DetectorPriorityLevel.HIGH,
+            comparison=100.0,
+            type="gte",
+        )
+
+        result = get_resolve_thresholds([dcg])
+        assert result == {}
+
+    def test_multiple_groups_mixed(self) -> None:
+        dcg1 = self.create_data_condition_group(organization=self.organization)
+        dcg2 = self.create_data_condition_group(organization=self.organization)
+        dcg3 = self.create_data_condition_group(organization=self.organization)
+
+        self.create_data_condition(
+            condition_group=dcg1,
+            condition_result=DetectorPriorityLevel.OK,
+            comparison=10.0,
+            type="gte",
+        )
+        # dcg2 has no resolve condition
+        self.create_data_condition(
+            condition_group=dcg2,
+            condition_result=DetectorPriorityLevel.HIGH,
+            comparison=200.0,
+            type="gte",
+        )
+        self.create_data_condition(
+            condition_group=dcg3,
+            condition_result=DetectorPriorityLevel.OK,
+            comparison=25.0,
+            type="gte",
+        )
+
+        result = get_resolve_thresholds([dcg1, dcg2, dcg3])
+        assert result == {dcg1.id: 10.0, dcg3.id: 25.0}
+        assert dcg2.id not in result

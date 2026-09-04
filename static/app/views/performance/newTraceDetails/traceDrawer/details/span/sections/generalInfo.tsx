@@ -2,41 +2,42 @@ import {Fragment} from 'react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
+import {InfoTip} from '@sentry/scraps/info';
+
 import {DateTime} from 'sentry/components/dateTime';
 import {getFormattedTimeRangeWithLeadingAndTrailingZero} from 'sentry/components/events/interfaces/spans/utils';
 import {Content} from 'sentry/components/keyValueData';
-import QuestionTooltip from 'sentry/components/questionTooltip';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import getDuration from 'sentry/utils/duration/getDuration';
-import getDynamicText from 'sentry/utils/getDynamicText';
-import {SQLishFormatter} from 'sentry/utils/sqlish/SQLishFormatter';
+import {getDuration} from 'sentry/utils/duration/getDuration';
+import {getDynamicText} from 'sentry/utils/getDynamicText';
+import {SQLishFormatter} from 'sentry/utils/sqlish';
 import {FullSpanDescription} from 'sentry/views/insights/common/components/fullSpanDescription';
 import {WiderHovercard} from 'sentry/views/insights/common/components/tableCells/spanDescriptionCell';
 import {resolveSpanModule} from 'sentry/views/insights/common/utils/resolveSpanModule';
-import {ModuleName, SpanIndexedField} from 'sentry/views/insights/types';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {ModuleName, SpanFields} from 'sentry/views/insights/types';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 import {
-  type SectionCardKeyValueList,
   TraceDrawerComponents,
+  type SectionCardKeyValueList,
 } from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
 import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
-import type {TraceTreeNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode';
+import type {BaseNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/baseNode';
+import type {SpanNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/spanNode';
 
 import {useSpanAncestryAndGroupingItems} from './ancestry';
 
 type GeneralnfoProps = {
   location: Location;
-  node: TraceTreeNode<TraceTree.Span>;
-  onParentClick: (node: TraceTreeNode<TraceTree.NodeValue>) => void;
+  node: SpanNode;
+  onParentClick: (node: BaseNode) => void;
   organization: Organization;
 };
 
-function SpanDuration({node}: {node: TraceTreeNode<TraceTree.Span>}) {
+function SpanDuration({node}: {node: SpanNode}) {
   const span = node.value;
-  const startTimestamp: number = span.start_timestamp;
-  const endTimestamp: number = span.timestamp;
+  const startTimestamp = span.start_timestamp;
+  const endTimestamp = span.timestamp;
   const duration = endTimestamp - startTimestamp;
 
   return (
@@ -46,15 +47,14 @@ function SpanDuration({node}: {node: TraceTreeNode<TraceTree.Span>}) {
       baseDescription={t(
         'Average total time for this span group across the project associated with its parent transaction, over the last 24 hours'
       )}
-      node={node}
     />
   );
 }
 
-function SpanSelfTime({node}: {node: TraceTreeNode<TraceTree.Span>}) {
+function SpanSelfTime({node}: {node: SpanNode}) {
   const span = node.value;
-  const startTimestamp: number = span.start_timestamp;
-  const endTimestamp: number = span.timestamp;
+  const startTimestamp = span.start_timestamp;
+  const endTimestamp = span.timestamp;
   const duration = endTimestamp - startTimestamp;
 
   if (
@@ -73,7 +73,6 @@ function SpanSelfTime({node}: {node: TraceTreeNode<TraceTree.Span>}) {
       baseDescription={t(
         'Average self time for this span group across the project associated with its parent transaction, over the last 24 hours'
       )}
-      node={node}
     />
   ) : null;
 }
@@ -81,7 +80,7 @@ function SpanSelfTime({node}: {node: TraceTreeNode<TraceTree.Span>}) {
 export function GeneralInfo(props: GeneralnfoProps) {
   const span = props.node.value;
 
-  const resolvedModule: ModuleName = resolveSpanModule(
+  const resolvedModule = resolveSpanModule(
     span.sentry_tags?.op,
     span.sentry_tags?.category
   );
@@ -110,7 +109,7 @@ export function GeneralInfo(props: GeneralnfoProps) {
       value: span.op,
       actionButton: (
         <TraceDrawerComponents.KeyValueAction
-          rowKey={SpanIndexedField.SPAN_OP}
+          rowKey={SpanFields.SPAN_OP}
           rowValue={span.op}
           projectIds={projectIds}
         />
@@ -142,7 +141,7 @@ export function GeneralInfo(props: GeneralnfoProps) {
       ),
       actionButton: (
         <TraceDrawerComponents.KeyValueAction
-          rowKey={SpanIndexedField.SPAN_DESCRIPTION}
+          rowKey={SpanFields.SPAN_DESCRIPTION}
           rowValue={span.description}
           projectIds={projectIds}
         />
@@ -155,7 +154,7 @@ export function GeneralInfo(props: GeneralnfoProps) {
       value: <SpanDuration node={props.node} />,
       actionButton: (
         <TraceDrawerComponents.KeyValueAction
-          rowKey={SpanIndexedField.SPAN_DURATION}
+          rowKey={SpanFields.SPAN_DURATION}
           rowValue={getDuration((endTimestamp - startTimestamp) / 1000, 2, true)}
           projectIds={projectIds}
         />
@@ -189,7 +188,7 @@ export function GeneralInfo(props: GeneralnfoProps) {
       }),
       actionButton: (
         <TraceDrawerComponents.KeyValueAction
-          rowKey={SpanIndexedField.TIMESTAMP}
+          rowKey={SpanFields.TIMESTAMP}
           rowValue={new Date(endTimestamp).toISOString()}
           projectIds={projectIds}
         />
@@ -205,16 +204,13 @@ export function GeneralInfo(props: GeneralnfoProps) {
       subjectNode: (
         <TraceDrawerComponents.FlexBox style={{gap: '5px'}}>
           {t('Self Time')}
-          <QuestionTooltip
-            title={t('Applicable to the children of this event only')}
-            size="xs"
-          />
+          <InfoTip title={t('Applicable to the children of this event only')} size="xs" />
         </TraceDrawerComponents.FlexBox>
       ),
       value: <SpanSelfTime node={props.node} />,
       actionButton: (
         <TraceDrawerComponents.KeyValueAction
-          rowKey={SpanIndexedField.SPAN_SELF_TIME}
+          rowKey={SpanFields.SPAN_SELF_TIME}
           rowValue={getDuration(span.exclusive_time / 1000, 2, true)}
           projectIds={projectIds}
         />
@@ -226,25 +222,25 @@ export function GeneralInfo(props: GeneralnfoProps) {
   items = [...items, ...ancestryAndGroupingItems];
 
   return (
-    <InterimSection
+    <FoldSection
+      sectionKey="trace_transaction_general"
       title={t('General')}
       disableCollapsePersistence
-      type="trace_transaction_general"
     >
       <ContentWrapper>
         {items.map(item => (
           <Content key={item.key} item={item} />
         ))}
       </ContentWrapper>
-    </InterimSection>
+    </FoldSection>
   );
 }
 
 const ContentWrapper = styled('div')`
   display: grid;
-  column-gap: ${space(1.5)};
+  column-gap: ${p => p.theme.space.lg};
   grid-template-columns: fit-content(50%) 1fr;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 function getFormattedSpanDescription(span: TraceTree.Span) {
@@ -254,7 +250,7 @@ function getFormattedSpanDescription(span: TraceTree.Span) {
   }
 
   const formatter = new SQLishFormatter();
-  const resolvedModule: ModuleName = resolveSpanModule(
+  const resolvedModule = resolveSpanModule(
     span.sentry_tags?.op,
     span.sentry_tags?.category
   );
@@ -273,5 +269,5 @@ const DescriptionWrapper = styled('div')`
 `;
 
 const EmptyValueContainer = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

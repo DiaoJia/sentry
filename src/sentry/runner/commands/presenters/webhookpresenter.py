@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import time
 from typing import Any
 
 import requests
@@ -13,14 +14,17 @@ from sentry.utils import json
 class WebhookPresenter(OptionsPresenter):
     """
     Sends changes of runtime options made via sentry configoptions
-    to a webhook url in a truncated json format. The webhook url can
-    be configured to your liking.
+    to a webhook url in json format. The webhook url can be configured
+    to your liking.
+
+    Values are sent in full, untruncated - the receiving webhook is
+    responsible for any truncation needed to fit its own display
+    constraints (e.g. Slack's block/section length limits).
     """
 
-    MAX_OPTION_VALUE_LENGTH = 30
-
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, timestamp: float | None = None) -> None:
         self.source = source
+        self.timestamp: float | None = timestamp
         self.drifted_options: list[tuple[str, Any]] = []
         self.channel_updated_options: list[str] = []
         self.updated_options: list[tuple[str, Any, Any]] = []
@@ -51,29 +55,30 @@ class WebhookPresenter(OptionsPresenter):
             return
 
         region: str | None = (
-            settings.SENTRY_REGION
-            if settings.SENTRY_REGION
-            else settings.CUSTOMER_ID if settings.CUSTOMER_ID else settings.SILO_MODE
+            settings.SENTRY_LOCAL_CELL
+            if settings.SENTRY_LOCAL_CELL
+            else settings.CUSTOMER_ID
+            if settings.CUSTOMER_ID
+            else settings.SILO_MODE
         )
 
-        json_data = {
+        json_data: dict[str, Any] = {
             "region": region,
             "source": self.source,
             "drifted_options": [
-                {"option_name": key, "option_value": self.truncate_value(value)}
+                {"option_name": key, "option_value": str(value)}
                 for key, value in self.drifted_options
             ],
             "updated_options": [
                 {
                     "option_name": key,
-                    "db_value": self.truncate_value(db_value),
-                    "value": self.truncate_value(value),
+                    "db_value": str(db_value),
+                    "value": str(value),
                 }
                 for key, db_value, value in self.updated_options
             ],
             "set_options": [
-                {"option_name": key, "option_value": self.truncate_value(value)}
-                for key, value in self.set_options
+                {"option_name": key, "option_value": str(value)} for key, value in self.set_options
             ],
             "unset_options": self.unset_options,
             "not_writable_options": [
@@ -85,14 +90,13 @@ class WebhookPresenter(OptionsPresenter):
                 for key, got_type, expected_type in self.invalid_type_options
             ],
         }
-        self._send_to_webhook(json_data)
 
-    def truncate_value(self, value: str) -> str:
-        value_str = str(value)
-        if len(value_str) > self.MAX_OPTION_VALUE_LENGTH:
-            return value_str[: self.MAX_OPTION_VALUE_LENGTH] + "..."
-        else:
-            return value_str
+        if self.timestamp is not None:
+            start_time = self.timestamp
+            latency_seconds = time.time() - start_time
+            json_data["latency_seconds"] = latency_seconds
+
+        self._send_to_webhook(json_data)
 
     def set(self, key: str, value: Any) -> None:
         self.set_options.append((key, value))

@@ -1,20 +1,21 @@
+import {useMutation, useQueryClient} from '@tanstack/react-query';
+
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {
-  type ApiQueryKey,
   setApiQueryData,
   useApiQuery,
   type UseApiQueryOptions,
-  useMutation,
-  useQueryClient,
 } from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
 
 interface AssistantResult {
   guide: string;
   seen: boolean;
 }
 
-const assistantQueryKey: ApiQueryKey = ['/assistant/'];
+const assistantQueryKey: ApiQueryKey = [getApiUrl('/assistant/')];
 
 export function useAssistant(
   options: Partial<UseApiQueryOptions<AssistantResult[]>> = {}
@@ -28,18 +29,12 @@ export function useAssistant(
 interface MutateAssistantData {
   guide: string;
   status: 'viewed' | 'dismissed' | 'restart';
-  useful?: boolean;
 }
 
 // Matching the logic from src/sentry/api/endpoints/assistant.py
 const seenStatuses = new Set(['viewed', 'dismissed']);
 
-interface UseMutateAssistantProps {
-  onError?: (error: RequestError) => void;
-  onSuccess?: () => void;
-}
-
-export function useMutateAssistant({onSuccess, onError}: UseMutateAssistantProps = {}) {
+export function useMutateAssistant() {
   const api = useApi({persistInFlight: false});
   const queryClient = useQueryClient();
 
@@ -57,7 +52,5 @@ export function useMutateAssistant({onSuccess, onError}: UseMutateAssistantProps
           )
       );
     },
-    onSuccess: () => onSuccess?.(),
-    onError: (error: RequestError) => onError?.(error),
   });
 }

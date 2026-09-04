@@ -15,20 +15,92 @@ from sentry.lang.native.processing import (
     ELECTRON_FIRST_MODULE_REWRITE_RULES,
     _merge_image,
     get_frames_for_symbolication,
+    get_native_symbolication_functions,
     process_native_stacktraces,
 )
-from sentry.models.eventerror import EventError
+from sentry.lang.native.symbolicator import SymbolicatorFunction
+from sentry.models.eventerror import EventErrorType
+from sentry.stacktraces.processing import find_stacktraces_in_data
 from sentry.testutils.pytest.fixtures import django_db_all
 from sentry.utils.safe import get_path
 
+MINIDUMP_PLACEHOLDER = {
+    "type": "Minidump",
+    "value": "Invalid Minidump",
+    "mechanism": {"type": "minidump", "handled": False, "synthetic": True},
+}
 
-def test_merge_symbolicator_image_empty():
+APPLECRASHREPORT_PLACEHOLDER = {
+    "type": "AppleCrashReport",
+    "value": "Invalid Apple Crash Report",
+    "mechanism": {"type": "applecrashreport", "handled": False, "synthetic": True},
+}
+
+NATIVE_EXCEPTION = {
+    "type": "EXCEPTION_ACCESS_VIOLATION_WRITE",
+    "stacktrace": {"frames": [{"instruction_addr": "0x2a2a3d"}]},
+}
+
+
+@pytest.mark.parametrize(
+    ("exceptions", "expected_functions"),
+    [
+        pytest.param(
+            [MINIDUMP_PLACEHOLDER],
+            [SymbolicatorFunction.minidump],
+            id="simple_minidump",
+        ),
+        pytest.param(
+            [MINIDUMP_PLACEHOLDER, NATIVE_EXCEPTION],
+            [SymbolicatorFunction.native, SymbolicatorFunction.minidump],
+            id="minidump_with_native_stacktrace",
+        ),
+        pytest.param(
+            [MINIDUMP_PLACEHOLDER, APPLECRASHREPORT_PLACEHOLDER],  # unlikely but allowed
+            [SymbolicatorFunction.minidump],
+            id="minidump_with_applecrashreport",
+        ),
+        pytest.param(
+            [APPLECRASHREPORT_PLACEHOLDER],
+            [SymbolicatorFunction.applecrashreport],
+            id="simple_applecrashreport",
+        ),
+        pytest.param(
+            [APPLECRASHREPORT_PLACEHOLDER, NATIVE_EXCEPTION],
+            [SymbolicatorFunction.native, SymbolicatorFunction.applecrashreport],
+            id="applecrashreport_with_native",
+        ),
+        pytest.param(
+            [NATIVE_EXCEPTION],
+            [SymbolicatorFunction.native],
+            id="native_stacktrace",
+        ),
+    ],
+)
+def test_get_native_symbolication_functions(
+    exceptions: list[dict[str, Any]], expected_functions: list[SymbolicatorFunction]
+) -> None:
+    # Relay sets the platform of minidump/applecrashreport events to "native",
+    # so a native platform alone must not schedule a `native` symbolication run.
+    data = {
+        "platform": "native",
+        "event_id": "cc3e6c2bb6b6498097f336d1e6979f4b",
+        "exception": {"values": exceptions},
+    }
+    stacktraces = find_stacktraces_in_data(data)
+
+    functions = list(get_native_symbolication_functions(data, stacktraces))
+
+    assert functions == expected_functions
+
+
+def test_merge_symbolicator_image_empty() -> None:
     data: dict[str, Any] = {}
     _merge_image({}, {}, None, data)
     assert not data.get("errors")
 
 
-def test_merge_symbolicator_image_basic():
+def test_merge_symbolicator_image_basic() -> None:
     raw_image = {"instruction_addr": 0xFEEBEE, "other": "foo"}
     sdk_info = {"sdk_name": "linux"}
     complete_image = {
@@ -52,7 +124,7 @@ def test_merge_symbolicator_image_basic():
     }
 
 
-def test_merge_symbolicator_image_basic_success():
+def test_merge_symbolicator_image_basic_success() -> None:
     raw_image = {"instruction_addr": 0xFEEBEE, "other": "foo"}
     sdk_info = {"sdk_name": "linux"}
     complete_image = {
@@ -76,7 +148,7 @@ def test_merge_symbolicator_image_basic_success():
     }
 
 
-def test_merge_symbolicator_image_remove_unknown_arch():
+def test_merge_symbolicator_image_remove_unknown_arch() -> None:
     raw_image = {"instruction_addr": 0xFEEBEE}
     sdk_info = {"sdk_name": "linux"}
     complete_image = {"debug_status": "found", "unwind_status": "found", "arch": "unknown"}
@@ -95,14 +167,14 @@ def test_merge_symbolicator_image_remove_unknown_arch():
 @pytest.mark.parametrize(
     "code_file,error",
     [
-        ("/var/containers/Bundle/Application/asdf/foo", EventError.NATIVE_MISSING_DSYM),
+        ("/var/containers/Bundle/Application/asdf/foo", EventErrorType.NATIVE_MISSING_DSYM.value),
         (
             "/var/containers/Bundle/Application/asdf/Frameworks/foo",
-            EventError.NATIVE_MISSING_OPTIONALLY_BUNDLED_DSYM,
+            EventErrorType.NATIVE_MISSING_OPTIONALLY_BUNDLED_DSYM.value,
         ),
     ],
 )
-def test_merge_symbolicator_image_errors(code_file, error):
+def test_merge_symbolicator_image_errors(code_file: str, error: EventErrorType) -> None:
     raw_image = {"instruction_addr": 0xFEEBEE, "other": "foo", "code_file": code_file}
     sdk_info = {"sdk_name": "macos"}
     complete_image = {
@@ -132,8 +204,7 @@ def test_merge_symbolicator_image_errors(code_file, error):
 
 @django_db_all
 @mock.patch("sentry.lang.native.processing.Symbolicator")
-def test_cocoa_function_name(mock_symbolicator, default_project):
-
+def test_cocoa_function_name(mock_symbolicator, default_project) -> None:
     data = {
         "platform": "cocoa",
         "project": default_project.id,
@@ -163,8 +234,7 @@ def test_cocoa_function_name(mock_symbolicator, default_project):
     assert function_name == "thunk for closure"
 
 
-def test_filter_frames():
-
+def test_filter_frames() -> None:
     frames = [
         {
             "instruction_addr": None,
@@ -183,7 +253,7 @@ def test_filter_frames():
     assert len(filtered_frames) == 0
 
 
-def test_instruction_addr_adjustment_auto():
+def test_instruction_addr_adjustment_auto() -> None:
     frames = [
         {"instruction_addr": "0xdeadbeef", "platform": "native"},
         {"instruction_addr": "0xbeefdead", "platform": "native"},
@@ -195,7 +265,7 @@ def test_instruction_addr_adjustment_auto():
     assert "adjust_instruction_addr" not in processed_frames[1].keys()
 
 
-def test_instruction_addr_adjustment_all():
+def test_instruction_addr_adjustment_all() -> None:
     frames = [
         {"instruction_addr": "0xdeadbeef", "platform": "native"},
         {"instruction_addr": "0xbeefdead", "platform": "native"},
@@ -207,7 +277,7 @@ def test_instruction_addr_adjustment_all():
     assert "adjust_instruction_addr" not in processed_frames[1].keys()
 
 
-def test_instruction_addr_adjustment_all_but_first():
+def test_instruction_addr_adjustment_all_but_first() -> None:
     frames = [
         {"instruction_addr": "0xdeadbeef", "platform": "native"},
         {"instruction_addr": "0xbeefdead", "platform": "native"},
@@ -219,7 +289,7 @@ def test_instruction_addr_adjustment_all_but_first():
     assert "adjust_instruction_addr" not in processed_frames[1].keys()
 
 
-def test_instruction_addr_adjustment_none():
+def test_instruction_addr_adjustment_none() -> None:
     frames = [
         {"instruction_addr": "0xdeadbeef", "platform": "native"},
         {"instruction_addr": "0xbeefdead", "platform": "native"},
@@ -231,7 +301,7 @@ def test_instruction_addr_adjustment_none():
     assert not processed_frames[1]["adjust_instruction_addr"]
 
 
-def test_rewrite_electron_debug_file():
+def test_rewrite_electron_debug_file() -> None:
     def rewrite(debug_file):
         for rule in ELECTRON_FIRST_MODULE_REWRITE_RULES:
             # Need to patch the regexes and replacement strings here
@@ -271,8 +341,7 @@ def test_rewrite_electron_debug_file():
 
 @django_db_all
 @mock.patch("sentry.lang.native.processing.Symbolicator")
-def test_il2cpp_symbolication(mock_symbolicator, default_project):
-
+def test_il2cpp_symbolication(mock_symbolicator, default_project) -> None:
     data = {
         "event_id": "c87700da71534177b92bd912f21a062f",
         "timestamp": "2022-06-15T10:13:46.963575+00:00",
@@ -282,7 +351,7 @@ def test_il2cpp_symbolication(mock_symbolicator, default_project):
             "values": [
                 {
                     "type": "System.InvalidOperationException",
-                    "value": "Exception from a lady beetle \uD83D\uDC1E",
+                    "value": "Exception from a lady beetle \ud83d\udc1e",
                     "module": "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
                     "thread_id": 1,
                     "stacktrace": {

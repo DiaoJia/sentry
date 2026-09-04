@@ -3,24 +3,24 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import wait
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jsonschema
 import orjson
-import sentry_sdk
 from arroyo.backends.kafka.consumer import KafkaPayload
 from arroyo.processing.strategies.batching import ValuesBatch
 from arroyo.types import BrokerValue, Message
 from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
+from rest_framework import serializers
+from sentry_sdk.traces import StreamedSpan
 from sentry_sdk.tracing import NoOpSpan, Span, Transaction
 
 from sentry import nodestore, options
 from sentry.event_manager import GroupInfo
-from sentry.eventstore.models import Event
 from sentry.issues.grouptype import InvalidGroupTypeError, get_group_type_by_type_id
 from sentry.issues.ingest import process_occurrence_data, save_issue_occurrence
 from sentry.issues.issue_occurrence import DEFAULT_LEVEL, IssueOccurrence, IssueOccurrenceData
@@ -30,8 +30,12 @@ from sentry.issues.status_change_consumer import process_status_change_message
 from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.ratelimits.sliding_windows import Quota, RedisSlidingWindowRateLimiter, RequestedQuota
+from sentry.services.eventstore.models import Event
 from sentry.types.actor import parse_and_validate_actor
 from sentry.utils import metrics
+from sentry.utils.concurrent import ContextPropagatingThreadPoolExecutor
+from sentry.utils.safe import get_path, set_path
+from sentry.utils.tracing import set_span_tag, start_span, trace
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +81,7 @@ def is_rate_limited(
         return False
 
 
-@sentry_sdk.tracing.trace
+@trace
 def save_event_from_occurrence(
     data: dict[str, Any],
     **kwargs: Any,
@@ -95,7 +99,7 @@ def save_event_from_occurrence(
         return event
 
 
-@sentry_sdk.tracing.trace
+@trace
 def lookup_event(project_id: int, event_id: str) -> Event:
     data = nodestore.backend.get(Event.generate_node_id(project_id, event_id))
     if data is None:
@@ -105,49 +109,7 @@ def lookup_event(project_id: int, event_id: str) -> Event:
     return event
 
 
-@sentry_sdk.tracing.trace
-def create_event(project_id: int, event_id: str, event_data: dict[str, Any]) -> Event:
-    return Event(
-        event_id=event_id,
-        project_id=project_id,
-        snuba_data={
-            "event_id": event_data["event_id"],
-            "project_id": event_data["project_id"],
-            "timestamp": event_data["timestamp"],
-            "release": event_data.get("release"),
-            "environment": event_data.get("environment"),
-            "platform": event_data.get("platform"),
-            "tags.key": [tag[0] for tag in event_data.get("tags", [])],
-            "tags.value": [tag[1] for tag in event_data.get("tags", [])],
-        },
-    )
-
-
-@sentry_sdk.tracing.trace
-def create_event_and_issue_occurrence(
-    occurrence_data: IssueOccurrenceData, event_data: dict[str, Any]
-) -> tuple[IssueOccurrence, GroupInfo | None]:
-    """With standalone span ingestion, we won't be storing events in
-    nodestore, so instead we create a light-weight event with a small
-    set of fields that lets us create occurrences.
-    """
-    project_id = occurrence_data["project_id"]
-    event_id = occurrence_data["event_id"]
-    if occurrence_data["event_id"] != event_data["event_id"]:
-        raise ValueError(
-            f"event_id in occurrence({occurrence_data['event_id']}) is different from event_id in event_data({event_data['event_id']})"
-        )
-
-    event = create_event(project_id, event_id, event_data)
-
-    with metrics.timer(
-        "occurrence_consumer._process_message.save_issue_occurrence",
-        tags={"method": "create_event_and_issue_occurrence"},
-    ):
-        return save_issue_occurrence(occurrence_data, event)
-
-
-@sentry_sdk.tracing.trace
+@trace
 def process_event_and_issue_occurrence(
     occurrence_data: IssueOccurrenceData, event_data: dict[str, Any]
 ) -> tuple[IssueOccurrence, GroupInfo | None]:
@@ -164,7 +126,7 @@ def process_event_and_issue_occurrence(
         return save_issue_occurrence(occurrence_data, event)
 
 
-@sentry_sdk.tracing.trace
+@trace
 def lookup_event_and_process_issue_occurrence(
     occurrence_data: IssueOccurrenceData,
 ) -> tuple[IssueOccurrence, GroupInfo | None]:
@@ -182,7 +144,7 @@ def lookup_event_and_process_issue_occurrence(
         return save_issue_occurrence(occurrence_data, event)
 
 
-@sentry_sdk.tracing.trace
+@trace
 def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     """
     Processes the incoming message payload into a format we can use.
@@ -200,6 +162,11 @@ def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     assignee = parse_and_validate_actor(payload_assignee, project.organization_id)
                     if assignee:
                         assignee_identifier = assignee.identifier
+                except serializers.ValidationError as e:
+                    logger.warning(
+                        "Failed to validate assignee for occurrence: %s",
+                        e.detail,
+                    )
                 except Exception:
                     logger.exception("Failed to validate assignee for occurrence")
 
@@ -249,7 +216,7 @@ def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     "level": occurrence_data["level"],
                     "project_id": event_payload.get("project_id"),
                     "platform": event_payload.get("platform"),
-                    "received": event_payload.get("received", timezone.now()),
+                    "received": event_payload.get("received") or timezone.now().isoformat(),
                     "tags": event_payload.get("tags"),
                     "timestamp": event_payload.get("timestamp"),
                 }
@@ -266,14 +233,37 @@ def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     "request",
                     "sdk",
                     "server_name",
+                    "spans",
                     "stacktrace",
                     "trace_id",
                     "transaction",
                     "user",
+                    "_meta",
                 ]
                 for optional_param in optional_params:
                     if optional_param in event_payload:
                         event_data[optional_param] = event_payload.get(optional_param)
+
+                if get_path(event_data, "contexts", "trace", "trace_id") is None:
+                    set_path(
+                        event_data,
+                        "contexts",
+                        "trace",
+                        value={
+                            "trace_id": uuid4().hex,
+                            "span_id": None,
+                        },
+                    )
+                    set_path(
+                        event_data,
+                        "_meta",
+                        "contexts",
+                        "trace",
+                        "trace_id",
+                        "",
+                        "err",
+                        value=["trace_id.missing"],
+                    )
 
                 try:
                     jsonschema.validate(event_data, EVENT_PAYLOAD_SCHEMA)
@@ -301,11 +291,7 @@ def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     "title": occurrence_data["issue_title"],
                 }
 
-                return {
-                    "occurrence_data": occurrence_data,
-                    "event_data": event_data,
-                    "is_buffered_spans": payload.get("is_buffered_spans") is True,
-                }
+                return {"occurrence_data": occurrence_data, "event_data": event_data}
             else:
                 if not payload.get("event_id"):
                     raise InvalidEventPayloadError(
@@ -320,31 +306,29 @@ def _get_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         raise InvalidEventPayloadError(e)
 
 
-@sentry_sdk.tracing.trace
+@trace
 @metrics.wraps("occurrence_consumer.process_occurrence_message")
 def process_occurrence_message(
-    message: Mapping[str, Any], txn: Transaction | NoOpSpan | Span
+    message: Mapping[str, Any], span: Transaction | NoOpSpan | Span | StreamedSpan
 ) -> tuple[IssueOccurrence, GroupInfo | None] | None:
     with metrics.timer("occurrence_consumer._process_message._get_kwargs"):
         kwargs = _get_kwargs(message)
     occurrence_data = kwargs["occurrence_data"]
     metric_tags = {"occurrence_type": occurrence_data["type"]}
-    is_buffered_spans = kwargs.get("is_buffered_spans", False)
-
     metrics.incr(
         "occurrence_ingest.messages",
         sample_rate=1.0,
         tags=metric_tags,
     )
-    txn.set_tag("occurrence_type", occurrence_data["type"])
+    set_span_tag(span, "occurrence_type", occurrence_data["type"])
 
     project = Project.objects.get_from_cache(id=occurrence_data["project_id"])
     organization = Organization.objects.get_from_cache(id=project.organization_id)
 
-    txn.set_tag("organization_id", organization.id)
-    txn.set_tag("organization_slug", organization.slug)
-    txn.set_tag("project_id", project.id)
-    txn.set_tag("project_slug", project.slug)
+    set_span_tag(span, "organization_id", organization.id)
+    set_span_tag(span, "organization_slug", organization.slug)
+    set_span_tag(span, "project_id", project.id)
+    set_span_tag(span, "project_slug", project.slug)
 
     group_type = get_group_type_by_type_id(occurrence_data["type"])
     if not group_type.allow_ingest(organization):
@@ -353,7 +337,7 @@ def process_occurrence_message(
             sample_rate=1.0,
             tags=metric_tags,
         )
-        txn.set_tag("result", "dropped_feature_disabled")
+        set_span_tag(span, "result", "dropped_feature_disabled")
         return None
 
     if is_rate_limited(project.id, fingerprint=occurrence_data["fingerprint"][0]):
@@ -362,13 +346,11 @@ def process_occurrence_message(
             sample_rate=1.0,
             tags=metric_tags,
         )
-        txn.set_tag("result", "dropped_rate_limited")
+        set_span_tag(span, "result", "dropped_rate_limited")
         return None
 
-    if "event_data" in kwargs and is_buffered_spans:
-        return create_event_and_issue_occurrence(kwargs["occurrence_data"], kwargs["event_data"])
-    elif "event_data" in kwargs:
-        txn.set_tag("result", "success")
+    if "event_data" in kwargs:
+        set_span_tag(span, "result", "success")
         with metrics.timer(
             "occurrence_consumer._process_message.process_event_and_issue_occurrence",
             tags=metric_tags,
@@ -377,7 +359,7 @@ def process_occurrence_message(
                 kwargs["occurrence_data"], kwargs["event_data"]
             )
     else:
-        txn.set_tag("result", "success")
+        set_span_tag(span, "result", "success")
         with metrics.timer(
             "occurrence_consumer._process_message.lookup_event_and_process_issue_occurrence",
             tags=metric_tags,
@@ -385,7 +367,7 @@ def process_occurrence_message(
             return lookup_event_and_process_issue_occurrence(kwargs["occurrence_data"])
 
 
-@sentry_sdk.tracing.trace
+@trace
 @metrics.wraps("occurrence_consumer.process_message")
 def _process_message(
     message: Mapping[str, Any],
@@ -394,21 +376,20 @@ def _process_message(
     :raises InvalidEventPayloadError: when the message is invalid
     :raises EventLookupError: when the provided event_id in the message couldn't be found.
     """
-    with sentry_sdk.start_transaction(
-        op="_process_message",
-        name="issues.occurrence_consumer",
-    ) as txn:
+    with start_span(
+        op="_process_message", name="issues.occurrence_consumer", transaction=True
+    ) as span:
         try:
             # Messages without payload_type default to an OCCURRENCE payload
             payload_type = message.get("payload_type", PayloadType.OCCURRENCE.value)
             if payload_type == PayloadType.STATUS_CHANGE.value:
-                group = process_status_change_message(message, txn)
+                group = process_status_change_message(message, span)
                 if not group:
                     return None
 
                 return None, GroupInfo(group=group, is_new=False, is_regression=False)
             elif payload_type == PayloadType.OCCURRENCE.value:
-                return process_occurrence_message(message, txn)
+                return process_occurrence_message(message, span)
             else:
                 metrics.incr(
                     "occurrence_consumer._process_message.dropped_invalid_payload_type",
@@ -420,15 +401,15 @@ def _process_message(
                 "occurrence_ingest.invalid_group_type", tags={"occurrence_type": e.group_type_id}
             )
         except (ValueError, KeyError) as e:
-            txn.set_tag("result", "error")
+            set_span_tag(span, "result", "error")
             raise InvalidEventPayloadError(e)
     return None
 
 
-@sentry_sdk.tracing.trace
+@trace
 @metrics.wraps("occurrence_consumer.process_batch")
 def process_occurrence_batch(
-    worker: ThreadPoolExecutor, message: Message[ValuesBatch[KafkaPayload]]
+    worker: ContextPropagatingThreadPoolExecutor, message: Message[ValuesBatch[KafkaPayload]]
 ) -> None:
     """
     Receives batches of occurrences. This function will take the batch
@@ -463,7 +444,7 @@ def process_occurrence_batch(
     # Number of groups we've collected to be processed in parallel
     metrics.gauge("occurrence_consumer.checkin.parallel_batch_groups", len(occcurrence_mapping))
     # Submit occurrences & status changes for processing
-    with sentry_sdk.start_transaction(op="process_batch", name="occurrence.occurrence_consumer"):
+    with start_span(op="process_batch", name="occurrence.occurrence_consumer", transaction=True):
         futures = [
             worker.submit(process_occurrence_group, group) for group in occcurrence_mapping.values()
         ]

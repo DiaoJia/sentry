@@ -11,12 +11,14 @@ from django.contrib.auth.models import UserManager as DjangoUserManager
 from django.contrib.auth.signals import user_logged_out
 from django.db import IntegrityError, models, router, transaction
 from django.db.models import Count, Subquery
+from django.db.models.functions import Upper
 from django.db.models.query import QuerySet
 from django.dispatch import receiver
 from django.forms import model_to_dict
 from django.http.request import HttpRequest
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 
 from bitfield import TypedClassBitField
@@ -26,36 +28,34 @@ from sentry.backup.dependencies import (
     NormalizedModelName,
     PrimaryKeyMap,
     get_model_name,
-    merge_users_for_model_in_org,
 )
 from sentry.backup.helpers import ImportFlags
 from sentry.backup.sanitize import SanitizableField, Sanitizer
 from sentry.backup.scopes import ImportScope, RelocationScope
 from sentry.db.models import Model, control_silo_model, sane_repr
+from sentry.db.models.indexes import IndexWithPostgresNameLimits
 from sentry.db.models.manager.base import BaseManager
 from sentry.db.models.manager.base_query_set import BaseQuerySet
-from sentry.db.models.utils import unique_db_instance
-from sentry.db.postgres.transactions import enforce_constraints
 from sentry.hybridcloud.models.outbox import ControlOutboxBase, outbox_context
 from sentry.hybridcloud.outbox.category import OutboxCategory
 from sentry.integrations.types import EXTERNAL_PROVIDERS, ExternalProviders
-from sentry.locks import locks
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.models.organizationmembermapping import OrganizationMemberMapping
 from sentry.models.orgauthtoken import OrgAuthToken
-from sentry.organizations.services.organization import RpcRegionUser, organization_service
-from sentry.types.region import find_all_region_names, find_regions_for_user
+from sentry.organizations.services.organization import RpcCellUser, organization_service
+from sentry.types.cell import find_all_cell_names, find_cells_for_user
 from sentry.users.models.authenticator import Authenticator
 from sentry.users.models.lostpasswordhash import LostPasswordHash
 from sentry.users.models.user_avatar import UserAvatar
 from sentry.users.models.useremail import UserEmail
 from sentry.users.services.user import RpcUser
 from sentry.utils.http import absolute_uri
-from sentry.utils.retries import TimedRetryPolicy
 
 audit_logger = logging.getLogger("sentry.audit.user")
+logger = logging.getLogger(__name__)
 
 MAX_USERNAME_LENGTH = 128
+MAX_EMAIL_LENGTH = 200
 RANDOM_PASSWORD_ALPHABET = ascii_letters + digits
 RANDOM_PASSWORD_LENGTH = 32
 
@@ -98,6 +98,7 @@ class User(Model, AbstractBaseUser):
 
     backend: str  # abstract -- from `django.contrib.auth`
 
+    # outbox settings
     replication_version: int = 2
 
     username = models.CharField(_("username"), max_length=MAX_USERNAME_LENGTH, unique=True)
@@ -162,8 +163,15 @@ class User(Model, AbstractBaseUser):
     is_password_expired = models.BooleanField(
         _("password expired"),
         default=False,
+        help_text=_("If set to true then the user needs to change the password on next sign in."),
+    )
+    is_suspended = models.BooleanField(
+        _("suspended"),
+        default=False,
+        db_default=False,
         help_text=_(
-            "If set to true then the user needs to change the " "password on next sign in."
+            "Designates whether this user account has been suspended by an admin. "
+            "Suspended users cannot log in but their account and data are preserved."
         ),
     )
     last_password_change = models.DateTimeField(
@@ -182,7 +190,6 @@ class User(Model, AbstractBaseUser):
         newsletter_consent_prompt: bool
 
         bitfield_default = 0
-        bitfield_null = True
 
     session_nonce = models.CharField(max_length=12, null=True)
 
@@ -204,6 +211,13 @@ class User(Model, AbstractBaseUser):
     class Meta:
         app_label = "sentry"
         db_table = "auth_user"
+        indexes = (
+            IndexWithPostgresNameLimits(Upper("username"), name="auth_user_username_upper_idx"),
+            IndexWithPostgresNameLimits(Upper("email"), name="auth_user_email_upper_idx"),
+            IndexWithPostgresNameLimits(
+                Upper("email_unique"), name="auth_user_email_unique_upper_idx"
+            ),
+        )
         verbose_name = _("user")
         verbose_name_plural = _("users")
 
@@ -215,7 +229,10 @@ class User(Model, AbstractBaseUser):
     def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
         if self.username == "sentry":
             raise Exception('You cannot delete the "sentry" user as it is required by Sentry.')
-        with outbox_context(transaction.atomic(using=router.db_for_write(User))):
+        with outbox_context(
+            transaction.atomic(using=router.db_for_write(User)),
+            flush=False,
+        ):
             avatar = self.avatar.first()
             if avatar:
                 avatar.delete()
@@ -224,19 +241,48 @@ class User(Model, AbstractBaseUser):
             return super().delete(*args, **kwargs)
 
     def update(self, *args: Any, **kwds: Any) -> int:
-        with outbox_context(transaction.atomic(using=router.db_for_write(User))):
+        with outbox_context(
+            transaction.atomic(using=router.db_for_write(User)),
+            flush=False,
+        ):
             for outbox in self.outboxes_for_update():
                 outbox.save()
             return super().update(*args, **kwds)
 
     def save(self, *args: Any, **kwargs: Any) -> None:
-        with outbox_context(transaction.atomic(using=router.db_for_write(User))):
-            if not self.username:
-                self.username = self.email
-            result = super().save(*args, **kwargs)
-            for outbox in self.outboxes_for_update():
-                outbox.save()
-            return result
+        is_test_user = kwargs.pop("is_test_user", False)
+        is_relocated_user = kwargs.pop("is_relocated_user", False)
+        try:
+            with outbox_context(transaction.atomic(using=router.db_for_write(User)), flush=False):
+                if not self.username:
+                    self.username = self.email
+                # for testing purposes, we want to be able to create new users with existing emails
+                # if we're relocating a user, then we would have handled email_unique in the relocation logic
+                if not is_test_user:
+                    if self.pk is None and not is_relocated_user:
+                        # new users should set email_unique
+                        self.email_unique = self.email
+                    elif self.pk is None and is_relocated_user:
+                        # If the user is new, relocated blank email_unique to dodge
+                        # integrity errors.
+                        self.email_unique = None
+                    else:
+                        # existing users with shared email addresses
+                        self.email_unique = (
+                            self.email
+                            if User.objects.filter(email=self.email).count() == 1
+                            else None
+                        )
+                result = super().save(*args, **kwargs)
+                for outbox in self.outboxes_for_update():
+                    outbox.save()
+                return result
+        except IntegrityError:
+            logger.info(
+                "Attempted to save user with non-unique primary email address",
+                extra={"email": self.email, "is_relocated_user": is_relocated_user},
+            )
+            raise
 
     def has_2fa(self) -> bool:
         return Authenticator.objects.filter(
@@ -346,16 +392,16 @@ class User(Model, AbstractBaseUser):
     def outboxes_for_user_update(
         identifier: int, is_user_delete: bool = False
     ) -> list[ControlOutboxBase]:
-        # User deletions must fan out to all regions to ensure cascade behavior
+        # User deletions must fan out to all cells to ensure cascade behavior
         # of anything with a HybridCloudForeignKey, even if the user is no longer
-        # a member of any organizations in that region.
+        # a member of any organizations in that cell.
         if is_user_delete:
-            user_regions = set(find_all_region_names())
+            user_cells = set(find_all_cell_names())
         else:
-            user_regions = find_regions_for_user(identifier)
+            user_cells = find_cells_for_user(identifier)
 
         return OutboxCategory.USER_UPDATE.as_control_outboxes(
-            region_names=user_regions,
+            cell_names=user_cells,
             object_identifier=identifier,
             shard_identifier=identifier,
         )
@@ -387,23 +433,21 @@ class User(Model, AbstractBaseUser):
                 organization_id=organization_id, from_user_id=from_user_id, to_user_id=to_user_id
             )
 
-            # Update all organization control models to only use the new user id.
-            #
-            # TODO: in the future, proactively update `OrganizationMemberTeamReplica` as well.
-            with enforce_constraints(
-                transaction.atomic(using=router.db_for_write(OrganizationMemberMapping))
+            # Update all organization control models that don't use user_id
+            with outbox_context(
+                transaction.atomic(using=router.db_for_write(OrganizationMemberMapping)),
+                flush=False,
             ):
-                control_side_org_models: tuple[type[Model], ...] = (
-                    OrgAuthToken,
-                    OrganizationMemberMapping,
-                )
-                for model in control_side_org_models:
-                    merge_users_for_model_in_org(
-                        model,
-                        organization_id=organization_id,
-                        from_user_id=from_user_id,
-                        to_user_id=to_user_id,
-                    )
+                # Update records individually as OrgAuthToken has outboxes
+                for token in OrgAuthToken.objects.filter(
+                    organization_id=organization_id, created_by_id=from_user_id
+                ):
+                    token.created_by_id = to_user_id
+                    token.save()
+
+        # Update any member map records where the the merged user was the inviter
+        queryset = OrganizationMemberMapping.objects.filter(inviter_id=from_user_id)
+        queryset.update(inviter_id=to_user_id)
 
         # While it would be nice to make the following changes in a transaction, there are too many
         # unique constraints to make this feasible. Instead, we just do it sequentially and ignore
@@ -414,14 +458,16 @@ class User(Model, AbstractBaseUser):
             UserAvatar,
             UserEmail,
             UserOption,
+            OrganizationMemberMapping,
         )
-        for model in user_related_models:
-            for obj in model.objects.filter(user_id=from_user_id):
-                try:
-                    with transaction.atomic(using=router.db_for_write(User)):
-                        obj.update(user_id=to_user_id)
-                except IntegrityError:
-                    pass
+        with outbox_context(flush=False):
+            for model in user_related_models:
+                for obj in model.objects.filter(user_id=from_user_id):
+                    try:
+                        with transaction.atomic(using=router.db_for_write(User)):
+                            obj.update(user_id=to_user_id)
+                    except IntegrityError:
+                        pass
 
         # users can be either the subject or the object of actions which get logged
         AuditLogEntry.objects.filter(actor=from_user).update(actor=to_user)
@@ -448,8 +494,6 @@ class User(Model, AbstractBaseUser):
         self.is_password_expired = False
 
     def refresh_session_nonce(self, request: HttpRequest | None = None) -> None:
-        from django.utils.crypto import get_random_string
-
         self.session_nonce = get_random_string(12)
         if request is not None:
             request.session["_nonce"] = self.session_nonce
@@ -503,10 +547,50 @@ class User(Model, AbstractBaseUser):
 
         return old_pk
 
+    @classmethod
+    def is_username_available(cls, username: str, *, exclude_user_id: int = 0) -> bool:
+        """
+        A username is available only if it is not already in use as another account's
+        username, primary email, or verified email. Login resolves a username before
+        falling back to email (see find_users in sentry/utils/auth.py), so a username
+        equal to an email another account owns would collide with its login identity.
+
+        `exclude_user_id` is the user being updated (excluded from the check); leave it
+        as the default when checking a not-yet-saved user (e.g. a relocation import).
+        """
+        # XXX: While it is tempting to combine all three of these queries to User
+        # into one, doing so results in poor execution performance as the query planner
+        # cannot effectively use its indexes and falls into SeqScan, while individual queries
+        # hit IndexScan
+        username_taken = (
+            cls.objects.exclude(id=exclude_user_id).filter(username__iexact=username).exists()
+        )
+        if username_taken:
+            return False
+
+        email_username_taken = (
+            cls.objects.exclude(id=exclude_user_id).filter(email__iexact=username).exists()
+        )
+        if email_username_taken:
+            return False
+
+        email_unique_taken = (
+            cls.objects.exclude(id=exclude_user_id).filter(email_unique__iexact=username).exists()
+        )
+        if email_unique_taken:
+            return False
+
+        verified_email_taken = (
+            UserEmail.objects.filter(email__iexact=username, is_verified=True)
+            .exclude(user_id=exclude_user_id)
+            .exists()
+        )
+        return not verified_email_taken
+
     def write_relocation_import(
         self, scope: ImportScope, flags: ImportFlags
     ) -> tuple[int, ImportKind] | None:
-        # Internal function that factors our some common logic.
+        # Internal function that factors out some common logic.
         def do_write() -> tuple[int, ImportKind]:
             from sentry.users.api.endpoints.user_details import (
                 BaseUserSerializer,
@@ -517,7 +601,7 @@ class User(Model, AbstractBaseUser):
                 DatabaseLostPasswordHashService,
             )
 
-            serializer_cls = BaseUserSerializer
+            serializer_cls: type[BaseUserSerializer]
             if scope not in {ImportScope.Config, ImportScope.Global}:
                 serializer_cls = UserSerializer
             else:
@@ -526,7 +610,7 @@ class User(Model, AbstractBaseUser):
             serializer_user = serializer_cls(instance=self, data=model_to_dict(self), partial=True)
             serializer_user.is_valid(raise_exception=True)
 
-            self.save(force_insert=True)
+            self.save(force_insert=True, is_relocated_user=True)
 
             if scope != ImportScope.Global:
                 DatabaseLostPasswordHashService().get_or_create(user_id=self.id)
@@ -536,29 +620,27 @@ class User(Model, AbstractBaseUser):
             # that actually goes, and how to prevent it from happening during the validation pass.
             return (self.pk, ImportKind.Inserted)
 
-        # If there is no existing user with this `username`, no special renaming or merging
-        # shenanigans are needed, as we can just insert this exact model directly.
-        existing = User.objects.filter(username=self.username).first()
-        if not existing:
-            return do_write()
-
-        # Re-use the existing user if merging is enabled.
+        # Merging is enabled only for SAAS_TO_SAAS relocations, where the data is
+        # server-generated and `username` is unique, so matching on username alone is safe.
+        # Reuse the existing account instead of inserting.
         if flags.merge_users:
-            return (existing.pk, ImportKind.Existing)
+            username_match = User.objects.filter(username__iexact=self.username).first()
+            if username_match:
+                return (username_match.pk, ImportKind.Existing)
 
-        # We already have a user with this `username`, but merging users has not been enabled. In
-        # this case, add a random suffix to the importing username.
-        lock = locks.get(f"user:username:{self.id}", duration=10, name="username")
-        with TimedRetryPolicy(10)(lock.acquire):
-            unique_db_instance(
-                self,
-                self.username,
-                max_length=MAX_USERNAME_LENGTH,
-                field_name="username",
-            )
+        # Suffix until the username collides with neither an existing username nor email.
+        # The standard slug helper (unique_db_instance) does not support cross-column checking.
+        if not User.is_username_available(self.username):
+            base = self.username[: MAX_USERNAME_LENGTH - 13]
+            for _ in range(3):
+                # 3 chances to create a random suffix - randomly selecting an exact duplicate should be almost impossible
+                suffix = get_random_string(12, allowed_chars="abcdefghijklmnopqrstuvwxyz0123456789")
+                self.username = f"{base}-{suffix}"
+                if User.is_username_available(self.username):
+                    return do_write()
+            raise RuntimeError("Could not generate a unique username during relocation import")
 
-            # Perform the remainder of the write while we're still holding the lock.
-            return do_write()
+        return do_write()
 
     @classmethod
     def sanitize_relocation_json(
@@ -574,33 +656,29 @@ class User(Model, AbstractBaseUser):
     def handle_async_deletion(
         cls,
         identifier: int,
-        region_name: str,
+        cell_name: str,
         shard_identifier: int,
         payload: Mapping[str, Any] | None,
     ) -> None:
-        from sentry.hybridcloud.rpc.caching import region_caching_service
+        from sentry.hybridcloud.rpc.caching import cell_caching_service
         from sentry.users.services.user.service import get_many_by_id, get_user
 
-        region_caching_service.clear_key(key=get_user.key_from(identifier), region_name=region_name)
-        region_caching_service.clear_key(
-            key=get_many_by_id.key_from(identifier), region_name=region_name
-        )
+        cell_caching_service.clear_key(key=get_user.key_from(identifier), cell_name=cell_name)
+        cell_caching_service.clear_key(key=get_many_by_id.key_from(identifier), cell_name=cell_name)
 
-    def handle_async_replication(self, region_name: str, shard_identifier: int) -> None:
-        from sentry.hybridcloud.rpc.caching import region_caching_service
+    def handle_async_replication(self, cell_name: str, shard_identifier: int) -> None:
+        from sentry.hybridcloud.rpc.caching import cell_caching_service
         from sentry.users.services.user.service import get_many_by_id, get_user
 
-        region_caching_service.clear_key(key=get_user.key_from(self.id), region_name=region_name)
-        region_caching_service.clear_key(
-            key=get_many_by_id.key_from(self.id), region_name=region_name
-        )
-        organization_service.update_region_user(
-            user=RpcRegionUser(
+        cell_caching_service.clear_key(key=get_user.key_from(self.id), cell_name=cell_name)
+        cell_caching_service.clear_key(key=get_many_by_id.key_from(self.id), cell_name=cell_name)
+        organization_service.update_cell_user(
+            user=RpcCellUser(
                 id=self.id,
                 is_active=self.is_active,
                 email=self.email,
             ),
-            region_name=region_name,
+            cell_name=cell_name,
         )
 
 

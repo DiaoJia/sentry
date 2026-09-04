@@ -9,9 +9,10 @@ from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import Endpoint, region_silo_endpoint
+from sentry.api.base import Endpoint, cell_silo_endpoint
 from sentry.constants import ObjectStatus
 from sentry.integrations.base import IntegrationDomain
 from sentry.integrations.mixins.issues import IssueSyncIntegration
@@ -21,8 +22,13 @@ from sentry.integrations.project_management.metrics import (
     ProjectManagementHaltReason,
 )
 from sentry.integrations.services.integration import integration_service
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.integrations.utils.metrics import IntegrationWebhookEvent, IntegrationWebhookEventType
+from sentry.integrations.utils.status_sync import PROVIDER_EVENT_TIME_KEY
 from sentry.integrations.utils.sync import sync_group_assignee_inbound
+from sentry.integrations.utils.webhook_viewer_context import webhook_viewer_context
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.types.ratelimit import RateLimit, RateLimitCategory
 from sentry.utils.email import parse_email
 
 if TYPE_CHECKING:
@@ -31,7 +37,6 @@ if TYPE_CHECKING:
 
 UNSET = object()
 logger = logging.getLogger("sentry.integrations")
-PROVIDER_KEY = "vsts"
 
 
 def get_vsts_external_id(data: Mapping[str, Any]) -> str:
@@ -39,12 +44,23 @@ def get_vsts_external_id(data: Mapping[str, Any]) -> str:
     return str(external_id)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class WorkItemWebhook(Endpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.CODING_WORKFLOWS
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
     }
+
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "POST": {
+                RateLimitCategory.IP: RateLimit(limit=100, window=1),
+                RateLimitCategory.USER: RateLimit(limit=100, window=1),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=100, window=1),
+            },
+        }
+    )
+
     authentication_classes = ()
     permission_classes = ()
 
@@ -60,7 +76,10 @@ class WorkItemWebhook(Endpoint):
         # https://docs.microsoft.com/en-us/azure/devops/service-hooks/events?view=azure-devops#workitem.updated
         if event_type == "workitem.updated":
             integration = integration_service.get_integration(
-                provider=PROVIDER_KEY, external_id=external_id, status=ObjectStatus.ACTIVE
+                provider=IntegrationProviderSlug.AZURE_DEVOPS.value,
+                external_id=external_id,
+                status=ObjectStatus.ACTIVE,
+                using_replica=options.get("integration_service.get_integration.using_replica"),
             )
             if integration is None:
                 logger.info(
@@ -77,7 +96,7 @@ class WorkItemWebhook(Endpoint):
             with IntegrationWebhookEvent(
                 interaction_type=IntegrationWebhookEventType.INBOUND_SYNC,
                 domain=IntegrationDomain.SOURCE_CODE_MANAGEMENT,
-                provider_key="vsts",
+                provider_key=IntegrationProviderSlug.AZURE_DEVOPS.value,
             ).capture():
                 handle_updated_workitem(data, integration)
 
@@ -141,6 +160,7 @@ def handle_status_change(
     external_issue_key: str,
     status_change: Mapping[str, str] | None,
     project: str | None,
+    changed_date: str | None,
 ) -> None:
     with ProjectManagementEvent(
         action_type=ProjectManagementActionType.INBOUND_STATUS_SYNC, integration=integration
@@ -158,24 +178,26 @@ def handle_status_change(
             "status_change": status_change,
         }
         for org_integration in org_integrations:
-            installation = integration.get_installation(
-                organization_id=org_integration.organization_id
-            )
-            if isinstance(installation, IssueSyncIntegration):
-                installation.sync_status_inbound(
-                    external_issue_key,
-                    {
-                        "new_state": status_change["newValue"],
-                        # old_state is None when the issue is New
-                        "old_state": status_change.get("oldValue"),
-                        "project": project,
-                    },
+            with webhook_viewer_context(org_integration.organization_id):
+                installation = integration.get_installation(
+                    organization_id=org_integration.organization_id
                 )
-            else:
-                lifecycle.record_halt(
-                    ProjectManagementHaltReason.SYNC_NON_SYNC_INTEGRATION_PROVIDED,
-                    extra=logging_context,
-                )
+                if isinstance(installation, IssueSyncIntegration):
+                    installation.sync_status_inbound(
+                        external_issue_key,
+                        {
+                            "new_state": status_change["newValue"],
+                            # old_state is None when the issue is New
+                            "old_state": status_change.get("oldValue"),
+                            "project": project,
+                            PROVIDER_EVENT_TIME_KEY: changed_date,
+                        },
+                    )
+                else:
+                    lifecycle.record_halt(
+                        ProjectManagementHaltReason.SYNC_NON_SYNC_INTEGRATION_PROVIDED,
+                        extra=logging_context,
+                    )
 
 
 def handle_updated_workitem(data: Mapping[str, Any], integration: RpcIntegration) -> None:
@@ -200,6 +222,11 @@ def handle_updated_workitem(data: Mapping[str, Any], integration: RpcIntegration
     try:
         assigned_to = data["resource"]["fields"].get("System.AssignedTo")
         status_change = data["resource"]["fields"].get("System.State")
+        # The only provider-side clock in this payload, used to order deliveries.
+        changed_date_field = data["resource"]["fields"].get("System.ChangedDate")
+        changed_date = (
+            changed_date_field.get("newValue") if isinstance(changed_date_field, dict) else None
+        )
     except KeyError as e:
         logger.info(
             "vsts.updated-workitem-fields-not-passed",
@@ -221,4 +248,4 @@ def handle_updated_workitem(data: Mapping[str, Any], integration: RpcIntegration
     )
 
     handle_assign_to(integration, external_issue_key, assigned_to)
-    handle_status_change(integration, external_issue_key, status_change, project)
+    handle_status_change(integration, external_issue_key, status_change, project, changed_date)

@@ -1,33 +1,31 @@
+import {keepPreviousData} from '@tanstack/react-query';
 import type {Query} from 'history';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
 import {t} from 'sentry/locale';
-import AlertStore from 'sentry/stores/alertStore';
-import TagStore from 'sentry/stores/tagStore';
+import {TagStore} from 'sentry/stores/tagStore';
 import type {PageFilters} from 'sentry/types/core';
 import type {Tag, TagValue} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
-import {
-  type ApiQueryKey,
-  keepPreviousData,
-  useApiQuery,
-  type UseApiQueryOptions,
-} from 'sentry/utils/queryClient';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApiQuery, type UseApiQueryOptions} from 'sentry/utils/queryClient';
 import {Dataset} from 'sentry/views/alerts/rules/metric/types';
+import type {AddAlert} from 'sentry/views/app/globalAlerts';
 
 const MAX_TAGS = 1000;
 
-function tagFetchSuccess(tags: Tag[] | undefined) {
+function tagFetchSuccess(tags: Tag[] | undefined, addAlert: AddAlert) {
   // We occasionally get undefined passed in when APIs are having a bad time.
   tags = tags || [];
   const trimmedTags = tags.slice(0, MAX_TAGS);
 
   if (tags.length > MAX_TAGS) {
-    AlertStore.addAlert({
+    addAlert({
       message: t('You have too many unique tags and some have been truncated'),
-      type: 'warning',
+      variant: 'warning',
     });
   }
   TagStore.loadTagsSuccess(trimmedTags);
@@ -39,11 +37,12 @@ function tagFetchSuccess(tags: Tag[] | undefined) {
 export function loadOrganizationTags(
   api: Client,
   orgSlug: string,
-  selection: PageFilters
+  selection: PageFilters,
+  addAlert: AddAlert
 ): Promise<void> {
   TagStore.reset();
 
-  const query: Query = selection.datetime
+  const query = selection.datetime
     ? {...normalizeDateTimeParams(selection.datetime)}
     : {};
   query.use_cache = '1';
@@ -53,40 +52,19 @@ export function loadOrganizationTags(
   }
 
   return api
-    .requestPromise(`/organizations/${orgSlug}/tags/`, {
-      method: 'GET',
-      query,
-    })
-    .then(tagFetchSuccess)
+    .requestPromise(
+      getApiUrl('/organizations/$organizationIdOrSlug/tags/', {
+        path: {organizationIdOrSlug: orgSlug},
+      }),
+      {
+        method: 'GET',
+        query,
+      }
+    )
+    .then(tags => tagFetchSuccess(tags, addAlert))
     .catch(() => {
       addErrorMessage(t('Unable to load tags'));
     });
-}
-
-/**
- * Fetch tags for an organization or a subset or projects.
- */
-export function fetchOrganizationTags(
-  api: Client,
-  orgId: string,
-  projectIds: string[] | null = null
-) {
-  TagStore.reset();
-
-  const url = `/organizations/${orgId}/tags/`;
-  const query: Query = {use_cache: '1'};
-  if (projectIds) {
-    query.project = projectIds;
-  }
-
-  const promise = api.requestPromise(url, {
-    method: 'GET',
-    query,
-  });
-
-  promise.then(tagFetchSuccess);
-
-  return promise;
 }
 
 /**
@@ -165,54 +143,6 @@ export function fetchTagValues({
   });
 }
 
-export function fetchSpanFieldValues({
-  api,
-  orgSlug,
-  fieldKey,
-  endpointParams,
-  projectIds,
-  search,
-  dataset,
-}: {
-  api: Client;
-  fieldKey: string;
-  orgSlug: string;
-  dataset?: 'spans' | 'spansIndexed';
-  endpointParams?: Query;
-  projectIds?: string[];
-  search?: string;
-}): Promise<TagValue[]> {
-  const url = `/organizations/${orgSlug}/spans/fields/${fieldKey}/values/`;
-
-  const query: Query = {};
-  if (search) {
-    query.query = search;
-  }
-  if (projectIds) {
-    query.project = projectIds;
-  }
-  if (endpointParams) {
-    if (endpointParams.start) {
-      query.start = endpointParams.start;
-    }
-    if (endpointParams.end) {
-      query.end = endpointParams.end;
-    }
-    if (endpointParams.statsPeriod) {
-      query.statsPeriod = endpointParams.statsPeriod;
-    }
-  }
-  if (dataset === 'spans') {
-    query.dataset = 'spans';
-    query.type = 'string';
-  }
-
-  return api.requestPromise(url, {
-    method: 'GET',
-    query,
-  });
-}
-
 /**
  * Fetch feature flag values for an organization. This is done by querying ERRORS with useFlagsBackend=1.
  * This only returns feature flags and not tags.
@@ -237,7 +167,7 @@ export function fetchFeatureFlagValues({
   sort?: '-last_seen' | '-count';
 }): Promise<TagValue[]> {
   // Search syntax may wrap with flags[] or flags[""], but this endpoint doesn't support it.
-  const strippedKey = tagKey.replace(/^flags\[(?:"?)(.*?)(?:"?)\]$/, '$1');
+  const strippedKey = tagKey.replace(/^flags\["?(.*?)"?\]$/, '$1');
 
   const url = `/organizations/${organization.slug}/tags/${strippedKey}/values/`;
 
@@ -312,7 +242,14 @@ const makeFetchOrganizationTags = ({
   if (end) {
     query.end = end;
   }
-  return [`/organizations/${orgSlug}/tags/`, {query}];
+  return [
+    getApiUrl('/organizations/$organizationIdOrSlug/tags/', {
+      path: {
+        organizationIdOrSlug: orgSlug,
+      },
+    }),
+    {query},
+  ];
 };
 
 export const useFetchOrganizationTags = (

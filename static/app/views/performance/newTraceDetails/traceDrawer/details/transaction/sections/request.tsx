@@ -1,29 +1,29 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
-import ErrorBoundary from 'sentry/components/errorBoundary';
+import {CodeBlock} from '@sentry/scraps/code';
+import {ExternalLink} from '@sentry/scraps/link';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import {EventDataSection} from 'sentry/components/events/eventDataSection';
-import getTransformedData from 'sentry/components/events/interfaces/request/getTransformedData';
+import {getTransformedData} from 'sentry/components/events/interfaces/request/getTransformedData';
 import {GraphQlRequestBody} from 'sentry/components/events/interfaces/request/graphQlRequestBody';
 import {getCurlCommand, getFullUrl} from 'sentry/components/events/interfaces/utils';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {
-  type StructedEventDataConfig,
   StructuredData,
+  type StructedEventDataConfig,
 } from 'sentry/components/structuredEventData';
-import Truncate from 'sentry/components/truncate';
+import {Truncate} from 'sentry/components/truncate';
 import {IconOpen} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {type EntryRequest, EntryType, type EventTransaction} from 'sentry/types/event';
+import {EntryType, type EntryRequest, type EventTransaction} from 'sentry/types/event';
 import type {Meta} from 'sentry/types/group';
-import {defined} from 'sentry/utils';
-import {isUrl} from 'sentry/utils/string/isUrl';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 import {
-  type SectionCardKeyValueList,
   TraceDrawerComponents,
+  type SectionCardKeyValueList,
 } from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
 
 type View = 'formatted' | 'curl';
@@ -39,7 +39,7 @@ export function Request({event}: {event: EventTransaction}) {
   }
   const entry = event.entries[entryIndex] as EntryRequest;
   const meta = event._meta?.entries?.[entryIndex]?.data;
-  const data: EntryRequest['data'] = entry.data;
+  const data = entry.data;
   const isPartial =
     // We assume we only have a partial interface is we're missing
     // an HTTP method. This means we don't have enough information
@@ -48,7 +48,7 @@ export function Request({event}: {event: EventTransaction}) {
 
   let fullUrl = getFullUrl(data);
 
-  if (!isUrl(fullUrl)) {
+  if (!isValidUrl(fullUrl)) {
     // Check if the url passed in is a safe url to avoid XSS
     fullUrl = undefined;
   }
@@ -94,7 +94,7 @@ export function Request({event}: {event: EventTransaction}) {
     {
       key: 'curl',
       subject: t('Command'),
-      value: <CodeSnippet language="bash">{getCurlCommand(data)}</CodeSnippet>,
+      value: <CodeBlock language="bash">{getCurlCommand(data)}</CodeBlock>,
     },
   ];
 
@@ -282,16 +282,16 @@ function getRequestSectionItems(data: Data, meta: Meta) {
 }
 
 const Monospace = styled('span')`
-  font-family: ${p => p.theme.text.familyMono};
+  font-family: ${p => p.theme.font.family.mono};
 `;
 
 const Path = styled('span')`
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   text-transform: none;
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
 
   & strong {
-    margin-right: ${space(0.5)};
+    margin-right: ${p => p.theme.space.xs};
   }
 `;
 
@@ -299,12 +299,12 @@ const Path = styled('span')`
 // doesn't quite get it in place.
 const StyledIconOpen = styled(IconOpen)`
   transition: 0.1s linear color;
-  margin: 0 ${space(0.5)};
-  color: ${p => p.theme.subText};
+  margin: 0 ${p => p.theme.space.xs};
+  color: ${p => p.theme.tokens.content.secondary};
   position: relative;
   top: 1px;
 
   &:hover {
-    color: ${p => p.theme.textColor};
+    color: ${p => p.theme.tokens.content.primary};
   }
 `;

@@ -1,30 +1,87 @@
-from django.db.models import Count, Q
-from drf_spectacular.utils import extend_schema
-from rest_framework import status
-from rest_framework.exceptions import ValidationError
+from datetime import datetime
+from functools import partial
+from typing import Any
+
+from django.db import router, transaction
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    IntegerField,
+    OuterRef,
+    Q,
+    QuerySet,
+    Subquery,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from sentry import audit_log
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import OrganizationEndpoint
+from sentry.api.bases.organization import OrganizationPermission
+from sentry.api.event_search import SearchConfig, SearchFilter, SearchKey, default_config
+from sentry.api.event_search import parse_search_query as base_parse_search_query
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import serialize
+from sentry.api.utils import to_valid_int_id, to_valid_int_id_list
 from sentry.apidocs.constants import (
     RESPONSE_BAD_REQUEST,
     RESPONSE_FORBIDDEN,
+    RESPONSE_NO_CONTENT,
     RESPONSE_NOT_FOUND,
+    RESPONSE_SUCCESS,
     RESPONSE_UNAUTHORIZED,
 )
-from sentry.apidocs.parameters import GlobalParams, OrganizationParams, WorkflowParams
-from sentry.db.models.query import in_icontains, in_iexact
-from sentry.search.utils import tokenize_query
-from sentry.workflow_engine.endpoints.serializers import WorkflowSerializer
+from sentry.apidocs.examples.workflow_engine_examples import WorkflowEngineExamples
+from sentry.apidocs.parameters import (
+    CursorQueryParam,
+    GlobalParams,
+    OrganizationParams,
+    VisibilityParams,
+    WorkflowParams,
+)
+from sentry.apidocs.response_types import DetailResponse
+from sentry.apidocs.utils import inline_sentry_response_serializer
+from sentry.constants import ObjectStatus
+from sentry.deletions.models.scheduleddeletion import CellScheduledDeletion
+from sentry.exceptions import InvalidSearchQuery
+from sentry.models.organization import Organization
+from sentry.models.project import Project
+from sentry.search.utils import parse_user_value
+from sentry.utils.audit import create_audit_entry
+from sentry.utils.dates import ensure_aware
+from sentry.workflow_engine.endpoints.serializers.workflow_serializer import (
+    WorkflowSerializer,
+    WorkflowSerializerResponse,
+)
+from sentry.workflow_engine.endpoints.utils.filters import apply_filter
+from sentry.workflow_engine.endpoints.utils.permissions import (
+    can_edit_workflows,
+    enforce_workflow_creation_permissions,
+)
 from sentry.workflow_engine.endpoints.utils.sortby import SortByParam
 from sentry.workflow_engine.endpoints.validators.base.workflow import WorkflowValidator
-from sentry.workflow_engine.models import Workflow
+from sentry.workflow_engine.endpoints.validators.detector_workflow_mutation import (
+    DetectorWorkflowMutationValidator,
+)
+from sentry.workflow_engine.endpoints.validators.utils import (
+    is_workflow_connected_to_all_projects_detector,
+    should_include_all_projects_detector_workflows,
+)
+from sentry.workflow_engine.models import DetectorWorkflow, Workflow
+from sentry.workflow_engine.models.workflow_fire_history import WorkflowFireHistory
+from sentry.workflow_engine.processors.detector import get_all_projects_detector
+from sentry.workflow_engine.types import DetectorId
 
 # Maps API field name to database field name, with synthetic aggregate fields keeping
 # to our field naming scheme for consistency.
@@ -35,93 +92,240 @@ SORT_COL_MAP = {
     "dateUpdated": "date_updated",
     "connectedDetectors": "connected_detectors",
     "actions": "actions",
+    "lastTriggered": "last_triggered",
 }
+
+workflow_search_config = SearchConfig.create_from(
+    default_config,
+    text_operator_keys={"name", "action"},
+    allowed_keys={"name", "action", "created_by"},
+    allow_boolean=False,
+    free_text_key="query",
+)
+parse_workflow_query = partial(base_parse_search_query, config=workflow_search_config)
+
+
+class OrganizationWorkflowPermission(OrganizationPermission):
+    scope_map = {
+        "GET": ["org:read", "org:write", "org:admin", "alerts:read"],
+        "POST": ["org:read", "org:write", "org:admin", "alerts:write"],
+        "PUT": ["org:read", "org:write", "org:admin", "alerts:write"],
+        "DELETE": ["org:read", "org:write", "org:admin", "alerts:write"],
+    }
 
 
 class OrganizationWorkflowEndpoint(OrganizationEndpoint):
-    def convert_args(self, request: Request, workflow_id, *args, **kwargs):
+    permission_classes = (OrganizationWorkflowPermission,)
+
+    def convert_args(
+        self, request: Request, workflow_id: str, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[Any, ...], dict[str, Organization | Workflow]]:
         args, kwargs = super().convert_args(request, *args, **kwargs)
+        validated_workflow_id = to_valid_int_id("workflow_id", workflow_id, raise_404=True)
         try:
             kwargs["workflow"] = Workflow.objects.get(
-                organization=kwargs["organization"], id=workflow_id
+                organization=kwargs["organization"], id=validated_workflow_id
             )
         except Workflow.DoesNotExist:
             raise ResourceDoesNotExist
 
+        # Check project access for workflows connected to detectors.
+        # User must have access to at least one connected project.
+        # Workflows with no detector connections are org-level and accessible
+        # to anyone with org-level workflow permissions.
+        workflow = kwargs["workflow"]
+        organization = kwargs["organization"]
+        if is_workflow_connected_to_all_projects_detector(workflow):
+            if not should_include_all_projects_detector_workflows(request, organization):
+                raise PermissionDenied
+            return args, kwargs
+
+        connected_projects = Project.objects.filter(
+            detector__detectorworkflow__workflow=workflow
+        ).distinct()
+
+        if connected_projects.exists():
+            has_access = any(
+                request.access.has_project_access(project) for project in connected_projects
+            )
+            if not has_access:
+                raise PermissionDenied
+
         return args, kwargs
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
+@extend_schema(tags=["Monitors"])
 class OrganizationWorkflowIndexEndpoint(OrganizationEndpoint):
     publish_status = {
-        "POST": ApiPublishStatus.EXPERIMENTAL,
-        "GET": ApiPublishStatus.EXPERIMENTAL,
+        "GET": ApiPublishStatus.PUBLIC,
+        "POST": ApiPublishStatus.PUBLIC,
+        "PUT": ApiPublishStatus.PUBLIC,
+        "DELETE": ApiPublishStatus.PUBLIC,
     }
     owner = ApiOwner.ISSUES
+    permission_classes = (OrganizationWorkflowPermission,)
 
-    @extend_schema(
-        operation_id="Fetch Workflows",
-        parameters=[
-            GlobalParams.ORG_ID_OR_SLUG,
-            WorkflowParams.SORT_BY,
-            WorkflowParams.QUERY,
-            WorkflowParams.ID,
-            OrganizationParams.PROJECT,
-        ],
-        responses={
-            201: WorkflowSerializer,
-            400: RESPONSE_BAD_REQUEST,
-            401: RESPONSE_UNAUTHORIZED,
-            403: RESPONSE_FORBIDDEN,
-            404: RESPONSE_NOT_FOUND,
-        },
-    )
-    def get(self, request, organization):
+    def filter_workflows(self, request: Request, organization: Organization) -> QuerySet[Workflow]:
         """
-        Returns a list of workflows for a given org
+        Helper function to filter workflows based on request parameters.
+        Project filtering is ALWAYS applied to ensure users can only
+        access workflows connected to projects they have access to.
         """
-        sort_by = SortByParam.parse(request.GET.get("sortBy", "id"), SORT_COL_MAP)
-
-        queryset = Workflow.objects.filter(organization_id=organization.id)
+        queryset: QuerySet[Workflow] = Workflow.objects.filter(organization_id=organization.id)
 
         if raw_idlist := request.GET.getlist("id"):
-            try:
-                ids = [int(id) for id in raw_idlist]
-            except ValueError:
-                raise ValidationError({"id": ["Invalid ID format"]})
+            ids = to_valid_int_id_list("id", raw_idlist)
             queryset = queryset.filter(id__in=ids)
 
+        if raw_detectorlist := request.GET.getlist("detector"):
+            detector_ids = to_valid_int_id_list("detector", raw_detectorlist)
+            queryset = queryset.filter(detectorworkflow__detector_id__in=detector_ids).distinct()
+
         if raw_query := request.GET.get("query"):
-            tokenized_query = tokenize_query(raw_query)
-            for key, values in tokenized_query.items():
-                match key:
-                    case "name":
-                        queryset = queryset.filter(in_iexact("name", values))
-                    case "action":
+            try:
+                parsed_query = parse_workflow_query(raw_query)
+            except InvalidSearchQuery as e:
+                raise serializers.ValidationError({"query": [str(e)]})
+            for filter in parsed_query:
+                assert isinstance(filter, SearchFilter)
+                match filter:
+                    case SearchFilter(key=SearchKey("name"), operator=("=" | "IN" | "!=")):
+                        queryset = apply_filter(queryset, filter, "name")
+                    case SearchFilter(key=SearchKey("action"), operator=("=" | "IN" | "!=")):
+                        queryset = apply_filter(
+                            queryset,
+                            filter,
+                            "workflowdataconditiongroup__condition_group__dataconditiongroupaction__action__type",
+                            distinct=True,
+                        )
+                    case SearchFilter(
+                        key=SearchKey("created_by"),
+                        operator=("=" | "IN" | "!=" | "NOT IN"),
+                    ):
+                        values = (
+                            filter.value.value
+                            if isinstance(filter.value.value, list)
+                            else [filter.value.value]
+                        )
+                        user_ids = [parse_user_value(v, request.user).id for v in values]
+                        created_by_q = Q(created_by_id__in=user_ids)
+                        if filter.operator in ("!=", "NOT IN"):
+                            queryset = queryset.exclude(created_by_q)
+                        else:
+                            queryset = queryset.filter(created_by_q)
+                    case SearchFilter(key=SearchKey("query"), operator="="):
+                        # 'query' is our free text key; all free text gets returned here
+                        # as '=', and we search any relevant fields for it.
                         queryset = queryset.filter(
-                            in_iexact(
-                                "workflowdataconditiongroup__condition_group__dataconditiongroupaction__action__type",
-                                values,
-                            )
-                        ).distinct()
-                    case "query":
-                        queryset = queryset.filter(
-                            in_icontains("name", values)
-                            | in_icontains(
-                                "workflowdataconditiongroup__condition_group__dataconditiongroupaction__action__type",
-                                values,
+                            Q(name__icontains=filter.value.value)
+                            | Q(
+                                workflowdataconditiongroup__condition_group__dataconditiongroupaction__action__type__icontains=filter.value.value,
                             )
                         ).distinct()
                     case _:
                         # TODO: What about unrecognized keys?
                         pass
 
-        projects = self.get_projects(request, organization)
-        if projects:
-            queryset = queryset.filter(
-                Q(detectorworkflow__detector__project__in=projects)
-                | Q(detectorworkflow__isnull=True)
-            ).distinct()
+        # Use include_all_accessible=True to get all projects the user can access,
+        # not just those explicitly requested. This filter is ALWAYS applied to ensure
+        # users with no project access only see org-level workflows.
+        projects = self.get_projects(request, organization, include_all_accessible=True)
+        accessible_workflows = Q(detectorworkflow__detector__project__in=projects)
+        # Detached workflows are organization-level and do not match a specific
+        # project filter. ID filters take precedence over project filters, and the
+        # all-project sentinels are equivalent to no project filter.
+        requested_projects = self.get_requested_project_params_unchecked(request)
+        has_specific_project_filter = (
+            not request.GET.getlist("id")
+            and requested_projects.has_values
+            and not requested_projects.has_all_projects_sentinel
+        )
+        if not has_specific_project_filter:
+            accessible_workflows |= Q(detectorworkflow__isnull=True)
+        all_projects_detector = get_all_projects_detector(organization.id)
+        if all_projects_detector:
+            all_projects_workflows_q = Q(detectorworkflow__detector_id=all_projects_detector.id)
+            if should_include_all_projects_detector_workflows(request, organization):
+                accessible_workflows |= all_projects_workflows_q
+            else:
+                queryset = queryset.exclude(all_projects_workflows_q)
+        queryset = queryset.filter(accessible_workflows).distinct()
+
+        return queryset
+
+    def _get_workflows_for_mutation(
+        self, request: Request, organization: Organization
+    ) -> tuple[QuerySet[Workflow], list[Workflow]]:
+        """Return the complete set of workflows that the request is allowed to mutate."""
+        queryset = self.filter_workflows(request, organization)
+        workflows = list(queryset)
+
+        if not workflows:
+            return queryset, workflows
+
+        if raw_idlist := request.GET.getlist("id"):
+            requested_ids = set(to_valid_int_id_list("id", raw_idlist))
+            if requested_ids != {workflow.id for workflow in workflows}:
+                raise PermissionDenied
+
+        if not can_edit_workflows(workflows, request):
+            raise PermissionDenied
+
+        return queryset, workflows
+
+    @extend_schema(
+        operation_id="listOrganizationWorkflows",
+        summary="Fetch Alerts",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            WorkflowParams.SORT_BY,
+            WorkflowParams.QUERY,
+            WorkflowParams.ID,
+            WorkflowParams.DETECTOR,
+            OrganizationParams.PROJECT,
+            VisibilityParams.PER_PAGE,
+            CursorQueryParam,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ListWorkflowSerializer", list[WorkflowSerializerResponse]
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=WorkflowEngineExamples.LIST_WORKFLOWS,
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[list[WorkflowSerializerResponse]] | Response[DetailResponse]:
+        """
+        Returns a list of alerts for a given organization
+        """
+        sort_by = SortByParam.parse(request.GET.get("sortBy", "id"), SORT_COL_MAP)
+
+        queryset = self.filter_workflows(request, organization)
+
+        # When the `priorityDetector` query param is provided, workflows connected to this detector are sorted first
+        priority_detector_id: DetectorId | None = None
+        if raw_priority := request.GET.get("priorityDetector"):
+            priority_detector_id = to_valid_int_id("priorityDetector", raw_priority)
+
+            is_priority = Exists(
+                DetectorWorkflow.objects.filter(
+                    workflow=OuterRef("pk"),
+                    detector_id=priority_detector_id,
+                )
+            )
+            queryset = queryset.annotate(
+                priority_detector_id=Case(
+                    When(condition=is_priority, then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                )
+            )
 
         # Add synthetic fields to the queryset if needed.
         match sort_by.db_field_name:
@@ -133,22 +337,42 @@ class OrganizationWorkflowIndexEndpoint(OrganizationEndpoint):
                         "workflowdataconditiongroup__condition_group__dataconditiongroupaction__action",
                     )
                 )
+            case "last_triggered":
+                long_ago = ensure_aware(datetime(1970, 1, 1))
 
-        queryset = queryset.order_by(*sort_by.db_order_by)
+                # We've got an index on (workflow, date_added) which allows a subquery
+                # to be more efficient than a Max() aggregation, because it lets us look at ~1
+                # workflow fire history row per workflow.
+                latest_fire_subquery = Subquery(
+                    WorkflowFireHistory.objects.filter(workflow=OuterRef("pk"))
+                    .order_by("-date_added")
+                    .values("date_added")[:1]
+                )
+
+                queryset = queryset.annotate(
+                    last_triggered=Coalesce(latest_fire_subquery, long_ago)
+                )
+
+        order_by = sort_by.db_order_by
+        if priority_detector_id is not None:
+            order_by = ("priority_detector_id", *sort_by.db_order_by)
 
         return self.paginate(
             request=request,
             queryset=queryset,
-            order_by=sort_by.db_order_by,
+            order_by=order_by,
             paginator_cls=OffsetPaginator,
             on_results=lambda x: serialize(x, request.user),
+            count_hits=True,
         )
 
     @extend_schema(
-        operation_id="Create a Workflow",
+        operation_id="createOrganizationWorkflow",
+        summary="Create an Alert for an Organization",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
         ],
+        request=WorkflowValidator,
         responses={
             201: WorkflowSerializer,
             400: RESPONSE_BAD_REQUEST,
@@ -156,22 +380,159 @@ class OrganizationWorkflowIndexEndpoint(OrganizationEndpoint):
             403: RESPONSE_FORBIDDEN,
             404: RESPONSE_NOT_FOUND,
         },
+        examples=WorkflowEngineExamples.CREATE_WORKFLOW,
     )
-    def post(self, request, organization):
+    def post(
+        self, request: Request, organization: Organization
+    ) -> Response[WorkflowSerializerResponse]:
         """
-        Creates a workflow for an organization
-        `````````````````````````````````````
-        :param string name: The name of the workflow
-        :param bool enabled: Whether the workflow is enabled or not
-        :param object config: The configuration of the workflow
-        :param object triggers: The Data Condition and DataConditionGroup for the when condition of a workflow
-        :param object action_filters: The Data Conditions, Data Condition Group, and Actions to invoke when a workflow is triggered
+        Creates an alert for an organization
         """
         validator = WorkflowValidator(
             data=request.data,
             context={"organization": organization, "request": request},
         )
-
         validator.is_valid(raise_exception=True)
+        enforce_workflow_creation_permissions(
+            request,
+            organization,
+            validator.validated_data.get("detector_ids"),
+        )
         workflow = validator.create(validator.validated_data)
-        return Response(serialize(workflow, request.user), status=status.HTTP_201_CREATED)
+        return Response(
+            serialize(workflow, request.user, WorkflowSerializer()),
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        operation_id="updateOrganizationWorkflows",
+        summary="Mutate an Organization's Alerts",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            WorkflowParams.QUERY,
+            WorkflowParams.ID,
+            OrganizationParams.PROJECT,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ListWorkflowSerializer", list[WorkflowSerializerResponse]
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        request=inline_serializer(
+            name="BulkUpdateAlerts",
+            fields={
+                "enabled": serializers.BooleanField(
+                    help_text="Whether to enable or disable the alerts"
+                )
+            },
+        ),
+        examples=WorkflowEngineExamples.LIST_WORKFLOWS,
+    )
+    def put(
+        self, request: Request, organization: Organization
+    ) -> Response[list[WorkflowSerializerResponse]] | Response[DetailResponse]:
+        """
+        Bulk enable or disable alerts for a given Organization
+        """
+        raw_idlist = request.GET.getlist("id")
+        if not (
+            raw_idlist
+            or request.GET.get("query")
+            or request.GET.getlist("project")
+            or request.GET.getlist("projectSlug")
+        ):
+            return Response(
+                {
+                    "detail": "At least one of 'id', 'query', 'project', or 'projectSlug' must be provided."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        validator = DetectorWorkflowMutationValidator(data=request.data)
+        validator.is_valid(raise_exception=True)
+        enabled = validator.validated_data["enabled"]
+
+        queryset, workflows = self._get_workflows_for_mutation(request, organization)
+
+        if not workflows:
+            return Response(
+                {"detail": "No workflows found."},
+                status=status.HTTP_200_OK,
+            )
+
+        with transaction.atomic(router.db_for_write(Workflow)):
+            # We update workflows individually to ensure post_save signals are called
+            for workflow in workflows:
+                workflow.update(enabled=enabled)
+
+        return self.paginate(
+            request=request,
+            queryset=queryset,
+            order_by="id",
+            paginator_cls=OffsetPaginator,
+            on_results=lambda x: serialize(x, request.user),
+        )
+
+    @extend_schema(
+        operation_id="deleteOrganizationWorkflows",
+        summary="Bulk Delete Alerts",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            WorkflowParams.QUERY,
+            WorkflowParams.ID,
+            OrganizationParams.PROJECT,
+        ],
+        responses={
+            200: RESPONSE_SUCCESS,
+            204: RESPONSE_NO_CONTENT,
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def delete(
+        self, request: Request, organization: Organization
+    ) -> Response[None] | Response[DetailResponse]:
+        """
+        Bulk delete alerts for a given organization
+        """
+        raw_idlist = request.GET.getlist("id")
+        if not (
+            raw_idlist
+            or request.GET.get("query")
+            or request.GET.getlist("project")
+            or request.GET.getlist("projectSlug")
+        ):
+            return Response(
+                {
+                    "detail": "At least one of 'id', 'query', 'project', or 'projectSlug' must be provided."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        _, workflows = self._get_workflows_for_mutation(request, organization)
+
+        if not workflows:
+            return Response(
+                {"detail": "No workflows found."},
+                status=status.HTTP_200_OK,
+            )
+
+        for workflow in workflows:
+            with transaction.atomic(router.db_for_write(Workflow)):
+                CellScheduledDeletion.schedule(workflow, days=0, actor=request.user)
+                create_audit_entry(
+                    request=request,
+                    organization=organization,
+                    target_object=workflow.id,
+                    event=audit_log.get_event_id("WORKFLOW_REMOVE"),
+                    data=workflow.get_audit_log_data(),
+                )
+                workflow.update(status=ObjectStatus.PENDING_DELETION)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

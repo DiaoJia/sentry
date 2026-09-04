@@ -1,13 +1,21 @@
 import {useEffect, useMemo, useState} from 'react';
 
-import SentryAppComponentsStore from 'sentry/stores/sentryAppComponentsStore';
-import type {SentryAppComponent} from 'sentry/types/integrations';
+import {SentryAppComponentsStore} from 'sentry/stores/sentryAppComponentsStore';
+import type {
+  SentryAppComponent,
+  SentryAppSchemaElement,
+  SentryAppSchemaStacktraceLink,
+} from 'sentry/types/integrations';
 
-export default function useSentryAppComponentsStore({
+export function useSentryAppComponentsStore<
+  Schema extends SentryAppSchemaStacktraceLink | SentryAppSchemaElement =
+    | SentryAppSchemaStacktraceLink
+    | SentryAppSchemaElement,
+>({
   componentType,
 }: {
   componentType: undefined | SentryAppComponent['type'];
-}) {
+}): Array<SentryAppComponent<Schema>> {
   const [components, setComponents] = useState(SentryAppComponentsStore.getAll());
 
   useEffect(() => {
@@ -26,5 +34,5 @@ export default function useSentryAppComponentsStore({
     return components;
   }, [components, componentType]);
 
-  return filteredComponents;
+  return filteredComponents as Array<SentryAppComponent<Schema>>;
 }

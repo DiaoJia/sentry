@@ -12,7 +12,6 @@ from sentry.backup.scopes import RelocationScope
 from sentry.constants import ObjectStatus
 from sentry.db.models import BoundedPositiveIntegerField, FlexibleForeignKey, control_silo_model
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
-from sentry.db.models.fields.jsonfield import JSONField
 from sentry.hybridcloud.outbox.base import ControlOutboxProducingManager, ReplicatedControlModel
 from sentry.hybridcloud.outbox.category import OutboxCategory
 
@@ -28,7 +27,7 @@ class OrganizationIntegration(ReplicatedControlModel):
 
     organization_id = HybridCloudForeignKey("sentry.Organization", on_delete="CASCADE")
     integration = FlexibleForeignKey("sentry.Integration")
-    config = JSONField(default=dict)
+    config = models.JSONField(default=dict)
 
     default_auth_id = BoundedPositiveIntegerField(db_index=True, null=True)
     status = BoundedPositiveIntegerField(
@@ -44,14 +43,14 @@ class OrganizationIntegration(ReplicatedControlModel):
         db_table = "sentry_organizationintegration"
         unique_together = (("organization_id", "integration"),)
 
-    def handle_async_replication(self, region_name: str, shard_identifier: int) -> None:
+    def handle_async_replication(self, cell_name: str, shard_identifier: int) -> None:
         pass
 
     @classmethod
     def handle_async_deletion(
         cls,
         identifier: int,
-        region_name: str,
+        cell_name: str,
         shard_identifier: int,
         payload: Mapping[str, Any] | None,
     ) -> None:

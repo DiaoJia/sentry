@@ -1,5 +1,5 @@
-import {type HTMLAttributes, useEffect, useLayoutEffect, useRef} from 'react';
-import {type Interpolation, type Theme, useTheme} from '@emotion/react';
+import {useEffect, useLayoutEffect, useRef, type HTMLAttributes} from 'react';
+import {useTheme, type Interpolation, type Theme} from '@emotion/react';
 import {Replayer} from '@sentry-internal/rrweb';
 
 import {
@@ -39,7 +39,10 @@ function useReplayerInstance() {
       return () => {};
     }
 
-    const webFrames = replay.getRRWebFrames();
+    const webFrames = replay?.getRRWebFrames();
+    if (!webFrames) {
+      return () => {};
+    }
 
     const replayer = new Replayer(webFrames, {
       root,
@@ -48,7 +51,7 @@ function useReplayerInstance() {
         duration: 0.75 * 1000,
         lineCap: 'round',
         lineWidth: 2,
-        strokeStyle: theme.purple200,
+        strokeStyle: theme.tokens.border.accent.moderate,
       },
       plugins: getPlugins(webFrames),
       skipInactive: initialPrefsRef.current.isSkippingInactive,
@@ -81,11 +84,10 @@ function useReplayerInstance() {
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
   css?: Interpolation<Theme>;
-  inspectable?: boolean;
   offsetMs?: undefined | number;
 }
 
-export default function ReplayPlayer({offsetMs, ...props}: Props) {
+export function ReplayPlayer({offsetMs, ...props}: Props) {
   const mountPointRef = useReplayerInstance();
   const userAction = useReplayUserAction();
 

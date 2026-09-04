@@ -1,24 +1,26 @@
-import {useMemo} from 'react';
-import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 
-import EventOrGroupExtraDetails from 'sentry/components/eventOrGroupExtraDetails';
-import EventOrGroupHeader from 'sentry/components/eventOrGroupHeader';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelItem from 'sentry/components/panels/panelItem';
+import {Flex, Stack} from '@sentry/scraps/layout';
+
+import {GroupHeaderRow} from 'sentry/components/groupHeaderRow';
+import {GroupMetaRow} from 'sentry/components/groupMetaRow';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelItem} from 'sentry/components/panels/panelItem';
 import {IconOpen} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Group} from 'sentry/types/group';
+import type {Level} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
-import {useApiQuery} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {orgHasIssueInbox} from 'sentry/utils/seer/orgHasIssueInbox';
+import {groupApiOptions} from 'sentry/views/issueDetails/useGroup';
 import {TraceDrawerComponents} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
-import {isTraceOccurence} from 'sentry/views/performance/newTraceDetails/traceGuards';
+import {getTraceIssueSeverityClassName} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 import {TraceIcons} from 'sentry/views/performance/newTraceDetails/traceIcons';
 import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
-import type {TraceTreeNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode';
+import type {BaseNode} from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeNode/baseNode';
 
 type IssueProps = {
   issue: TraceTree.TraceIssue;
@@ -27,7 +29,7 @@ type IssueProps = {
 
 const MAX_DISPLAYED_ISSUES_COUNT = 3;
 
-const issueOrderPriority: Record<keyof Theme['level'], number> = {
+const issueOrderPriority: Record<Level | 'default', number> = {
   fatal: 0,
   error: 1,
   warning: 2,
@@ -54,24 +56,17 @@ function Issue(props: IssueProps) {
     data: fetchedIssue,
     isError,
     error,
-  } = useApiQuery<Group>(
-    [
-      `/issues/${props.issue.issue_id}/`,
-      {
-        query: {
-          collapse: 'release',
-          expand: 'inbox',
-        },
-      },
-    ],
-    {
-      enabled: !!props.issue.issue_id,
-      staleTime: 2 * 60 * 1000,
-    }
-  );
+  } = useQuery({
+    ...groupApiOptions({
+      groupId: String(props.issue.issue_id),
+      organizationSlug: props.organization.slug,
+      environments: [],
+      expandDerivedData: orgHasIssueInbox(props.organization),
+    }),
+    staleTime: 10 * 60 * 1000,
+  });
 
-  const isOccurence: boolean = isTraceOccurence(props.issue);
-  const iconClassName: string = isOccurence ? 'occurence' : props.issue.level;
+  const iconClassName = getTraceIssueSeverityClassName(props.issue);
 
   return isPending ? (
     <StyledLoadingIndicatorWrapper>
@@ -84,15 +79,17 @@ function Issue(props: IssueProps) {
           <TraceIcons.Icon event={props.issue} />
         </IconBackground>
       </IconWrapper>
-      <SummaryWrapper>
-        <EventOrGroupHeader data={fetchedIssue} eventId={props.issue.event_id} />
-        <EventOrGroupExtraDetails data={fetchedIssue} />
-      </SummaryWrapper>
+      <Stack justify="left" width="100%" overflow="hidden">
+        <GroupHeaderRow data={fetchedIssue} eventId={props.issue.event_id} />
+        <GroupMetaRow data={fetchedIssue} />
+      </Stack>
     </StyledPanelItem>
   ) : isError ? (
     <LoadingError
       message={
-        error.status === 404 ? t('This issue was deleted') : t('Failed to fetch issue')
+        error instanceof RequestError && error.status === 404
+          ? t('This issue was deleted')
+          : t('Failed to fetch issue')
       }
     />
   ) : null;
@@ -110,13 +107,13 @@ const IconBackground = styled('div')`
   svg {
     width: 16px;
     height: 16px;
-    fill: ${p => p.theme.white};
+    fill: ${p => p.theme.colors.white};
   }
 `;
 
 const IconWrapper = styled('div')`
   border-radius: 50%;
-  padding: ${space(0.25)};
+  padding: ${p => p.theme.space['2xs']};
 
   &.info {
     border: 1px solid var(--info);
@@ -143,10 +140,10 @@ const IconWrapper = styled('div')`
       background-color: var(--error);
     }
   }
-  &.occurence {
-    border: 1px solid var(--occurence);
+  &.occurrence {
+    border: 1px solid var(--occurrence);
     ${IconBackground} {
-      background-color: var(--occurence);
+      background-color: var(--occurrence);
     }
   }
   &.default {
@@ -164,7 +161,7 @@ const IconWrapper = styled('div')`
 
   &.info,
   &.warning,
-  &.occurence,
+  &.occurrence,
   &.default,
   &.unknown {
     svg {
@@ -173,92 +170,56 @@ const IconWrapper = styled('div')`
   }
 `;
 
-const SummaryWrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  width: 100%;
-  justify-content: left;
-`;
-
 type IssueListProps = {
   issues: TraceTree.TraceIssue[];
-  node: TraceTreeNode<TraceTree.NodeValue>;
+  node: BaseNode;
   organization: Organization;
+  className?: string;
+  /**
+   * Overrides the trace slug used for the "Open N more in Issues" link. Pass
+   * this when rendering outside the trace waterfall route (e.g. the
+   * conversations span detail), where the `traceSlug` route param is absent.
+   */
+  traceSlug?: string;
 };
 
-export function IssueList({issues, node, organization}: IssueListProps) {
-  const uniqueErrorIssues = useMemo(() => {
-    const unique: TraceTree.TraceErrorIssue[] = [];
+export function IssueList({
+  issues,
+  node,
+  organization,
+  traceSlug,
+  className,
+}: IssueListProps) {
+  const uniqueIssues = [
+    ...node.uniqueErrorIssues.sort(sortIssuesByLevel),
+    ...node.uniqueOccurrenceIssues,
+  ].filter(issue => issue.issue_id);
 
-    const seenIssues: Set<number> = new Set();
-
-    for (const issue of node.errors) {
-      if (seenIssues.has(issue.issue_id)) {
-        continue;
-      }
-      seenIssues.add(issue.issue_id);
-      unique.push(issue);
-    }
-
-    return unique;
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node, node.errors.size]);
-
-  const uniqueOccurences = useMemo(() => {
-    const unique: TraceTree.TraceOccurrence[] = [];
-    const seenIssues: Set<number> = new Set();
-
-    for (const issue of node.occurrences) {
-      if (seenIssues.has(issue.issue_id)) {
-        continue;
-      }
-      seenIssues.add(issue.issue_id);
-      unique.push(issue);
-    }
-
-    return unique;
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node, node.occurrences.size]);
-
-  const uniqueIssues = useMemo(() => {
-    return [...uniqueOccurences, ...uniqueErrorIssues.sort(sortIssuesByLevel)];
-  }, [uniqueErrorIssues, uniqueOccurences]);
-
-  if (!issues.length) {
+  if (!issues.length || !uniqueIssues.length) {
     return null;
   }
 
   return (
-    <IssuesWrapper>
+    <IssuesWrapper className={className}>
       <StyledPanel>
         {uniqueIssues.slice(0, MAX_DISPLAYED_ISSUES_COUNT).map((issue, index) => (
           <Issue key={index} issue={issue} organization={organization} />
         ))}
       </StyledPanel>
       {uniqueIssues.length > MAX_DISPLAYED_ISSUES_COUNT ? (
-        <TraceDrawerComponents.IssuesLink node={node}>
-          <IssueLinkWrapper>
+        <TraceDrawerComponents.IssuesLink node={node} traceSlug={traceSlug}>
+          <Flex align="center" marginLeft="2xs" gap="xs">
             <IconOpen />
             {t(
-              `Open %s more in Issues`,
+              'Open %s more in Issues',
               uniqueIssues.length - MAX_DISPLAYED_ISSUES_COUNT
             )}
-          </IssueLinkWrapper>
+          </Flex>
         </TraceDrawerComponents.IssuesLink>
       ) : null}
     </IssuesWrapper>
   );
 }
-
-const IssueLinkWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.5)};
-  margin-left: ${space(0.25)};
-`;
 
 const StyledPanel = styled(Panel)`
   container-type: inline-size;
@@ -267,9 +228,9 @@ const StyledPanel = styled(Panel)`
 const IssuesWrapper = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(0.75)};
+  gap: ${p => p.theme.space.sm};
   justify-content: left;
-  margin: ${space(1)} 0;
+  margin: ${p => p.theme.space.md} 0;
 
   ${StyledPanel} {
     margin-bottom: 0;
@@ -281,26 +242,27 @@ const StyledLoadingIndicatorWrapper = styled('div')`
   align-items: center;
   justify-content: center;
   width: 100%;
-  padding: ${space(2)} 0;
+  padding: ${p => p.theme.space.xl} 0;
   min-height: 76px;
 
   /* Add a border between two rows of loading issue states */
   & + & {
-    border-top: 1px solid ${p => p.theme.border};
+    border-top: 1px solid ${p => p.theme.tokens.border.primary};
   }
 `;
 
 const StyledLegacyPanelItem = styled(PanelItem)`
   justify-content: space-between;
   align-items: center;
-  padding: ${space(1)} 0;
+  padding: ${p => p.theme.space.md} 0;
   line-height: 1.1;
 `;
 
 const StyledPanelItem = styled(StyledLegacyPanelItem)`
   justify-content: left;
   align-items: flex-start;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   height: fit-content;
-  padding: ${space(1)} ${space(2)} ${space(1.5)} ${space(1)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl} ${p => p.theme.space.lg}
+    ${p => p.theme.space.md};
 `;

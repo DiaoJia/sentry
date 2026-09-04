@@ -1,221 +1,116 @@
-import {useEffect} from 'react';
+import {useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import {fetchOrgMembers} from 'sentry/actionCreators/members';
-import {Button} from 'sentry/components/core/button';
-import {Flex} from 'sentry/components/core/layout';
-import SelectField from 'sentry/components/forms/fields/selectField';
+import {Alert} from '@sentry/scraps/alert';
+import {Container, Stack} from '@sentry/scraps/layout';
+import type {SelectValue} from '@sentry/scraps/select';
+
 import {ConditionBadge} from 'sentry/components/workflowEngine/ui/conditionBadge';
 import {PurpleTextButton} from 'sentry/components/workflowEngine/ui/purpleTextButton';
-import {IconAdd, IconDelete, IconMail} from 'sentry/icons';
+import {IconAdd} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {DataConditionGroup} from 'sentry/types/workflowEngine/dataConditions';
-import {DataConditionHandlerGroupType} from 'sentry/types/workflowEngine/dataConditions';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import {FILTER_MATCH_OPTIONS} from 'sentry/views/automations/components/actionFilters/constants';
-import ActionNodeList from 'sentry/views/automations/components/actionNodeList';
+import {
+  DataConditionGroupLogicType,
+  DataConditionHandlerGroupType,
+} from 'sentry/types/workflowEngine/dataConditions';
+import {ActionFilterBlock} from 'sentry/views/automations/components/actionFilterBlock';
+import {AutomationBuilderConflictContext} from 'sentry/views/automations/components/automationBuilderConflictContext';
 import {useAutomationBuilderContext} from 'sentry/views/automations/components/automationBuilderContext';
-import DataConditionNodeList from 'sentry/views/automations/components/dataConditionNodeList';
+import {useAutomationBuilderErrorContext} from 'sentry/views/automations/components/automationBuilderErrorContext';
+import {DataConditionNodeList} from 'sentry/views/automations/components/dataConditionNodeList';
+import {
+  EmbeddedSelectField,
+  Step,
+  StepLead,
+} from 'sentry/views/automations/components/stepComponents';
 import {TRIGGER_MATCH_OPTIONS} from 'sentry/views/automations/components/triggers/constants';
+import {findConflictingConditions} from 'sentry/views/automations/hooks/utils';
 
-export default function AutomationBuilder() {
-  const {state, actions} = useAutomationBuilderContext();
-  const organization = useOrganization();
-  const api = useApi();
+export function AutomationBuilder() {
+  const {state, actions, showTriggerLogicTypeSelector} = useAutomationBuilderContext();
+  const {mutationErrors} = useAutomationBuilderErrorContext();
 
-  // fetch org members for SelectMembers dropdowns
-  useEffect(() => {
-    fetchOrgMembers(api, organization.slug);
-  }, [api, organization]);
+  const conflictData = useMemo(() => {
+    return findConflictingConditions(state.triggers, state.actionFilters);
+  }, [state]);
 
   return (
-    <Flex direction="column" gap={space(1)}>
-      <Step>
-        <StepLead>
-          {/* TODO: Only make this a selector of "all" is originally selected */}
-          {tct('[when:When] [selector] of the following occur', {
-            when: <ConditionBadge />,
-            selector: (
-              <EmbeddedWrapper>
-                <EmbeddedSelectField
-                  styles={{
-                    control: (provided: any) => ({
-                      ...provided,
-                      minHeight: '21px',
-                      height: '21px',
-                    }),
-                  }}
-                  inline={false}
-                  isSearchable={false}
-                  isClearable={false}
-                  name="triggers.logicType"
-                  value={state.triggers.logicType}
-                  onChange={logicType => actions.updateWhenLogicType(logicType)}
-                  required
-                  flexibleControlStateSize
-                  options={TRIGGER_MATCH_OPTIONS}
-                  size="xs"
-                />
-              </EmbeddedWrapper>
-            ),
-          })}
-        </StepLead>
-      </Step>
-      <DataConditionNodeList
-        handlerGroup={DataConditionHandlerGroupType.WORKFLOW_TRIGGER}
-        placeholder={t('Select a trigger...')}
-        conditions={state.triggers.conditions}
-        group="triggers"
-        onAddRow={type => actions.addWhenCondition(type)}
-        onDeleteRow={index => actions.removeWhenCondition(index)}
-        updateCondition={(id, comparison) => actions.updateWhenCondition(id, comparison)}
-      />
-
-      {state.actionFilters.map(actionFilter => (
-        <ActionFilterBlock
-          key={`actionFilters.${actionFilter.id}`}
-          actionFilter={actionFilter}
+    <AutomationBuilderConflictContext.Provider value={conflictData}>
+      <Stack gap="md">
+        <Step>
+          <StepLead>
+            {tct('[when:When] [selector] of the following occur', {
+              when: <ConditionBadge />,
+              selector: showTriggerLogicTypeSelector ? (
+                <Container width="80px">
+                  <EmbeddedSelectField
+                    styles={{
+                      control: (provided: any) => ({
+                        ...provided,
+                        minHeight: '21px',
+                        height: '21px',
+                      }),
+                    }}
+                    isSearchable={false}
+                    isClearable={false}
+                    name={`${state.triggers.id}.logicType`}
+                    value={
+                      // We do not expose ANY as a valid option, but it is
+                      state.triggers.logicType === DataConditionGroupLogicType.ANY
+                        ? DataConditionGroupLogicType.ANY_SHORT_CIRCUIT
+                        : state.triggers.logicType
+                    }
+                    onChange={(option: SelectValue<DataConditionGroupLogicType>) =>
+                      actions.updateWhenLogicType(option.value)
+                    }
+                    options={TRIGGER_MATCH_OPTIONS}
+                    size="xs"
+                  />
+                </Container>
+              ) : (
+                <strong>{t('any')}</strong>
+              ),
+            })}
+          </StepLead>
+        </Step>
+        <DataConditionNodeList
+          handlerGroup={DataConditionHandlerGroupType.WORKFLOW_TRIGGER}
+          label={t('Add trigger')}
+          placeholder={t('Select a trigger...')}
+          conditions={state.triggers.conditions}
+          groupId={state.triggers.id}
+          onAddRow={type => actions.addWhenCondition(type)}
+          onDeleteRow={index => actions.removeWhenCondition(index)}
+          updateCondition={(id, comparison) =>
+            actions.updateWhenCondition(id, comparison)
+          }
         />
-      ))}
-      <span>
-        <PurpleTextButton
-          borderless
-          icon={<IconAdd />}
-          size="xs"
-          onClick={() => actions.addIf()}
-        >
-          {t('If/Then Block')}
-        </PurpleTextButton>
-      </span>
-      <span>
-        <Button icon={<IconMail />}>{t('Send Test Notification')}</Button>
-      </span>
-    </Flex>
-  );
-}
-
-interface ActionFilterBlockProps {
-  actionFilter: DataConditionGroup;
-}
-
-function ActionFilterBlock({actionFilter}: ActionFilterBlockProps) {
-  const {actions} = useAutomationBuilderContext();
-
-  return (
-    <IfThenWrapper>
-      <Step>
-        <Flex direction="column" gap={space(0.75)}>
-          <Flex justify="space-between">
-            <StepLead>
-              {tct('[if: If] [selector] of these filters match', {
-                if: <ConditionBadge />,
-                selector: (
-                  <EmbeddedWrapper>
-                    <EmbeddedSelectField
-                      styles={{
-                        control: (provided: any) => ({
-                          ...provided,
-                          minHeight: '21px',
-                          height: '21px',
-                        }),
-                      }}
-                      inline={false}
-                      isSearchable={false}
-                      isClearable={false}
-                      name={`actionFilters.${actionFilter.id}.logicType`}
-                      required
-                      flexibleControlStateSize
-                      options={FILTER_MATCH_OPTIONS}
-                      size="xs"
-                      value={actionFilter.logicType}
-                      onChange={value =>
-                        actions.updateIfLogicType(actionFilter.id, value)
-                      }
-                    />
-                  </EmbeddedWrapper>
-                ),
-              })}
-            </StepLead>
-            <Button
-              aria-label={t('Delete If/Then Block')}
-              size="sm"
-              icon={<IconDelete />}
-              borderless
-              onClick={() => actions.removeIf(actionFilter.id)}
-              className="delete-condition-group"
-            />
-          </Flex>
-          <DataConditionNodeList
-            handlerGroup={DataConditionHandlerGroupType.ACTION_FILTER}
-            placeholder={t('Filter by...')}
-            group={`actionFilters.${actionFilter.id}`}
-            conditions={actionFilter?.conditions || []}
-            onAddRow={type => actions.addIfCondition(actionFilter.id, type)}
-            onDeleteRow={id => actions.removeIfCondition(actionFilter.id, id)}
-            updateCondition={(id, comparison) =>
-              actions.updateIfCondition(actionFilter.id, id, comparison)
-            }
-            updateConditionType={(id, type) =>
-              actions.updateIfConditionType(actionFilter.id, id, type)
-            }
+        {(mutationErrors as any)?.actionFilters?.all && (
+          <StyledAlert variant="danger">
+            {(mutationErrors as any).actionFilters.all}
+          </StyledAlert>
+        )}
+        {state.actionFilters.map(actionFilter => (
+          <ActionFilterBlock
+            key={`actionFilters.${actionFilter.id}`}
+            actionFilter={actionFilter}
           />
-        </Flex>
-      </Step>
-      <Step>
-        <StepLead>
-          {tct('[then:Then] perform these actions', {
-            then: <ConditionBadge />,
-          })}
-        </StepLead>
-        {/* TODO: add actions dropdown here */}
-        <ActionNodeList
-          placeholder={t('Select an action')}
-          group={`actionFilters.${actionFilter.id}`}
-          actions={actionFilter?.actions || []}
-          onAddRow={(id, type) => actions.addIfAction(actionFilter.id, id, type)}
-          onDeleteRow={id => actions.removeIfAction(actionFilter.id, id)}
-          updateAction={(id, data) => actions.updateIfAction(actionFilter.id, id, data)}
-        />
-      </Step>
-    </IfThenWrapper>
+        ))}
+        <span>
+          <PurpleTextButton
+            variant="transparent"
+            icon={<IconAdd />}
+            size="xs"
+            onClick={() => actions.addIf()}
+          >
+            {t('If/Then Block')}
+          </PurpleTextButton>
+        </span>
+      </Stack>
+    </AutomationBuilderConflictContext.Provider>
   );
 }
 
-const Step = styled(Flex)`
-  flex-direction: column;
-  gap: ${space(0.75)};
-`;
-
-const StepLead = styled(Flex)`
-  align-items: center;
-  gap: ${space(0.5)};
-`;
-
-const EmbeddedSelectField = styled(SelectField)`
-  padding: 0;
-  font-weight: ${p => p.theme.fontWeightNormal};
-  text-transform: none;
-`;
-
-const EmbeddedWrapper = styled('div')`
-  width: 80px;
-`;
-
-const IfThenWrapper = styled(Flex)`
-  flex-direction: column;
-  gap: ${space(1.5)};
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
-  padding: ${space(1.5)};
-  padding-top: ${space(1)};
-  margin-top: ${space(1)};
-
-  .delete-condition-group {
-    opacity: 0;
-  }
-  :hover .delete-condition-group {
-    opacity: 1;
-  }
+const StyledAlert = styled(Alert)`
+  margin-top: ${p => p.theme.space.md};
 `;

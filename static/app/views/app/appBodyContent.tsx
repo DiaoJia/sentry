@@ -1,23 +1,8 @@
-import {Fragment} from 'react';
-
-import SystemAlerts from 'sentry/views/app/systemAlerts';
-
-interface AppContentProps {
-  children: React.ReactNode;
-}
+import {Outlet} from 'react-router-dom';
 
 /**
- * Wraps the body content of the app. For organization routes,
- * this is the main content which excludes the sidebar.
- *
- * For now, this just provides system alerts, which should be visible
- * on all pages.
+ * Route component version that renders children via Outlet.
  */
-export function AppBodyContent({children}: AppContentProps) {
-  return (
-    <Fragment>
-      <SystemAlerts className="messages-container" />
-      {children}
-    </Fragment>
-  );
+export function AppBodyContentRoute() {
+  return <Outlet />;
 }

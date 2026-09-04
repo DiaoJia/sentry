@@ -3,17 +3,21 @@ from datetime import timedelta
 import pytest
 from django.urls import reverse
 
-from sentry.snuba.metrics.naming_layer.mri import TransactionMRI
 from sentry.testutils.cases import MetricsAPIBaseTestCase
 from sentry.testutils.helpers.datetime import freeze_time
 from sentry.utils.samples import load_data
 
-pytestmark = [pytest.mark.sentry_metrics]
+pytestmark = [
+    pytest.mark.sentry_metrics,
+    pytest.mark.skip(
+        reason="Generic metrics sets, gauges, and distributions are no longer queryable"
+    ),
+]
 
 
 @freeze_time(MetricsAPIBaseTestCase.MOCK_DATETIME)
 class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(self.user)
         self.org = self.create_organization(owner=self.user)
@@ -22,7 +26,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
             "sentry-api-0-organization-events-root-cause-analysis", args=[self.org.slug]
         )
         self.store_performance_metric(
-            name=TransactionMRI.DURATION.value,
+            name="d:transactions/duration@millisecond",
             tags={"transaction": "foo"},
             org_id=self.org.id,
             project_id=self.project.id,
@@ -59,7 +63,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
         data["contexts"]["trace"]["parent_span_id"] = parent_span_id
         return self.store_event(data, project_id=project_id)
 
-    def test_transaction_name_required(self):
+    def test_transaction_name_required(self) -> None:
         response = self.client.get(
             self.url,
             format="json",
@@ -71,7 +75,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
 
         assert response.status_code == 400, response.content
 
-    def test_project_id_required(self):
+    def test_project_id_required(self) -> None:
         response = self.client.get(
             self.url,
             format="json",
@@ -82,7 +86,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
 
         assert response.status_code == 400, response.content
 
-    def test_breakpoint_required(self):
+    def test_breakpoint_required(self) -> None:
         response = self.client.get(
             self.url,
             format="json",
@@ -91,7 +95,80 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
 
         assert response.status_code == 400, response.content
 
-    def test_transaction_must_exist(self):
+    def test_rejects_quote_in_transaction(self) -> None:
+        response = self.client.get(
+            self.url,
+            format="json",
+            data={
+                "transaction": 'foo" OR project.id:>0 OR transaction:"bar',
+                "project": self.project.id,
+                "breakpoint": self.now - timedelta(days=1),
+                "start": self.now - timedelta(days=3),
+                "end": self.now,
+            },
+        )
+
+        assert response.status_code == 400, response.content
+        assert "transaction" in response.json()
+
+    def test_rejects_backslash_in_transaction(self) -> None:
+        response = self.client.get(
+            self.url,
+            format="json",
+            data={
+                "transaction": "foo\\bar",
+                "project": self.project.id,
+                "breakpoint": self.now - timedelta(days=1),
+                "start": self.now - timedelta(days=3),
+                "end": self.now,
+            },
+        )
+
+        assert response.status_code == 400, response.content
+        assert "transaction" in response.json()
+
+    def test_rejects_non_integer_project(self) -> None:
+        response = self.client.get(
+            self.url,
+            format="json",
+            data={
+                "transaction": "foo",
+                "project": "not-an-int",
+                "breakpoint": self.now - timedelta(days=1),
+            },
+        )
+
+        assert response.status_code == 400, response.content
+
+    def test_rejects_invalid_breakpoint(self) -> None:
+        response = self.client.get(
+            self.url,
+            format="json",
+            data={
+                "transaction": "foo",
+                "project": self.project.id,
+                "breakpoint": "not-a-date",
+            },
+        )
+
+        assert response.status_code == 400, response.content
+        assert "breakpoint" in response.json()
+
+    def test_rejects_per_page_over_max(self) -> None:
+        response = self.client.get(
+            self.url,
+            format="json",
+            data={
+                "transaction": "foo",
+                "project": self.project.id,
+                "breakpoint": self.now - timedelta(days=1),
+                "per_page": 1000,
+            },
+        )
+
+        assert response.status_code == 400, response.content
+
+    def test_transaction_must_exist(self) -> None:
         response = self.client.get(
             self.url,
             format="json",
@@ -121,7 +198,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
         assert response.status_code == 400, response.content
 
     # TODO: Enable this test when adding a serializer to handle validation
-    # def test_breakpoint_must_be_in_the_past(self):
+    # def test_breakpoint_must_be_in_the_past(self) -> None:
     #     response = self.client.get(
     #         self.url,
     #         format="json",
@@ -134,7 +211,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
 
     #     assert response.status_code == 400, response.content
 
-    def test_returns_change_data_for_regressed_spans(self):
+    def test_returns_change_data_for_regressed_spans(self) -> None:
         before_timestamp = self.now - timedelta(days=2)
         before_span = {
             "parent_span_id": "a" * 16,
@@ -248,7 +325,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
             },
         ]
 
-    def test_results_are_limited(self):
+    def test_results_are_limited(self) -> None:
         # Before
         self.create_transaction(
             transaction="foo",
@@ -330,7 +407,7 @@ class OrganizationRootCauseAnalysisTest(MetricsAPIBaseTestCase):
             }
         ]
 
-    def test_analysis_leaves_a_buffer_around_breakpoint_to_ignore_mixed_transactions(self):
+    def test_analysis_leaves_a_buffer_around_breakpoint_to_ignore_mixed_transactions(self) -> None:
         breakpoint_timestamp = self.now - timedelta(days=1)
         before_timestamp = breakpoint_timestamp - timedelta(hours=1)
         after_timestamp = breakpoint_timestamp + timedelta(hours=1)

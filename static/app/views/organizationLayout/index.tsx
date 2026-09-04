@@ -1,68 +1,78 @@
-import {ScrollRestoration} from 'react-router-dom';
+import {useRef} from 'react';
+import {Outlet, ScrollRestoration} from 'react-router-dom';
 import styled from '@emotion/styled';
 
-import DemoHeader from 'sentry/components/demo/demoHeader';
+import {GlobalDrawer} from '@sentry/scraps/drawer';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {PictureInPictureProvider} from '@sentry/scraps/pictureInPicture';
+
+import {DemoHeader} from 'sentry/components/demo/demoHeader';
 import {useFeatureFlagOnboardingDrawer} from 'sentry/components/events/featureFlags/onboarding/featureFlagOnboardingSidebar';
 import {useFeedbackOnboardingDrawer} from 'sentry/components/feedback/feedbackOnboarding/sidebar';
-import Footer from 'sentry/components/footer';
-import {GlobalDrawer} from 'sentry/components/globalDrawer';
-import HookOrDefault from 'sentry/components/hookOrDefault';
+import * as Layout from 'sentry/components/layouts/thirds';
+import {Override} from 'sentry/components/override';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
 import {usePerformanceOnboardingDrawer} from 'sentry/components/performanceOnboarding/sidebar';
 import {useProfilingOnboardingDrawer} from 'sentry/components/profiling/profilingOnboardingSidebar';
 import {useReplaysOnboardingDrawer} from 'sentry/components/replaysOnboarding/sidebar';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import Sidebar from 'sentry/components/sidebar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {getOverride} from 'sentry/overrideRegistry';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {Organization} from 'sentry/types/organization';
-import useRouteAnalyticsHookSetup from 'sentry/utils/routeAnalytics/useRouteAnalyticsHookSetup';
-import useRouteAnalyticsParams from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
-import useInitSentryToolbar from 'sentry/utils/useInitSentryToolbar';
-import useOrganization from 'sentry/utils/useOrganization';
-import {AppBodyContent} from 'sentry/views/app/appBodyContent';
-import Nav from 'sentry/views/nav';
-import {NavContextProvider} from 'sentry/views/nav/context';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
-import OrganizationContainer from 'sentry/views/organizationContainer';
-import {useReleasesDrawer} from 'sentry/views/releases/drawer/useReleasesDrawer';
+import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
+import {useRouteAnalyticsHookSetup} from 'sentry/utils/routeAnalytics/useRouteAnalyticsHookSetup';
+import {useDimensions} from 'sentry/utils/useDimensions';
+import {useInitSentryToolbar} from 'sentry/utils/useInitSentryToolbar';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SystemAlerts} from 'sentry/views/app/systemAlerts';
+import {useReleasesDrawer} from 'sentry/views/explore/releases/drawer/useReleasesDrawer';
+import {useRegisterDomainViewUsage} from 'sentry/views/insights/common/utils/domainRedirect';
+import {Navigation} from 'sentry/views/navigation';
+import {PrimaryNavigationContextProvider} from 'sentry/views/navigation/primaryNavigationContext';
+import {TopBar} from 'sentry/views/navigation/topBar';
+import {OrganizationContainer} from 'sentry/views/organizationContainer';
+import {SeerExplorerSidebarLayout} from 'sentry/views/seerExplorer/components/sidebar/seerExplorerSidebarLayout';
+import {useSeerExplorerDocumentTitle} from 'sentry/views/seerExplorer/components/useSeerExplorerDocumentTitle';
+import {SeerExplorerChatStateProvider} from 'sentry/views/seerExplorer/seerExplorerChatStateContext';
+import {SeerExplorerSessionsProvider} from 'sentry/views/seerExplorer/seerExplorerSessionContext';
+import {SeerExplorerContextProvider} from 'sentry/views/seerExplorer/useSeerExplorerContext';
 
-import OrganizationDetailsBody from './body';
+import {OrganizationDetailsBody} from './body';
 
-interface Props {
-  children: React.ReactNode;
-}
-
-const OrganizationHeader = HookOrDefault({
-  hookName: 'component:organization-header',
+const OrganizationHeader = OverrideOrDefault({
+  overrideName: 'component:organization-header',
 });
 
-function OrganizationLayout({children}: Props) {
-  useRouteAnalyticsHookSetup();
-
+export function OrganizationLayout() {
   // XXX(epurkhiser): The OrganizationContainer is responsible for ensuring the
   // oganization is loaded before rendering children. Organization may not be
   // loaded yet when this first renders.
   const organization = useOrganization({allowNull: true});
-  const prefersStackedNav = usePrefersStackedNav();
-  const App = prefersStackedNav ? AppLayout : LegacyAppLayout;
-
-  useRouteAnalyticsParams({
-    prefers_stacked_navigation: prefersStackedNav,
-  });
 
   useInitSentryToolbar(organization);
 
   return (
     <SentryDocumentTitle noSuffix title={organization?.name ?? 'Sentry'}>
+      <GlobalAnalytics />
       <OrganizationContainer>
-        <GlobalDrawer>
-          <App organization={organization}>{children}</App>
-        </GlobalDrawer>
+        <SeerExplorerSessionsProvider>
+          <SeerExplorerChatStateProvider>
+            <PictureInPictureProvider>
+              <GlobalDrawer>
+                <SeerExplorerContextProvider>
+                  <AppLayout organization={organization} />
+                </SeerExplorerContextProvider>
+              </GlobalDrawer>
+            </PictureInPictureProvider>
+          </SeerExplorerChatStateProvider>
+        </SeerExplorerSessionsProvider>
       </OrganizationContainer>
       <ScrollRestoration getKey={location => location.pathname} />
     </SentryDocumentTitle>
   );
 }
 
-interface LayoutProps extends Props {
+interface LayoutProps {
   organization: Organization | null;
 }
 
@@ -77,57 +87,77 @@ function AppDrawers() {
   return null;
 }
 
-function AppLayout({children, organization}: LayoutProps) {
+function AppLayout({organization}: LayoutProps) {
+  useSeerExplorerDocumentTitle();
+  const pageBannerRef = useRef<HTMLDivElement>(null);
+  const {height: pageBannerHeight} = useDimensions({
+    elementRef: pageBannerRef,
+  });
+  const showSuperuserWarning =
+    isActiveSuperuser() &&
+    !ConfigStore.get('isSelfHosted') &&
+    !getOverride('component:superuser-warning-excluded')?.(organization);
+
   return (
-    <NavContextProvider>
-      <AppContainer>
-        <Nav />
-        {/* The `#main` selector is used to make the app content `inert` when an overlay is active */}
-        <BodyContainer id="main">
-          <AppBodyContent>
-            {organization && <OrganizationHeader organization={organization} />}
-            <OrganizationDetailsBody>{children}</OrganizationDetailsBody>
-          </AppBodyContent>
-          <Footer />
-        </BodyContainer>
-      </AppContainer>
+    <PrimaryNavigationContextProvider>
+      <Stack flex="1" minWidth="0" minHeight="100dvh">
+        <Container ref={pageBannerRef}>
+          {showSuperuserWarning && (
+            <Override name="component:superuser-warning" organization={organization} />
+          )}
+          <SystemAlerts className="messages-container" />
+        </Container>
+        <Flex
+          flex="1"
+          minWidth="0"
+          minHeight="0"
+          direction={{'screen:sm': 'column', 'screen:md': 'row'}}
+          position="relative"
+        >
+          <Navigation pageBannerHeight={pageBannerHeight} />
+          <SeerExplorerSidebarLayout>
+            {/* The `#main` selector is used to make the app content `inert` when an overlay is active */}
+            <ContentStack
+              id="main"
+              tabIndex={-1}
+              flex="1"
+              minWidth="0"
+              background="secondary"
+              containerType="inline-size"
+            >
+              <DemoHeader />
+              {organization && <OrganizationHeader organization={organization} />}
+              <OrganizationDetailsBody>
+                <TopBar.Slot.Provider>
+                  <TopBar />
+                  <Layout.Page>
+                    <Outlet />
+                  </Layout.Page>
+                </TopBar.Slot.Provider>
+              </OrganizationDetailsBody>
+            </ContentStack>
+          </SeerExplorerSidebarLayout>
+        </Flex>
+      </Stack>
       {organization ? <AppDrawers /> : null}
-    </NavContextProvider>
+    </PrimaryNavigationContextProvider>
   );
 }
 
-function LegacyAppLayout({children, organization}: LayoutProps) {
-  useReleasesDrawer();
-
-  return (
-    <div className="app">
-      <DemoHeader />
-      {organization && <OrganizationHeader organization={organization} />}
-      <Sidebar />
-      <AppBodyContent>
-        <OrganizationDetailsBody>{children}</OrganizationDetailsBody>
-      </AppBodyContent>
-      <Footer />
-    </div>
-  );
-}
-
-const AppContainer = styled('div')`
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  flex-grow: 1;
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    flex-direction: row;
+const ContentStack = styled(Stack)`
+  &:focus-visible {
+    outline: none;
+    box-shadow: none;
   }
 `;
 
-const BodyContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-`;
+/**
+ * Pulled into its own component to avoid re-rendering the OrganizationLayout
+ * TODO: figure out why these analytics hooks trigger rerenders
+ */
+function GlobalAnalytics() {
+  useRouteAnalyticsHookSetup();
+  useRegisterDomainViewUsage();
 
-export default OrganizationLayout;
+  return null;
+}

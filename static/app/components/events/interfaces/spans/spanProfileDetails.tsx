@@ -1,22 +1,23 @@
 import {useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {Button, ButtonBar, LinkButton} from '@sentry/scraps/button';
+import {InfoTip} from '@sentry/scraps/info';
+
 import {SectionHeading} from 'sentry/components/charts/styles';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {StackTraceContent} from 'sentry/components/events/interfaces/crashContent/stackTrace';
-import {StackTraceContentPanel} from 'sentry/components/events/interfaces/crashContent/stackTrace/content';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {FrameContent} from 'sentry/components/stackTrace/frame/frameContent';
+import {IssueFrameActions} from 'sentry/components/stackTrace/issueStackTrace/issueFrameActions';
+import {StackTraceViewStateProvider} from 'sentry/components/stackTrace/stackTraceContext';
+import {StackTraceFrames} from 'sentry/components/stackTrace/stackTraceFrames';
+import {StackTraceProvider} from 'sentry/components/stackTrace/stackTraceProvider';
 import {IconChevron, IconProfiling} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {EntryType, type EventTransaction, type Frame} from 'sentry/types/event';
 import type {Organization} from 'sentry/types/organization';
-import type {PlatformKey, Project} from 'sentry/types/project';
-import {StackView} from 'sentry/types/stacktrace';
-import {defined} from 'sentry/utils';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {defined} from 'sentry/utils/defined';
 import {formatPercentage} from 'sentry/utils/number/formatPercentage';
 import {CallTreeNode} from 'sentry/utils/profiling/callTreeNode';
 import {Frame as ProfilingFrame} from 'sentry/utils/profiling/frame';
@@ -26,9 +27,9 @@ import {
   generateProfileFlamechartRouteWithQuery,
 } from 'sentry/utils/profiling/routes';
 import {formatTo} from 'sentry/utils/profiling/units/units';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import {useProfileGroup} from 'sentry/views/profiling/profileGroupProvider';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {useProfileGroup} from 'sentry/views/explore/profiling/profileGroupProvider';
 
 const MAX_STACK_DEPTH = 8;
 const MAX_TOP_NODES = 5;
@@ -41,19 +42,23 @@ export interface SpanProfileDetailsProps {
     end_timestamp: number;
     span_id: string;
     start_timestamp: number;
+    thread_id?: string;
   }>;
-  onNoProfileFound?: () => void;
 }
 
 export function useSpanProfileDetails(
   organization: Organization,
   project: Project | undefined,
-  event: Readonly<EventTransaction>,
+  event: Readonly<EventTransaction | undefined>,
   span: SpanProfileDetailsProps['span']
 ) {
   const profileGroup = useProfileGroup();
 
   const processedEvent = useMemo(() => {
+    if (!event) {
+      return null;
+    }
+
     const entries: EventTransaction['entries'] = [...(event.entries || [])];
     if (profileGroup.images) {
       entries.push({
@@ -65,10 +70,16 @@ export function useSpanProfileDetails(
   }, [event, profileGroup]);
 
   // TODO: Pick another thread if it's more relevant.
-  const threadId = useMemo(
-    () => profileGroup.profiles[profileGroup.activeProfileIndex]?.threadId,
-    [profileGroup]
-  );
+  const threadId = useMemo(() => {
+    const rawThreadId = span.thread_id?.trim();
+    if (rawThreadId) {
+      const maybeThreadId = Number(rawThreadId);
+      if (!isNaN(maybeThreadId)) {
+        return maybeThreadId;
+      }
+    }
+    return profileGroup.profiles[profileGroup.activeProfileIndex]?.threadId;
+  }, [span.thread_id, profileGroup]);
 
   const profile = useMemo(() => {
     if (!defined(threadId)) {
@@ -77,8 +88,8 @@ export function useSpanProfileDetails(
     return profileGroup.profiles.find(p => p.threadId === threadId) ?? null;
   }, [profileGroup.profiles, threadId]);
 
-  const nodes: CallTreeNode[] = useMemo(() => {
-    if (profile === null) {
+  const nodes = useMemo(() => {
+    if (profile === null || !event) {
       return [];
     }
 
@@ -133,7 +144,7 @@ export function useSpanProfileDetails(
   }, [nodes]);
 
   const {frames, hasPrevious, hasNext} = useMemo(() => {
-    if (index >= maxNodes) {
+    if (index >= maxNodes || !event) {
       return {frames: [], hasPrevious: false, hasNext: false};
     }
 
@@ -145,7 +156,7 @@ export function useSpanProfileDetails(
   }, [index, maxNodes, event, nodes]);
 
   const profileTarget = useMemo(() => {
-    if (defined(project)) {
+    if (defined(project) && event) {
       const profileContext = event.contexts.profile ?? {};
 
       if (defined(profileContext.profile_id)) {
@@ -169,13 +180,14 @@ export function useSpanProfileDetails(
           query: {
             eventId: event.id,
             spanId: span.span_id,
+            tid: threadId ? String(threadId) : undefined,
           },
         });
       }
     }
 
-    return undefined;
-  }, [organization, project, event, span]);
+    return;
+  }, [organization, project, event, span, threadId]);
 
   return {
     processedEvent,
@@ -193,11 +205,7 @@ export function useSpanProfileDetails(
   };
 }
 
-export function SpanProfileDetails({
-  event,
-  span,
-  onNoProfileFound,
-}: SpanProfileDetailsProps) {
+export function SpanProfileDetails({event, span}: SpanProfileDetailsProps) {
   const organization = useOrganization();
   const {projects} = useProjects();
   const project = projects.find(p => p.id === event.projectID);
@@ -214,14 +222,11 @@ export function SpanProfileDetails({
     frames,
   } = useSpanProfileDetails(organization, project, event, span);
 
-  if (!defined(profileTarget)) {
+  if (!defined(profileTarget) || !processedEvent) {
     return null;
   }
 
   if (!frames.length) {
-    if (onNoProfileFound) {
-      onNoProfileFound();
-    }
     return null;
   }
 
@@ -242,7 +247,7 @@ export function SpanProfileDetails({
             })}
           </SectionSubtext>
         </SpanDetailsItem>
-        <QuestionTooltip
+        <InfoTip
           position="top"
           size="xs"
           title={t(
@@ -253,7 +258,7 @@ export function SpanProfileDetails({
           )}
         />
         <SpanDetailsItem>
-          <ButtonBar merged>
+          <ButtonBar>
             <Button
               icon={<IconChevron direction="left" />}
               aria-label={t('Previous')}
@@ -288,20 +293,24 @@ export function SpanProfileDetails({
           </LinkButton>
         </SpanDetailsItem>
       </SpanDetails>
-      <StackTraceContent
-        event={processedEvent}
-        newestFirst
-        platform={event.platform || 'other'}
-        stacktrace={{
-          framesOmitted: null,
-          hasSystemFrames: false,
-          registers: null,
-          frames,
-        }}
-        stackView={StackView.APP}
-        inlined
-        maxDepth={MAX_STACK_DEPTH}
-      />
+      <StackTraceViewStateProvider platform={event.platform || 'other'}>
+        <StackTraceProvider
+          event={processedEvent}
+          stacktrace={{
+            framesOmitted: null,
+            hasSystemFrames: false,
+            registers: null,
+            frames,
+          }}
+          maxDepth={MAX_STACK_DEPTH}
+        >
+          <StackTraceFrames
+            borderless
+            frameActionsComponent={IssueFrameActions}
+            frameContextComponent={FrameContent}
+          />
+        </StackTraceProvider>
+      </StackTraceViewStateProvider>
     </SpanContainer>
   );
 }
@@ -313,7 +322,7 @@ function getTopNodes(
 ): CallTreeNode[] {
   let duration = profile.startedAt;
 
-  const callTree: CallTreeNode = new CallTreeNode(ProfilingFrame.Root, null);
+  const callTree = new CallTreeNode(ProfilingFrame.Root, null);
 
   for (let i = 0; i < profile.samples.length; i++) {
     const sample = profile.samples[i]!;
@@ -401,7 +410,7 @@ function extractFrames(node: CallTreeNode | null, platform: PlatformKey): Frame[
   const frames: Frame[] = [];
 
   while (node && !node.isRoot) {
-    const frame = {
+    const frame: Frame = {
       absPath: node.frame.path ?? null,
       colNo: node.frame.column ?? null,
       context: [],
@@ -412,8 +421,10 @@ function extractFrames(node: CallTreeNode | null, platform: PlatformKey): Frame[
       lineNo: node.frame.line ?? null,
       module: node.frame.module ?? null,
       package: node.frame.package ?? null,
+      parentIndex: null,
       platform,
       rawFunction: null,
+      sampleCount: null,
       symbol: node.frame.symbol ?? null,
       symbolAddr: node.frame.symbolAddr ?? null,
       symbolicatorStatus: node.frame.symbolicatorStatus,
@@ -433,20 +444,15 @@ function extractFrames(node: CallTreeNode | null, platform: PlatformKey): Frame[
 
 const SpanContainer = styled('div')`
   container: profiling-container / inline-size;
-  border: 1px solid ${p => p.theme.innerBorder};
-  border-radius: ${p => p.theme.borderRadius};
+  border: 1px solid ${p => p.theme.tokens.border.secondary};
+  border-radius: ${p => p.theme.radius.md};
   overflow: hidden;
-
-  ${StackTraceContentPanel} {
-    margin-bottom: 0;
-    box-shadow: none;
-  }
 `;
 const SpanDetails = styled('div')`
-  padding: ${space(0.5)} ${space(1)};
+  padding: ${p => p.theme.space.xs} ${p => p.theme.space.md};
   display: flex;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
 const SpanDetailsItem = styled('span')<{grow?: boolean}>`
@@ -473,6 +479,6 @@ const SpanDetailsItem = styled('span')<{grow?: boolean}>`
 `;
 
 const SectionSubtext = styled('span')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.md};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.md};
 `;

@@ -4,22 +4,23 @@ import debounce from 'lodash/debounce';
 import isEqual from 'lodash/isEqual';
 import pick from 'lodash/pick';
 
-import {Button} from 'sentry/components/core/button';
-import type {SelectOption, SelectSection} from 'sentry/components/core/compactSelect';
-import SearchBarAction from 'sentry/components/events/interfaces/searchBarAction';
-import ExternalLink from 'sentry/components/links/externalLink';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {Button} from '@sentry/scraps/button';
+import type {SelectOption, SelectSection} from '@sentry/scraps/compactSelect';
+import {InfoTip} from '@sentry/scraps/info';
+import {Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {SearchBarAction} from 'sentry/components/events/interfaces/searchBarAction';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Image} from 'sentry/types/debugImage';
 import {CandidateDownloadStatus, ImageStatus} from 'sentry/types/debugImage';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
-import Status from './candidate/status';
-import Candidate from './candidate';
+import {Status} from './candidate/status';
+import {Candidate} from './candidate';
 import {INTERNAL_SOURCE} from './utils';
 
 const filterOptionCategories = {
@@ -49,7 +50,7 @@ type State = {
   searchTerm: string;
 };
 
-class Candidates extends Component<Props, State> {
+export class Candidates extends Component<Props, State> {
   state: State = {
     searchTerm: '',
     filterOptions: [],
@@ -244,11 +245,11 @@ class Candidates extends Component<Props, State> {
       return {
         emptyMessage: t('Sorry, no debug files match your search query'),
         emptyAction: hasActiveFilter ? (
-          <Button onClick={this.handleResetFilter} priority="primary">
+          <Button onClick={this.handleResetFilter} variant="primary">
             {t('Reset filter')}
           </Button>
         ) : (
-          <Button onClick={this.handleResetSearchBar} priority="primary">
+          <Button onClick={this.handleResetSearchBar} variant="primary">
             {t('Clear search bar')}
           </Button>
         ),
@@ -311,12 +312,14 @@ class Candidates extends Component<Props, State> {
     const haveCandidatesAtLeastOneAction =
       haveCandidatesOkOrDeletedDebugFile || hasReprocessWarning;
 
+    const {emptyMessage, emptyAction} = this.getEmptyMessage();
+
     return (
       <Wrapper>
         <Header>
           <Title>
             {t('Debug File Candidates')}
-            <QuestionTooltip
+            <InfoTip
               title={tct(
                 'These are the Debug Information Files (DIFs) corresponding to this image which have been looked up on [docLink:symbol servers] during the processing of the stacktrace.',
                 {
@@ -327,7 +330,6 @@ class Candidates extends Component<Props, State> {
               )}
               size="xs"
               position="top"
-              isHoverable
             />
           </Title>
           {!!candidates.length && (
@@ -341,36 +343,44 @@ class Candidates extends Component<Props, State> {
             />
           )}
         </Header>
-        <StyledPanelTable
-          headers={
-            haveCandidatesAtLeastOneAction
-              ? [t('Status'), t('Information'), '']
-              : [t('Status'), t('Information')]
+        <StyledSimpleTable
+          hasActions={haveCandidatesAtLeastOneAction}
+          header={
+            <SimpleTable.HeaderRow>
+              <SimpleTable.HeaderCell>{t('Status')}</SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Information')}</SimpleTable.HeaderCell>
+              {haveCandidatesAtLeastOneAction && <SimpleTable.HeaderCell />}
+            </SimpleTable.HeaderRow>
           }
-          isEmpty={!filteredCandidatesByFilter.length}
-          isLoading={isLoading}
-          {...this.getEmptyMessage()}
         >
-          {filteredCandidatesByFilter.map((candidate, index) => (
-            <Candidate
-              key={index}
-              candidate={candidate}
-              organization={organization}
-              baseUrl={baseUrl}
-              projSlug={projSlug}
-              eventDateReceived={eventDateReceived}
-              hasReprocessWarning={hasReprocessWarning}
-              haveCandidatesAtLeastOneAction={haveCandidatesAtLeastOneAction}
-              onDelete={onDelete}
-            />
-          ))}
-        </StyledPanelTable>
+          {isLoading && <SimpleTable.Loading />}
+          {!isLoading && !filteredCandidatesByFilter.length && (
+            <SimpleTable.Empty>
+              <Stack align="center" gap="xl">
+                {emptyMessage}
+                {emptyAction}
+              </Stack>
+            </SimpleTable.Empty>
+          )}
+          {!isLoading &&
+            filteredCandidatesByFilter.map((candidate, index) => (
+              <Candidate
+                key={index}
+                candidate={candidate}
+                organization={organization}
+                baseUrl={baseUrl}
+                projSlug={projSlug}
+                eventDateReceived={eventDateReceived}
+                hasReprocessWarning={hasReprocessWarning}
+                haveCandidatesAtLeastOneAction={haveCandidatesAtLeastOneAction}
+                onDelete={onDelete}
+              />
+            ))}
+        </StyledSimpleTable>
       </Wrapper>
     );
   }
 }
-
-export default Candidates;
 
 const Wrapper = styled('div')`
   display: grid;
@@ -379,39 +389,41 @@ const Wrapper = styled('div')`
 const Header = styled('div')`
   display: flex;
   flex-direction: column;
-  @media (min-width: ${props => props.theme.breakpoints.small}) {
+  @media (min-width: ${props => props.theme.breakpoints.sm}) {
     flex-wrap: wrap;
     flex-direction: row;
   }
 `;
 
 const Title = styled('div')`
-  padding-right: ${space(4)};
+  padding-right: ${p => p.theme.space['3xl']};
   display: grid;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
   grid-template-columns: repeat(2, max-content);
   align-items: center;
-  font-weight: ${p => p.theme.fontWeightBold};
-  color: ${p => p.theme.gray400};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  color: ${p => p.theme.colors.gray500};
   height: 32px;
   flex: 1;
 
-  @media (min-width: ${props => props.theme.breakpoints.small}) {
-    margin-bottom: ${space(1)};
+  @media (min-width: ${props => props.theme.breakpoints.sm}) {
+    margin-bottom: ${p => p.theme.space.md};
   }
 `;
 
-const StyledPanelTable = styled(PanelTable)`
+const StyledSimpleTable = styled(SimpleTable, {
+  shouldForwardProp: prop => prop !== 'hasActions',
+})<{hasActions: boolean}>`
   grid-template-columns: ${p =>
-    p.headers.length === 3 ? 'max-content 1fr max-content' : 'max-content 1fr'};
+    p.hasActions ? 'max-content 1fr max-content' : 'max-content 1fr'};
 
   height: 100%;
 
-  @media (min-width: ${props => props.theme.breakpoints.xxlarge}) {
+  @media (min-width: ${props => props.theme.breakpoints['2xl']}) {
     overflow: visible;
   }
 `;
 
 const StyledSearchBarAction = styled(SearchBarAction)`
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 `;

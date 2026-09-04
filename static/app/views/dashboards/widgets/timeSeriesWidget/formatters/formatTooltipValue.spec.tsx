@@ -16,8 +16,13 @@ describe('formatTooltipValue', () => {
 
   describe('number', () => {
     it.each([
-      [17.1238, '17.124'],
+      [0.000033452, '0.00003345'],
+      [0.00003, '0.00003'],
+      [0.001234, '0.0012'],
+      [17.1238, '17.1238'],
+      [170, '170'],
       [1772313.1, '1,772,313.1'],
+      [1772313.11123, '1,772,313.1112'],
     ])('Formats %s as %s', (value, formattedValue) => {
       expect(formatTooltipValue(value, 'number')).toEqual(formattedValue);
     });
@@ -36,7 +41,7 @@ describe('formatTooltipValue', () => {
 
   describe('duration', () => {
     it.each([
-      [0, 'millisecond', '0.00ms'],
+      [0, 'millisecond', '0.00μs'],
       [0.712, 'second', '712.00ms'],
       [1231, 'second', '20.52min'],
     ])('Formats %s as %s', (value, unit, formattedValue) => {
@@ -46,8 +51,8 @@ describe('formatTooltipValue', () => {
 
   describe('size', () => {
     it.each([
-      [0, 'byte', '0.0 B'],
-      [0.712, 'megabyte', '712 KB'],
+      [0, 'byte', '0 B'],
+      [0.712, 'megabyte', '712 kB'],
       [1231, 'kibibyte', '1.2 MiB'],
     ])('Formats %s as %s', (value, unit, formattedValue) => {
       expect(formatTooltipValue(value, 'size', unit)).toEqual(formattedValue);
@@ -71,6 +76,19 @@ describe('formatTooltipValue', () => {
       [17.231, undefined, '17'],
     ])('Formats %s as %s', (value, unit, formattedValue) => {
       expect(formatTooltipValue(value, 'score', unit)).toEqual(formattedValue);
+    });
+  });
+
+  describe('currency', () => {
+    it.each([
+      [0, '$0'],
+      [17, '$17'],
+      [171, '$171'],
+      [17111, '$17.11K'],
+      [17_000_110, '$17M'],
+      [1_000_110_000, '$1B'],
+    ])('Formats %s as %s', (value, formattedValue) => {
+      expect(formatTooltipValue(value, 'currency')).toEqual(formattedValue);
     });
   });
 });

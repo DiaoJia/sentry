@@ -1,62 +1,96 @@
 import {Fragment, useCallback, useMemo} from 'react';
-import styled from '@emotion/styled';
+import {mutationOptions, useMutation, useQueryClient} from '@tanstack/react-query';
+import {parseAsStringLiteral, useQueryState} from 'nuqs';
+import {z} from 'zod';
+
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {AutoSaveForm, FieldGroup} from '@sentry/scraps/form';
+import {Flex} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import type {RequestOptions} from 'sentry/api';
-import {Alert} from 'sentry/components/core/alert';
-import Form from 'sentry/components/forms/form';
-import JsonForm from 'sentry/components/forms/jsonForm';
-import type {Data, JsonFormObject} from 'sentry/components/forms/types';
-import HookOrDefault from 'sentry/components/hookOrDefault';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelItem from 'sentry/components/panels/panelItem';
+import {updateOrganization} from 'sentry/actionCreators/organizations';
+import * as Layout from 'sentry/components/layouts/thirds';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {PluginIcon} from 'sentry/icons/pluginIcon';
 import {t} from 'sentry/locale';
-import {PluginIcon} from 'sentry/plugins/components/pluginIcon';
-import {space} from 'sentry/styles/space';
-import type {ObjectStatus} from 'sentry/types/core';
-import type {Integration, IntegrationProvider} from 'sentry/types/integrations';
+import type {
+  Integration,
+  IntegrationProvider,
+  OrganizationIntegration,
+} from 'sentry/types/integrations';
+import type {Organization} from 'sentry/types/organization';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {
+  openGithubPermissionsUpdateModal,
+  useAutoOpenPermissionsModal,
+} from 'sentry/utils/integrations/useAutoOpenPermissionsModal';
+import {
+  canManageIntegrations,
   getAlertText,
   getIntegrationStatus,
+  integrationRequiresUpgrade,
+  isScmProvider,
   trackIntegrationAnalytics,
 } from 'sentry/utils/integrationUtil';
 import {
-  type ApiQueryKey,
+  fetchMutation,
+  getApiQueryData,
   setApiQueryData,
   useApiQuery,
-  useQueryClient,
 } from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
+import {AddIntegrationButton} from 'sentry/views/settings/organizationIntegrations/addIntegrationButton';
 import type {
   AlertType,
   IntegrationTab,
 } from 'sentry/views/settings/organizationIntegrations/detailedView/integrationLayout';
-import IntegrationLayout from 'sentry/views/settings/organizationIntegrations/detailedView/integrationLayout';
-import {useIntegrationTabs} from 'sentry/views/settings/organizationIntegrations/detailedView/useIntegrationTabs';
-import InstalledIntegration from 'sentry/views/settings/organizationIntegrations/installedIntegration';
-import IntegrationButton from 'sentry/views/settings/organizationIntegrations/integrationButton';
+import {IntegrationLayout} from 'sentry/views/settings/organizationIntegrations/detailedView/integrationLayout';
+import {InstalledIntegration} from 'sentry/views/settings/organizationIntegrations/installedIntegration';
+import {IntegrationButton} from 'sentry/views/settings/organizationIntegrations/integrationButton';
 import {IntegrationContext} from 'sentry/views/settings/organizationIntegrations/integrationContext';
 
 // Show the features tab if the org has features for the integration
-const integrationFeatures = ['github', 'gitlab', 'slack'];
+const integrationFeatures = ['slack'];
 
-const FirstPartyIntegrationAlert = HookOrDefault({
-  hookName: 'component:first-party-integration-alert',
+const FirstPartyIntegrationAlert = OverrideOrDefault({
+  overrideName: 'component:first-party-integration-alert',
   defaultComponent: () => null,
 });
 
-const FirstPartyIntegrationAdditionalCTA = HookOrDefault({
-  hookName: 'component:first-party-integration-additional-cta',
+const FirstPartyIntegrationAdditionalCTA = OverrideOrDefault({
+  overrideName: 'component:first-party-integration-additional-cta',
   defaultComponent: () => null,
 });
 
-type IntegrationInformation = {
+const slackFeaturesSchema = z.object({
+  issueAlertsThreadFlag: z.boolean(),
+  metricAlertsThreadFlag: z.boolean(),
+});
+
+function getOrgMutationOptions(organization: Organization) {
+  const orgEndpoint = getApiUrl('/organizations/$organizationIdOrSlug/', {
+    path: {organizationIdOrSlug: organization.slug},
+  });
+  return mutationOptions({
+    mutationFn: (data: Partial<Organization>) =>
+      fetchMutation<Organization>({method: 'PUT', url: orgEndpoint, data}),
+    onSuccess: data => updateOrganization(data),
+  });
+}
+
+export type IntegrationInformation = {
   providers: IntegrationProvider[];
 };
 
@@ -68,7 +102,9 @@ function makeIntegrationQueryKey({
   orgSlug: string;
 }): ApiQueryKey {
   return [
-    `/organizations/${orgSlug}/integrations/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/integrations/', {
+      path: {organizationIdOrSlug: orgSlug},
+    }),
     {
       query: {
         provider_key: integrationSlug,
@@ -78,16 +114,20 @@ function makeIntegrationQueryKey({
   ];
 }
 
+const tabs: IntegrationTab[] = ['overview', 'configurations', 'features'];
+const tabsWithoutFeatures = tabs.filter(tab => tab !== 'features');
+const tabTitles: Record<IntegrationTab, string> = {
+  overview: t('Overview'),
+  configurations: t('Configurations'),
+  features: t('Features'),
+};
+
 export default function IntegrationDetailedView() {
-  const tabs: IntegrationTab[] = useMemo(
-    () => ['overview', 'configurations', 'features'],
-    []
-  );
-  const api = useApi({persistInFlight: true});
   const queryClient = useQueryClient();
-  const {activeTab, setActiveTab} = useIntegrationTabs<IntegrationTab>({
-    initialTab: 'overview',
-  });
+  const [activeTab, setActiveTab] = useQueryState(
+    'tab',
+    parseAsStringLiteral(tabs).withDefault('overview').withOptions({history: 'push'})
+  );
   const navigate = useNavigate();
   const location = useLocation();
   const organization = useOrganization();
@@ -99,7 +139,9 @@ export default function IntegrationDetailedView() {
     isError: isInformationError,
   } = useApiQuery<IntegrationInformation>(
     [
-      `/organizations/${organization.slug}/config/integrations/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/config/integrations/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           provider_key: integrationSlug,
@@ -115,17 +157,22 @@ export default function IntegrationDetailedView() {
   const {
     data: configurations = [],
     isPending: isConfigurationsPending,
+    isFetching: isConfigurationsFetching,
     isError: isConfigurationsError,
-  } = useApiQuery<Integration[]>(
+  } = useApiQuery<OrganizationIntegration[]>(
     makeIntegrationQueryKey({orgSlug: organization.slug, integrationSlug}),
     {
-      staleTime: Infinity,
+      staleTime: 0,
       retry: false,
     }
   );
 
   const integrationType = 'first_party';
   const provider = information?.providers[0];
+  const displayTabs =
+    !provider || integrationFeatures.includes(provider.key) ? tabs : tabsWithoutFeatures;
+  const displayedTab = displayTabs.includes(activeTab) ? activeTab : 'overview';
+
   const description = provider?.metadata.description ?? '';
   const author = provider?.metadata.author ?? '';
   const resourceLinks = useMemo(() => {
@@ -134,24 +181,34 @@ export default function IntegrationDetailedView() {
       {url: provider?.metadata.issue_url ?? '', title: 'Report Issue'},
     ];
   }, [provider]);
-  const alerts: AlertType[] = useMemo(() => {
+  const alerts = useMemo(() => {
     // The server response for integration installations includes old icon CSS classes
     // We map those to the currently in use values to their react equivalents
     // and fallback to IconFlag just in case.
-    const alertList = (provider?.metadata.aspects.alerts || []).map(item => ({
-      ...item,
-      showIcon: true,
-    }));
+    const alertList: AlertType[] = (provider?.metadata.aspects.alerts || []).map(
+      alert => ({
+        variant: alert.variant ?? 'muted',
+        text: alert.text,
+        icon: alert.icon,
+      })
+    );
 
     if (!provider?.canAdd && provider?.metadata.aspects.externalInstall) {
       alertList.push({
-        type: 'warning',
-        showIcon: true,
+        variant: 'warning',
         text: provider?.metadata.aspects.externalInstall.noticeText,
       });
     }
     return alertList;
   }, [provider]);
+
+  const alertText = getAlertText(configurations);
+
+  const outdatedConfigurations = useMemo(
+    () => configurations.filter(integrationRequiresUpgrade),
+    [configurations]
+  );
+
   const installationStatus = useMemo(() => {
     const statusList = configurations?.map(getIntegrationStatus);
     // if we have conflicting statuses, we have a priority order
@@ -167,6 +224,11 @@ export default function IntegrationDetailedView() {
     return 'Not Installed';
   }, [configurations]);
   const integrationName = provider?.name ?? '';
+  const navigationTabTitle = (
+    <Layout.Title>
+      <Text as="span">{tabTitles[displayedTab]}</Text>
+    </Layout.Title>
+  );
   const featureData = useMemo(() => {
     return provider?.metadata.features ?? [];
   }, [provider]);
@@ -187,67 +249,100 @@ export default function IntegrationDetailedView() {
   );
 
   const renderTabs = useCallback(() => {
-    const displayTabs = integrationFeatures.includes(provider?.key ?? '')
-      ? tabs
-      : tabs.filter(tab => tab !== 'features');
-
     return (
       <IntegrationLayout.Tabs
         tabs={displayTabs}
-        activeTab={activeTab}
+        activeTab={displayedTab}
         onTabChange={onTabChange}
       />
     );
-  }, [provider, tabs, activeTab, onTabChange]);
+  }, [displayTabs, displayedTab, onTabChange]);
+
+  useAutoOpenPermissionsModal({
+    provider,
+    organization,
+    outdatedConfigurations,
+    isConfigurationsLoading: isConfigurationsPending || isConfigurationsFetching,
+  });
 
   const onInstall = useCallback(
     (integration: Integration) => {
-      // send the user to the configure integration view for that integration
+      if (provider?.features.includes('coding-agent')) {
+        queryClient.invalidateQueries({
+          queryKey: makeIntegrationQueryKey({
+            orgSlug: organization.slug,
+            integrationSlug,
+          }),
+        });
+        queryClient.invalidateQueries({
+          queryKey: [
+            getApiUrl('/organizations/$organizationIdOrSlug/config/integrations/', {
+              path: {organizationIdOrSlug: organization.slug},
+            }),
+          ],
+        });
+      }
       navigate(
         `/settings/${organization.slug}/integrations/${integration.provider.key}/${integration.id}/`
       );
     },
-    [organization.slug, navigate]
+    [organization.slug, integrationSlug, navigate, queryClient, provider?.features]
   );
 
-  const onRemove = useCallback(
-    (integration: Integration) => {
-      const originalConfigurations = [...configurations];
-
-      const updatedConfigurations = configurations.map(config =>
-        config.id === integration.id
-          ? {...config, organizationIntegrationStatus: 'pending_deletion' as ObjectStatus}
-          : config
-      );
-
-      setApiQueryData<Integration[]>(
-        queryClient,
-        makeIntegrationQueryKey({orgSlug: organization.slug, integrationSlug}),
-        updatedConfigurations
-      );
-
-      const options: RequestOptions = {
+  const {mutate: onRemove} = useMutation({
+    mutationFn: (integration: OrganizationIntegration) =>
+      fetchMutation({
         method: 'DELETE',
-        error: () => {
-          setApiQueryData<Integration[]>(
-            queryClient,
-            makeIntegrationQueryKey({orgSlug: organization.slug, integrationSlug}),
-            originalConfigurations
-          );
-          addErrorMessage(t('Failed to remove Integration'));
-        },
-      };
+        url: getApiUrl(
+          '/organizations/$organizationIdOrSlug/integrations/$integrationId/',
+          {path: {organizationIdOrSlug: organization.slug, integrationId: integration.id}}
+        ),
+      }),
+    onMutate: async integration => {
+      const queryKey = makeIntegrationQueryKey({
+        orgSlug: organization.slug,
+        integrationSlug,
+      });
+      // Cancel in-flight refetches so they can't clobber the optimistic update.
+      await queryClient.cancelQueries({queryKey});
 
-      // XXX: We can probably convert this to a mutation, but trying to avoid it for the FC conversion.
-      api.request(
-        `/organizations/${organization.slug}/integrations/${integration.id}/`,
-        options
+      const previousConfigurations = getApiQueryData<OrganizationIntegration[]>(
+        queryClient,
+        queryKey
       );
-    },
-    [api, configurations, integrationSlug, organization.slug, queryClient]
-  );
 
-  const onDisable = useCallback((integration: Integration) => {
+      setApiQueryData<OrganizationIntegration[]>(queryClient, queryKey, current =>
+        (current ?? []).map(config =>
+          config.id === integration.id
+            ? {
+                ...config,
+                organizationIntegrationStatus: 'pending_deletion',
+              }
+            : config
+        )
+      );
+
+      return {previousConfigurations};
+    },
+    onError: (_error, _integration, context) => {
+      if (context?.previousConfigurations) {
+        setApiQueryData<OrganizationIntegration[]>(
+          queryClient,
+          makeIntegrationQueryKey({orgSlug: organization.slug, integrationSlug}),
+          context.previousConfigurations
+        );
+      }
+      addErrorMessage(t('Failed to remove Integration'));
+    },
+    onSettled: () => {
+      // Resync with the server once the delete settles.
+      queryClient.invalidateQueries({
+        queryKey: makeIntegrationQueryKey({orgSlug: organization.slug, integrationSlug}),
+      });
+    },
+  });
+
+  const onDisable = useCallback((integration: OrganizationIntegration) => {
     let url: string;
 
     if (!integration.domainName) {
@@ -274,40 +369,43 @@ export default function IntegrationDetailedView() {
         priority: 'primary',
         'data-test-id': 'install-button',
         disabled: disabledFromFeatures,
-      };
+      } as const;
 
       if (!provider) {
         return null;
       }
 
       return (
-        <IntegrationContext
-          value={{
-            provider,
-            type: integrationType,
-            installStatus: installationStatus,
-            analyticsParams: {
-              view: 'integrations_directory_integration_detail',
-              already_installed: installationStatus !== 'Not Installed',
-              ...(referrer && {referrer}),
-            },
-          }}
-        >
-          <StyledIntegrationButton
-            userHasAccess={userHasAccess}
-            onAddIntegration={onInstall}
-            onExternalClick={() => {
-              trackIntegrationAnalytics('integrations.installation_start', {
+        <Flex gap="md">
+          <IntegrationContext
+            value={{
+              provider,
+              type: integrationType,
+              installStatus: installationStatus,
+              analyticsParams: {
                 view: 'integrations_directory_integration_detail',
-                integration: integrationSlug,
-                integration_type: integrationType,
                 already_installed: installationStatus !== 'Not Installed',
-                organization,
-              });
+                ...(referrer && {referrer}),
+              },
             }}
-            buttonProps={buttonProps}
-          />
-        </IntegrationContext>
+          >
+            <IntegrationButton
+              userHasAccess={userHasAccess}
+              onAddIntegration={onInstall}
+              onExternalClick={() => {
+                trackIntegrationAnalytics('integrations.installation_start', {
+                  view: 'integrations_directory_integration_detail',
+                  integration: integrationSlug,
+                  integration_type: integrationType,
+                  is_scm: provider ? isScmProvider(provider) : false,
+                  already_installed: installationStatus !== 'Not Installed',
+                  organization,
+                });
+              }}
+              buttonProps={buttonProps}
+            />
+          </IntegrationContext>
+        </Flex>
       );
     },
     [
@@ -337,17 +435,8 @@ export default function IntegrationDetailedView() {
       );
     }
 
-    const alertText = getAlertText(configurations);
-
     return (
       <Fragment>
-        {alertText && (
-          <Alert.Container>
-            <Alert type="warning" showIcon>
-              {alertText}
-            </Alert>
-          </Alert.Container>
-        )}
         <Panel>
           {configurations.map(integration => (
             <PanelItem key={integration.id}>
@@ -367,7 +456,7 @@ export default function IntegrationDetailedView() {
                     organization,
                   });
                 }}
-                requiresUpgrade={!!alertText}
+                requiresUpgrade={integrationRequiresUpgrade(integration)}
               />
             </PanelItem>
           ))}
@@ -387,225 +476,195 @@ export default function IntegrationDetailedView() {
     renderTopButton,
   ]);
 
-  const getSlackFeatures = useCallback((): [JsonFormObject[], Data] => {
-    const hasIntegration = configurations ? configurations.length > 0 : false;
-
-    const forms: JsonFormObject[] = [
-      {
-        fields: [
-          {
-            name: 'issueAlertsThreadFlag',
-            type: 'boolean',
-            label: t('Enable Slack threads on Issue Alerts'),
-            help: t(
-              'Allow Slack integration to post replies in threads for an Issue Alert notification.'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a Slack integration to enable this feature.'
-            ),
-          },
-          {
-            name: 'metricAlertsThreadFlag',
-            type: 'boolean',
-            label: t('Enable Slack threads on Metric Alerts'),
-            help: t(
-              'Allow Slack integration to post replies in threads for an Metric Alert notification.'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a Slack integration to enable this feature.'
-            ),
-          },
-        ],
-      },
-    ];
-
-    const initialData = {
-      issueAlertsThreadFlag: organization.issueAlertsThreadFlag,
-      metricAlertsThreadFlag: organization.metricAlertsThreadFlag,
-    };
-
-    return [forms, initialData];
-  }, [organization, configurations]);
-
-  const getGithubFeatures = useCallback((): [JsonFormObject[], Data] => {
-    const hasIntegration = configurations ? configurations.length > 0 : false;
-
-    const forms: JsonFormObject[] = [
-      {
-        fields: [
-          {
-            name: 'githubPRBot',
-            type: 'boolean',
-            label: t('Enable Comments on Suspect Pull Requests'),
-            help: t(
-              'Allow Sentry to comment on recent pull requests suspected of causing issues.'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a GitHub integration to enable this feature.'
-            ),
-          },
-          {
-            name: 'githubOpenPRBot',
-            type: 'boolean',
-            label: t('Enable Comments on Open Pull Requests'),
-            help: t(
-              'Allow Sentry to comment on open pull requests to show recent error issues for the code being changed.'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a GitHub integration to enable this feature.'
-            ),
-          },
-          {
-            name: 'githubNudgeInvite',
-            type: 'boolean',
-            label: t('Enable Missing Member Detection'),
-            help: t(
-              'Allow Sentry to detect users committing to your GitHub repositories that are not part of your Sentry organization..'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a GitHub integration to enable this feature.'
-            ),
-          },
-        ],
-      },
-    ];
-
-    const initialData = {
-      githubPRBot: organization.githubPRBot,
-      githubOpenPRBot: organization.githubOpenPRBot,
-      githubNudgeInvite: organization.githubNudgeInvite,
-    };
-
-    return [forms, initialData];
-  }, [organization, configurations]);
-
-  const getGitlabFeatures = useCallback((): [JsonFormObject[], Data] => {
-    const hasIntegration = configurations ? configurations.length > 0 : false;
-
-    const forms: JsonFormObject[] = [
-      {
-        fields: [
-          {
-            name: 'gitlabPRBot',
-            type: 'boolean',
-            label: t('Enable Comments on Suspect Pull Requests'),
-            help: t(
-              'Allow Sentry to comment on recent pull requests suspected of causing issues.'
-            ),
-            disabled: !hasIntegration,
-            disabledReason: t(
-              'You must have a GitLab integration to enable this feature.'
-            ),
-          },
-        ],
-      },
-    ];
-
-    const initialData = {
-      gitlabPRBot: organization.gitlabPRBot,
-    };
-
-    return [forms, initialData];
-  }, [organization, configurations]);
+  const orgMutationOptions = getOrgMutationOptions(organization);
 
   const renderFeatures = useCallback(() => {
-    const endpoint = `/organizations/${organization.slug}/`;
     const hasOrgWrite = organization.access.includes('org:write');
+    const hasIntegration = configurations ? configurations.length > 0 : false;
+    const isDisabled = !hasOrgWrite || !hasIntegration;
 
-    let forms: JsonFormObject[], initialData: Data;
     switch (provider?.key) {
-      case 'github': {
-        [forms, initialData] = getGithubFeatures();
-        break;
-      }
-      case 'gitlab': {
-        [forms, initialData] = getGitlabFeatures();
-        break;
-      }
-      case 'slack': {
-        [forms, initialData] = getSlackFeatures();
-        break;
-      }
+      case 'slack':
+        return (
+          <FieldGroup>
+            <AutoSaveForm
+              name="issueAlertsThreadFlag"
+              schema={slackFeaturesSchema}
+              initialValue={organization.issueAlertsThreadFlag}
+              mutationOptions={orgMutationOptions}
+            >
+              {field => (
+                <field.Layout.Row
+                  label={t('Enable Slack threads on Issue Alerts')}
+                  hintText={
+                    hasIntegration
+                      ? t(
+                          'Allow Slack integration to post replies in threads for an Issue Alert notification.'
+                        )
+                      : t('You must have a Slack integration to enable this feature.')
+                  }
+                >
+                  <field.Switch
+                    checked={field.state.value}
+                    onChange={field.handleChange}
+                    disabled={isDisabled}
+                    aria-label={t('Enable Slack threads on Issue Alerts')}
+                  />
+                </field.Layout.Row>
+              )}
+            </AutoSaveForm>
+            <AutoSaveForm
+              name="metricAlertsThreadFlag"
+              schema={slackFeaturesSchema}
+              initialValue={organization.metricAlertsThreadFlag}
+              mutationOptions={orgMutationOptions}
+            >
+              {field => (
+                <field.Layout.Row
+                  label={t('Enable Slack threads on Metric Alerts')}
+                  hintText={
+                    hasIntegration
+                      ? t(
+                          'Allow Slack integration to post replies in threads for an Metric Alert notification.'
+                        )
+                      : t('You must have a Slack integration to enable this feature.')
+                  }
+                >
+                  <field.Switch
+                    checked={field.state.value}
+                    onChange={field.handleChange}
+                    disabled={isDisabled}
+                    aria-label={t('Enable Slack threads on Metric Alerts')}
+                  />
+                </field.Layout.Row>
+              )}
+            </AutoSaveForm>
+          </FieldGroup>
+        );
       default:
         return null;
     }
-
-    return (
-      <Form
-        apiMethod="PUT"
-        apiEndpoint={endpoint}
-        saveOnBlur
-        allowUndo
-        initialData={initialData}
-        onSubmitError={() => addErrorMessage('Unable to save change')}
-      >
-        <JsonForm
-          disabled={!hasOrgWrite}
-          features={organization.features}
-          forms={forms}
-        />
-      </Form>
-    );
-  }, [organization, provider, getGithubFeatures, getGitlabFeatures, getSlackFeatures]);
+  }, [organization, provider, configurations, orgMutationOptions]);
 
   if (isInformationPending || isConfigurationsPending) {
-    return <LoadingIndicator />;
+    return (
+      <Fragment>
+        {navigationTabTitle}
+        <LoadingIndicator />
+      </Fragment>
+    );
   }
 
   if (isInformationError || isConfigurationsError) {
     return <LoadingError message={t('There was an error loading this integration.')} />;
   }
 
+  const renderUpgradeButton = () => {
+    if (!canManageIntegrations(organization)) {
+      return (
+        <Tooltip
+          title={t('You must be an organization owner, manager or admin to update')}
+        >
+          <Button size="xs" variant="primary" disabled>
+            {t('Update')}
+          </Button>
+        </Tooltip>
+      );
+    }
+
+    const [outdatedConfiguration] = outdatedConfigurations;
+
+    if (outdatedConfigurations.length !== 1 || !provider || !outdatedConfiguration) {
+      return (
+        <Button
+          size="xs"
+          variant="primary"
+          onClick={() => setActiveTab('configurations')}
+        >
+          {t('Update')}
+        </Button>
+      );
+    }
+
+    return provider.key === 'github' ? (
+      <Button
+        size="xs"
+        variant="primary"
+        onClick={() => openGithubPermissionsUpdateModal(outdatedConfiguration)}
+        data-test-id="integration-upgrade-button"
+      >
+        {t('Update now')}
+      </Button>
+    ) : (
+      <AddIntegrationButton
+        provider={provider}
+        organization={organization}
+        onAddIntegration={onInstall}
+        analyticsParams={{
+          view: 'integrations_directory_integration_detail',
+          already_installed: true,
+        }}
+        buttonText={t('Update now')}
+        variant="primary"
+        size="xs"
+        data-test-id="integration-upgrade-button"
+      />
+    );
+  };
+
   return (
-    <IntegrationLayout.Body
-      integrationName={integrationName}
-      alert={<FirstPartyIntegrationAlert integrations={configurations} hideCTA />}
-      topSection={
-        <IntegrationLayout.TopSection
-          featureData={featureData}
-          integrationName={integrationName}
-          installationStatus={installationStatus}
-          integrationIcon={<PluginIcon pluginId={integrationSlug} size={50} />}
-          addInstallButton={
-            <IntegrationLayout.AddInstallButton
-              featureData={featureData}
-              hideButtonIfDisabled={false}
-              requiresAccess
-              renderTopButton={renderTopButton}
-            />
-          }
-          additionalCTA={
-            <FirstPartyIntegrationAdditionalCTA integrations={configurations} />
-          }
-        />
-      }
-      tabs={renderTabs()}
-      content={
-        activeTab === 'overview' ? (
-          <IntegrationLayout.InformationCard
-            integrationSlug={integrationSlug}
-            description={description}
-            alerts={alerts}
+    <SentryDocumentTitle title={integrationName}>
+      {navigationTabTitle}
+      <IntegrationLayout.Body
+        integrationName={integrationName}
+        alert={<FirstPartyIntegrationAlert integrations={configurations} hideCTA />}
+        topSection={
+          <IntegrationLayout.TopSection
             featureData={featureData}
-            author={author}
-            resourceLinks={resourceLinks}
-            permissions={null}
+            integrationName={integrationName}
+            installationStatus={installationStatus}
+            integrationIcon={<PluginIcon pluginId={integrationSlug} size={50} />}
+            addInstallButton={
+              <IntegrationLayout.AddInstallButton
+                featureData={featureData}
+                hideButtonIfDisabled={false}
+                requiresAccess
+                renderTopButton={renderTopButton}
+              />
+            }
+            additionalCTA={
+              <FirstPartyIntegrationAdditionalCTA integrations={configurations} />
+            }
           />
-        ) : activeTab === 'configurations' ? (
-          renderConfigurations()
-        ) : (
-          renderFeatures()
-        )
-      }
-    />
+        }
+        tabs={renderTabs()}
+        content={
+          displayedTab === 'overview' ? (
+            <IntegrationLayout.InformationCard
+              integrationSlug={integrationSlug}
+              description={description}
+              alerts={alerts}
+              upgradeAlert={
+                alertText && (
+                  <Alert.Container>
+                    <Alert variant="warning" trailingItems={renderUpgradeButton()}>
+                      {alertText}
+                    </Alert>
+                  </Alert.Container>
+                )
+              }
+              featureData={featureData}
+              author={author}
+              resourceLinks={resourceLinks}
+              permissions={null}
+            />
+          ) : displayedTab === 'configurations' ? (
+            renderConfigurations()
+          ) : (
+            renderFeatures()
+          )
+        }
+      />
+    </SentryDocumentTitle>
   );
 }
-
-const StyledIntegrationButton = styled(IntegrationButton)`
-  margin-bottom: ${space(1)};
-`;

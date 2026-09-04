@@ -1,66 +1,68 @@
 import {Fragment, useCallback, useEffect, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Container, Flex, Grid, Stack, type GridProps} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import {Pagination} from '@sentry/scraps/pagination';
+
+import {Confirm} from 'sentry/components/confirm';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {IconAdd, IconBroadcast} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {DataCategory} from 'sentry/types/core';
-import type {Organization} from 'sentry/types/organization';
-import useApi from 'sentry/utils/useApi';
-import withOrganization from 'sentry/utils/withOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 import {OrganizationPermissionAlert} from 'sentry/views/settings/organization/organizationPermissionAlert';
 
-import LearnMoreButton from 'getsentry/components/features/learnMoreButton';
+import {LearnMoreButton} from 'getsentry/components/features/learnMoreButton';
 import PlanFeature from 'getsentry/components/features/planFeature';
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
 import {AllocationTargetTypes} from 'getsentry/constants';
 import type {Subscription} from 'getsentry/types';
-import {displayPlanName, isAmEnterprisePlan} from 'getsentry/utils/billing';
+import {displayPlanName} from 'getsentry/utils/billing';
 import {
   getCategoryInfoFromPlural,
   getPlanCategoryName,
 } from 'getsentry/utils/dataCategory';
 import {isDisabledByPartner} from 'getsentry/utils/partnerships';
-import trackGetsentryAnalytics from 'getsentry/utils/trackGetsentryAnalytics';
-import PartnershipNote from 'getsentry/views/subscriptionPage/partnershipNote';
+import {trackGetsentryAnalytics} from 'getsentry/utils/trackGetsentryAnalytics';
+import {SubscriptionPageContainer} from 'getsentry/views/subscriptionPage/components/subscriptionPageContainer';
+import {PartnershipNote} from 'getsentry/views/subscriptionPage/partnershipNote';
 import {hasPermissions} from 'getsentry/views/subscriptionPage/utils';
 
-import AllocationForm from './components/allocationForm';
+import {AllocationForm} from './components/allocationForm';
 import type {SpendAllocation} from './components/types';
-import EnableSpendAllocations from './enableSpendAllocations';
-import ProjectAllocationsTable from './projectAllocationsTable';
-import RootAllocationCard from './rootAllocationCard';
+import {EnableSpendAllocations} from './enableSpendAllocations';
+import {ProjectAllocationsTable} from './projectAllocationsTable';
+import {RootAllocationCard} from './rootAllocationCard';
 import {BigNumUnits} from './utils';
 
 type Props = {
-  organization: Organization;
   subscription: Subscription;
 };
 
-/** @internal exported for tests only */
-export function SpendAllocationsRoot({organization, subscription}: Props) {
+export function SpendAllocationsRoot({subscription}: Props) {
+  const organization = useOrganization();
+  const {openModal} = useModal();
+
   const [errors, setErrors] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [orgEnabledFlag, setOrgEnabledFlag] = useState<boolean>(true);
-  const [selectedMetric, setSelectedMetric] = useState<DataCategory>(DataCategory.ERRORS);
-  const [shouldRetry, setShouldRetry] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [orgEnabledFlag, setOrgEnabledFlag] = useState(true);
+  const [selectedMetric, setSelectedMetric] = useState(DataCategory.ERRORS);
+  const [shouldRetry, setShouldRetry] = useState(true);
   const [rootAllocations, setRootAllocations] = useState<SpendAllocation[]>([]);
   const [spendAllocations, setSpendAllocations] = useState<SpendAllocation[]>([]); // NOTE: we default to fetching 1 period
-  const [viewNextPeriod, _setViewNextPeriod] = useState<boolean>(false);
+  const [viewNextPeriod, _setViewNextPeriod] = useState(false);
   const [currentCursor, setCurrentCursor] = useState<string | undefined>('');
   const [pageLinks, setPageLinks] = useState<string | null>();
   const {planDetails} = subscription;
@@ -69,9 +71,8 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
   const hasOrgWritePerms = hasPermissions(organization, 'org:write');
   const canViewSpendAllocation = hasBillingPerms || hasOrgWritePerms;
   const metricUnit = useMemo(() => {
-    return selectedMetric === DataCategory.ATTACHMENTS
-      ? BigNumUnits.KILO_BYTES
-      : BigNumUnits.NUMBERS;
+    const categoryInfo = getCategoryInfoFromPlural(selectedMetric);
+    return categoryInfo?.formatting.bigNumUnit ?? BigNumUnits.NUMBERS;
   }, [selectedMetric]);
 
   const supportedCategories = planDetails.categories.filter(
@@ -97,7 +98,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
     return [start, end];
   }, [viewNextPeriod, subscription]);
 
-  const currentRootAllocations: SpendAllocation[] = useMemo(() => {
+  const currentRootAllocations = useMemo(() => {
     // Return all root allocations that overlap with the selected period
     const [periodStart, periodEnd] = period;
     return rootAllocations.filter(
@@ -110,7 +111,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
     );
   }, [rootAllocations, period]);
 
-  const currentAllocations: SpendAllocation[] = useMemo(() => {
+  const currentAllocations = useMemo(() => {
     // Return all project allocations that overlap with the selected period
     const [periodStart, periodEnd] = period;
     return spendAllocations.filter(
@@ -123,7 +124,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
     );
   }, [spendAllocations, period]);
 
-  const rootAllocationForMetric: SpendAllocation | undefined = useMemo(() => {
+  const rootAllocationForMetric = useMemo(() => {
     const root = currentRootAllocations.find(
       a => a.billingMetric === getCategoryInfoFromPlural(selectedMetric)?.name
     );
@@ -133,7 +134,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
   const fetchSpendAllocations = useCallback(
     // Target timestamp allows us to specify a period
     // Periods allows us to specify how many periods we want to fetch
-    async (targetTimestamp: number | undefined = undefined, periods = 1) => {
+    async (targetTimestamp?: number, periods = 1) => {
       try {
         setIsLoading(true);
         // NOTE: we cannot just use the subscription period start since newly created allocations could start after the period start
@@ -177,7 +178,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
           (resp?.getResponseHeader('Link') || resp?.getResponseHeader('link')) ??
           undefined;
         setPageLinks(links);
-      } catch (err) {
+      } catch (err: any) {
         if (err.status === 404) {
           setErrors('Error fetching spend allocations');
         } else if (err.status === 403) {
@@ -218,7 +219,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
           },
         });
         await fetchSpendAllocations();
-      } catch (err) {
+      } catch (err: any) {
         setErrors(err.statusText);
       }
     };
@@ -240,7 +241,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
         },
       });
       await fetchSpendAllocations();
-    } catch (err) {
+    } catch (err: any) {
       setShouldRetry(false);
       setErrors(err.responseJSON.detail);
     }
@@ -260,12 +261,14 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
     try {
       // Clear all allocations
       await api.requestPromise(
-        `/organizations/${organization.slug}/spend-allocations/index/`,
+        getApiUrl('/organizations/$organizationIdOrSlug/spend-allocations/index/', {
+          path: {organizationIdOrSlug: organization.slug},
+        }),
         {
           method: 'DELETE',
         }
       );
-    } catch (err) {
+    } catch (err: any) {
       if (err.status === 409) {
         setErrors('Spend Allocations are already disabled');
       }
@@ -290,7 +293,6 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
           {...modalProps}
           fetchSpendAllocations={fetchSpendAllocations}
           initializedData={formData}
-          organization={organization}
           selectedMetric={selectedMetric}
           rootAllocation={rootAllocationForMetric}
           spendAllocations={currentAllocations}
@@ -305,88 +307,94 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
 
   if (!organization.features.includes('spend-allocations')) {
     return (
-      <PlanFeature organization={organization} features={['spend-allocations']}>
-        {({plan}) => (
-          <Panel dashedBorder data-test-id="disabled-allocations">
-            <EmptyMessage
-              size="large"
-              icon={<IconBroadcast size="xl" />}
-              title={t(
-                'Allocate event resources to important projects every billing period.'
-              )}
-              description={tct(
-                'Spend Allocations prioritize important projects by guaranteeing a monthly volume of events for exclusive consumption. This ensures coverage for your important projects, even during consumption spikes. This feature [planRequirement] or above.',
-                {
-                  planRequirement: (
-                    <strong>
-                      {t(
-                        'requires %s %s Plan',
-                        isAmEnterprisePlan(plan?.id) ? 'an' : 'a',
-                        displayPlanName(plan)
-                      )}
-                    </strong>
-                  ),
+      <SubscriptionPageContainer>
+        <PlanFeature organization={organization} features={['spend-allocations']}>
+          {({plan}) => (
+            <Panel dashedBorder data-test-id="disabled-allocations">
+              <EmptyMessage
+                size="lg"
+                icon={<IconBroadcast />}
+                title={t(
+                  'Allocate event resources to important projects every billing period.'
+                )}
+                action={
+                  <Container margin="sm">
+                    <LearnMoreButton
+                      organization={organization}
+                      source="allocations-upsell"
+                      href="https://docs.sentry.io/product/accounts/quotas/#spend-allocation"
+                      external
+                    >
+                      {t('Documentation')}
+                    </LearnMoreButton>
+                  </Container>
                 }
-              )}
-              action={
-                <ButtonBar>
-                  <StyledLearnMoreButton
-                    organization={organization}
-                    source="allocations-upsell"
-                    href="https://docs.sentry.io/product/accounts/quotas/#spend-allocation"
-                    external
-                  >
-                    {t('Documentation')}
-                  </StyledLearnMoreButton>
-                </ButtonBar>
-              }
-            />
-          </Panel>
-        )}
-      </PlanFeature>
+              >
+                {tct(
+                  'Spend Allocations prioritize important projects by guaranteeing a monthly volume of events for exclusive consumption. This ensures coverage for your important projects, even during consumption spikes. This feature [planRequirement] or above.',
+                  {
+                    planRequirement: (
+                      <strong>
+                        {t(
+                          'requires %s %s Plan',
+                          plan?.isEnterprise ? 'an' : 'a',
+                          displayPlanName(plan)
+                        )}
+                      </strong>
+                    ),
+                  }
+                )}
+              </EmptyMessage>
+            </Panel>
+          )}
+        </PlanFeature>
+      </SubscriptionPageContainer>
     );
   }
 
   if (isDisabledByPartner(subscription)) {
-    return <PartnershipNote subscription={subscription} />;
+    return (
+      <SubscriptionPageContainer>
+        <PartnershipNote subscription={subscription} />
+      </SubscriptionPageContainer>
+    );
   }
 
   return (
-    <Fragment>
+    <SubscriptionPageContainer>
       <SentryDocumentTitle title={t('Spend Allocations')} orgSlug={organization.slug} />
       <SettingsPageHeader
         title={t('Spend Allocations')}
         action={
           !isLoading &&
           orgEnabledFlag && (
-            <div>
+            <Flex gap="md">
               {subscription.canSelfServe && hasBillingPerms && (
                 <LinkButton
                   aria-label={t('Manage Subscription')}
                   size="sm"
-                  style={{marginRight: space(1)}}
-                  to={`/settings/${organization.slug}/billing/checkout/?referrer=spend_allocations`}
+                  to={`/checkout/${organization.slug}/?referrer=spend_allocations`}
                 >
                   {t('Manage Subscription')}
                 </LinkButton>
               )}
               <Button
                 aria-label={t('New Allocation')}
-                priority="primary"
+                variant="primary"
                 size="sm"
                 data-test-id="new-allocation"
-                icon={<IconAdd size="xs" isCircled />}
+                icon={<IconAdd size="xs" />}
                 onClick={openForm()}
               >
                 {t('New Allocation')}
               </Button>
-            </div>
+            </Flex>
           )
         }
       />
       <div>
         {tct(
-          `Allocate a portion of your subscription's reserved quota to your projects and guarantee a minimum volume for them. Read the [docsLink: docs]`,
+          "Allocate a portion of your subscription's reserved quota to your projects and guarantee a minimum volume for them. Read the [docsLink: docs]",
           {
             docsLink: (
               <ExternalLink href="https://docs.sentry.io/pricing/quotas/spend-allocation/" />
@@ -395,18 +403,25 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
         )}
       </div>
       {!isLoading && !canViewSpendAllocation && (
-        <StyledPermissionAlert
-          data-test-id="permission-alert"
-          message={t(
-            'Only users with billing or write permissions can view spend allocation details.'
-          )}
-        />
+        <Container marginTop="3xl">
+          <OrganizationPermissionAlert
+            data-test-id="permission-alert"
+            message={t(
+              'Only users with billing or write permissions can view spend allocation details.'
+            )}
+          />
+        </Container>
       )}
-
       {canViewSpendAllocation && (
-        <PageGrid data-test-id="subhead-actions">
-          <StyledButtonBar gap={1}>
-            <Dates>
+        <Grid
+          columns={{'screen:xs': 'repeat(3, 1fr)', 'screen:lg': 'repeat(5, 1fr)'}}
+          areas={{'screen:xs': '"bb bb dd"', 'screen:lg': '"bb bb dd . ."'}}
+          gap="xl"
+          margin="xl 0"
+          data-test-id="subhead-actions"
+        >
+          <StyledButtonBar>
+            <Stack align="center" column="2 / 5">
               <strong>
                 {!viewNextPeriod && 'Current Period'}
                 {viewNextPeriod && 'Next Period'}
@@ -424,10 +439,12 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
                   year: 'numeric',
                 })}
               </div>
-            </Dates>
+            </Stack>
           </StyledButtonBar>
           <DropdownDataCategory
-            triggerProps={{prefix: t('Category')}}
+            trigger={triggerProps => (
+              <OverlayTrigger.Button {...triggerProps} prefix={t('Category')} />
+            )}
             value={selectedMetric}
             options={supportedCategories
               .filter(category => subscription.planDetails.categories.includes(category))
@@ -444,7 +461,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
               setCurrentCursor('');
             }}
           />
-        </PageGrid>
+        </Grid>
       )}
       {isLoading && <LoadingIndicator />}
       {errors && (
@@ -497,7 +514,7 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
           <Button
             aria-label={t('Disable Spend Allocations')}
             size="sm"
-            priority="danger"
+            variant="danger"
             data-test-id="disable"
             disabled={!orgEnabledFlag}
           >
@@ -505,27 +522,11 @@ export function SpendAllocationsRoot({organization, subscription}: Props) {
           </Button>
         </Confirm>
       )}
-    </Fragment>
+    </SubscriptionPageContainer>
   );
 }
 
-export default withOrganization(withSubscription(SpendAllocationsRoot));
-
-const PageGrid = styled('div')`
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: ${space(2)};
-  margin: ${space(2)} 0;
-
-  @media (min-width: 0) {
-    grid-template-columns: repeat(3, 1fr);
-    grid-template-areas: 'bb bb dd';
-  }
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: repeat(5, 1fr);
-    grid-template-areas: 'bb bb dd . .';
-  }
-`;
+export default withSubscription(SpendAllocationsRoot);
 
 const DropdownDataCategory = styled(CompactSelect)`
   grid-column: auto / span 1;
@@ -537,21 +538,9 @@ const DropdownDataCategory = styled(CompactSelect)`
   }
 `;
 
-const StyledPermissionAlert = styled(OrganizationPermissionAlert)`
-  margin-top: 30px;
-`;
-
-const StyledButtonBar = styled(ButtonBar)`
+const StyledButtonBar = styled((props: GridProps) => (
+  <Grid flow="column" align="center" gap="md" {...props} />
+))`
   grid-column: auto / span 1;
   grid-area: bb;
-`;
-const Dates = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  grid-column: 2 / 5;
-`;
-
-const StyledLearnMoreButton = styled(LearnMoreButton)`
-  margin: ${space(0.75)};
 `;

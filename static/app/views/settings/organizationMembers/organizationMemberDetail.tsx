@@ -1,7 +1,13 @@
-import {Fragment, useEffect, useMemo, useState} from 'react';
+import {Fragment, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
+import {useMutation, useQueryClient} from '@tanstack/react-query';
 import isEqual from 'lodash/isEqual';
+
+import {Button} from '@sentry/scraps/button';
+import {Flex, Grid, useResponsivePropValue} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
 import {removeAuthenticator} from 'sentry/actionCreators/account';
 import {
@@ -10,43 +16,35 @@ import {
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import {resendMemberInvite, updateMember} from 'sentry/actionCreators/members';
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Confirm} from 'sentry/components/confirm';
 import {DateTime} from 'sentry/components/dateTime';
-import NotFound from 'sentry/components/errors/notFound';
-import FieldGroup from 'sentry/components/forms/fieldGroup';
-import HookOrDefault from 'sentry/components/hookOrDefault';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import PanelItem from 'sentry/components/panels/panelItem';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {NotFound} from 'sentry/components/errors/notFound';
+import {FieldGroup} from 'sentry/components/forms/fieldGroup';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {IconRefresh} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Member} from 'sentry/types/organization';
-import isMemberDisabledFromLimit from 'sentry/utils/isMemberDisabledFromLimit';
-import {
-  type ApiQueryKey,
-  setApiQueryData,
-  useApiQuery,
-  useMutation,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import Teams from 'sentry/utils/teams';
-import useApi from 'sentry/utils/useApi';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {isMemberDisabledFromLimit} from 'sentry/utils/isMemberDisabledFromLimit';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {Teams} from 'sentry/utils/teams';
+import {useApi} from 'sentry/utils/useApi';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TeamSelectForMember from 'sentry/views/settings/components/teamSelect/teamSelectForMember';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {TeamSelect as TeamSelectForMember} from 'sentry/views/settings/components/teamSelect/teamSelectForMember';
 
-import OrganizationRoleSelect from './inviteMember/orgRoleSelect';
+import {OrganizationRoleSelect} from './inviteMember/orgRoleSelect';
 
 const MULTIPLE_ORGS = t('Cannot be reset since user is in more than one organization');
 const NOT_ENROLLED = t('Not enrolled in two-factor authentication');
@@ -55,8 +53,8 @@ const TWO_FACTOR_REQUIRED = t(
   'Cannot be reset since two-factor is required for this organization'
 );
 
-const DisabledMemberTooltip = HookOrDefault({
-  hookName: 'component:disabled-member-tooltip',
+const DisabledMemberTooltip = OverrideOrDefault({
+  overrideName: 'component:disabled-member-tooltip',
   defaultComponent: ({children}) => <Fragment>{children}</Fragment>,
 });
 
@@ -84,7 +82,9 @@ function MemberStatus({
 }
 
 const getMemberQueryKey = (orgSlug: string, memberId: string): ApiQueryKey => [
-  `/organizations/${orgSlug}/members/${memberId}/`,
+  getApiUrl('/organizations/$organizationIdOrSlug/members/$memberId/', {
+    path: {organizationIdOrSlug: orgSlug, memberId},
+  }),
 ];
 
 function OrganizationMemberDetailContent({member}: {member: Member}) {
@@ -92,17 +92,10 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
   const queryClient = useQueryClient();
   const organization = useOrganization();
   const navigate = useNavigate();
-
-  const [orgRole, setOrgRole] = useState<Member['orgRole']>('');
-  const [teamRoles, setTeamRoles] = useState<Member['teamRoles']>([]);
+  const [orgRole, setOrgRole] = useState(member.orgRole);
+  const [teamRoles, setTeamRoles] = useState(member.teamRoles);
   const hasTeamRoles = organization.features.includes('team-roles');
-
-  useEffect(() => {
-    if (member) {
-      setOrgRole(member.orgRole);
-      setTeamRoles(member.teamRoles);
-    }
-  }, [member]);
+  const isLarge = useResponsivePropValue({zero: false, lg: true});
 
   const {mutate: updatedMember, isPending: isSaving} = useMutation<Member, RequestError>({
     mutationFn: () => {
@@ -154,7 +147,7 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
     }
   );
 
-  const {mutate: reset2fa, isPending: isResetting2fa} = useMutation<unknown>({
+  const {mutate: reset2fa, isPending: isResetting2fa} = useMutation({
     mutationFn: () => {
       const {user} = member;
       const promises =
@@ -250,7 +243,7 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
 
   const memberDeactivated = isMemberDisabledFromLimit(member);
   const canEdit = organization.access.includes('org:write') && !memberDeactivated;
-  const isPartnershipUser = member.flags['partnership:restricted'] === true;
+  const isPartnershipUser = member.flags['partnership:restricted'];
 
   const {email, expired, pending} = member;
   const canResend = !expired;
@@ -261,14 +254,7 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
   return (
     <Fragment>
       <SentryDocumentTitle title={t('%s Member Settings', member.name || member.email)} />
-      <SettingsPageHeader
-        title={
-          <Fragment>
-            <div>{member.name}</div>
-            <ExtraHeaderText>{t('Member Settings')}</ExtraHeaderText>
-          </Fragment>
-        }
-      />
+      <SettingsPageHeader title={member.name || t('Member Settings')} />
 
       <Panel>
         <PanelHeader hasButtons={showResendButton}>
@@ -278,9 +264,11 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
             <Button
               data-test-id="resend-invite"
               size="xs"
-              priority="primary"
+              variant="primary"
               icon={<IconRefresh />}
-              title={t('Generate a new invite link and send a new email.')}
+              tooltipProps={{
+                title: t('Generate a new invite link and send a new email.'),
+              }}
               busy={isInviting}
               onClick={() => inviteMember()}
             >
@@ -291,12 +279,10 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
 
         <PanelBody>
           <PanelItem>
-            <Details>
+            <Grid columns={{zero: '1fr', xl: '2fr 1fr 1fr'}} gap="xl" width="100%">
               <div>
                 <DetailLabel>{t('Email')}</DetailLabel>
-                <div>
-                  <ExternalLink href={`mailto:${email}`}>{email}</ExternalLink>
-                </div>
+                <ExternalLink href={`mailto:${email}`}>{email}</ExternalLink>
               </div>
               <div>
                 <DetailLabel>{t('Status')}</DetailLabel>
@@ -306,11 +292,9 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
               </div>
               <div>
                 <DetailLabel>{t('Added')}</DetailLabel>
-                <div>
-                  <DateTime dateOnly date={member.dateCreated} />
-                </div>
+                <DateTime dateOnly date={member.dateCreated} />
               </div>
-            </Details>
+            </Grid>
           </PanelItem>
         </PanelBody>
       </Panel>
@@ -320,8 +304,9 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
           <PanelHeader>{t('Authentication')}</PanelHeader>
           <PanelBody>
             <FieldGroup
-              alignRight
+              alignRight={isLarge}
               flexibleControlStateSize
+              inline={isLarge}
               label={t('Reset two-factor authentication')}
               help={t(
                 'Resetting two-factor authentication will remove all two-factor authentication methods for this member.'
@@ -336,7 +321,7 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
                   )}
                   onConfirm={() => reset2fa()}
                 >
-                  <Button priority="danger" busy={isResetting2fa}>
+                  <Button variant="danger" busy={isResetting2fa}>
                     {t('Reset two-factor authentication')}
                   </Button>
                 </Confirm>
@@ -378,16 +363,16 @@ function OrganizationMemberDetailContent({member}: {member: Member}) {
         )}
       </Teams>
 
-      <Footer>
+      <Flex justify="end">
         <Button
-          priority="primary"
+          variant="primary"
           busy={isSaving}
           onClick={() => updatedMember()}
           disabled={!canEdit || !hasFormChanged()}
         >
           {t('Save Member')}
         </Button>
-      </Footer>
+      </Flex>
     </Fragment>
   );
 }
@@ -417,37 +402,13 @@ function OrganizationMemberDetail() {
     return <NotFound />;
   }
 
-  return <OrganizationMemberDetailContent member={member} />;
+  return <OrganizationMemberDetailContent member={member} key={member.id} />;
 }
 
 export default OrganizationMemberDetail;
 
-const ExtraHeaderText = styled('div')`
-  color: ${p => p.theme.subText};
-  font-weight: ${p => p.theme.fontWeightNormal};
-  font-size: ${p => p.theme.fontSize.lg};
-`;
-
-const Details = styled('div')`
-  display: grid;
-  grid-auto-flow: column;
-  grid-template-columns: 2fr 1fr 1fr;
-  gap: ${space(2)};
-  width: 100%;
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    grid-auto-flow: row;
-    grid-template-columns: auto;
-  }
-`;
-
 const DetailLabel = styled('div')`
-  font-weight: ${p => p.theme.fontWeightBold};
-  margin-bottom: ${space(0.5)};
-  color: ${p => p.theme.textColor};
-`;
-
-const Footer = styled('div')`
-  display: flex;
-  justify-content: flex-end;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin-bottom: ${p => p.theme.space.xs};
+  color: ${p => p.theme.tokens.content.primary};
 `;

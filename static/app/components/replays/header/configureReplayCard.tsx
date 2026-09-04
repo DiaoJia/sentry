@@ -3,18 +3,18 @@ import styled from '@emotion/styled';
 import type {Key} from '@react-types/shared';
 import * as Sentry from '@sentry/react';
 
-import {Flex} from 'sentry/components/core/layout';
-import DropdownButton from 'sentry/components/dropdownButton';
+import {Flex} from '@sentry/scraps/layout';
+
+import {DropdownButton} from 'sentry/components/dropdownButton';
 import type {MenuItemProps} from 'sentry/components/dropdownMenu';
 import {DropdownMenu} from 'sentry/components/dropdownMenu';
 import {IconOpen} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
-import type {ReplayRecord} from 'sentry/views/replays/types';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {ReplayRecord} from 'sentry/views/explore/replays/types';
 
-export default function ConfigureReplayCard({
+export function ConfigureReplayCard({
   isMobile,
   replayRecord,
 }: {
@@ -44,8 +44,10 @@ export default function ConfigureReplayCard({
 function getPath(sdkName: string | null | undefined) {
   switch (sdkName) {
     case 'sentry.cocoa':
+    case 'sentry.cocoa.unreal': // Session Replay on iOS builds of Unreal Engine games via the embedded Cocoa SDK
       return 'apple/guides/ios'; // https://docs.sentry.io/platforms/apple/guides/ios/session-replay/
     case 'sentry.java.android':
+    case 'sentry.java.android.unreal': // Session Replay on Android builds of Unreal Engine games via the embedded Java Android SDK
       return 'android'; // https://docs.sentry.io/platforms/android/session-replay/
     case 'sentry.cocoa.flutter':
     case 'sentry.dart.flutter':
@@ -90,7 +92,8 @@ function getWebItems(): MenuItemProps[] {
         />
       ),
       textValue: keyToTitle('general'),
-      externalHref: `https://docs.sentry.io/platforms/javascript/session-replay/configuration/#general-integration-configuration`,
+      externalHref:
+        'https://docs.sentry.io/platforms/javascript/session-replay/configuration/#general-integration-configuration',
     },
     {
       key: 'masking',
@@ -101,7 +104,8 @@ function getWebItems(): MenuItemProps[] {
         />
       ),
       textValue: keyToTitle('masking'),
-      externalHref: `https://docs.sentry.io/platforms/javascript/session-replay/privacy/#privacy-configuration`,
+      externalHref:
+        'https://docs.sentry.io/platforms/javascript/session-replay/privacy/#privacy-configuration',
     },
     {
       key: 'users',
@@ -112,7 +116,8 @@ function getWebItems(): MenuItemProps[] {
         />
       ),
       textValue: keyToTitle('users'),
-      externalHref: `https://docs.sentry.io/platforms/javascript/session-replay/configuration/#identifying-users`,
+      externalHref:
+        'https://docs.sentry.io/platforms/javascript/session-replay/configuration/#identifying-users',
     },
     {
       key: 'network',
@@ -123,7 +128,8 @@ function getWebItems(): MenuItemProps[] {
         />
       ),
       textValue: keyToTitle('network'),
-      externalHref: `https://docs.sentry.io/platforms/javascript/session-replay/configuration/#network-details`,
+      externalHref:
+        'https://docs.sentry.io/platforms/javascript/session-replay/configuration/#network-details',
     },
     {
       key: 'canvas',
@@ -137,7 +143,8 @@ function getWebItems(): MenuItemProps[] {
         />
       ),
       textValue: keyToTitle('canvas'),
-      externalHref: `https://docs.sentry.io/platforms/javascript/session-replay/#canvas-recording`,
+      externalHref:
+        'https://docs.sentry.io/platforms/javascript/session-replay/#canvas-recording',
     },
   ] satisfies MenuItemProps[];
 }
@@ -193,7 +200,7 @@ function ReplayConfigureDropdownItem({
   title: ReactNode;
 }) {
   return (
-    <Flex gap={space(1)} align="center">
+    <Flex gap="md" align="center">
       <IconOpen />
       <ButtonContent>
         <ButtonTitle>{title}</ButtonTitle>
@@ -208,15 +215,15 @@ const ButtonContent = styled('div')`
   flex-direction: column;
   text-align: left;
   white-space: pre-line;
-  gap: ${space(0.25)};
+  gap: ${p => p.theme.space['2xs']};
 `;
 
 const ButtonTitle = styled('div')`
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
 `;
 
 const ButtonSubtitle = styled('div')`
-  color: ${p => p.theme.subText};
-  font-weight: ${p => p.theme.fontWeightNormal};
-  font-size: ${p => p.theme.fontSize.sm};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  font-size: ${p => p.theme.font.size.sm};
 `;

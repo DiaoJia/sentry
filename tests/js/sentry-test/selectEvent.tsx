@@ -21,9 +21,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import userEvent from '@testing-library/user-event'; // eslint-disable-line no-restricted-imports
+import {userEvent} from '@testing-library/user-event'; // eslint-disable-line no-restricted-imports
 
-import {type Matcher, waitFor, within} from 'sentry-test/reactTestingLibrary';
+import {waitFor, within, type Matcher} from 'sentry-test/reactTestingLibrary';
 
 /**
  * Find the react-select container from its input field
@@ -183,5 +183,4 @@ const clearAll = async (
   await clear(clearAllButton, {user});
 };
 
-const selectEvent = {select, create, clearFirst, clearAll, openMenu};
-export default selectEvent;
+export const selectEvent = {select, create, clearFirst, clearAll, openMenu};

@@ -17,7 +17,7 @@ from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
 )
 from sentry.utils import json
 from sentry.utils.hashlib import sha1_text
@@ -26,6 +26,9 @@ from sentry.utils.hashlib import sha1_text
 # always different from `NULL`.
 NULL_UUID = "00000000-00000000-00000000-00000000"
 NULL_STRING = ""
+
+# Must stay in sync with Symbolicator's `object_file_max_decompressed_source_size`
+MAX_SOURCE_FILE_SIZE = 1024 * 1024 * 1024
 
 
 class SourceFileType(Enum):
@@ -59,7 +62,7 @@ class ArtifactBundleIndexingState(Enum):
         return [(key.value, key.name) for key in cls]
 
 
-@region_silo_model
+@cell_silo_model
 class ArtifactBundle(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -134,7 +137,7 @@ def delete_file_for_artifact_bundle(instance, **kwargs):
 post_delete.connect(delete_file_for_artifact_bundle, sender=ArtifactBundle)
 
 
-@region_silo_model
+@cell_silo_model
 class ArtifactBundleIndex(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -150,7 +153,7 @@ class ArtifactBundleIndex(Model):
         indexes = (models.Index(fields=("url", "artifact_bundle")),)
 
 
-@region_silo_model
+@cell_silo_model
 class ReleaseArtifactBundle(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -175,7 +178,7 @@ class ReleaseArtifactBundle(Model):
         )
 
 
-@region_silo_model
+@cell_silo_model
 class DebugIdArtifactBundle(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -192,7 +195,7 @@ class DebugIdArtifactBundle(Model):
         indexes = (models.Index(fields=("debug_id", "artifact_bundle")),)
 
 
-@region_silo_model
+@cell_silo_model
 class ProjectArtifactBundle(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -236,6 +239,9 @@ class ArtifactBundleArchive:
 
     def info(self, filename: str) -> zipfile.ZipInfo:
         return self._zip_file.getinfo(filename)
+
+    def infolist(self) -> list[zipfile.ZipInfo]:
+        return self._zip_file.infolist()
 
     def read(self, filename: str) -> bytes:
         return self._zip_file.read(filename)

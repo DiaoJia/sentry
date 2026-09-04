@@ -15,11 +15,11 @@ from sentry.incidents.models.alert_rule import AlertRule
 from sentry.incidents.serializers import AlertRuleSerializer
 from sentry.integrations.slack.utils.constants import SLACK_RATE_LIMITED_MESSAGE
 from sentry.integrations.slack.utils.rule_status import RedisRuleStatus
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.models.organization import Organization
 from sentry.shared_integrations.exceptions import ApiRateLimitedError
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import integrations_tasks
 from sentry.users.services.user import RpcUser
 from sentry.users.services.user.service import user_service
@@ -29,11 +29,8 @@ logger = logging.getLogger("sentry.integrations.slack.tasks")
 
 @instrumented_task(
     name="sentry.integrations.slack.tasks.search_channel_id_for_alert_rule",
-    queue="integrations",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=integrations_tasks,
-    ),
+    namespace=integrations_tasks,
+    silo_mode=SiloMode.CELL,
 )
 def find_channel_id_for_alert_rule(
     organization_id: int,
@@ -85,7 +82,7 @@ def find_channel_id_for_alert_rule(
 
     for trigger in data["triggers"]:
         for action in trigger["actions"]:
-            if action["type"] == "slack":
+            if action["type"] == IntegrationProviderSlug.SLACK.value:
                 if action["targetIdentifier"] in mapped_ids:
                     action["input_channel_id"] = mapped_ids[action["targetIdentifier"]]
                     # This will conflict within the CamelCaseSerializer below.

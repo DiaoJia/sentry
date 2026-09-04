@@ -2,27 +2,37 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
 
 from django.conf import settings
 from django.db import models
-from django.db.models.signals import pre_save
-from django.dispatch import receiver
 
 from sentry.backup.scopes import RelocationScope
 from sentry.constants import ObjectStatus
-from sentry.db.models import DefaultFieldsModel, FlexibleForeignKey, region_silo_model, sane_repr
+from sentry.db.models import DefaultFieldsModel, FlexibleForeignKey, cell_silo_model, sane_repr
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 from sentry.db.models.manager.base import BaseManager
 from sentry.db.models.manager.base_query_set import BaseQuerySet
 from sentry.models.owner_base import OwnerModel
 from sentry.workflow_engine.models.data_condition import DataCondition, is_slow_condition
-from sentry.workflow_engine.models.data_condition_group import DataConditionGroup
-from sentry.workflow_engine.types import WorkflowEventData
+from sentry.workflow_engine.models.data_condition_group import (
+    DataConditionGroup,
+    DataConditionGroupSnapshot,
+)
+from sentry.workflow_engine.processors.evaluations import DataConditionGroupEvaluation
+from sentry.workflow_engine.types import ConditionError, WorkflowEventData
 
 from .json_config import JSONConfigBase
 
 logger = logging.getLogger(__name__)
+
+
+class WorkflowSnapshot(TypedDict):
+    id: int
+    enabled: bool
+    environment_id: int | None
+    status: int
+    triggers: DataConditionGroupSnapshot | None
 
 
 class WorkflowManager(BaseManager["Workflow"]):
@@ -34,7 +44,7 @@ class WorkflowManager(BaseManager["Workflow"]):
         )
 
 
-@region_silo_model
+@cell_silo_model
 class Workflow(DefaultFieldsModel, OwnerModel, JSONConfigBase):
     """
     A workflow is a way to execute actions in a specified order.
@@ -44,7 +54,7 @@ class Workflow(DefaultFieldsModel, OwnerModel, JSONConfigBase):
     __relocation_scope__ = RelocationScope.Organization
 
     objects: ClassVar[WorkflowManager] = WorkflowManager()
-    objects_for_deletion: ClassVar[BaseManager] = BaseManager()
+    objects_for_deletion: ClassVar[BaseManager[Workflow]] = BaseManager()
 
     name = models.CharField(max_length=256)
     organization = FlexibleForeignKey("sentry.Organization")
@@ -57,7 +67,7 @@ class Workflow(DefaultFieldsModel, OwnerModel, JSONConfigBase):
 
     # Required as the 'when' condition for the workflow, this evaluates states emitted from the detectors
     when_condition_group = FlexibleForeignKey(
-        "workflow_engine.DataConditionGroup", null=True, blank=True
+        "workflow_engine.DataConditionGroup", null=True, blank=True, db_index=False
     )
 
     environment = FlexibleForeignKey("sentry.Environment", null=True, blank=True)
@@ -82,20 +92,46 @@ class Workflow(DefaultFieldsModel, OwnerModel, JSONConfigBase):
         "additionalProperties": False,
     }
 
-    __repr__ = sane_repr("name", "organization_id")
+    __repr__ = sane_repr("organization_id")
 
     class Meta:
         app_label = "workflow_engine"
         db_table = "workflow_engine_workflow"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["when_condition_group_id"],
+                name="workflow_engine_workflow_when_condition_group_id_11d9ba05_uniq",
+            ),
+        ]
 
     def get_audit_log_data(self) -> dict[str, Any]:
         return {"name": self.name}
 
+    def get_snapshot(self) -> WorkflowSnapshot:
+        when_condition_group = None
+        if self.when_condition_group:
+            when_condition_group = self.when_condition_group.get_snapshot()
+
+        environment_id = None
+        if self.environment:
+            environment_id = self.environment.id
+
+        return {
+            "id": self.id,
+            "enabled": self.enabled,
+            "environment_id": environment_id,
+            "status": self.status,
+            "triggers": when_condition_group,
+        }
+
     def evaluate_trigger_conditions(
-        self, event_data: WorkflowEventData
-    ) -> tuple[bool, list[DataCondition]]:
+        self,
+        event_data: WorkflowEventData,
+        when_data_conditions: list[DataCondition] | None = None,
+        group: DataConditionGroup | None = None,
+    ) -> tuple[DataConditionGroupEvaluation, list[DataCondition]]:
         """
-        Evaluate the conditions for the workflow trigger and return if the evaluation was successful.
+        Evaluate the conditions for the workflow trigger and return the group evaluation.
         If there aren't any workflow trigger conditions, the workflow is considered triggered.
         """
         # TODO - investigate circular import issue
@@ -104,23 +140,53 @@ class Workflow(DefaultFieldsModel, OwnerModel, JSONConfigBase):
         )
 
         if self.when_condition_group_id is None:
-            return True, []
+            return (
+                DataConditionGroupEvaluation(
+                    result=True,
+                    triggered=True,
+                    data={
+                        "condition_evaluations": [],
+                        "logic_type": DataConditionGroup.Type.ANY,
+                    },
+                ),
+                [],
+            )
 
         workflow_event_data = replace(event_data, workflow_env=self.environment)
-        try:
-            group = DataConditionGroup.objects.get_from_cache(id=self.when_condition_group_id)
-        except DataConditionGroup.DoesNotExist:
-            # This isn't expected under normal conditions, but weird things can happen in the
-            # midst of deletions and migrations.
-            logger.exception(
-                "DataConditionGroup does not exist",
-                extra={"id": self.when_condition_group_id},
+
+        if group is None:
+            # Callers may pass the group in (e.g. when it's been fetched as a batch to avoid an N+1),
+            # but fall back to fetching it ourselves when it isn't provided.
+            try:
+                group = DataConditionGroup.objects.get_from_cache(id=self.when_condition_group_id)
+            except DataConditionGroup.DoesNotExist:
+                # This isn't expected under normal conditions, but weird things can happen in the
+                # midst of deletions and migrations.
+                logger.exception(
+                    "DataConditionGroup does not exist",
+                    extra={"id": self.when_condition_group_id},
+                )
+                return (
+                    DataConditionGroupEvaluation(
+                        result=False,
+                        triggered=False,
+                        data={
+                            "condition_evaluations": [],
+                            "logic_type": DataConditionGroup.Type.ANY,
+                        },
+                        error=ConditionError(msg="DataConditionGroup does not exist"),
+                    ),
+                    [],
+                )
+        else:
+            assert group.id == self.when_condition_group_id, (
+                "Provided group does not match the workflow's when_condition_group_id"
             )
-            return False, []
+
         group_evaluation, remaining_conditions = process_data_condition_group(
-            group, workflow_event_data
+            group, workflow_event_data, when_data_conditions
         )
-        return group_evaluation.logic_result, remaining_conditions
+        return group_evaluation, remaining_conditions
 
 
 def get_slow_conditions(workflow: Workflow) -> list[DataCondition]:
@@ -133,8 +199,3 @@ def get_slow_conditions(workflow: Workflow) -> list[DataCondition]:
         if is_slow_condition(condition)
     ]
     return slow_conditions
-
-
-@receiver(pre_save, sender=Workflow)
-def enforce_config_schema(sender, instance: Workflow, **kwargs):
-    instance.validate_config(instance.config_schema)

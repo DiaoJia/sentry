@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import tempfile
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import cached_property, cmp_to_key
 from pathlib import Path
 from typing import Any
@@ -15,8 +15,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from django.apps import apps
 from django.db import connections, router
 from django.utils import timezone
+from fido2.ctap2 import AuthenticatorData
+from fido2.utils import sha256
 from sentry_relay.auth import generate_key_pair
 
+from sentry.auth.authenticators.u2f import create_credential_object
 from sentry.backup.crypto import LocalFileDecryptor, LocalFileEncryptor, decrypt_encrypted_tarball
 from sentry.backup.dependencies import (
     NormalizedModelName,
@@ -36,35 +39,50 @@ from sentry.backup.helpers import Printer
 from sentry.backup.imports import import_in_global_scope
 from sentry.backup.scopes import ExportScope
 from sentry.backup.validate import validate
-from sentry.data_secrecy.models import DataSecrecyWaiver
 from sentry.db.models.paranoia import ParanoidModel
 from sentry.explore.models import (
     ExploreSavedQuery,
     ExploreSavedQueryLastVisited,
     ExploreSavedQueryProject,
     ExploreSavedQueryStarred,
+    TraceItemAttributeContext,
+    TraceItemAttributeTypes,
+    TraceItemAttributeValueContext,
+    TraceItemTypes,
+    TraceMetricTypes,
 )
-from sentry.incidents.models.incident import IncidentActivity, IncidentTrigger
+from sentry.incidents.grouptype import MetricIssue
+from sentry.incidents.models.incident import IncidentActivity
 from sentry.insights.models import InsightsStarredSegment
+from sentry.integrations.models.data_forwarder import DataForwarder
+from sentry.integrations.models.data_forwarder_project import DataForwarderProject
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.models.activity import Activity
 from sentry.models.apiauthorization import ApiAuthorization
+from sentry.models.apidevicecode import ApiDeviceCode
 from sentry.models.apigrant import ApiGrant
 from sentry.models.apikey import ApiKey
 from sentry.models.apitoken import ApiToken
 from sentry.models.authidentity import AuthIdentity
 from sentry.models.authprovider import AuthProvider
+from sentry.models.code_review_event import CodeReviewEvent, CodeReviewEventStatus
 from sentry.models.counter import Counter
-from sentry.models.dashboard import Dashboard, DashboardFavoriteUser, DashboardTombstone
+from sentry.models.custominboundfilter import CustomInboundFilter
+from sentry.models.dashboard import (
+    Dashboard,
+    DashboardFavoriteUser,
+    DashboardLastVisited,
+    DashboardRevision,
+)
 from sentry.models.dashboard_permissions import DashboardPermissions
 from sentry.models.dashboard_widget import (
+    DashboardFieldLink,
     DashboardWidget,
     DashboardWidgetQuery,
     DashboardWidgetQueryOnDemand,
     DashboardWidgetTypes,
 )
-from sentry.models.dynamicsampling import CustomDynamicSamplingRule
 from sentry.models.groupassignee import GroupAssignee
 from sentry.models.groupbookmark import GroupBookmark
 from sentry.models.groupsearchview import GroupSearchView, GroupSearchViewProject
@@ -75,7 +93,6 @@ from sentry.models.groupshare import GroupShare
 from sentry.models.groupsubscription import GroupSubscription
 from sentry.models.options.option import ControlOption, Option
 from sentry.models.options.organization_option import OrganizationOption
-from sentry.models.options.project_template_option import ProjectTemplateOption
 from sentry.models.organization import Organization
 from sentry.models.organizationaccessrequest import OrganizationAccessRequest
 from sentry.models.organizationmember import InviteStatus, OrganizationMember
@@ -84,19 +101,25 @@ from sentry.models.orgauthtoken import OrgAuthToken
 from sentry.models.project import Project
 from sentry.models.projectownership import ProjectOwnership
 from sentry.models.projectredirect import ProjectRedirect
+from sentry.models.projectrepository import ProjectRepository, ProjectRepositorySource
 from sentry.models.projectsdk import EventType, ProjectSDK
-from sentry.models.projecttemplate import ProjectTemplate
 from sentry.models.recentsearch import RecentSearch
 from sentry.models.relay import Relay, RelayUsage
-from sentry.models.rule import NeglectedRule, RuleActivity, RuleActivityType
-from sentry.models.savedsearch import SavedSearch, Visibility
+from sentry.models.repositorysettings import CodeReviewTrigger
+from sentry.models.rule import RuleActivity, RuleActivityType
 from sentry.models.search_common import SearchType
 from sentry.monitors.models import Monitor, ScheduleType
-from sentry.nodestore.django.models import Node
+from sentry.replays.models import OrganizationMemberReplayAccess
+from sentry.seer.models.project_repository import (
+    SeerProjectRepository,
+    SeerProjectRepositoryBranchOverride,
+)
 from sentry.sentry_apps.logic import SentryAppUpdater
 from sentry.sentry_apps.models.sentry_app import SentryApp
+from sentry.services.nodestore.django.models import Node
 from sentry.silo.base import SiloMode
 from sentry.silo.safety import unguarded_write
+from sentry.snuba.models import QuerySubscriptionDataSourceHandler
 from sentry.tempest.models import TempestCredentials
 from sentry.testutils.cases import TestCase, TransactionTestCase
 from sentry.testutils.factories import get_fixture_path
@@ -111,6 +134,7 @@ from sentry.users.models.userrole import UserRole, UserRoleUser
 from sentry.utils import json
 from sentry.workflow_engine.models import Action, DataConditionAlertRuleTrigger, DataConditionGroup
 from sentry.workflow_engine.models.workflow_action_group_status import WorkflowActionGroupStatus
+from sentry.workflow_engine.registry import data_source_type_registry
 
 __all__ = [
     "export_to_file",
@@ -275,7 +299,7 @@ def clear_model(model, *, reset_pks: bool):
                 cursor.execute("SELECT setval(%s, 1, false)", [seq])
 
 
-@assume_test_silo_mode(SiloMode.REGION)
+@assume_test_silo_mode(SiloMode.CELL)
 def clear_database(*, reset_pks: bool = False):
     """
     Deletes all models we care about from the database, in a sequence that ensures we get no
@@ -372,7 +396,38 @@ class ExhaustiveFixtures(Fixtures):
             first_seen=datetime(2012, 4, 5, 3, 29, 45, tzinfo=UTC),
             last_seen=datetime(2012, 4, 5, 3, 29, 45, tzinfo=UTC),
         )
-        Authenticator.objects.create(user=user, type=1, config={})
+        Authenticator.objects.create(
+            user=user,
+            type=1,
+            config={
+                "devices": [
+                    {
+                        "binding": {
+                            "publicKey": "publickey",
+                            "keyHandle": "aowerkoweraowerkkro",
+                            "appId": "https://dev.getsentry.net:8000/auth/2fa/u2fappid.json",
+                        },
+                        "name": "Sentry",
+                        "ts": 1512505334,
+                    },
+                    {
+                        "name": "Alert Escargot",
+                        "ts": 1512505334,
+                        "binding": AuthenticatorData.create(
+                            sha256(b"test"),
+                            0x41,
+                            1,
+                            create_credential_object(
+                                {
+                                    "publicKey": "webauthn",
+                                    "keyHandle": "webauthn",
+                                }
+                            ),
+                        ),
+                    },
+                ]
+            },
+        )
 
         if is_admin:
             self.add_user_permission(user, "users.admin")
@@ -381,7 +436,7 @@ class ExhaustiveFixtures(Fixtures):
 
         return user
 
-    @assume_test_silo_mode(SiloMode.REGION)
+    @assume_test_silo_mode(SiloMode.CELL)
     def create_exhaustive_organization(
         self,
         slug: str,
@@ -425,8 +480,10 @@ class ExhaustiveFixtures(Fixtures):
                     )
 
         OrganizationOption.objects.create(
-            organization=org, key="sentry:account-rate-limit", value=0
+            organization=org, key="sentry:scrape_javascript", value=True
         )
+        owner_member = OrganizationMember.objects.get(organization=org, user_id=owner_id)
+        OrganizationMemberReplayAccess.objects.create(organizationmember=owner_member)
 
         # Team
         team = self.create_team(name=f"test_team_in_{slug}", organization=org)
@@ -434,12 +491,6 @@ class ExhaustiveFixtures(Fixtures):
         OrganizationAccessRequest.objects.create(member=invited, team=team, requester_id=owner_id)
 
         # Project*
-        project_template = ProjectTemplate.objects.create(name=f"template-{slug}", organization=org)
-        ProjectTemplateOption.objects.create(
-            project_template=project_template, key="mail:subject_prefix", value=f"[{slug}]"
-        )
-
-        # TODO (@saponifi3d): Add project template to project
         project = self.create_project(name=f"project-{slug}", teams=[team], organization=org)
         self.create_project_key(project)
         self.create_project_bookmark(project=project, user=owner)
@@ -454,6 +505,11 @@ class ExhaustiveFixtures(Fixtures):
             sdk_version="2.41.0",
         )
         self.create_notification_action(organization=org, projects=[project])
+        CustomInboundFilter.objects.create(
+            project=project,
+            name=f"custom-inbound-filter-{slug}",
+            conditions=[{"op": "eq", "name": "event.release", "value": ["1.0.0"]}],
+        )
 
         # Auth*
         self.create_exhaustive_organization_auth(owner, org, project)
@@ -467,24 +523,6 @@ class ExhaustiveFixtures(Fixtures):
             rule=rule, type=RuleActivityType.CREATED.value, user_id=owner_id
         )
         self.snooze_rule(user_id=owner_id, owner_id=owner_id, rule=rule)
-        NeglectedRule.objects.create(
-            rule=rule,
-            organization=org,
-            disable_date=timezone.now(),
-            sent_initial_email_date=timezone.now(),
-            sent_final_email_date=timezone.now(),
-        )
-        CustomDynamicSamplingRule.update_or_create(
-            created_by_id=owner_id,
-            condition={"op": "equals", "name": "environment", "value": "prod"},
-            start=timezone.now(),
-            end=timezone.now() + timedelta(hours=1),
-            project_ids=[project.id],
-            organization_id=org.id,
-            num_samples=100,
-            sample_rate=0.5,
-            query="environment:prod event.type:transaction",
-        )
 
         # Environment*
         self.create_environment(project=project)
@@ -516,15 +554,15 @@ class ExhaustiveFixtures(Fixtures):
             comment=f"hello {slug}",
             user_id=owner_id,
         )
-        IncidentTrigger.objects.create(
-            incident=incident,
-            alert_rule_trigger=trigger,
-            status=1,
-        )
 
         # Dashboard
         dashboard = Dashboard.objects.create(
             title=f"Dashboard 1 for {slug}",
+            created_by_id=owner_id,
+            organization=org,
+        )
+        linked_dashboard = Dashboard.objects.create(
+            title=f"Linked Dashboard 1 for {slug}",
             created_by_id=owner_id,
             organization=org,
         )
@@ -533,13 +571,17 @@ class ExhaustiveFixtures(Fixtures):
             user_id=owner_id,
             organization=org,
         )
+        DashboardLastVisited.objects.create(
+            user_id=owner_id,
+            dashboard=dashboard,
+            last_visited=timezone.now(),
+        )
         permissions = DashboardPermissions.objects.create(
             is_editable_by_everyone=True, dashboard=dashboard
         )
         permissions.teams_with_edit_access.set([team])
         widget = DashboardWidget.objects.create(
             dashboard=dashboard,
-            order=1,
             title=f"Test Widget for {slug}",
             display_type=0,
             widget_type=DashboardWidgetTypes.DISCOVER,
@@ -552,7 +594,17 @@ class ExhaustiveFixtures(Fixtures):
             extraction_state=DashboardWidgetQueryOnDemand.OnDemandExtractionState.DISABLED_NOT_APPLICABLE,
             spec_hashes=[],
         )
-        DashboardTombstone.objects.create(organization=org, slug=f"test-tombstone-in-{slug}")
+        DashboardFieldLink.objects.create(
+            dashboard_widget_query=widget_query,
+            field="count()",
+            dashboard=linked_dashboard,
+        )
+        DashboardRevision.objects.create(
+            dashboard=dashboard,
+            created_by_id=owner_id,
+            title=dashboard.title,
+            snapshot_schema_version=1,
+        )
 
         # *Search
         RecentSearch.objects.create(
@@ -560,13 +612,6 @@ class ExhaustiveFixtures(Fixtures):
             user_id=owner_id,
             type=SearchType.ISSUE.value,
             query=f"some query for {slug}",
-        )
-        SavedSearch.objects.create(
-            organization=org,
-            name=f"Saved query for {slug}",
-            query=f"saved query for {slug}",
-            visibility=Visibility.ORGANIZATION,
-            owner_id=owner_id,
         )
 
         # misc
@@ -580,6 +625,46 @@ class ExhaustiveFixtures(Fixtures):
         )
         repo.external_id = "https://git.example.com:1234"
         repo.save()
+
+        self.create_repository_settings(
+            repository=repo,
+            enabled_code_review=True,
+            code_review_triggers=[
+                CodeReviewTrigger.ON_NEW_COMMIT,
+                CodeReviewTrigger.ON_READY_FOR_REVIEW,
+            ],
+        )
+        project_repo, _ = ProjectRepository.objects.get_or_create(
+            project=project,
+            repository=repo,
+            defaults={"source": ProjectRepositorySource.MANUAL},
+        )
+        seer_project_repo = SeerProjectRepository.objects.create(project_repository=project_repo)
+        SeerProjectRepositoryBranchOverride.objects.create(
+            seer_project_repository=seer_project_repo,
+            tag_name="environment",
+            tag_value="production",
+            branch_name="release",
+        )
+
+        CodeReviewEvent.objects.create(
+            organization=org,
+            repository=repo,
+            raw_event_type="pull_request",
+            raw_event_action="opened",
+            trigger_id=f"trigger-{slug}",
+            pr_number=1,
+            pr_title=f"Test PR for {slug}",
+            pr_author="test-author",
+            pr_url="https://github.com/getsentry/getsentry/pull/1",
+            pr_state="open",
+            trigger="on_new_commit",
+            trigger_user="test-user",
+            target_commit_sha="abc123",
+            status=CodeReviewEventStatus.REVIEW_COMPLETED,
+            seer_run_id=f"seer-run-{slug}",
+            comments_posted=2,
+        )
 
         # Group*
         group = self.create_group(project=project)
@@ -620,16 +705,9 @@ class ExhaustiveFixtures(Fixtures):
                 user_id=owner_id,
             )
 
-        # DataSecrecyWaiver
-        DataSecrecyWaiver.objects.create(
-            organization=org,
-            access_start=timezone.now(),
-            access_end=timezone.now() + timedelta(days=1),
-        )
-
         # Setup a test 'Issue Rule' and 'Automation'
         workflow = self.create_workflow(organization=org)
-        detector = self.create_detector(project=project)
+        detector = self.create_detector(project=project, type=MetricIssue.slug)
         self.create_detector_workflow(detector=detector, workflow=workflow)
         self.create_detector_state(detector=detector)
 
@@ -648,7 +726,14 @@ class ExhaustiveFixtures(Fixtures):
             workflow=workflow, condition_group=notification_condition_group
         )
 
-        data_source = self.create_data_source(organization=org)
+        # Use the alert_rule's QuerySubscription for the DataSource
+        query_subscription = alert.snuba_query.subscriptions.first()
+        assert query_subscription is not None
+        data_source = self.create_data_source(
+            organization=org,
+            source_id=str(query_subscription.id),
+            type=data_source_type_registry.get_key(QuerySubscriptionDataSourceHandler),
+        )
 
         self.create_data_source_detector(data_source, detector)
         detector_conditions = self.create_data_condition_group(
@@ -711,11 +796,48 @@ class ExhaustiveFixtures(Fixtures):
             last_visited=timezone.now(),
         )
 
+        TraceItemAttributeContext.objects.create(
+            organization=org,
+            project=project,
+            attribute_key="http.method",
+            item_type=TraceItemTypes.SPANS,
+            attribute_type=TraceItemAttributeTypes.STRING,
+            brief="The HTTP method of the request",
+            examples=["GET", "POST"],
+            created_by_id=owner_id,
+            updated_by_id=owner_id,
+        )
+
+        TraceItemAttributeValueContext.objects.create(
+            organization=org,
+            attribute_name="metric.name",
+            attribute_value="my.custom.counter",
+            attribute_type=TraceMetricTypes.COUNTER,
+            item_type=TraceItemTypes.TRACEMETRICS,
+            brief="Total number of widgets processed",
+            created_by_id=owner_id,
+            updated_by_id=owner_id,
+        )
+
         InsightsStarredSegment.objects.create(
             organization=org,
             user_id=owner_id,
             project=project,
             segment_name="test_transaction",
+        )
+
+        data_forwarder = DataForwarder.objects.create(
+            organization=org,
+            is_enabled=True,
+            enroll_new_projects=True,
+            provider="segment",
+            config={"write_key": "test_write_key"},
+        )
+        DataForwarderProject.objects.create(
+            is_enabled=True,
+            data_forwarder=data_forwarder,
+            project=project,
+            overrides={"write_key": "test_override_write_key"},
         )
 
         return org
@@ -752,7 +874,7 @@ class ExhaustiveFixtures(Fixtures):
             provider="slack", name=f"Slack for {org.slug}", external_id=f"slack:{org.slug}"
         )
         return OrganizationIntegration.objects.create(
-            organization_id=org.id, integration=integration, config='{"hello":"hello"}'
+            organization_id=org.id, integration=integration, config={"hello": "hello"}
         )
 
     @assume_test_silo_mode(SiloMode.CONTROL)
@@ -786,6 +908,10 @@ class ExhaustiveFixtures(Fixtures):
             redirect_uri="https://example.com",
             scope_list=["openid", "profile", "email"],
         )
+        ApiDeviceCode.objects.create(
+            application=app.application,
+            scope_list=["openid", "profile"],
+        )
 
         # ServiceHook
         self.create_service_hook(
@@ -800,7 +926,7 @@ class ExhaustiveFixtures(Fixtures):
 
         return app
 
-    @assume_test_silo_mode(SiloMode.REGION)
+    @assume_test_silo_mode(SiloMode.CELL)
     def create_exhaustive_sentry_app_notification(self, app: SentryApp, org: Organization):
         project = Project.objects.filter(organization=org).first()
         self.create_notification_action(organization=org, sentry_app_id=app.id, projects=[project])
@@ -811,7 +937,7 @@ class ExhaustiveFixtures(Fixtures):
         self.create_exhaustive_global_configs_regional()
         ControlOption.objects.create(key="bar", value="b")
 
-    @assume_test_silo_mode(SiloMode.REGION)
+    @assume_test_silo_mode(SiloMode.CELL)
     def create_exhaustive_global_configs_regional(self):
         _, public_key = generate_key_pair()
         relay = str(uuid4())
@@ -861,6 +987,10 @@ class ExhaustiveFixtures(Fixtures):
 
     def import_export_then_validate(self, out_name, *, reset_pks: bool = True) -> Any:
         return import_export_then_validate(out_name, reset_pks=reset_pks)
+
+    def json_of_org_and_project(self) -> Any:
+        with open(get_fixture_path("backup", "org-and-project.json")) as backup_file:
+            return json.load(backup_file)
 
     @cached_property
     def _json_of_exhaustive_user_with_maximum_privileges(self) -> Any:

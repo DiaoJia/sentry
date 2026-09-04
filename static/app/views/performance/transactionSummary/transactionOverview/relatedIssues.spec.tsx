@@ -1,33 +1,27 @@
 import {GroupsFixture} from 'sentry-fixture/groups';
+import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, waitForElementToBeRemoved} from 'sentry-test/reactTestingLibrary';
 
-import RelatedIssues from 'sentry/views/performance/transactionSummary/transactionOverview/relatedIssues';
+import {RelatedIssues} from 'sentry/views/performance/transactionSummary/transactionOverview/relatedIssues';
 
-describe('RelatedIssues', function () {
+describe('RelatedIssues', () => {
   const organization = OrganizationFixture();
   const issues = GroupsFixture();
   const transaction = 'test-transaction';
 
-  const initialData = initializeOrg({
-    organization,
-    router: {
-      location: {
-        query: {
-          transaction: 'test-transaction',
-          project: '1',
-          statsPeriod: '14d',
-        },
-      },
+  const location = LocationFixture({
+    query: {
+      transaction: 'test-transaction',
+      project: '1',
+      statsPeriod: '14d',
     },
   });
 
   beforeEach(() => {
-    // NOTE: This mock is jank. `GroupList` concatenates the query string with the URL. This means we have to mock the full URL including the parameters. There are a few other tests that have to do the same.
     MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/issues/?limit=5&project=1&query=is%3Aunresolved%20transaction%3Atest-transaction&sort=trends&statsPeriod=14d',
+      url: '/organizations/org-slug/issues/',
       method: 'GET',
       body: issues,
     });
@@ -38,15 +32,15 @@ describe('RelatedIssues', function () {
     });
   });
 
-  afterAll(function () {
+  afterAll(() => {
     jest.resetAllMocks();
   });
 
-  it('renders the issues list and "Open in Issues" link', async function () {
+  it('renders the issues list and "Open in Issues" link', async () => {
     render(
       <RelatedIssues
         organization={organization}
-        location={initialData.router.location}
+        location={location}
         transaction={transaction}
         statsPeriod="14d"
       />
@@ -67,9 +61,9 @@ describe('RelatedIssues', function () {
     expect(screen.getByText(/ReferenceError/)).toBeInTheDocument();
   });
 
-  it('shows empty state when no issues are found', async function () {
+  it('shows empty state when no issues are found', async () => {
     MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/issues/?limit=5&project=1&query=is%3Aunresolved%20transaction%3Atest-transaction&sort=trends&statsPeriod=14d',
+      url: '/organizations/org-slug/issues/',
       method: 'GET',
       body: [],
     });
@@ -77,7 +71,7 @@ describe('RelatedIssues', function () {
     render(
       <RelatedIssues
         organization={organization}
-        location={initialData.router.location}
+        location={location}
         transaction={transaction}
         statsPeriod="14d"
       />
@@ -86,5 +80,38 @@ describe('RelatedIssues', function () {
     await waitForElementToBeRemoved(() => screen.queryAllByTestId('loading-placeholder'));
 
     expect(screen.getByText(/No new issues/i)).toBeInTheDocument();
+  });
+
+  it('remaps request.method to http.method', async () => {
+    const eapLocation = LocationFixture({
+      query: {
+        transaction: 'test-transaction',
+        project: '1',
+        statsPeriod: '14d',
+        query: 'request.method:GET',
+      },
+    });
+
+    render(
+      <RelatedIssues
+        organization={organization}
+        location={eapLocation}
+        transaction={transaction}
+        statsPeriod="14d"
+      />
+    );
+
+    const placeholders = screen.queryAllByTestId('loading-placeholder');
+    await waitForElementToBeRemoved(placeholders);
+
+    const $openInIssuesButton = screen.getByRole('button', {name: 'Open in Issues'});
+    expect($openInIssuesButton).toHaveAttribute(
+      'href',
+      expect.stringContaining('http.method')
+    );
+    expect($openInIssuesButton).not.toHaveAttribute(
+      'href',
+      expect.stringContaining('request.method')
+    );
   });
 });

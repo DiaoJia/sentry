@@ -1,29 +1,21 @@
 import type {LocationDescriptor} from 'history';
 
-import type {TooltipProps} from 'sentry/components/core/tooltip';
+import type {Responsive} from '@sentry/scraps/layout';
+import type {TooltipProps} from '@sentry/scraps/tooltip';
+import type {AnalyticsProps} from '@sentry/scraps/trackingContext';
 
-// We do not want people using this type as it should only be used
-// internally by the different button implementations
+export type ButtonVariant =
+  | 'secondary'
+  | 'primary'
+  | 'danger'
+  | 'warning'
+  | 'link'
+  | 'transparent';
 
-// eslint-disable-next-line @typescript-eslint/naming-convention
-export interface DO_NOT_USE_CommonButtonProps {
-  /**
-   * Used when you want to overwrite the default Reload event key for analytics
-   */
-  analyticsEventKey?: string;
-  /**
-   * Used when you want to send an Amplitude Event. By default, Amplitude events are not sent so
-   * you must pass in a eventName to send an Amplitude event.
-   */
-  analyticsEventName?: string;
-  /**
-   * Adds extra parameters to the analytics tracking
-   */
-  analyticsParams?: Record<string, any>;
-  /**
-   * Removes borders from the button.
-   */
-  borderless?: boolean;
+export type ButtonSize = 'zero' | 'xs' | 'sm' | 'md';
+
+// eslint-disable-next-line @sentry/naming-convention
+export interface DO_NOT_USE_CommonButtonProps extends AnalyticsProps {
   /**
    * Indicates that the button is "doing" something.
    */
@@ -34,28 +26,26 @@ export interface DO_NOT_USE_CommonButtonProps {
    */
   icon?: React.ReactNode;
   /**
-   * The semantic "priority" of the button. Use `primary` when the action is
+   * The size of the button
+   */
+  size?: Responsive<ButtonSize>;
+  /**
+   * Button Tooltip Props
+   */
+  tooltipProps?: ButtonTooltipProps;
+  /**
+   * The semantic "variant" of the button. Use `primary` when the action is
    * contextually the primary action, `danger` if the button will do something
    * destructive, `link` for visual similarity to a link.
    */
-  priority?: 'default' | 'primary' | 'danger' | 'link' | 'transparent';
-  /**
-   * The size of the button
-   */
-  size?: 'zero' | 'xs' | 'sm' | 'md';
-  /**
-   * Display a tooltip for the button.
-   */
+  variant?: ButtonVariant;
+}
+
+interface ButtonTooltipProps extends Omit<
+  TooltipProps,
+  'children' | 'skipWrapper' | 'title'
+> {
   title?: TooltipProps['title'];
-  /**
-   * Additional properties for the Tooltip when `title` is set.
-   */
-  tooltipProps?: Omit<TooltipProps, 'children' | 'title' | 'skipWrapper'>;
-  /**
-   * Userful in scenarios where the border of the button should blend with the
-   * background behind the button.
-   */
-  translucentBorder?: boolean;
 }
 
 type ButtonElementProps = Omit<
@@ -64,9 +54,7 @@ type ButtonElementProps = Omit<
 >;
 
 interface BaseButtonProps extends DO_NOT_USE_CommonButtonProps, ButtonElementProps {
-  href?: never;
   ref?: React.Ref<HTMLButtonElement>;
-  to?: never;
 }
 
 interface ButtonPropsWithoutAriaLabel extends BaseButtonProps {
@@ -78,14 +66,14 @@ interface ButtonPropsWithAriaLabel extends BaseButtonProps {
   children?: never;
 }
 
-// eslint-disable-next-line @typescript-eslint/naming-convention
+// eslint-disable-next-line @sentry/naming-convention
 export type DO_NOT_USE_ButtonProps =
   | ButtonPropsWithoutAriaLabel
   | ButtonPropsWithAriaLabel;
 
 type LinkElementProps = Omit<
   React.AnchorHTMLAttributes<HTMLAnchorElement>,
-  'label' | 'size' | 'title' | 'href'
+  'label' | 'size' | 'title' | 'href' | 'target'
 >;
 
 interface BaseLinkButtonProps extends DO_NOT_USE_CommonButtonProps, LinkElementProps {
@@ -98,13 +86,19 @@ interface BaseLinkButtonProps extends DO_NOT_USE_CommonButtonProps, LinkElementP
 interface LinkButtonPropsWithHref extends BaseLinkButtonProps {
   href: string;
   /**
-   * Determines if the link is external and should open in a new tab.
+   * Determines if the link is external. External links always open in a new tab.
    */
   external?: boolean;
 }
 
 interface LinkButtonPropsWithTo extends BaseLinkButtonProps {
   to: string | LocationDescriptor;
+  /**
+   * Opens the link in a new tab. Use sparingly — internal links typically
+   * should not open in a new tab. For external links, use `href` with
+   * `external` instead, which always opens in a new tab.
+   */
+  openInNewTab?: boolean;
   /**
    * If true, the link will not reset the scroll position of the page when clicked.
    */
@@ -115,5 +109,5 @@ interface LinkButtonPropsWithTo extends BaseLinkButtonProps {
   replace?: boolean;
 }
 
-// eslint-disable-next-line @typescript-eslint/naming-convention
+// eslint-disable-next-line @sentry/naming-convention
 export type DO_NOT_USE_LinkButtonProps = LinkButtonPropsWithHref | LinkButtonPropsWithTo;

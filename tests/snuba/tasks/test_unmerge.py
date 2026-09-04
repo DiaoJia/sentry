@@ -6,20 +6,21 @@ import itertools
 import logging
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
 
 from django.utils import timezone
 
 from sentry import eventstream, tsdb
-from sentry.eventstore.models import Event
 from sentry.models.environment import Environment
 from sentry.models.group import Group
+from sentry.models.groupenvironment import GroupEnvironment
 from sentry.models.grouphash import GroupHash
-from sentry.models.groupopenperiod import GroupOpenPeriod
 from sentry.models.grouprelease import GroupRelease
 from sentry.models.release import Release
 from sentry.models.userreport import UserReport
+from sentry.services.eventstore.models import GroupEvent
 from sentry.similarity import _make_index_backend, features
 from sentry.tasks.merge import merge_groups
 from sentry.tasks.unmerge import (
@@ -28,8 +29,11 @@ from sentry.tasks.unmerge import (
     get_fingerprint,
     get_group_backfill_attributes,
     get_group_creation_attributes,
+    repair_denormalizations,
+    start_unmerge,
     unmerge,
 )
+from sentry.taskworker.selfchain_idempotency import mark_spawned
 from sentry.testutils.cases import SnubaTestCase, TestCase
 from sentry.testutils.helpers.datetime import before_now
 from sentry.testutils.helpers.features import with_feature
@@ -42,7 +46,19 @@ index = _make_index_backend(redis.clusters.get("default").get_local_client(0))
 
 @patch.object(features, "index", new=index)
 class UnmergeTestCase(TestCase, SnubaTestCase):
-    def test_get_fingerprint(self):
+    @patch("sentry.tasks.unmerge.Group")
+    @patch("sentry.tasks.unmerge.current_task")
+    def test_selfchain_skips_when_already_spawned(self, mock_current_task, mock_group) -> None:
+        # A prior delivery of this activation already spawned its continuation; a broker re-pend
+        # must short-circuit before touching the DB (proving no re-processing / no fork).
+        mock_current_task.return_value = SimpleNamespace(id="unmerge-act-skip")
+        mark_spawned("unmerge", "unmerge-act-skip")
+
+        unmerge(self.project.id, 123, 456, ["abcabc"], None, batch_size=5)
+
+        assert mock_group.objects.get.call_count == 0
+
+    def test_get_fingerprint(self) -> None:
         assert (
             get_fingerprint(
                 self.store_event(data={"message": "Hello world"}, project_id=self.project.id)
@@ -60,7 +76,7 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
             == hashlib.md5(b"Not hello world").hexdigest()
         )
 
-    def test_get_group_creation_attributes(self):
+    def test_get_group_creation_attributes(self) -> None:
         now = timezone.now().replace(microsecond=0)
         e1 = self.store_event(
             data={
@@ -120,7 +136,7 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
             "substatus": e1.group.substatus,
         }
 
-    def test_get_group_backfill_attributes(self):
+    def test_get_group_backfill_attributes(self) -> None:
         now = timezone.now().replace(microsecond=0)
 
         assert get_group_backfill_attributes(
@@ -172,10 +188,12 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
         }
 
     @with_feature("projects:similarity-indexing")
-    @with_feature("organizations:issue-open-periods")
-    @mock.patch("sentry.analytics.record")
-    def test_unmerge(self, mock_record):
-        now = before_now(minutes=5).replace(microsecond=0)
+    def test_unmerge(self) -> None:
+        # Replace second=0 to ensure all 17 events (now+0s to now+17s)
+        # stay within the same hour bucket. Without this, if now is within
+        # 17 seconds of an hour boundary, events can cross into the next
+        # bucket causing count mismatches.
+        now = before_now(minutes=5).replace(second=0, microsecond=0)
 
         def time_from_now(offset=0):
             return now + timedelta(seconds=offset)
@@ -189,7 +207,7 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
 
         def create_message_event(
             template, parameters, environment, release, fingerprint="group1"
-        ) -> Event:
+        ) -> GroupEvent:
             i = next(sequence)
 
             event_id = uuid.UUID(fields=(i, 0x0, 0x1000, 0x80, 0x80, 0x808080808080)).hex
@@ -227,7 +245,7 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
 
             return event
 
-        events: dict[str | None, list[Event]] = {}
+        events: dict[str | None, list[GroupEvent]] = {}
 
         for event in (
             create_message_event(
@@ -259,7 +277,7 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
 
         events.setdefault(get_fingerprint(event), []).append(event)
 
-        merge_source, source, destination = list(Group.objects.all())
+        merge_source, source, destination = list(Group.objects.all().order_by("id"))
 
         assert len(events) == 3
         assert sum(len(x) for x in events.values()) == 17
@@ -345,17 +363,25 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
             ("production", time_from_now(0), time_from_now(9)),
             ("staging", time_from_now(16), time_from_now(16)),
         }
-        source_open_periods = (
-            GroupOpenPeriod.objects.filter(group=source).order_by("-date_started").first()
-        )
-        destination_open_period = (
-            GroupOpenPeriod.objects.filter(group=destination).order_by("-date_started").first()
+
+        staging_environment = Environment.objects.get(
+            organization_id=project.organization_id, name="staging"
         )
 
-        assert source_open_periods is not None
-        assert source_open_periods.date_ended is None
-        assert destination_open_period is not None
-        assert destination_open_period.date_ended is None
+        assert set(
+            GroupEnvironment.objects.filter(group_id=source.id).values_list(
+                "environment_id", "first_seen"
+            )
+        ) == {(production_environment.id, time_from_now(10))}
+
+        assert set(
+            GroupEnvironment.objects.filter(group_id=destination.id).values_list(
+                "environment_id", "first_seen"
+            )
+        ) == {
+            (production_environment.id, time_from_now(0)),
+            (staging_environment.id, time_from_now(16)),
+        }
 
         rollup_duration = 3600
 
@@ -451,11 +477,6 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
             aggregate = aggregate if aggregate is not None else set()
             aggregate.add(
                 get_event_user_from_interface(event.data["user"], event.group.project).tag_value
-            )
-            mock_record.assert_called_with(
-                "eventuser_endpoint.request",
-                project_id=event.group.project.id,
-                endpoint="sentry.tasks.unmerge.get_event_user_from_interface",
             )
             return aggregate
 
@@ -606,3 +627,49 @@ class UnmergeTestCase(TestCase, SnubaTestCase):
         )
         assert destination_similar_items[1][0] == source.id
         assert destination_similar_items[1][1]["message:message:character-shingles"] < 1.0
+
+    @mock.patch("sentry.tasks.unmerge.similarity")
+    def test_repair_denormalizations_skips_similarity_when_backfilled_to_seer(
+        self, mock_similarity
+    ) -> None:
+        project = self.create_project()
+        project.update_option("sentry:similarity_backfill_completed", True)
+
+        event = self.store_event(
+            data={"message": "Test event", "fingerprint": ["test-group"]},
+            project_id=project.id,
+        )
+
+        repair_denormalizations(get_caches(), project, [event])
+
+        mock_similarity.record.assert_not_called()
+
+    @mock.patch("sentry.tasks.unmerge.similarity")
+    def test_repair_denormalizations_records_similarity_when_not_backfilled(
+        self, mock_similarity
+    ) -> None:
+        project = self.create_project()
+
+        event = self.store_event(
+            data={"message": "Test event", "fingerprint": ["test-group"]},
+            project_id=project.id,
+        )
+
+        repair_denormalizations(get_caches(), project, [event])
+
+        mock_similarity.record.assert_called_once_with(project, [event])
+
+
+class StartUnmergeTest(TestCase):
+    def test_delegates_to_unmerge(self) -> None:
+        with patch.object(unmerge, "delay") as mock_delay:
+            start_unmerge(
+                project_id=1,
+                source_id=2,
+                destination_id=None,
+                fingerprints=["abc", "def"],
+                actor_id=3,
+                batch_size=500,
+            )
+
+        mock_delay.assert_called_once_with(1, 2, None, ["abc", "def"], 3, batch_size=500)

@@ -1,12 +1,14 @@
+import type {Platform} from 'sentry/components/platformPicker';
 import {
   backend,
   desktop,
   frontend,
+  gaming,
   mobile,
   PlatformCategory,
   serverless,
 } from 'sentry/data/platformCategories';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 
 /**
  *
@@ -32,6 +34,9 @@ export function platformToCategory(platform: PlatformKey | undefined): PlatformC
   if ((desktop as string[]).includes(platform)) {
     return PlatformCategory.DESKTOP;
   }
+  if ((gaming as string[]).includes(platform)) {
+    return PlatformCategory.GAMING;
+  }
   return PlatformCategory.OTHER;
 }
 
@@ -43,6 +48,8 @@ export function isNativePlatform(platform: string | undefined) {
     case 'swift':
     case 'c':
     case 'nintendo-switch':
+    case 'playstation':
+    case 'xbox':
       return true;
     default:
       return false;
@@ -59,4 +66,32 @@ export function isMobilePlatform(platform: string | undefined) {
   }
 
   return (mobile as string[]).includes(platform);
+}
+
+function startsWithPunctuation(name: string) {
+  return /^\p{P}/u.test(name);
+}
+
+/**
+ * Sort comparator for platform display names, matching the legacy platform
+ * picker's non-popular tabs: alphabetical, except names starting with
+ * punctuation (the .NET family) sort last instead of first.
+ */
+export function comparePlatformNames(a: string, b: string): number {
+  const aStartsWithPunctuation = startsWithPunctuation(a);
+  const bStartsWithPunctuation = startsWithPunctuation(b);
+  if (aStartsWithPunctuation !== bStartsWithPunctuation) {
+    return aStartsWithPunctuation ? 1 : -1;
+  }
+  return a.localeCompare(b);
+}
+
+export function isDisabledGamingPlatform({
+  platform,
+  enabledConsolePlatforms,
+}: {
+  platform: Pick<Platform, 'id' | 'type'>;
+  enabledConsolePlatforms?: string[];
+}) {
+  return platform.type === 'console' && !enabledConsolePlatforms?.includes(platform.id);
 }

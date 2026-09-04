@@ -3,13 +3,12 @@ import {IssueType} from 'sentry/types/group';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const dbQueryConfig: IssueCategoryConfigMapping = {
+export const dbQueryConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
       delete: {
-        enabled: false,
-        disabledReason: t('Not yet supported for performance issues'),
+        enabled: true,
       },
       deleteAndDiscard: {
         enabled: false,
@@ -101,5 +100,3 @@ const dbQueryConfig: IssueCategoryConfigMapping = {
     },
   },
 };
-
-export default dbQueryConfig;

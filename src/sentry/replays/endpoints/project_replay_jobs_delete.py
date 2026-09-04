@@ -1,16 +1,50 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import TypedDict
+
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from sentry import audit_log, features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectPermission
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import Serializer, serialize
-from sentry.replays.models import ReplayDeletionJobModel
+from sentry.apidocs.constants import RESPONSE_BAD_REQUEST, RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND
+from sentry.apidocs.examples.replay_examples import ReplayExamples
+from sentry.apidocs.parameters import GlobalParams, ReplayParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
+from sentry.apidocs.utils import inline_sentry_response_serializer
+from sentry.replays.endpoints.project_replay_endpoint import ProjectReplayEndpoint
+from sentry.replays.models import DeletionJobStatus, ReplayDeletionJobModel
+from sentry.replays.permissions import has_replay_permission
 from sentry.replays.tasks import run_bulk_replay_delete_job
+
+
+class ReplayDeletionJobResponseData(TypedDict):
+    id: int
+    dateCreated: str
+    dateUpdated: str
+    rangeStart: str
+    rangeEnd: str
+    environments: list[str]
+    status: str
+    query: str
+    countDeleted: int
+
+
+class ReplayDeletionJobListResponse(TypedDict):
+    data: list[ReplayDeletionJobResponseData]
+
+
+class ReplayDeletionJobDetailResponse(TypedDict):
+    data: ReplayDeletionJobResponseData
 
 
 class ReplayDeletionJobPermission(ProjectPermission):
@@ -35,33 +69,60 @@ class ReplayDeletionJobSerializer(Serializer):
         }
 
 
-class ReplayDeletionJobCreateSerializer(serializers.Serializer):
+class ReplayDeletionJobCreateDataSerializer(serializers.Serializer):
     rangeStart = serializers.DateTimeField(required=True)
     rangeEnd = serializers.DateTimeField(required=True)
     environments = serializers.ListField(
         child=serializers.CharField(allow_null=False, allow_blank=False), required=True
     )
-    query = serializers.CharField(required=True, allow_blank=True)
+    query = serializers.CharField(required=True, allow_blank=True, allow_null=True)
 
     def validate(self, data):
         if data["rangeStart"] >= data["rangeEnd"]:
             raise serializers.ValidationError("rangeStart must be before rangeEnd")
+        if data["rangeEnd"] - data["rangeStart"] > timedelta(days=30):
+            raise serializers.ValidationError(
+                "you cannot delete more than 30 days of data at a time"
+            )
         return data
 
 
-@region_silo_endpoint
+class ReplayDeletionJobCreateSerializer(serializers.Serializer):
+    data = ReplayDeletionJobCreateDataSerializer(required=True)  # type: ignore[assignment]
+
+
+@cell_silo_endpoint
+@extend_schema(tags=["Replays"])
 class ProjectReplayDeletionJobsIndexEndpoint(ProjectEndpoint):
-    owner = ApiOwner.REPLAY
+    owner = ApiOwner.DATA_BROWSING
     publish_status = {
-        "GET": ApiPublishStatus.PRIVATE,
-        "POST": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.PUBLIC,
+        "POST": ApiPublishStatus.PUBLIC,
     }
     permission_classes = (ReplayDeletionJobPermission,)
 
-    def get(self, request: Request, project) -> Response:
+    @extend_schema(
+        operation_id="listProjectReplayDeletionJobs",
+        summary="List Replay Batch-Deletion Jobs",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ListReplayDeletionJobs", ReplayDeletionJobListResponse
+            ),
+            403: RESPONSE_FORBIDDEN,
+        },
+        examples=ReplayExamples.GET_REPLAY_DELETION_JOBS,
+    )
+    def get(self, request: Request, project) -> Response[ReplayDeletionJobListResponse]:
         """
         Retrieve a collection of replay delete jobs.
         """
+        if not has_replay_permission(request, project.organization):
+            return Response(status=403)
+
         queryset = ReplayDeletionJobModel.objects.filter(
             organization_id=project.organization_id, project_id=project.id
         )
@@ -76,15 +137,37 @@ class ProjectReplayDeletionJobsIndexEndpoint(ProjectEndpoint):
             paginator_cls=OffsetPaginator,
         )
 
-    def post(self, request: Request, project) -> Response:
+    @extend_schema(
+        operation_id="createProjectReplayDeletionJob",
+        summary="Create Replay Batch Deletion Job",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+        ],
+        request=ReplayDeletionJobCreateSerializer,
+        responses={
+            201: inline_sentry_response_serializer(
+                "CreateReplayDeletionJob", ReplayDeletionJobDetailResponse
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            403: RESPONSE_FORBIDDEN,
+        },
+        examples=ReplayExamples.CREATE_REPLAY_DELETION_JOB,
+    )
+    def post(
+        self, request: Request, project
+    ) -> Response[ReplayDeletionJobDetailResponse] | Response[ValidationErrorResponse]:
         """
         Create a new replay deletion job.
         """
+        if not has_replay_permission(request, project.organization):
+            return Response(status=403)
+
         serializer = ReplayDeletionJobCreateSerializer(data=request.data)
         if not serializer.is_valid():
-            return Response(serializer.errors, status=400)
+            return Response(as_validation_errors(serializer), status=400)
 
-        data = serializer.validated_data
+        data = serializer.validated_data["data"]
 
         # Create the deletion job
         job = ReplayDeletionJobModel.objects.create(
@@ -93,35 +176,67 @@ class ProjectReplayDeletionJobsIndexEndpoint(ProjectEndpoint):
             environments=data["environments"],
             organization_id=project.organization_id,
             project_id=project.id,
-            query=data["query"],
-            status="pending",
+            query=data["query"] or "",
+            status=DeletionJobStatus.PENDING,
         )
 
-        # We always start with an offset of 0 (obviously) but future work doesn't need to obey
-        # this. You're free to start from wherever you want.
-        run_bulk_replay_delete_job.delay(job.id, offset=0)
+        # We don't check Seer features because an org may have previously had them on, then turned them off.
+        has_seer_data = features.has("organizations:replay-ai-summaries", project.organization)
+
+        run_bulk_replay_delete_job.delay(job.id, has_seer_data=has_seer_data)
+
+        self.create_audit_entry(
+            request,
+            organization=project.organization,
+            target_object=job.id,
+            event=audit_log.get_event_id("REPLAYDELETIONJOBMODEL_START"),
+            data={},
+        )
 
         response_data = serialize(job, request.user, ReplayDeletionJobSerializer())
-        response = {"data": response_data}
+        response: ReplayDeletionJobDetailResponse = {"data": response_data}
 
         return Response(response, status=201)
 
 
-@region_silo_endpoint
-class ProjectReplayDeletionJobDetailEndpoint(ProjectEndpoint):
-    owner = ApiOwner.REPLAY
+@cell_silo_endpoint
+@extend_schema(tags=["Replays"])
+class ProjectReplayDeletionJobDetailEndpoint(ProjectReplayEndpoint):
     publish_status = {
-        "GET": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.PUBLIC,
     }
     permission_classes = (ReplayDeletionJobPermission,)
 
-    def get(self, request: Request, project, job_id: int) -> Response:
+    @extend_schema(
+        operation_id="getProjectReplayDeletionJob",
+        summary="Retrieve a Replay Batch-Deletion Job",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            ReplayParams.JOB_ID,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "GetReplayDeletionJob", ReplayDeletionJobDetailResponse
+            ),
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=ReplayExamples.GET_REPLAY_DELETION_JOB,
+    )
+    def get(
+        self, request: Request, project, job_id: int
+    ) -> Response[ReplayDeletionJobDetailResponse]:
         """
         Fetch a replay delete job instance.
         """
+        self.check_replay_access(request, project)
+
         try:
             job = ReplayDeletionJobModel.objects.get(
-                id=job_id, organization_id=project.organization_id, project_id=project.id
+                id=job_id,
+                organization_id=project.organization_id,
+                project_id=project.id,
             )
         except ReplayDeletionJobModel.DoesNotExist:
             raise ResourceDoesNotExist

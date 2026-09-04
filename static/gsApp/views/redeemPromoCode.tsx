@@ -1,107 +1,131 @@
-import styled from '@emotion/styled';
+import {useMutation} from '@tanstack/react-query';
+import {z} from 'zod';
 
-import {addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {defaultFormOptions, setFieldErrors, useScrapsForm} from '@sentry/scraps/form';
+import {Flex} from '@sentry/scraps/layout';
+
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import {fetchOrganizationDetails} from 'sentry/actionCreators/organization';
-import type {Client} from 'sentry/api';
-import ApiForm from 'sentry/components/forms/apiForm';
-import TextField from 'sentry/components/forms/fields/textField';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import Text from 'sentry/components/text';
+import {Client} from 'sentry/api';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Organization} from 'sentry/types/organization';
-import useRouteAnalyticsParams from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
-import withApi from 'sentry/utils/withApi';
-import withOrganization from 'sentry/utils/withOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {requestErrorToFieldErrors} from 'sentry/utils/requestError/requestErrorToFieldErrors';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 
-import SubscriptionContext from 'getsentry/components/subscriptionContext';
-import withSubscription from 'getsentry/components/withSubscription';
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
+import {SubscriptionContext} from 'getsentry/components/subscriptionContext';
+import {withSubscription} from 'getsentry/components/withSubscription';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 import type {Subscription} from 'getsentry/types';
 import {isDisabledByPartner} from 'getsentry/utils/partnerships';
-import PartnershipNote from 'getsentry/views/subscriptionPage/partnershipNote';
+import {SubscriptionPageContainer} from 'getsentry/views/subscriptionPage/components/subscriptionPageContainer';
+import {PartnershipNote} from 'getsentry/views/subscriptionPage/partnershipNote';
 
-type Props = RouteComponentProps<unknown, unknown> & {
-  api: Client;
-  organization: Organization;
-  subscription: Subscription;
-};
+const schema = z.object({
+  code: z.string().min(1, t('Promotional code is required')),
+});
 
-function RedeemPromoCode({organization, api, subscription}: Props) {
+function RedeemPromoCode({subscription}: {subscription: Subscription}) {
+  const organization = useOrganization();
+
   const {accountBalance} = subscription;
   const accountCredit =
     accountBalance < 0 ? Number((accountBalance / -100).toFixed(2)) : 0;
   useRouteAnalyticsParams({
     account_credit: accountCredit,
   });
-  const AccountCredit =
-    accountCredit > 0 ? (
-      <AccountCreditWrapper id="account-balance">
-        <ItemContainer>{t('Your account credit:')}</ItemContainer>
-        <ItemContainer>{'$' + accountCredit.toString()}</ItemContainer>
-      </AccountCreditWrapper>
-    ) : null;
+
+  const mutation = useMutation({
+    mutationFn: (data: {code: string}) =>
+      fetchMutation<{details?: string}>({
+        url: getApiUrl('/customers/$organizationIdOrSlug/redeem-promo/', {
+          path: {organizationIdOrSlug: organization.slug},
+        }),
+        method: 'PUT',
+        data,
+      }),
+    onSuccess: resp => {
+      const msg = resp?.details || t('Successfully applied credit to your organization');
+
+      SubscriptionStore.loadData(organization.slug, null, {
+        markStartedTrial: true,
+      });
+      fetchOrganizationDetails(new Client(), organization.slug);
+      addSuccessMessage(msg);
+    },
+    onError: error => {
+      if (error instanceof RequestError) {
+        setFieldErrors(form, requestErrorToFieldErrors(error, form.state.values));
+
+        // non-field errors can be camelcase or snake case
+        const nonFieldErrors =
+          error.responseJSON?.non_field_errors || error.responseJSON?.nonFieldErrors;
+
+        if (Array.isArray(nonFieldErrors) && nonFieldErrors.length) {
+          addErrorMessage(nonFieldErrors[0], {duration: 10000});
+        }
+      } else {
+        addErrorMessage(t('Unable to redeem promo code'));
+      }
+    },
+  });
+
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {code: ''},
+    validators: {onDynamic: schema},
+    onSubmit: ({value}) => {
+      return mutation
+        .mutateAsync(value)
+        .then(() => form.reset())
+        .catch(() => {});
+    },
+  });
 
   if (isDisabledByPartner(subscription)) {
-    return <PartnershipNote subscription={subscription} />;
+    return (
+      <SubscriptionPageContainer>
+        <PartnershipNote subscription={subscription} />
+      </SubscriptionPageContainer>
+    );
   }
   return (
-    <SubscriptionContext>
-      <div className="ref-redeem-code">
+    <SubscriptionPageContainer>
+      <SubscriptionContext>
         <SentryDocumentTitle title={t('Redeem Promo Code')} orgSlug={organization.slug} />
         <SettingsPageHeader title={t('Redeem Promotional Code')} />
-        <Panel>
-          <PanelHeader>{t('Redeem Promotional Code')}</PanelHeader>
-          <PanelBody>
-            <ApiForm
-              extraButton={AccountCredit}
-              apiMethod="PUT"
-              apiEndpoint={`/customers/${organization.slug}/redeem-promo/`}
-              submitLabel={t('Redeem')}
-              resetOnError
-              onSubmitSuccess={resp => {
-                const msg =
-                  resp?.details || t('Successfully applied credit to your organization');
-
-                SubscriptionStore.loadData(organization.slug, null, {
-                  markStartedTrial: true,
-                });
-                fetchOrganizationDetails(api, organization.slug);
-                addSuccessMessage(msg);
-              }}
-            >
-              <Text>
-                <p>
-                  {t(
-                    'Received a promotional code? Enter it here to apply credit to your organization.'
-                  )}
-                </p>
-              </Text>
-
-              <TextField name="code" label={t('Promotional Code')} required />
-            </ApiForm>
-          </PanelBody>
-        </Panel>
-      </div>
-    </SubscriptionContext>
+        <div className="ref-redeem-code">
+          <form.AppForm form={form}>
+            <form.FieldGroup title={t('Redeem Promotional Code')}>
+              <form.AppField name="code">
+                {field => (
+                  <field.Layout.Row
+                    label={t('Promotional Code')}
+                    hintText={t(
+                      'Received a promotional code? Enter it here to apply credit to your organization.'
+                    )}
+                    required
+                  >
+                    <field.Input
+                      value={field.state.value}
+                      onChange={field.handleChange}
+                    />
+                  </field.Layout.Row>
+                )}
+              </form.AppField>
+              <Flex align="center" justify="end">
+                <form.SubmitButton>{t('Redeem')}</form.SubmitButton>
+              </Flex>
+            </form.FieldGroup>
+          </form.AppForm>
+        </div>
+      </SubscriptionContext>
+    </SubscriptionPageContainer>
   );
 }
 
-export default withApi(withSubscription(withOrganization(RedeemPromoCode)));
-
-const AccountCreditWrapper = styled('div')`
-  width: 100%;
-  display: flex;
-  justify-content: flex-start;
-  gap: ${space(1)};
-  padding: 0 ${space(2)};
-`;
-
-const ItemContainer = styled('span')`
-  margin: auto 0;
-`;
+export default withSubscription(RedeemPromoCode);

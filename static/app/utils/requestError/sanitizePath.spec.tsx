@@ -1,6 +1,6 @@
 import {sanitizePath} from 'sentry/utils/requestError/sanitizePath';
 
-describe('sanitizePath', function () {
+describe('sanitizePath', () => {
   for (const prefix of ['https://sentry.io/api/0', '']) {
     test.each([
       // /organizations/ endpoints
@@ -111,12 +111,6 @@ describe('sanitizePath', function () {
         // CustomerDetailsEndpoint
         '/customers/sentry/',
         '/customers/{orgSlug}/',
-      ],
-
-      [
-        // CustomerDetailsEndpoint
-        '/subscriptions/sentry/',
-        '/subscriptions/{orgSlug}/',
       ],
 
       // replays endpionts

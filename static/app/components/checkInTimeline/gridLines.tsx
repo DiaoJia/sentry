@@ -4,12 +4,14 @@ import styled from '@emotion/styled';
 import {mergeRefs} from '@react-aria/utils';
 import moment from 'moment-timezone';
 
-import {updateDateTime} from 'sentry/actionCreators/pageFilters';
-import {DateTime} from 'sentry/components/dateTime';
-import {space} from 'sentry/styles/space';
-import useRouter from 'sentry/utils/useRouter';
+import {Container} from '@sentry/scraps/layout';
 
-import {type CursorOffsets, useTimelineCursor} from './timelineCursor';
+import {DateTime} from 'sentry/components/dateTime';
+import {updateDateTime} from 'sentry/components/pageFilters/actions';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+
+import {useTimelineCursor, type CursorOffsets} from './timelineCursor';
 import {useTimelineZoom} from './timelineZoom';
 import type {TimeWindowConfig} from './types';
 
@@ -55,8 +57,15 @@ function alignDateToBoundary(date: moment.Moment, minuteInterval: number) {
 }
 
 function getTimeMarkersFromConfig(config: TimeWindowConfig) {
-  const {periodStart, end, elapsedMinutes, intervals, dateTimeProps, timelineWidth} =
-    config;
+  const {
+    periodStart,
+    end,
+    elapsedMinutes,
+    intervals,
+    dateTimeProps,
+    timelineWidth,
+    timezone,
+  } = config;
 
   const {referenceMarkerInterval, minimumMarkerInterval, normalMarkerInterval} =
     intervals;
@@ -78,19 +87,26 @@ function getTimeMarkersFromConfig(config: TimeWindowConfig) {
 
   // The mark after the first mark will be aligned to a boundary to make it
   // easier to understand the rest of the marks
-  const currentMark = alignDateToBoundary(moment(periodStart), normalMarkerInterval);
+  const currentMark = alignDateToBoundary(
+    moment.tz(periodStart, timezone),
+    normalMarkerInterval
+  );
 
   // The first label is larger since we include the date, time, and timezone.
 
   while (
-    currentMark.isBefore(moment(periodStart).add(referenceMarkerInterval, 'minutes'))
+    currentMark.isBefore(
+      moment.tz(periodStart, timezone).add(referenceMarkerInterval, 'minutes')
+    )
   ) {
     currentMark.add(normalMarkerInterval, 'minute');
   }
 
   // Generate time markers which represent location of grid lines/time labels.
   // Stop adding markers once there's no more room for more markers
-  while (moment(currentMark).add(minimumMarkerInterval, 'minutes').isBefore(end)) {
+  while (
+    moment.tz(currentMark, timezone).add(minimumMarkerInterval, 'minutes').isBefore(end)
+  ) {
     const position =
       startOffset + (currentMark.valueOf() - periodStart.valueOf()) / msPerPixel;
     markers.push({date: currentMark.toDate(), position, dateTimeProps});
@@ -125,7 +141,35 @@ export function GridLineLabels({
           <TimeLabel date={date} {...dateTimeProps} />
         </TimeLabelContainer>
       ))}
+      {labelPosition && (
+        <GridLines timeWindowConfig={timeWindowConfig} labelPosition={labelPosition} />
+      )}
     </LabelsContainer>
+  );
+}
+
+interface GridLinesProps {
+  labelPosition: LabelPosition;
+  timeWindowConfig: TimeWindowConfig;
+}
+
+function GridLines({timeWindowConfig, labelPosition}: GridLinesProps) {
+  const {timelineUnderscanWidth} = timeWindowConfig.rollupConfig;
+
+  const gridLine = getTimeMarkersFromConfig(timeWindowConfig);
+
+  // Skip rendering of the first grid line marker when the underscan width is
+  // below the threshold to be displayed
+  if (timelineUnderscanWidth < UNDERSCAN_MARKER_LINE_THRESHOLD) {
+    gridLine.shift();
+  }
+
+  return (
+    <GridLineContainer>
+      {gridLine.map(({date, position}) => (
+        <Gridline key={date.getTime()} left={position} labelPosition={labelPosition} />
+      ))}
+    </GridLineContainer>
   );
 }
 
@@ -186,8 +230,10 @@ export function GridLineOverlay({
   labelPosition = 'left-top',
   resetPaginationOnZoom,
 }: GridLineOverlayProps) {
-  const router = useRouter();
-  const {periodStart, timelineWidth, dateLabelFormat, rollupConfig} = timeWindowConfig;
+  const location = useLocation();
+  const navigate = useNavigate();
+  const {periodStart, timelineWidth, dateLabelFormat, rollupConfig, timezone} =
+    timeWindowConfig;
   const {timelineUnderscanWidth} = rollupConfig;
 
   const msPerPixel = (timeWindowConfig.elapsedMinutes * 60 * 1000) / timelineWidth;
@@ -196,8 +242,11 @@ export function GridLineOverlay({
   // to the pixel value after the timelineUnderscanWidth.
   const dateFromPosition = useCallback(
     (position: number) =>
-      moment(periodStart.getTime() + msPerPixel * (position - timelineUnderscanWidth)),
-    [msPerPixel, periodStart, timelineUnderscanWidth]
+      moment.tz(
+        periodStart.getTime() + msPerPixel * (position - timelineUnderscanWidth),
+        timezone
+      ),
+    [msPerPixel, periodStart, timelineUnderscanWidth, timezone]
   );
 
   const makeCursorLabel = useCallback(
@@ -212,10 +261,11 @@ export function GridLineOverlay({
           start: dateFromPosition(startX).startOf('minute').toDate(),
           end: dateFromPosition(endX).add(1, 'minute').startOf('minute').toDate(),
         },
-        router,
+        location,
+        navigate,
         {keepCursor: !resetPaginationOnZoom}
       ),
-    [dateFromPosition, resetPaginationOnZoom, router]
+    [dateFromPosition, resetPaginationOnZoom, location, navigate]
   );
 
   const {
@@ -234,39 +284,28 @@ export function GridLineOverlay({
   });
 
   const overlayRef = mergeRefs(cursorContainerRef, selectionContainerRef);
-  const gridLine = getTimeMarkersFromConfig(timeWindowConfig);
-
-  // Skip rendering of the first grid line marker when the underscan width is
-  // below the threshold to be displayed
-  if (timelineUnderscanWidth < UNDERSCAN_MARKER_LINE_THRESHOLD) {
-    gridLine.shift();
-  }
 
   return (
-    <Overlay aria-hidden ref={overlayRef} className={className}>
+    <Container
+      width="100%"
+      height="100%"
+      position="absolute"
+      aria-hidden
+      ref={overlayRef}
+      className={className}
+    >
       {timelineCursor}
       {timelineSelector}
       {additionalUi}
-      <GridLineContainer>
-        {gridLine.map(({date, position}) => (
-          <Gridline key={date.getTime()} left={position} labelPosition={labelPosition} />
-        ))}
-      </GridLineContainer>
-    </Overlay>
+      <GridLines timeWindowConfig={timeWindowConfig} labelPosition={labelPosition} />
+    </Container>
   );
 }
-
-const Overlay = styled('div')`
-  height: 100%;
-  width: 100%;
-  position: absolute;
-`;
 
 const GridLineContainer = styled('div')`
   position: relative;
   overflow: hidden;
   height: 100%;
-  z-index: 1;
   pointer-events: none;
 `;
 
@@ -277,24 +316,24 @@ const LabelsContainer = styled('div')<{labelPosition: LabelPosition}>`
   ${p =>
     p.labelPosition === 'left-top' &&
     css`
-      height: 50px;
+      min-height: 50px;
     `}
   ${p =>
     p.labelPosition === 'center-bottom' &&
     // The pseudo element is used to create the left-most notch
     css`
       height: 24px;
-      border-top: 1px solid ${p.theme.translucentBorder};
+      border-top: 1px solid ${p.theme.tokens.border.transparent.neutral.muted};
       top: 68px;
       &:before {
         content: '';
         position: absolute;
         top: -1px;
         left: 0;
-        height: ${space(0.5)};
+        height: ${p.theme.space.xs};
         width: 1px;
         border-radius: 1px;
-        background: ${p.theme.translucentBorder};
+        background: ${p.theme.tokens.background.transparent.neutral.muted};
       }
     `}
 `;
@@ -306,7 +345,7 @@ export const Gridline = styled('div')<{labelPosition: LabelPosition; left: numbe
     p.labelPosition === 'left-top' &&
     css`
       height: 100%;
-      border-left: 1px solid ${p.theme.translucentInnerBorder};
+      border-left: 1px solid ${p.theme.tokens.border.transparent.neutral.muted};
     `}
   ${p =>
     p.labelPosition === 'center-bottom' &&
@@ -314,7 +353,7 @@ export const Gridline = styled('div')<{labelPosition: LabelPosition; left: numbe
       height: 6px;
       width: 1px;
       border-radius: 1px;
-      background: ${p.theme.translucentBorder};
+      background: ${p.theme.tokens.background.transparent.neutral.muted};
       top: 68px;
     `}
 `;
@@ -332,12 +371,12 @@ const TimeLabelContainer = styled('div')<{
   ${p =>
     p.labelPosition === 'left-top' &&
     css`
-      padding-left: ${space(1)};
+      padding-left: ${p.theme.space.md};
     `}
   ${p =>
     p.labelPosition === 'center-bottom' &&
     css`
-      padding-top: ${space(1)};
+      padding-top: ${p.theme.space.md};
     `}
   ${p =>
     p.labelPosition === 'center-bottom' &&
@@ -350,7 +389,7 @@ const TimeLabelContainer = styled('div')<{
 
 const TimeLabel = styled(DateTime)`
   font-variant-numeric: tabular-nums;
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
   pointer-events: none;
 `;

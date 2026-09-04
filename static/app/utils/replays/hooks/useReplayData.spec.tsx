@@ -1,36 +1,23 @@
-import type {ReactNode} from 'react';
 import {duration} from 'moment-timezone';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+import {ProjectFixture} from 'sentry-fixture/project';
+import {RawReplayErrorFixture} from 'sentry-fixture/replay/error';
 import {
   ReplayConsoleEventFixture,
   ReplayNavigateEventFixture,
 } from 'sentry-fixture/replay/helpers';
 import {RRWebInitFrameEventsFixture} from 'sentry-fixture/replay/rrweb';
-import {ReplayErrorFixture} from 'sentry-fixture/replayError';
 import {ReplayRecordFixture} from 'sentry-fixture/replayRecord';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
-import {makeTestQueryClient} from 'sentry-test/queryClient';
-import {renderHook, waitFor} from 'sentry-test/reactTestingLibrary';
+import {act, renderHookWithProviders, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {DiscoverDatasets} from 'sentry/utils/discover/types';
-import {QueryClientProvider} from 'sentry/utils/queryClient';
-import useReplayData from 'sentry/utils/replays/hooks/useReplayData';
-import type {HydratedReplayRecord} from 'sentry/views/replays/types';
+import {useReplayData} from 'sentry/utils/replays/hooks/useReplayData';
+import type {HydratedReplayRecord} from 'sentry/views/explore/replays/types';
 
-const {organization, project} = initializeOrg();
-
-ProjectsStore.loadInitialData([project]);
-
-const mockInvalidateQueries = jest.fn();
-
-function wrapper({children}: {children?: ReactNode}) {
-  const queryClient = makeTestQueryClient();
-
-  queryClient.invalidateQueries = mockInvalidateQueries;
-
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-}
+const organization = OrganizationFixture();
+const project = ProjectFixture();
 
 function getMockReplayRecord(replayRecord?: Partial<HydratedReplayRecord>) {
   const HYDRATED_REPLAY = ReplayRecordFixture({
@@ -52,8 +39,20 @@ function getMockReplayRecord(replayRecord?: Partial<HydratedReplayRecord>) {
 
 describe('useReplayData', () => {
   beforeEach(() => {
+    jest.useFakeTimers();
+    ProjectsStore.loadInitialData([project]);
     MockApiClient.clearMockResponses();
-    mockInvalidateQueries.mockClear();
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/projects/`,
+      body: [project],
+    });
+  });
+
+  afterEach(() => {
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
+    jest.useRealTimers();
   });
 
   it('should hydrate the replayRecord', async () => {
@@ -67,7 +66,7 @@ describe('useReplayData', () => {
       body: {data: mockReplayResponse},
     });
     MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {
         data: [],
       },
@@ -84,8 +83,7 @@ describe('useReplayData', () => {
       body: {data: mockReplayResponse},
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId: mockReplayResponse.id,
         orgSlug: organization.slug,
@@ -96,6 +94,7 @@ describe('useReplayData', () => {
       expect(result.current).toEqual({
         attachments: expect.any(Array),
         errors: expect.any(Array),
+        feedbackEvents: expect.any(Array),
         fetchError: undefined,
         isError: false,
         isPending: false,
@@ -105,6 +104,86 @@ describe('useReplayData', () => {
         status: 'success',
       })
     );
+  });
+
+  it('should stay pending until the projects request resolves the project slug', async () => {
+    const {mockReplayResponse, expectedReplay} = getMockReplayRecord({
+      count_errors: 0,
+      count_segments: 0,
+      error_ids: [],
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/replays/${mockReplayResponse.id}/`,
+      body: {data: mockReplayResponse},
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/`,
+      body: {data: []},
+    });
+    let resolveProjects = () => {};
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/projects/`,
+      body: [project],
+      asyncDelay: new Promise<void>(resolve => {
+        resolveProjects = resolve;
+      }),
+    });
+    ProjectsStore.reset();
+
+    const {result} = renderHookWithProviders(useReplayData, {
+      initialProps: {
+        replayId: mockReplayResponse.id,
+        orgSlug: organization.slug,
+      },
+    });
+
+    await waitFor(() => expect(result.current.replayRecord).toEqual(expectedReplay));
+    expect(result.current.projectSlug).toBeNull();
+    expect(result.current.isPending).toBe(true);
+    expect(result.current.status).toBe('pending');
+
+    act(() => {
+      ProjectsStore.loadInitialData([project]);
+      resolveProjects();
+    });
+
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(result.current.projectSlug).toBe(project.slug);
+    expect(result.current.status).toBe('success');
+  });
+
+  it('should stop pending when the projects request fails', async () => {
+    const {mockReplayResponse, expectedReplay} = getMockReplayRecord({
+      count_errors: 0,
+      count_segments: 0,
+      error_ids: [],
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/replays/${mockReplayResponse.id}/`,
+      body: {data: mockReplayResponse},
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/`,
+      body: {data: []},
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/projects/`,
+      statusCode: 500,
+      body: {detail: 'boom'},
+    });
+    ProjectsStore.reset();
+
+    const {result} = renderHookWithProviders(useReplayData, {
+      initialProps: {
+        replayId: mockReplayResponse.id,
+        orgSlug: organization.slug,
+      },
+    });
+
+    await waitFor(() => expect(result.current.replayRecord).toEqual(expectedReplay));
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(result.current.projectSlug).toBeNull();
+    expect(result.current.status).toBe('success');
   });
 
   it('should concat N segment responses and pass them into ReplayReader', async () => {
@@ -121,7 +200,7 @@ describe('useReplayData', () => {
     });
 
     MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {
         data: [],
       },
@@ -159,14 +238,15 @@ describe('useReplayData', () => {
       match: [(_url, options) => options.query?.cursor === '0:1:0'],
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId: mockReplayResponse.id,
         orgSlug: organization.slug,
         segmentsPerPage: 1,
       },
     });
+
+    await act(() => jest.advanceTimersByTimeAsync(0));
 
     await waitFor(() => expect(mockedSegmentsCall1).toHaveBeenCalledTimes(1));
     expect(mockedSegmentsCall2).toHaveBeenCalledTimes(1);
@@ -182,7 +262,7 @@ describe('useReplayData', () => {
     });
   });
 
-  it('should always fetch DISCOVER & ISSUE_PLATFORM errors', async () => {
+  it('should always fetch ERRORS & ISSUE_PLATFORM errors', async () => {
     const startedAt = new Date('12:00:00 01-01-2023');
     const finishedAt = new Date('12:00:10 01-01-2023');
 
@@ -200,7 +280,7 @@ describe('useReplayData', () => {
       body: {data: mockReplayResponse},
     });
     const mockedErrorEventsMetaCall = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {},
       headers: {
         Link: [
@@ -209,14 +289,14 @@ describe('useReplayData', () => {
         ].join(','),
       },
       match: [
-        (_url, options) => options.query?.dataset === DiscoverDatasets.DISCOVER,
+        (_url, options) => options.query?.dataset === DiscoverDatasets.ERRORS,
         (_url, options) => options.query?.query === `replayId:[${mockReplayResponse.id}]`,
         (_url, options) => options.query?.cursor === '0:0:0',
       ],
     });
 
     const mockedIssuePlatformEventsMetaCall = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {},
       headers: {
         Link: [
@@ -231,14 +311,15 @@ describe('useReplayData', () => {
       ],
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId: mockReplayResponse.id,
         orgSlug: organization.slug,
         errorsPerPage: 1,
       },
     });
+
+    await act(() => jest.advanceTimersByTimeAsync(0));
 
     await waitFor(() => expect(mockedErrorEventsMetaCall).toHaveBeenCalledTimes(1));
     expect(mockedIssuePlatformEventsMetaCall).toHaveBeenCalledTimes(1);
@@ -272,31 +353,31 @@ describe('useReplayData', () => {
     });
 
     const mockErrorResponse1 = [
-      ReplayErrorFixture({
+      RawReplayErrorFixture({
         id: ERROR_IDS[0]!,
         issue: 'JAVASCRIPT-123E',
-        timestamp: startedAt.toISOString(),
+        timestamp: startedAt,
       }),
     ];
     const mockErrorResponse2 = [
-      ReplayErrorFixture({
+      RawReplayErrorFixture({
         id: ERROR_IDS[1]!,
         issue: 'JAVASCRIPT-789Z',
-        timestamp: startedAt.toISOString(),
+        timestamp: startedAt,
       }),
     ];
     const mockErrorResponse3 = [
-      ReplayErrorFixture({
+      RawReplayErrorFixture({
         id: ERROR_IDS[0]!,
         issue: 'JAVASCRIPT-123E',
-        timestamp: startedAt.toISOString(),
+        timestamp: startedAt,
       }),
     ];
     const mockErrorResponse4 = [
-      ReplayErrorFixture({
+      RawReplayErrorFixture({
         id: ERROR_IDS[1]!,
         issue: 'JAVASCRIPT-789Z',
-        timestamp: startedAt.toISOString(),
+        timestamp: startedAt,
       }),
     ];
 
@@ -305,7 +386,7 @@ describe('useReplayData', () => {
       body: {data: mockReplayResponse},
     });
     const mockedErrorEventsMetaCall1 = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {data: mockErrorResponse1},
       headers: {
         Link: [
@@ -314,13 +395,13 @@ describe('useReplayData', () => {
         ].join(','),
       },
       match: [
-        (_url, options) => options.query?.dataset === DiscoverDatasets.DISCOVER,
+        (_url, options) => options.query?.dataset === DiscoverDatasets.ERRORS,
         (_url, options) => options.query?.query === `replayId:[${mockReplayResponse.id}]`,
         (_url, options) => options.query?.cursor === '0:0:0',
       ],
     });
     const mockedErrorEventsMetaCall2 = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {data: mockErrorResponse2},
       headers: {
         Link: [
@@ -329,13 +410,13 @@ describe('useReplayData', () => {
         ].join(','),
       },
       match: [
-        (_url, options) => options.query?.dataset === DiscoverDatasets.DISCOVER,
+        (_url, options) => options.query?.dataset === DiscoverDatasets.ERRORS,
         (_url, options) => options.query?.query === `replayId:[${mockReplayResponse.id}]`,
         (_url, options) => options.query?.cursor === '0:1:0',
       ],
     });
     const mockedIssuePlatformEventsMetaCall1 = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {data: mockErrorResponse3},
       headers: {
         Link: [
@@ -350,7 +431,7 @@ describe('useReplayData', () => {
       ],
     });
     const mockedIssuePlatformEventsMetaCall2 = MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       body: {data: mockErrorResponse4},
       headers: {
         Link: [
@@ -365,8 +446,7 @@ describe('useReplayData', () => {
       ],
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId: mockReplayResponse.id,
         orgSlug: organization.slug,
@@ -374,10 +454,14 @@ describe('useReplayData', () => {
       },
     });
 
-    await waitFor(() => expect(mockedErrorEventsMetaCall1).toHaveBeenCalledTimes(1));
-    expect(mockedErrorEventsMetaCall2).toHaveBeenCalledTimes(1);
-    expect(mockedIssuePlatformEventsMetaCall1).toHaveBeenCalledTimes(1);
-    expect(mockedIssuePlatformEventsMetaCall2).toHaveBeenCalledTimes(1);
+    await act(() => jest.advanceTimersByTimeAsync(0));
+
+    await waitFor(() => {
+      expect(mockedErrorEventsMetaCall1).toHaveBeenCalledTimes(1);
+      expect(mockedErrorEventsMetaCall2).toHaveBeenCalledTimes(1);
+      expect(mockedIssuePlatformEventsMetaCall1).toHaveBeenCalledTimes(1);
+      expect(mockedIssuePlatformEventsMetaCall2).toHaveBeenCalledTimes(1);
+    });
 
     await waitFor(() => {
       expect(result.current).toStrictEqual(
@@ -412,10 +496,10 @@ describe('useReplayData', () => {
       timestamp: startedAt,
     });
     const mockErrorResponse = [
-      ReplayErrorFixture({
+      RawReplayErrorFixture({
         id: ERROR_IDS[0]!,
         issue: 'JAVASCRIPT-123E',
-        timestamp: startedAt.toISOString(),
+        timestamp: startedAt,
       }),
     ];
 
@@ -433,19 +517,18 @@ describe('useReplayData', () => {
 
     const mockedErrorEventsMetaCall = MockApiClient.addMockResponse({
       asyncDelay: 250, // Simulate 250ms response time
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
-      match: [MockApiClient.matchQuery({dataset: DiscoverDatasets.DISCOVER})],
+      url: `/organizations/${organization.slug}/events/`,
+      match: [MockApiClient.matchQuery({dataset: DiscoverDatasets.ERRORS})],
       body: {data: mockErrorResponse},
     });
     const mockedIssuePlatformEventsMetaCall = MockApiClient.addMockResponse({
       asyncDelay: 250, // Simulate 250ms response time
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+      url: `/organizations/${organization.slug}/events/`,
       match: [MockApiClient.matchQuery({dataset: DiscoverDatasets.ISSUE_PLATFORM})],
       body: {data: mockErrorResponse},
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId: mockReplayResponse.id,
         orgSlug: organization.slug,
@@ -453,15 +536,17 @@ describe('useReplayData', () => {
     });
 
     const expectedReplayData = {
+      attachmentError: undefined,
       attachments: [],
       errors: [],
+      feedbackEvents: [],
       fetchError: undefined,
-      isError: true,
+      isError: false,
       isPending: true,
       onRetry: expect.any(Function),
       projectSlug: null,
       replayRecord: undefined,
-      status: 'error',
+      status: 'pending',
     } as Record<string, unknown>;
 
     // Immediately we will see the replay call is made
@@ -470,6 +555,10 @@ describe('useReplayData', () => {
     expect(mockedIssuePlatformEventsMetaCall).not.toHaveBeenCalled();
     expect(mockedSegmentsCall).not.toHaveBeenCalled();
     expect(result.current).toEqual(expectedReplayData);
+
+    // Advance past the replay asyncDelay (1ms) so it resolves,
+    // but segments (100ms) and errors (250ms) are still pending
+    await act(() => jest.advanceTimersByTimeAsync(2));
 
     // Afterwards we see the attachments & errors requests are made
     await waitFor(() => expect(mockedReplayCall).toHaveBeenCalledTimes(1));
@@ -489,6 +578,9 @@ describe('useReplayData', () => {
       )
     );
 
+    // Advance past the segments asyncDelay (100ms) so rrweb data arrives
+    await act(() => jest.advanceTimersByTimeAsync(100));
+
     // Next we see that some rrweb data has arrived
     await waitFor(() =>
       expect(result.current).toStrictEqual(
@@ -499,6 +591,9 @@ describe('useReplayData', () => {
         })
       )
     );
+
+    // Advance past the errors asyncDelay (250ms) so error data arrives
+    await act(() => jest.advanceTimersByTimeAsync(250));
 
     // Finally we see fetching is complete, errors are here too
     await waitFor(() =>
@@ -522,13 +617,13 @@ describe('useReplayData', () => {
 
     const replayId = mockReplayResponse.id;
 
-    MockApiClient.addMockResponse({
+    const mockedReplayCall = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/replays/${replayId}/`,
       body: {data: mockReplayResponse},
     });
 
-    MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/replays-events-meta/`,
+    const mockedErrorEventsMetaCall = MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/events/`,
       body: {
         data: [],
       },
@@ -540,33 +635,36 @@ describe('useReplayData', () => {
       },
     });
 
-    const {result} = renderHook(useReplayData, {
-      wrapper,
+    const {result} = renderHookWithProviders(useReplayData, {
       initialProps: {
         replayId,
         orgSlug: organization.slug,
       },
     });
 
-    // We need this 'await waitFor()' for the following assertions to pass:
+    await act(() => jest.advanceTimersByTimeAsync(0));
+
     await waitFor(() => {
       expect(result.current).toBeTruthy();
     });
 
-    result.current.onRetry();
+    await waitFor(() => {
+      expect(mockedReplayCall).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(mockedErrorEventsMetaCall).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      result.current.onRetry();
+      await jest.runAllTimersAsync();
+    });
 
     await waitFor(() => {
-      expect(mockInvalidateQueries).toHaveBeenCalledWith({
-        queryKey: [`/organizations/${organization.slug}/replays/${replayId}/`],
-      });
+      expect(mockedReplayCall).toHaveBeenCalledTimes(2);
     });
-    expect(mockInvalidateQueries).toHaveBeenCalledWith({
-      queryKey: [
-        `/projects/${organization.slug}/${project.slug}/replays/${replayId}/recording-segments/`,
-      ],
-    });
-    expect(mockInvalidateQueries).toHaveBeenCalledWith({
-      queryKey: [`/organizations/${organization.slug}/replays-events-meta/`],
+    await waitFor(() => {
+      expect(mockedErrorEventsMetaCall).toHaveBeenCalledTimes(4);
     });
   });
 });

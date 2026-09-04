@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from django.db import models
 from django.db.models import QuerySet
@@ -12,9 +12,8 @@ from sentry.db.models import (
     BoundedBigIntegerField,
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
-    JSONField,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.db.models.manager.base import BaseManager
@@ -37,7 +36,7 @@ class GroupLinkManager(BaseManager["GroupLink"]):
         return self.filter(**kwargs)
 
 
-@region_silo_model
+@cell_silo_model
 class GroupLink(Model):
     """
     Link a group with an external resource like a commit, issue, or pull request
@@ -71,7 +70,7 @@ class GroupLink(Model):
         default=Relationship.references,
         choices=((Relationship.resolves, _("Resolves")), (Relationship.references, _("Linked"))),
     )
-    data: models.Field[dict[str, Any], dict[str, Any]] = JSONField()
+    data = models.JSONField(default=dict)
     datetime = models.DateTimeField(default=timezone.now, db_index=True)
 
     objects: ClassVar[GroupLinkManager] = GroupLinkManager()
@@ -80,6 +79,9 @@ class GroupLink(Model):
         app_label = "sentry"
         db_table = "sentry_grouplink"
         unique_together = (("group", "linked_type", "linked_id"),)
-        indexes = [models.Index(fields=["project", "linked_id", "linked_type", "group"])]
+        indexes = [
+            models.Index(fields=["project", "linked_id", "linked_type", "group"]),
+            models.Index(fields=["linked_id", "linked_type"]),
+        ]
 
     __repr__ = sane_repr("group_id", "linked_type", "linked_id", "relationship", "datetime")

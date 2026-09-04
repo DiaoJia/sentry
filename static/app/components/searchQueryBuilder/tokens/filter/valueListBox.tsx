@@ -1,16 +1,17 @@
 import {Fragment, useCallback} from 'react';
 import {createPortal} from 'react-dom';
 import styled from '@emotion/styled';
-import {isMac} from '@react-aria/utils';
 
-import {ListBox} from 'sentry/components/core/compactSelect/listBox';
-import type {SelectOptionOrSectionWithKey} from 'sentry/components/core/compactSelect/types';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {ListBox} from '@sentry/scraps/compactSelect';
+import type {SelectOptionOrSectionWithKey} from '@sentry/scraps/compactSelect';
+
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {Overlay} from 'sentry/components/overlay';
 import type {CustomComboboxMenuProps} from 'sentry/components/searchQueryBuilder/tokens/combobox';
 import {itemIsSection} from 'sentry/components/searchQueryBuilder/tokens/utils';
+import {type Token, type TokenResult} from 'sentry/components/searchSyntax/parser';
+import {isWildcardOperator} from 'sentry/components/searchSyntax/utils';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 interface ConstrainAndAlignListBoxArgs {
   popoverRef: React.RefObject<HTMLElement | null>;
@@ -23,13 +24,17 @@ function constrainAndAlignListBox({
   referenceRef,
   refsToSync,
 }: ConstrainAndAlignListBoxArgs) {
-  if (!referenceRef.current || !popoverRef.current) return;
+  if (!referenceRef.current || !popoverRef.current) {
+    return;
+  }
 
   const referenceRect = referenceRef.current.getBoundingClientRect();
   const popoverRect = popoverRef.current.getBoundingClientRect();
 
   refsToSync.forEach(ref => {
-    if (!ref.current) return;
+    if (!ref.current) {
+      return;
+    }
     ref.current.style.maxWidth = `${referenceRect.width}px`;
   });
 
@@ -45,7 +50,36 @@ function constrainAndAlignListBox({
     popoverRef.current.style.left = `${newX}px`;
   } else {
     popoverRef.current.style.left = 'auto';
+
+    // Defer horizontal position to the popper, then pull the menu back inside
+    // the viewport if a far-right anchor (e.g. a long, scrolled list of chips)
+    // pushed it off the right edge.
+    const viewportMargin = 8;
+    const rect = popoverRef.current.getBoundingClientRect();
+    const rightOverflow =
+      rect.right - (document.documentElement.clientWidth - viewportMargin);
+    if (rightOverflow > 0) {
+      popoverRef.current.style.left = `-${rightOverflow}px`;
+    }
   }
+}
+
+function WildcardFooter({
+  canUseWildcard,
+  token,
+}: {
+  canUseWildcard: boolean;
+  token: TokenResult<Token.FILTER>;
+}) {
+  if (isWildcardOperator(token.operator)) {
+    return <Label>{t('Switch to "is" operator to use wildcard (*) matching')}</Label>;
+  }
+
+  if (canUseWildcard) {
+    return <Label>{t('Wildcard (*) matching allowed')}</Label>;
+  }
+
+  return null;
 }
 
 interface ValueListBoxProps<T> extends CustomComboboxMenuProps<T> {
@@ -53,6 +87,7 @@ interface ValueListBoxProps<T> extends CustomComboboxMenuProps<T> {
   isLoading: boolean;
   isMultiSelect: boolean;
   items: T[];
+  token: TokenResult<Token.FILTER>;
   wrapperRef: React.RefObject<HTMLDivElement | null>;
   portalTarget?: HTMLElement | null;
 }
@@ -60,9 +95,11 @@ interface ValueListBoxProps<T> extends CustomComboboxMenuProps<T> {
 function Footer({
   isMultiSelect,
   canUseWildcard,
+  token,
 }: {
   canUseWildcard: boolean;
   isMultiSelect: boolean;
+  token: TokenResult<Token.FILTER>;
 }) {
   if (!isMultiSelect && !canUseWildcard) {
     return null;
@@ -70,11 +107,8 @@ function Footer({
 
   return (
     <FooterContainer>
-      {isMultiSelect ? (
-        <Label>{t('Hold %s to select multiple', isMac() ? '⌘' : 'Ctrl')}</Label>
-      ) : null}
-      <Label>{t('Type to search suggestions')}</Label>
-      {canUseWildcard ? <Label>{t('Wildcard (*) matching allowed')}</Label> : null}
+      {isMultiSelect ? <Label>{t('Use the checkboxes to select multiple')}</Label> : null}
+      <WildcardFooter canUseWildcard={canUseWildcard} token={token} />
     </FooterContainer>
   );
 }
@@ -93,6 +127,7 @@ export function ValueListBox<T extends SelectOptionOrSectionWithKey<string>>({
   items,
   canUseWildcard,
   portalTarget,
+  token,
   wrapperRef,
 }: ValueListBoxProps<T>) {
   const totalOptions = items.reduce(
@@ -105,7 +140,9 @@ export function ValueListBox<T extends SelectOptionOrSectionWithKey<string>>({
     (element: HTMLUListElement | null) => {
       listBoxRef.current = element;
 
-      if (!element) return undefined;
+      if (!element) {
+        return;
+      }
 
       const refsToSync = [listBoxRef, popoverRef];
 
@@ -151,7 +188,6 @@ export function ValueListBox<T extends SelectOptionOrSectionWithKey<string>>({
               listState={state}
               hasSearch={!!filterValue}
               hiddenOptions={hiddenOptions}
-              keyDownHandler={() => true}
               overlayIsOpen={isOpen}
               showSectionHeaders={!filterValue}
               size="sm"
@@ -162,7 +198,11 @@ export function ValueListBox<T extends SelectOptionOrSectionWithKey<string>>({
                 <LoadingIndicator size={24} />
               </LoadingWrapper>
             ) : null}
-            <Footer isMultiSelect={isMultiSelect} canUseWildcard={canUseWildcard} />
+            <Footer
+              isMultiSelect={isMultiSelect}
+              canUseWildcard={canUseWildcard}
+              token={token}
+            />
           </Fragment>
         )}
       </SectionedOverlay>
@@ -195,13 +235,13 @@ const StyledPositionWrapper = styled('div')<{visible?: boolean}>`
 `;
 
 const FooterContainer = styled('div')`
-  padding: ${space(1)} ${space(2)};
-  color: ${p => p.theme.subText};
-  border-top: 1px solid ${p => p.theme.innerBorder};
-  font-size: ${p => p.theme.fontSize.sm};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
+  color: ${p => p.theme.tokens.content.secondary};
+  border-top: 1px solid ${p => p.theme.tokens.border.secondary};
+  font-size: ${p => p.theme.font.size.sm};
   display: flex;
   flex-direction: column;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
 `;
 
 const LoadingWrapper = styled('div')<{height?: string; width?: string}>`

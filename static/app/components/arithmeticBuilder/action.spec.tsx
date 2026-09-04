@@ -4,8 +4,8 @@ import {useArithmeticBuilderAction} from 'sentry/components/arithmeticBuilder/ac
 import {Expression} from 'sentry/components/arithmeticBuilder/expression';
 import {tokenizeExpression} from 'sentry/components/arithmeticBuilder/tokenizer';
 
-describe('useArithmeticBuilderAction', function () {
-  it('returns initial state', function () {
+describe('useArithmeticBuilderAction', () => {
+  it('returns initial state', () => {
     const {result} = renderHook(
       ({initialExpression}) =>
         useArithmeticBuilderAction({
@@ -26,7 +26,7 @@ describe('useArithmeticBuilderAction', function () {
     });
   });
 
-  it('resets focus override', function () {
+  it('resets focus override', () => {
     const expression = '( avg(span.duration) )';
 
     const tokens = tokenizeExpression(expression);
@@ -77,7 +77,7 @@ describe('useArithmeticBuilderAction', function () {
     });
   });
 
-  it('deletes token', function () {
+  it('deletes token', () => {
     const expression = '( avg(span.duration) )';
 
     const tokens = tokenizeExpression(expression);
@@ -110,7 +110,7 @@ describe('useArithmeticBuilderAction', function () {
     });
   });
 
-  it('replaces token', function () {
+  it('replaces token', () => {
     const expression = '( avg(span.duration) )';
 
     const tokens = tokenizeExpression(expression);
@@ -142,5 +142,57 @@ describe('useArithmeticBuilderAction', function () {
         focusOverride: null,
       },
     });
+  });
+
+  it('resets expression when initialExpression prop changes', () => {
+    const {result, rerender} = renderHook(
+      ({initialExpression}) =>
+        useArithmeticBuilderAction({
+          initialExpression,
+        }),
+      {
+        initialProps: {
+          initialExpression: 'A + B',
+        },
+      }
+    );
+
+    expect(result.current.state.expression).toEqual(new Expression('A + B'));
+
+    rerender({initialExpression: 'C * D'});
+
+    expect(result.current.state.expression).toEqual(new Expression('C * D'));
+  });
+
+  it('preserves user edits until initialExpression changes', () => {
+    const tokens = tokenizeExpression('A + B');
+
+    const {result, rerender} = renderHook(
+      ({initialExpression}) =>
+        useArithmeticBuilderAction({
+          initialExpression,
+        }),
+      {
+        initialProps: {
+          initialExpression: 'A + B',
+        },
+      }
+    );
+
+    act(() =>
+      result.current.dispatch({
+        type: 'REPLACE_TOKEN',
+        token: tokens[0]!,
+        text: 'X',
+      })
+    );
+
+    expect(result.current.state.expression).toEqual(new Expression('X + B'));
+
+    rerender({initialExpression: 'A + B'});
+    expect(result.current.state.expression).toEqual(new Expression('X + B'));
+
+    rerender({initialExpression: 'C / D'});
+    expect(result.current.state.expression).toEqual(new Expression('C / D'));
   });
 });

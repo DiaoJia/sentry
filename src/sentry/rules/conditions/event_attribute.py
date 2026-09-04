@@ -2,25 +2,23 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import sentry_sdk
 from django import forms
 
-from sentry.eventstore.models import GroupEvent
 from sentry.rules import MATCH_CHOICES, EventState, MatchType, match_values
 from sentry.rules.conditions.base import EventCondition
 from sentry.rules.history.preview_strategy import DATASET_TO_COLUMN_NAME, get_dataset_columns
+from sentry.services.eventstore.models import GroupEvent
 from sentry.snuba.dataset import Dataset
 from sentry.snuba.events import Columns
 from sentry.types.condition_activity import ConditionActivity
 from sentry.utils.registry import NoRegistrationExistsError, Registry
 
 
-@dataclass(frozen=True)
 class AttributeHandler(ABC):
-    minimum_path_length: int
+    minimum_path_length: ClassVar[int]
 
     @classmethod
     def handle(cls, path: list[str], event: GroupEvent) -> list[str]:

@@ -1,28 +1,27 @@
 import type {NavigateFunction} from 'react-router-dom';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {resetPageFilters} from 'sentry/actionCreators/pageFilters';
 import type {Client} from 'sentry/api';
+import {resetPageFilters} from 'sentry/components/pageFilters/actions';
 import {USING_CUSTOMER_DOMAIN} from 'sentry/constants';
-import ConfigStore from 'sentry/stores/configStore';
-import GuideStore from 'sentry/stores/guideStore';
-import OrganizationsStore from 'sentry/stores/organizationsStore';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {GuideStore} from 'sentry/stores/guideStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import type {Organization} from 'sentry/types/organization';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 
 type RedirectRemainingOrganizationParams = {
+  /**
+   * navigate function from useNavigate
+   */
+  navigate: NavigateFunction;
   /**
    * The organization slug
    */
   orgId: string;
-  /**
-   * navigate function from useNavigate
-   */
-  navigate?: NavigateFunction;
   /**
    * Should remove org?
    */
@@ -45,12 +44,7 @@ export function redirectToRemainingOrganization({
     org => org.status.id === 'active' && org.slug !== orgId
   );
   if (!allOrgs.length) {
-    if (navigate) {
-      navigate('/organizations/new/');
-    } else {
-      browserHistory.push('/organizations/new/');
-    }
-
+    navigate('/organizations/new/');
     return;
   }
 
@@ -64,11 +58,7 @@ export function redirectToRemainingOrganization({
     return;
   }
 
-  if (navigate) {
-    navigate(route);
-  } else {
-    browserHistory.push(route);
-  }
+  navigate(route);
 
   // Remove org from SidebarDropdown
   if (removeOrg) {
@@ -158,7 +148,9 @@ export async function fetchOrganizationByMember(
   memberId: string,
   {addOrg, fetchOrgDetails}: FetchOrganizationByMemberParams
 ) {
-  const data = await api.requestPromise(`/organizations/?query=member_id:${memberId}`);
+  const data = await api.requestPromise(
+    `${getApiUrl('/organizations/')}?query=member_id:${memberId}`
+  );
 
   if (!data.length) {
     return null;
@@ -186,11 +178,6 @@ type FetchOrganizationDetailsParams = {
   loadProjects?: boolean;
 
   /**
-   * Should load teams in TeamStore?
-   */
-  loadTeam?: boolean;
-
-  /**
    * Should set as active organization?
    */
   setActive?: boolean;
@@ -198,20 +185,21 @@ type FetchOrganizationDetailsParams = {
 export async function fetchOrganizationDetails(
   api: Client,
   orgId: string,
-  {setActive, loadProjects, loadTeam}: FetchOrganizationDetailsParams
+  {setActive, loadProjects}: FetchOrganizationDetailsParams
 ) {
-  const data = await api.requestPromise(`/organizations/${orgId}/`, {
-    query: {
-      include_feature_flags: 1,
-    },
-  });
+  const data = await api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
+    {
+      query: {
+        include_feature_flags: 1,
+      },
+    }
+  );
 
   if (setActive) {
     setActiveOrganization(data);
-  }
-
-  if (loadTeam) {
-    TeamStore.loadInitialData(data.teams, false, null);
   }
 
   if (loadProjects) {
@@ -224,29 +212,14 @@ export async function fetchOrganizationDetails(
 /**
  * Get all organizations for the current user.
  *
- * Will perform a fan-out across all multi-tenant regions,
- * and single-tenant regions the user has membership in.
+ * The control silo endpoint returns the full cross-cell list in one call.
  *
  * This function is challenging to type as the structure of the response
  * from /organizations can vary based on query parameters
  */
 export async function fetchOrganizations(api: Client, query?: Record<string, any>) {
-  const regions = ConfigStore.get('memberRegions');
-  const results = await Promise.all(
-    regions.map(region =>
-      api.requestPromise(`/organizations/`, {
-        host: region.url,
-        query,
-        // Authentication errors can happen as we span regions.
-        allowAuthError: true,
-      })
-    )
-  );
-  return results.reduce((acc, response) => {
-    // Don't append error results to the org list.
-    if (response[0]) {
-      acc = acc.concat(response);
-    }
-    return acc;
-  }, []);
+  return api.requestPromise('/organizations/', {
+    host: ConfigStore.get('links').sentryUrl,
+    query,
+  });
 }

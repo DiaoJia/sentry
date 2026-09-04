@@ -1,98 +1,100 @@
-import styled from '@emotion/styled';
+import {useTheme} from '@emotion/react';
+import {parseAsString, useQueryState} from 'nuqs';
+
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
 
 import {Breadcrumbs} from 'sentry/components/breadcrumbs';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
-import * as Layout from 'sentry/components/layouts/thirds';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {FullHeightForm} from 'sentry/components/workflowEngine/form/fullHeightForm';
-import {
-  StickyFooter,
-  StickyFooterLabel,
-} from 'sentry/components/workflowEngine/ui/footer';
-import {useWorkflowEngineFeatureGate} from 'sentry/components/workflowEngine/useWorkflowEngineFeatureGate';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {DetectorType} from 'sentry/types/workflowEngine/detectors';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {EditLayoutDeprecated} from 'sentry/components/workflowEngine/layout/edit';
+import {t, tct} from 'sentry/locale';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import {DetectorTypeForm} from 'sentry/views/detectors/components/detectorTypeForm';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {
+  DetectorTypeForm,
+  useDetectorTypeQueryState,
+} from 'sentry/views/detectors/components/detectorTypeForm';
+import {MonitorFeedbackButton} from 'sentry/views/detectors/components/monitorFeedbackButton';
 import {makeMonitorBasePathname} from 'sentry/views/detectors/pathnames';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
-interface NewDetectorFormData {
-  detectorType: DetectorType;
-  environment: string;
-  project: string;
+function NewDetectorBreadcrumbs() {
+  const organization = useOrganization();
+  const newMonitorName = t('New Monitor');
+
+  return (
+    <Breadcrumbs
+      crumbs={[
+        {
+          label: t('Monitors'),
+          to: makeMonitorBasePathname(organization.slug),
+        },
+        {label: newMonitorName},
+      ]}
+    />
+  );
 }
 
 export default function DetectorNew() {
   const navigate = useNavigate();
   const organization = useOrganization();
-  useWorkflowEngineFeatureGate({redirect: true});
-  const {projects} = useProjects();
+  const theme = useTheme();
+  const maxWidth = theme.breakpoints.xl;
+  const [detectorType] = useDetectorTypeQueryState();
+  const [projectId] = useQueryState('project', parseAsString);
 
-  const defaultProject = projects.find(p => p.isMember) ?? projects[0];
+  const formProps = {
+    onSubmit: () => {
+      navigate({
+        pathname: `${makeMonitorBasePathname(organization.slug)}new/settings/`,
+        query: {
+          detectorType,
+          project: projectId ?? undefined,
+        },
+      });
+    },
+    initialData: {
+      detectorType,
+    },
+  };
 
-  const newMonitorName = t('New Monitor');
   return (
-    <FullHeightForm
-      onSubmit={formData => {
-        // Form doesn't allow type to be defined, cast to the expected shape
-        const data = formData as NewDetectorFormData;
-        navigate({
-          pathname: `${makeMonitorBasePathname(organization.slug)}new/settings/`,
-          query: {
-            detectorType: data.detectorType,
-            project: data.project,
-            environment: data.environment,
-          },
-        });
-      }}
-      hideFooter
-      initialData={
-        {
-          detectorType: 'metric_issue',
-          project: defaultProject?.id ?? '',
-          environment: '',
-        } satisfies NewDetectorFormData
-      }
-    >
-      <SentryDocumentTitle title={newMonitorName} />
-      <Layout.Page>
-        <StyledLayoutHeader>
-          <Layout.HeaderContent>
-            <Breadcrumbs
-              crumbs={[
-                {label: t('Monitors'), to: makeMonitorBasePathname(organization.slug)},
-                {label: newMonitorName},
-              ]}
-            />
-            <Layout.Title>{newMonitorName}</Layout.Title>
-          </Layout.HeaderContent>
-        </StyledLayoutHeader>
-        <Layout.Body>
-          <Layout.Main fullWidth>
-            <DetectorTypeForm />
-          </Layout.Main>
-        </Layout.Body>
-      </Layout.Page>
-      <StickyFooter>
-        <StickyFooterLabel>{t('Step 1 of 2')}</StickyFooterLabel>
-        <Flex gap={space(1)}>
-          <LinkButton priority="default" to={makeMonitorBasePathname(organization.slug)}>
-            {t('Cancel')}
-          </LinkButton>
-          <Button priority="primary" type="submit">
-            {t('Next')}
-          </Button>
-        </Flex>
-      </StickyFooter>
-    </FullHeightForm>
+    <EditLayoutDeprecated formProps={formProps}>
+      <SentryDocumentTitle title={t('New Monitor')} />
+      <EditLayoutDeprecated.Header maxWidth={maxWidth}>
+        <EditLayoutDeprecated.HeaderContent>
+          <TopBar.Slot name="title">
+            <NewDetectorBreadcrumbs />
+          </TopBar.Slot>
+          <Text as="p" size="md" variant="muted">
+            {tct(
+              'Monitors detect problems in your application and create Sentry Issues. [docsLink:Read the Docs].',
+              {
+                docsLink: (
+                  <ExternalLink href="https://docs.sentry.io/product/new-monitors-and-alerts/monitors/" />
+                ),
+              }
+            )}
+          </Text>
+        </EditLayoutDeprecated.HeaderContent>
+        <div>
+          <MonitorFeedbackButton />
+        </div>
+      </EditLayoutDeprecated.Header>
+
+      <EditLayoutDeprecated.Body maxWidth={maxWidth}>
+        <DetectorTypeForm />
+      </EditLayoutDeprecated.Body>
+
+      <EditLayoutDeprecated.Footer label={t('Step 1 of 2')} maxWidth={maxWidth}>
+        <LinkButton variant="secondary" to={makeMonitorBasePathname(organization.slug)}>
+          {t('Cancel')}
+        </LinkButton>
+        <Button variant="primary" type="submit">
+          {t('Next')}
+        </Button>
+      </EditLayoutDeprecated.Footer>
+    </EditLayoutDeprecated>
   );
 }
-
-const StyledLayoutHeader = styled(Layout.Header)`
-  background-color: ${p => p.theme.background};
-`;

@@ -1,20 +1,35 @@
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import type {DashboardListItem} from 'sentry/views/dashboards/types';
+import {useQuery} from '@tanstack/react-query';
+
+import type {Organization} from 'sentry/types/organization';
+import {
+  dashboardsApiOptions,
+  starredDashboardsApiOptions,
+} from 'sentry/utils/dashboards/dashboardsApiOptions';
+import {useHasProjectAccess} from 'sentry/utils/useHasProjectAccess';
+import {useOrganization} from 'sentry/utils/useOrganization';
+
+export function getStarredDashboardsQueryKey(organization: Organization) {
+  if (organization.features.includes('dashboards-starred')) {
+    return starredDashboardsApiOptions(organization).queryKey;
+  }
+  return dashboardsApiOptions(organization, {
+    query: {filter: 'onlyFavorites'},
+  }).queryKey;
+}
 
 export function useGetStarredDashboards() {
   const organization = useOrganization();
-  return useApiQuery<DashboardListItem[]>(
-    [
-      `/organizations/${organization.slug}/dashboards/`,
-      {
-        query: {
-          filter: 'onlyFavorites',
-        },
-      },
-    ],
-    {
-      staleTime: Infinity,
-    }
-  );
+  const {hasProjectAccess, projectsLoaded} = useHasProjectAccess();
+
+  const usesStarredEndpoint = organization.features.includes('dashboards-starred');
+
+  return useQuery({
+    ...(usesStarredEndpoint
+      ? starredDashboardsApiOptions(organization)
+      : dashboardsApiOptions(organization, {
+          query: {filter: 'onlyFavorites'},
+        })),
+    staleTime: Infinity,
+    enabled: hasProjectAccess || !projectsLoaded,
+  });
 }

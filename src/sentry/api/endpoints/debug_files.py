@@ -2,37 +2,60 @@ import logging
 import posixpath
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set
+from contextlib import closing
+from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeGuard, cast
 
 import jsonschema
 import orjson
 from django.db import IntegrityError, router
-from django.db.models import Q
-from django.http import Http404, HttpResponse, StreamingHttpResponse
+from django.db.models import Case, Exists, F, IntegerField, Q, QuerySet, Value, When
+from django.http import Http404, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
+from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from objectstore_client import RequestError
 from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
 from symbolic.debuginfo import normalize_debug_id
 from symbolic.exceptions import SymbolicError
+from urllib3.exceptions import HTTPError
 
-from sentry import ratelimits
+from sentry.apidocs.response_types import DetailResponse
+
+if TYPE_CHECKING:
+    from django_stubs_ext import WithAnnotations
+
+from sentry import features, ratelimits
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectReleasePermission
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import serialize
+from sentry.api.serializers.models.debug_file import DebugFileSerializerResponse
+from sentry.api.utils import to_valid_int_id
+from sentry.apidocs.constants import RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
+from sentry.apidocs.examples.dsym_examples import DebugFileExamples
+from sentry.apidocs.parameters import CursorQueryParam, GlobalParams
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.auth.access import Access
 from sentry.auth.superuser import is_active_superuser
 from sentry.auth.system import is_system_auth
 from sentry.constants import DEBUG_FILES_ROLE_DEFAULT, KNOWN_DIF_FORMATS
 from sentry.debug_files.debug_files import maybe_renew_debug_files
 from sentry.debug_files.upload import find_missing_chunks
+from sentry.lang.native.sources import record_last_upload
 from sentry.models.debugfile import (
     ProguardArtifactRelease,
     ProjectDebugFile,
+    build_proguard_reupload_dif_meta,
+    clean_redundant_difs,
     create_files_from_dif_zip,
+    find_existing_dif,
+    get_debug_id_from_dif_request,
+    get_dif_download_filename,
 )
 from sentry.models.files.file import File
 from sentry.models.organizationmember import OrganizationMember
@@ -70,7 +93,11 @@ def has_download_permission(request: Request, project: Project):
         return False
 
     organization = project.organization
-    required_role = organization.get_option("sentry:debug_files_role") or DEBUG_FILES_ROLE_DEFAULT
+    required_role = (
+        project.get_option("sentry:debug_files_role")
+        or organization.get_option("sentry:debug_files_role")
+        or DEBUG_FILES_ROLE_DEFAULT
+    )
 
     if request.user.is_sentry_app:
         if organization_roles.can_manage("member", required_role):
@@ -101,7 +128,7 @@ def _has_delete_permission(access: Access, project: Project) -> bool:
     return access.has_project_scope(project, "project:write")
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ProguardArtifactReleasesEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -185,12 +212,47 @@ class ProguardArtifactReleasesEndpoint(ProjectEndpoint):
         return Response({"releases": releases})
 
 
-@region_silo_endpoint
+DSYM_QUERY_PARAM = OpenApiParameter(
+    name="query",
+    location="query",
+    required=False,
+    type=str,
+    description="Substring filter matched against object name, debug ID, code ID, CPU name, and file headers.",
+)
+
+DSYM_DEBUG_ID_PARAM = OpenApiParameter(
+    name="debug_id",
+    location="query",
+    required=False,
+    type=str,
+    description="Filter results to debug information files matching the given debug ID.",
+)
+
+DSYM_CODE_ID_PARAM = OpenApiParameter(
+    name="code_id",
+    location="query",
+    required=False,
+    type=str,
+    description="Filter results to debug information files matching the given code ID.",
+)
+
+DSYM_FILE_FORMATS_PARAM = OpenApiParameter(
+    name="file_formats",
+    location="query",
+    required=False,
+    many=True,
+    type=str,
+    description="Restrict results to one or more file formats.",
+)
+
+
+@extend_schema(tags=["Projects"])
+@cell_silo_endpoint
 class DebugFilesEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
-        "GET": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.PUBLIC,
         "POST": ApiPublishStatus.PRIVATE,
     }
     permission_classes = (ProjectReleasePermission,)
@@ -215,39 +277,62 @@ class DebugFilesEndpoint(ProjectEndpoint):
         if debug_file is None:
             raise Http404
 
+        if debug_file.uses_objectstore_for_read() and features.has(
+            "organizations:objectstore-debugfiles-direct-read", project.organization
+        ):
+            return HttpResponseRedirect(debug_file.get_objectstore_presigned_url(self.request))
+
         try:
-            fp = debug_file.file.getfile()
+            fp = debug_file.get_file()
+
+            def stream_debug_file():
+                try:
+                    yield from iter(lambda: fp.read(4096), b"")
+                finally:
+                    fp.close()
+
             response = StreamingHttpResponse(
-                iter(lambda: fp.read(4096), b""), content_type="application/octet-stream"
+                stream_debug_file(), content_type="application/octet-stream"
             )
-            response["Content-Length"] = debug_file.file.size
-            response["Content-Disposition"] = 'attachment; filename="{}{}"'.format(
-                posixpath.basename(debug_file.debug_id),
-                debug_file.file_extension,
+            response["Content-Length"] = debug_file.get_file_size()
+            response["Content-Disposition"] = (
+                f'attachment; filename="{posixpath.basename(debug_file.debug_id)}{debug_file.file_extension}"'
             )
             return response
-        except OSError:
+        except (OSError, RequestError, Project.DoesNotExist, HTTPError):
             raise Http404
 
-    def get(self, request: Request, project: Project) -> Response:
+    @extend_schema(
+        operation_id="listProjectDebugFiles",
+        summary="List a Project's Debug Information Files",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            DSYM_QUERY_PARAM,
+            DSYM_DEBUG_ID_PARAM,
+            DSYM_CODE_ID_PARAM,
+            DSYM_FILE_FORMATS_PARAM,
+            CursorQueryParam,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ListProjectDebugFilesResponse", list[DebugFileSerializerResponse]
+            ),
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=DebugFileExamples.LIST_PROJECT_DEBUG_FILES,
+    )
+    def get(
+        self, request: Request, project: Project
+    ) -> Response[list[DebugFileSerializerResponse]] | Response[DetailResponse]:
         """
-        List a Project's Debug Information Files
-        ````````````````````````````````````````
-
         Retrieve a list of debug information files for a given project.
-
-        :pparam string organization_id_or_slug: the id or slug of the organization the
-                                          file belongs to.
-        :pparam string project_id_or_slug: the id or slug of the project to list the
-                                     DIFs of.
-        :qparam string query: If set, this parameter is used to locate DIFs with.
-        :qparam string id: If set, the specified DIF will be sent in the response.
-        :qparam string file_formats: If set, only DIFs with these formats will be returned.
-        :auth: required
         """
         download_requested = request.GET.get("id") is not None
         if download_requested and has_download_permission(request, project):
-            return self.download(request.GET.get("id"), project)
+            return self.download(to_valid_int_id("id", request.GET["id"], raise_404=True), project)
         elif download_requested:
             return Response(status=403)
 
@@ -265,43 +350,63 @@ class DebugFilesEndpoint(ProjectEndpoint):
             except SymbolicError:
                 pass
 
-        if debug_id:
-            # If a debug ID is specified, do not consider the stored code
-            # identifier and strictly filter by debug identifier. Often there
-            # are mismatches in the code identifier in PEs.
-            q = Q(debug_id__exact=debug_id)
-        elif code_id:
-            q = Q(code_id__exact=code_id)
-        elif query:
-            q = (
-                Q(object_name__icontains=query)
-                | Q(debug_id__icontains=query)
-                | Q(code_id__icontains=query)
-                | Q(cpu_name__icontains=query)
-                | Q(file__headers__icontains=query)
-            )
-
-            known_file_format = DIF_MIMETYPES.get(query)
-            if known_file_format:
-                q |= Q(file__headers__icontains=known_file_format)
-        else:
-            q = Q()
-
+        q = Q(project_id=project.id)
         if file_formats:
             file_format_q = Q()
             for file_format in file_formats:
                 known_file_format = DIF_MIMETYPES.get(file_format)
                 if known_file_format:
-                    file_format_q |= Q(file__headers__icontains=known_file_format)
+                    file_format_q |= Q(file__headers__icontains=known_file_format) | Q(
+                        content_type__icontains=known_file_format
+                    )
             q &= file_format_q
 
-        q &= Q(project_id=project.id)
-        queryset = ProjectDebugFile.objects.filter(q).select_related("file")
+        queryset = None
+        if debug_id and code_id:
+            # Be lenient when searching for debug files, check either for a matching debug id
+            # or a matching code id. We only fallback to code id if there is no debug id match.
+            # While both identifiers should be unique, in practice they are not and the debug id
+            # yields better results.
+            #
+            # Ideally debug- and code-id yield the same files, but especially on Windows it is possible
+            # that the debug id does not perfectly match due to 'age' differences, but the code-id
+            # will match.
+            debug_id_qs = ProjectDebugFile.objects.filter(Q(debug_id__exact=debug_id) & q)
+            queryset = debug_id_qs.select_related("file").union(
+                ProjectDebugFile.objects.filter(Q(code_id__exact=code_id) & q)
+                # Only return any code id matches if there are *no* debug id matches.
+                .filter(~Exists(debug_id_qs))
+                .select_related("file")
+            )
+        elif debug_id:
+            q &= Q(debug_id__exact=debug_id)
+        elif code_id:
+            q &= Q(code_id__exact=code_id)
+        elif query:
+            query_q = (
+                Q(object_name__icontains=query)
+                | Q(debug_id__icontains=query)
+                | Q(code_id__icontains=query)
+                | Q(cpu_name__icontains=query)
+                | Q(file__headers__icontains=query)
+                | Q(content_type__icontains=query)
+            )
+
+            known_file_format = DIF_MIMETYPES.get(query)
+            if known_file_format:
+                query_q |= Q(file__headers__icontains=known_file_format) | Q(
+                    content_type__icontains=known_file_format
+                )
+
+            q &= query_q
+
+        if queryset is None:
+            queryset = ProjectDebugFile.objects.filter(q).select_related("file")
 
         def on_results(difs: Sequence[ProjectDebugFile]):
             # NOTE: we are only refreshing files if there is direct query for specific files
             if debug_id and not query and not file_formats:
-                maybe_renew_debug_files(q, difs)
+                maybe_renew_debug_files(difs)
 
             return serialize(difs, request.user)
 
@@ -328,10 +433,12 @@ class DebugFilesEndpoint(ProjectEndpoint):
         :qparam string id: The id of the DIF to delete.
         :auth: required
         """
-        if request.GET.get("id") and _has_delete_permission(request.access, project):
+        debug_file_id = request.GET.get("id")
+        if debug_file_id and _has_delete_permission(request.access, project):
+            validated_id = to_valid_int_id("id", debug_file_id, raise_404=True)
             with atomic_transaction(using=router.db_for_write(File)):
                 debug_file = (
-                    ProjectDebugFile.objects.filter(id=request.GET.get("id"), project_id=project.id)
+                    ProjectDebugFile.objects.filter(id=validated_id, project_id=project.id)
                     .select_related("file")
                     .first()
                 )
@@ -368,7 +475,7 @@ class DebugFilesEndpoint(ProjectEndpoint):
         return upload_from_request(request, project=project)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class UnknownDebugFilesEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -382,7 +489,7 @@ class UnknownDebugFilesEndpoint(ProjectEndpoint):
         return Response({"missing": missing})
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class AssociateDSymFilesEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -395,90 +502,141 @@ class AssociateDSymFilesEndpoint(ProjectEndpoint):
         return Response({"associatedDsymFiles": []})
 
 
-def get_file_info(files, checksum):
-    """
-    Extracts file information from files given a checksum.
-    """
-    file = files.get(checksum)
-    if file is None:
-        return None
+class AssembleRequestFile(TypedDict):
+    """One file entry from the DIF assemble request body."""
 
-    name = file.get("name")
+    name: str
+    chunks: list[str]
+    debug_id: NotRequired[str]
+
+
+AssembleRequestPayload = dict[str, AssembleRequestFile]
+"""Mapping from file checksums to the corresponding assemble request payload."""
+
+
+def parse_assemble_request_payload(body: bytes) -> AssembleRequestPayload:
+    """Parse and validate the DIF assemble request body."""
+    schema: dict[str, object] = {
+        "type": "object",
+        "patternProperties": {
+            "^[0-9a-f]{40}$": {
+                "type": "object",
+                "required": ["name", "chunks"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "debug_id": {"type": "string", "pattern": "^[A-Fa-f0-9-]+$"},
+                    "chunks": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                    },
+                },
+                "additionalProperties": True,
+            }
+        },
+        "additionalProperties": False,
+    }
+    payload_obj: object = orjson.loads(body)
+    jsonschema.validate(payload_obj, schema)
+    return cast(AssembleRequestPayload, payload_obj)
+
+
+def get_file_info(file: AssembleRequestFile) -> tuple[str, str | None, list[str]]:
+    """
+    Extracts file information from one assemble payload.
+    """
+    name = file["name"]
     debug_id = file.get("debug_id")
-    chunks = file.get("chunks", [])
+    chunks = file["chunks"]
 
     return name, debug_id, chunks
 
 
-def batch_assemble(project, files):
+def batch_assemble(project: Project, files: AssembleRequestPayload):
     """
     Performs assembling in a batch fashion, issuing queries that span multiple files.
     """
-    # We build a set of all the checksums that still need checks.
-    checksums_to_check = {checksum for checksum in files.keys()}
+    files_to_check = files.copy()
     file_response = {}
 
-    # 1. Exclude all files that have already an assemble status.
-    checksums_with_status = set()
-    for checksum in checksums_to_check:
+    # 1. Exclude all files that already have an assemble status.
+    for checksum, file in list(files_to_check.items()):
         # First, check the cached assemble status. During assembling, a
         # `ProjectDebugFile` will be created, and we need to prevent a race
         # condition.
         state, detail = get_assemble_status(AssembleTask.DIF, project.id, checksum)
-        if state == ChunkFileState.OK:
+        requested_debug_id = _get_requested_debug_id(file)
+        cached_debug_id = detail.get("uuid") if isinstance(detail, Mapping) else None
+
+        if state == ChunkFileState.OK and not _is_proguard_reupload_clone_request(
+            file=file,
+            requested_debug_id=requested_debug_id,
+            selected_debug_id=cached_debug_id,
+        ):
             file_response[checksum] = {
                 "state": state,
                 "detail": None,
                 "missingChunks": [],
                 "dif": detail,
             }
-            checksums_with_status.add(checksum)
-        elif state is not None:
+            files_to_check.pop(checksum)
+        elif state is not None and state != ChunkFileState.OK:
             file_response[checksum] = {"state": state, "detail": detail, "missingChunks": []}
-            checksums_with_status.add(checksum)
+            files_to_check.pop(checksum)
 
-    checksums_to_check -= checksums_with_status
+    # 2. Check if this project already owns the `ProjectDebugFile` for each file,
+    # also create ProGuard reupload clones if applicable.
+    requested_debug_ids_by_checksum = {
+        checksum: _get_requested_debug_id(file) for checksum, file in files_to_check.items()
+    }
+    existing_debug_files = _find_existing_debug_files(
+        project=project,
+        checksums=files_to_check.keys(),
+        requested_debug_ids_by_checksum=requested_debug_ids_by_checksum,
+    )
 
-    # 2. Check if this project already owns the `ProjectDebugFile` for each file.
-    debug_files = ProjectDebugFile.objects.filter(
-        project_id=project.id,
-        checksum__in=checksums_to_check,
-    ).select_related("file")
+    for debug_file in existing_debug_files:
+        checksum = debug_file.nonnull_checksum
+        file = files_to_check.pop(checksum)
+        requested_debug_id = requested_debug_ids_by_checksum[checksum]
 
-    checksums_with_debug_files = set()
-    for debug_file in debug_files:
-        file_response[debug_file.checksum] = {
+        if _is_proguard_reupload_clone_request(
+            requested_debug_id=requested_debug_id,
+            file=file,
+            selected_debug_id=debug_file.debug_id,
+        ):
+            file_response[checksum] = _clone_proguard_debug_file_for_reupload(
+                project=project,
+                debug_file=debug_file,
+                requested_debug_id=requested_debug_id,
+                is_proguard_clone_source=bool(debug_file.proguard_clone_source_match),
+            )
+            continue
+
+        file_response[checksum] = {
             "state": ChunkFileState.OK,
             "detail": None,
             "missingChunks": [],
             "dif": serialize(debug_file),
         }
-        checksums_with_debug_files.add(debug_file.checksum)
-
-    checksums_to_check -= checksums_with_debug_files
 
     # 3. Compute all the chunks that have to be checked for existence.
     chunks_to_check = {}
-    checksums_without_chunks = set()
-    for checksum in checksums_to_check:
-        file_info = get_file_info(files, checksum)
-        name, debug_id, chunks = file_info or (None, None, None)
+    for checksum, file in list(files_to_check.items()):
+        name, debug_id, chunks = get_file_info(file)
 
         # If we don't have any chunks, this is likely a poll request
         # checking for file status, so return NOT_FOUND.
         if not chunks:
             file_response[checksum] = {"state": ChunkFileState.NOT_FOUND, "missingChunks": []}
-            checksums_without_chunks.add(checksum)
+            files_to_check.pop(checksum)
             continue
 
         # Map each chunk back to its source file checksum.
         for chunk in chunks:
             chunks_to_check[chunk] = checksum
 
-    checksums_to_check -= checksums_without_chunks
-
     # 4. Find missing chunks and group them per checksum.
-    all_missing_chunks = find_missing_chunks(project.organization.id, set(chunks_to_check.keys()))
+    all_missing_chunks = find_missing_chunks(project.organization.id, chunks_to_check.keys())
 
     missing_chunks_per_checksum: dict[str, set[str]] = {}
     for chunk in all_missing_chunks:
@@ -487,29 +645,22 @@ def batch_assemble(project, files):
         missing_chunks_per_checksum.setdefault(chunks_to_check[chunk], set()).add(chunk)
 
     # 5. Report missing chunks per checksum.
-    checksums_with_missing_chunks = set()
     for checksum, missing_chunks in missing_chunks_per_checksum.items():
         file_response[checksum] = {
             "state": ChunkFileState.NOT_FOUND,
             "missingChunks": list(missing_chunks),
         }
-        checksums_with_missing_chunks.add(checksum)
-
-    checksums_to_check -= checksums_with_missing_chunks
+        files_to_check.pop(checksum, None)
 
     from sentry.tasks.assemble import assemble_dif
 
     # 6. Kickstart async assembling for all remaining chunks that have passed all checks.
-    for checksum in checksums_to_check:
-        file_info = get_file_info(files, checksum)
-        if file_info is None:
-            continue
-
+    for checksum, file in files_to_check.items():
         # We don't have a state yet, this means we can now start an assemble job in the background and mark
         # this in the state.
         set_assemble_status(AssembleTask.DIF, project.id, checksum, ChunkFileState.CREATED)
 
-        name, debug_id, chunks = file_info
+        name, debug_id, chunks = get_file_info(file)
         assemble_dif.apply_async(
             kwargs={
                 "project_id": project.id,
@@ -525,7 +676,232 @@ def batch_assemble(project, files):
     return file_response
 
 
-@region_silo_endpoint
+def _get_requested_debug_id(file: AssembleRequestFile) -> str | None:
+    """Returns the effective requested debug ID for one assemble payload.
+
+    This normalizes an explicit ``debug_id`` when present, or derives one from a
+    ProGuard-style request name such as ``/proguard/mapping-<uuid>.txt``.
+    """
+    return get_debug_id_from_dif_request(name=file["name"], debug_id=file.get("debug_id"))
+
+
+def _is_requested_proguard(file: AssembleRequestFile) -> bool:
+    """Returns whether one assemble payload should be treated as a ProGuard request.
+
+    This is true only when the request's effective debug ID comes from a
+    ProGuard-style filename, rather than merely from an explicit ``debug_id``.
+    """
+    name = file["name"]
+    requested_debug_id = _get_requested_debug_id(file)
+    return (
+        requested_debug_id is not None
+        and get_debug_id_from_dif_request(name=name, debug_id=None) == requested_debug_id
+    )
+
+
+def _is_proguard_reupload_clone_request(
+    requested_debug_id: str | None,
+    file: AssembleRequestFile,
+    selected_debug_id: str | None,
+) -> TypeGuard[str]:
+    """Return whether the assemble request should clone a ProGuard debug file."""
+    return (
+        requested_debug_id is not None
+        and requested_debug_id != selected_debug_id
+        and _is_requested_proguard(file)
+    )
+
+
+class _DebugFileAnnotations(TypedDict):
+    nonnull_checksum: str
+    requested_debug_id_match: int
+    proguard_clone_source_match: int
+
+
+def _find_existing_debug_files(
+    project: Project,
+    checksums: Set[str],
+    requested_debug_ids_by_checksum: dict[str, str | None],
+) -> "QuerySet[WithAnnotations[ProjectDebugFile, _DebugFileAnnotations]]":
+    """Find up to one existing `ProjectDebugFile` row per requested checksum.
+
+    This query is used to determine whether assemble can be satisfied from rows
+    that already exist for the project, or whether the request must continue to
+    chunk lookup and async assembly.
+
+    It only considers `ProjectDebugFile` rows in the same project and for the
+    requested checksums. The result contains at most one row per checksum,
+    chosen by SQL ordering plus `distinct("checksum")`.
+
+    Two annotations are added and preserved on the returned rows:
+
+    - `requested_debug_id_match`: `1` when the row exactly matches the
+      effective requested debug ID for that checksum, else `0`.
+    - `proguard_clone_source_match`: `1` when the row points at a stored
+      ProGuard `project.dif` file that is safe to reuse as the source for a
+      ProGuard reupload clone, else `0`.
+
+    Rows are ordered so each checksum prefers:
+
+    1. an exact requested debug ID match,
+    2. otherwise a valid ProGuard clone source,
+    3. otherwise the newest remaining row.
+
+    If no result is returned for a given checksum, no `ProjectDebugFile` rows
+    with that checksum exist in the given project.
+
+    Downstream, `batch_assemble` uses that selected row to decide whether the
+    checksum is already satisfied, whether a ProGuard alias row should be
+    created, or whether the request still needs upload work.
+    """
+    return (
+        ProjectDebugFile.objects.filter(
+            project_id=project.id,
+            checksum__in=checksums,
+            checksum__isnull=False,
+        )
+        .annotate(
+            # Mirror the filtered checksum into an annotated non-null field for type safety.
+            nonnull_checksum=F("checksum"),
+            requested_debug_id_match=_build_requested_debug_id_match_annotation(
+                requested_debug_ids_by_checksum.items()
+            ),
+            proguard_clone_source_match=_build_proguard_clone_source_annotation(checksums),
+        )
+        .select_related("file")
+        .order_by("checksum", "-requested_debug_id_match", "-proguard_clone_source_match", "-id")
+        .distinct("checksum")
+    )
+
+
+def _build_requested_debug_id_match_annotation(
+    requested_debug_ids: Iterable[tuple[str, str | None]],
+) -> Case:
+    """Builds a per-row match score for exact requested debug ID matches.
+
+    The annotation returns ``1`` when a row's ``checksum`` and ``debug_id`` match
+    the effective requested debug ID for that checksum, and ``0`` otherwise.
+    """
+    return Case(
+        *[
+            When(checksum=checksum, debug_id=debug_id, then=Value(1))
+            for checksum, debug_id in requested_debug_ids
+            if debug_id is not None
+        ],
+        default=Value(0),
+        output_field=IntegerField(),
+    )
+
+
+def _build_proguard_clone_source_annotation(checksums: Iterable[str]) -> Case:
+    """Builds a per-row match score for ProGuard clone-source selection.
+
+    The annotation returns ``1`` when a row belongs to one of the requested
+    checksums and is a ProGuard mapping — either via the linked ``File``
+    (type ``project.dif`` with matching content-type header) or via the
+    Objectstore path (``file`` is NULL, ``content_type`` matches directly).
+    It returns ``0`` for all other rows.
+    """
+    proguard_ct = DIF_MIMETYPES["proguard"]
+    return Case(
+        When(
+            Q(checksum__in=checksums)
+            & (
+                Q(
+                    file__type="project.dif",
+                    file__headers={"Content-Type": proguard_ct},
+                )
+                | Q(file__isnull=True, content_type=proguard_ct)
+            ),
+            then=Value(1),
+        ),
+        default=Value(0),
+        output_field=IntegerField(),
+    )
+
+
+def _clone_proguard_debug_file_for_reupload(
+    project: Project,
+    debug_file: ProjectDebugFile,
+    requested_debug_id: str,
+    is_proguard_clone_source: bool,
+) -> dict[str, object]:
+    """Clone a ProGuard debug file row for a reupload and return a batch response.
+
+    ``is_proguard_clone_source`` must reflect the caller's annotation-based
+    selection result for whether ``debug_file`` is a valid ProGuard clone source.
+    If it is false, this returns an error response payload. Otherwise it creates
+    or reuses the ``ProjectDebugFile`` row for ``requested_debug_id`` and
+    returns an OK response payload.
+    """
+    if not is_proguard_clone_source:
+        return {
+            "state": ChunkFileState.ERROR,
+            "detail": "This file is not a ProGuard mapping.",
+            "missingChunks": [],
+        }
+
+    meta = build_proguard_reupload_dif_meta(debug_file, requested_debug_id)
+    checksum = debug_file.get_checksum()
+
+    dif = find_existing_dif(project, meta, checksum)
+    if dif is None:
+        objectstore_metadata: dict[str, object] = {}
+        objectstore_session = None
+        storage_path = None
+        if debug_file.storage_path is not None:
+            content_type = debug_file.get_content_type()
+            file_size = debug_file.get_file_size()
+            objectstore_session = debug_file.get_objectstore_session()
+            with closing(debug_file.get_file()) as source_fileobj:
+                storage_path = objectstore_session.put(
+                    source_fileobj,
+                    content_type=content_type,
+                    filename=get_dif_download_filename(meta),
+                )
+
+            objectstore_metadata = {
+                "storage_path": storage_path,
+                "content_type": content_type,
+                "file_size": file_size,
+                "date_created": timezone.now(),
+            }
+
+        try:
+            dif = ProjectDebugFile.objects.create(
+                file=debug_file.file,
+                checksum=checksum,
+                debug_id=meta.debug_id,
+                code_id=meta.code_id,
+                cpu_name=meta.arch,
+                object_name="proguard-mapping",
+                project_id=project.id,
+                data=meta.data,
+                **objectstore_metadata,
+            )
+        except Exception:
+            if storage_path is not None:
+                assert objectstore_session is not None
+                try:
+                    objectstore_session.delete(storage_path)
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up Objectstore debug file after database error"
+                    )
+            raise
+
+        clean_redundant_difs(project, meta.debug_id)
+        record_last_upload(project)
+
+    return {
+        "state": ChunkFileState.OK,
+        "detail": None,
+        "missingChunks": [],
+        "dif": serialize(dif),
+    }
+
+
+@cell_silo_endpoint
 class DifAssembleEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -540,29 +916,8 @@ class DifAssembleEndpoint(ProjectEndpoint):
 
         :auth: required
         """
-        schema = {
-            "type": "object",
-            "patternProperties": {
-                "^[0-9a-f]{40}$": {
-                    "type": "object",
-                    "required": ["name", "chunks"],
-                    "properties": {
-                        "name": {"type": "string"},
-                        "debug_id": {"type": "string"},
-                        "chunks": {
-                            "type": "array",
-                            "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                        },
-                    },
-                    "additionalProperties": True,
-                }
-            },
-            "additionalProperties": False,
-        }
-
         try:
-            files = orjson.loads(request.body)
-            jsonschema.validate(files, schema)
+            files = parse_assemble_request_payload(request.body)
         except jsonschema.ValidationError as e:
             return Response({"error": str(e).splitlines()[0]}, status=400)
         except Exception:
@@ -573,7 +928,7 @@ class DifAssembleEndpoint(ProjectEndpoint):
         return Response(file_response, status=200)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class SourceMapsEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {

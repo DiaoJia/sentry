@@ -2,7 +2,7 @@ import {useCallback, useState} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {space} from 'sentry/styles/space';
+import {Container} from '@sentry/scraps/layout';
 
 interface TruncateProps {
   value: string;
@@ -11,15 +11,11 @@ interface TruncateProps {
   expandable?: boolean;
   leftTrim?: boolean;
   maxLength?: number;
-  minLength?: number;
-  trimRegex?: RegExp;
 }
 
-function Truncate({
+export function Truncate({
   value,
-  trimRegex,
   className,
-  minLength = 15,
   maxLength = 50,
   leftTrim = false,
   expandable = true,
@@ -42,37 +38,15 @@ function Truncate({
       ? value.slice(value.length - (maxLength - 4), value.length)
       : value.slice(0, maxLength - 4);
 
-    // Try to trim to values from the regex
-    if (trimRegex && leftTrim) {
-      const valueIndex = slicedValue.search(trimRegex);
-      shortValue = (
-        <span>
-          …{' '}
-          {valueIndex > 0 && valueIndex <= maxLength - minLength
-            ? slicedValue.slice(slicedValue.search(trimRegex), slicedValue.length)
-            : slicedValue}
-        </span>
-      );
-    } else if (trimRegex && !leftTrim) {
-      const matches = slicedValue.match(trimRegex);
-      let lastIndex = matches
-        ? slicedValue.lastIndexOf(matches[matches.length - 1]!) + 1
-        : slicedValue.length;
-      if (lastIndex <= minLength) {
-        lastIndex = slicedValue.length;
-      }
-      shortValue = <span>{slicedValue.slice(0, lastIndex)} …</span>;
-    } else if (leftTrim) {
-      shortValue = <span>… {slicedValue}</span>;
-    } else {
-      shortValue = <span>{slicedValue} …</span>;
-    }
+    shortValue = leftTrim ? <span>… {slicedValue}</span> : <span>{slicedValue} …</span>;
   } else {
     shortValue = value;
   }
 
   return (
-    <Wrapper
+    <Container
+      as="span"
+      position="relative"
       className={className}
       onMouseOver={expandable ? onFocus : undefined}
       onMouseOut={expandable ? onBlur : undefined}
@@ -85,13 +59,9 @@ function Truncate({
           {value}
         </FullValue>
       )}
-    </Wrapper>
+    </Container>
   );
 }
-
-const Wrapper = styled('span')`
-  position: relative;
-`;
 
 const FullValue = styled('span')<{
   expandDirection: 'left' | 'right';
@@ -99,11 +69,11 @@ const FullValue = styled('span')<{
 }>`
   display: none;
   position: absolute;
-  background: ${p => p.theme.background};
-  padding: ${space(0.5)};
-  border: 1px solid ${p => p.theme.innerBorder};
+  background: ${p => p.theme.tokens.background.primary};
+  padding: ${p => p.theme.space.xs};
+  border: 1px solid ${p => p.theme.tokens.border.secondary};
   white-space: nowrap;
-  border-radius: ${space(0.5)};
+  border-radius: ${p => p.theme.space.xs};
   top: -5px;
   ${p => p.expandDirection === 'left' && 'right: -5px;'}
   ${p => p.expandDirection === 'right' && 'left: -5px;'}
@@ -115,5 +85,3 @@ const FullValue = styled('span')<{
       display: block;
     `}
 `;
-
-export default Truncate;

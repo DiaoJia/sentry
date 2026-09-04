@@ -1,53 +1,45 @@
-import {css} from '@emotion/react';
-import styled from '@emotion/styled';
+import {css, useTheme} from '@emotion/react';
 
-import {space} from 'sentry/styles/space';
+import {Container, type ContainerProps} from '@sentry/scraps/layout';
 
-const IssueStreamHeaderLabel = styled('div')<{
+type Props = ContainerProps & {
   align?: 'left' | 'right';
-  breakpoint?: string;
   hideDivider?: boolean;
-}>`
-  position: relative;
-  display: inline-block;
-  margin-right: ${space(2)};
-  font-size: 13px;
-  font-weight: ${p => p.theme.fontWeightBold};
-  color: ${p => p.theme.subText};
-  white-space: nowrap;
+};
 
-  ${p =>
-    p.align === 'right'
-      ? css`
-          padding-right: ${space(2)};
-          text-align: right;
-        `
-      : css`
-          text-align: left;
-        `}
+export function IssueStreamHeaderLabel({align, hideDivider, ...props}: Props) {
+  const theme = useTheme();
 
-  ${p =>
-    !p.hideDivider &&
-    css`
-      &::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -${space(2)};
-        width: 1px;
-        height: 100%;
+  return (
+    <Container
+      {...props}
+      display={props.display ?? 'inline-block'}
+      position="relative"
+      marginRight="xl"
+      whiteSpace="nowrap"
+      paddingRight={align === 'right' ? 'xl' : undefined}
+      css={css`
+        font-size: 13px;
+        font-weight: ${theme.font.weight.sans.medium};
+        color: ${theme.tokens.content.secondary};
+        text-align: ${align === 'right' ? 'right' : 'left'};
 
-        background-color: ${p.theme.gray200};
-      }
-    `}
+        ${
+          !hideDivider &&
+          css`
+            &::before {
+              content: '';
+              position: absolute;
+              top: 0;
+              left: -${theme.space.xl};
+              width: 1px;
+              height: 100%;
 
-  ${p =>
-    p.breakpoint &&
-    css`
-      @container (width < ${p.breakpoint}) {
-        display: none;
-      }
-    `}
-`;
-
-export default IssueStreamHeaderLabel;
+              background-color: ${theme.colors.gray200};
+            }
+          `
+        }
+      `}
+    />
+  );
+}

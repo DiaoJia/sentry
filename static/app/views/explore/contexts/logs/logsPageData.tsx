@@ -1,45 +1,66 @@
-import {useMemo} from 'react';
+import {createContext, useContext, useMemo} from 'react';
 
-import {createDefinedContext} from 'sentry/utils/performance/contexts/utils';
-import useOrganization from 'sentry/utils/useOrganization';
-import type {
-  UseInfiniteLogsQueryResult,
-  UseLogsQueryResult,
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {isLogsEnabled} from 'sentry/views/explore/logs/isLogsEnabled';
+import type {UseInfiniteLogsQueryResult} from 'sentry/views/explore/logs/useLogsQuery';
+import {
+  useInfiniteLogsQuery,
+  useLogsQueryHighFidelity,
 } from 'sentry/views/explore/logs/useLogsQuery';
-import {useInfiniteLogsQuery, useLogsQuery} from 'sentry/views/explore/logs/useLogsQuery';
+import {useLogsTotalPayload} from 'sentry/views/explore/logs/useLogsTotalPayload';
 
 interface LogsPageData {
   infiniteLogsQueryResult: UseInfiniteLogsQueryResult;
-  logsQueryResult: UseLogsQueryResult;
+  totalPayloadBytes: number | undefined;
 }
 
-const [_LogsPageDataProvider, _useLogsPageData, _ctx] =
-  createDefinedContext<LogsPageData>({
-    name: 'LogsPageDataContext',
-  });
-export const useLogsPageData = _useLogsPageData;
+const LogsPageDataContext = createContext<LogsPageData | undefined>(undefined);
 
-export function LogsPageDataProvider({children}: {children: React.ReactNode}) {
+export function useLogsPageData(): LogsPageData {
+  const context = useContext(LogsPageDataContext);
+  if (context === undefined) {
+    throw new Error(
+      'useContext for "LogsPageDataContext" must be inside a Provider with a value'
+    );
+  }
+  return context;
+}
+
+export function LogsPageDataProvider({
+  children,
+  allowHighFidelity,
+  disabled,
+  staleTime,
+}: {
+  children: React.ReactNode;
+  allowHighFidelity?: boolean;
+  disabled?: boolean;
+  staleTime?: number;
+}) {
   const organization = useOrganization();
-  const feature = organization.features.includes('ourlogs-enabled');
-  const infiniteScroll = organization.features.includes('ourlogs-infinite-scroll');
-  const logsQueryResult = useLogsQuery({disabled: infiniteScroll || !feature});
+  const feature = isLogsEnabled(organization);
+  const highFidelity = useLogsQueryHighFidelity();
   const infiniteLogsQueryResult = useInfiniteLogsQuery({
-    disabled: !infiniteScroll || !feature,
+    disabled: disabled || !feature,
+    highFidelity: allowHighFidelity && highFidelity,
+    staleTime,
+  });
+  const totalPayloadBytes = useLogsTotalPayload({
+    enabled: !!(allowHighFidelity && highFidelity && feature && !disabled),
   });
   const value = useMemo(() => {
     return {
-      logsQueryResult,
       infiniteLogsQueryResult,
+      totalPayloadBytes,
     };
-  }, [logsQueryResult, infiniteLogsQueryResult]);
-  return <_LogsPageDataProvider value={value}>{children}</_LogsPageDataProvider>;
+  }, [infiniteLogsQueryResult, totalPayloadBytes]);
+  return <LogsPageDataContext value={value}>{children}</LogsPageDataContext>;
 }
 
 export function useLogsPageDataQueryResult() {
-  const hasInfiniteFeature = useOrganization().features.includes(
-    'ourlogs-infinite-scroll'
-  );
   const pageData = useLogsPageData();
-  return hasInfiniteFeature ? pageData.infiniteLogsQueryResult : pageData.logsQueryResult;
+  return {
+    ...pageData.infiniteLogsQueryResult,
+    totalPayloadBytes: pageData.totalPayloadBytes,
+  };
 }

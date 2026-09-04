@@ -10,6 +10,8 @@ from sentry.api.serializers import Serializer, serialize
 from sentry.auth.services.auth import AuthenticationContext
 from sentry.constants import SentryAppInstallationStatus, SentryAppStatus
 from sentry.hybridcloud.rpc.filter_query import FilterQueryDatabaseImpl, OpaqueSerializedResponse
+from sentry.models.organizationmembermapping import OrganizationMemberMapping
+from sentry.roles import organization_roles
 from sentry.sentry_apps.alert_rule_action_creator import SentryAppAlertRuleActionCreator
 from sentry.sentry_apps.api.serializers.sentry_app_component import (
     SentryAppAlertRuleActionSerializer,
@@ -33,6 +35,7 @@ from sentry.sentry_apps.services.app import (
     RpcSentryAppService,
     SentryAppInstallationFilterArgs,
 )
+from sentry.sentry_apps.services.app.model import SentryAppUpdateArgs
 from sentry.sentry_apps.services.app.serial import (
     serialize_sentry_app,
     serialize_sentry_app_component,
@@ -41,6 +44,29 @@ from sentry.sentry_apps.services.app.serial import (
 from sentry.sentry_apps.utils.errors import SentryAppErrorType
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
+from sentry.users.services.user.service import user_service
+
+
+def _is_valid_creator_email(email: str, organization_id: int) -> bool:
+    return bool(
+        user_service.get_many_by_email(
+            emails=[email],
+            is_active=True,
+            is_verified=True,
+            organization_id=organization_id,
+        )
+    )
+
+
+def _get_org_owner_emails(organization_id: int) -> list[str]:
+    return list(
+        OrganizationMemberMapping.objects.filter(
+            organization_id=organization_id,
+            role=organization_roles.get_top_dog().id,
+            user__is_active=True,
+            user__emails__is_verified=True,
+        ).values_list("user__emails__email", flat=True)
+    )
 
 
 class DatabaseBackedAppService(AppService):
@@ -83,7 +109,7 @@ class DatabaseBackedAppService(AppService):
     def get_installation_org_id_by_token_id(self, token_id: int) -> int | None:
         filters: SentryAppInstallationFilterArgs = {
             "status": SentryAppInstallationStatus.INSTALLED,
-            "api_installation_token_id": str(token_id),
+            "api_installation_token_id": token_id,
         }
         queryset = self._FQ.apply_filters(SentryAppInstallation.objects.all(), filters)
         install = queryset.first()
@@ -102,6 +128,12 @@ class DatabaseBackedAppService(AppService):
         sentry_apps = SentryApp.objects.filter(proxy_user_id__in=proxy_user_ids).prefetch_related(
             "avatar"
         )
+        return [
+            serialize_sentry_app(app=app, avatars=list(app.avatar.all())) for app in sentry_apps
+        ]
+
+    def get_sentry_apps_by_ids(self, *, ids: list[int]) -> list[RpcSentryApp]:
+        sentry_apps = SentryApp.objects.filter(id__in=ids).prefetch_related("avatar")
         return [
             serialize_sentry_app(app=app, avatars=list(app.avatar.all())) for app in sentry_apps
         ]
@@ -333,6 +365,33 @@ class DatabaseBackedAppService(AppService):
         )
         return [serialize_sentry_app(app) for app in published_apps]
 
+    def get_sentry_apps_for_organization(self, *, organization_id: int) -> list[RpcSentryApp]:
+        """
+        Get active Sentry Apps for a given organization
+        """
+        sentry_apps = SentryApp.objects.filter(
+            owner_id=organization_id, application__isnull=False
+        ).exclude(status=SentryAppStatus.DELETION_IN_PROGRESS)
+        return [serialize_sentry_app(app) for app in sentry_apps]
+
+    def update_sentry_app(
+        self,
+        *,
+        id: int,
+        attrs: SentryAppUpdateArgs,
+    ) -> RpcSentryApp | None:
+        try:
+            sentry_app = SentryApp.objects.get(id=id)
+        except SentryApp.DoesNotExist:
+            return None
+
+        if len(attrs):
+            for k, v in attrs.items():
+                setattr(sentry_app, k, v)
+            sentry_app.save()
+
+        return serialize_sentry_app(sentry_app)
+
     def get_internal_integrations(
         self, *, organization_id: int, integration_name: str
     ) -> list[RpcSentryApp]:
@@ -397,13 +456,19 @@ class DatabaseBackedAppService(AppService):
     ) -> RpcSentryAppComponent | None:
         from sentry.sentry_apps.models.sentry_app_installation import prepare_sentry_app_components
 
-        installation = SentryAppInstallation.objects.get(id=installation_id)
+        try:
+            installation = SentryAppInstallation.objects.get(id=installation_id)
+        except SentryAppInstallation.DoesNotExist:
+            # Installations are cached, so there is a chance that is has been deleted
+            return None
         component = prepare_sentry_app_components(installation, component_type, project_slug)
         return serialize_sentry_app_component(component) if component else None
 
-    def disable_sentryapp(self, *, id: int) -> None:
-        try:
-            sentryapp = SentryApp.objects.get(id=id)
-        except SentryApp.DoesNotExist:
-            return
-        sentryapp._disable()
+    def get_notification_emails_for_sentry_app(
+        self, *, organization_id: int, creator_label: str | None
+    ) -> list[str]:
+        if creator_label and "@" in creator_label:
+            if _is_valid_creator_email(creator_label, organization_id):
+                return [creator_label]
+
+        return _get_org_owner_emails(organization_id)

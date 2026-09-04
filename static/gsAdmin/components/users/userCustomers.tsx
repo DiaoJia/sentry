@@ -1,14 +1,16 @@
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
+import {Button} from '@sentry/scraps/button';
+import {useModal} from '@sentry/scraps/modal';
 
 import {AddToOrgModal, RemoveFromOrgModal} from 'admin/components/addOrRemoveOrgModal';
-import CustomerGrid from 'admin/components/customerGrid';
+import {CustomerGrid} from 'admin/components/customerGrid';
 
 type Props = {
   userId: string;
 };
 
-function UserCustomers({userId}: Props) {
+export function UserCustomers({userId}: Props) {
+  const {openModal} = useModal();
+
   const openAddToOrgModal = () => {
     openModal(modalProps => <AddToOrgModal {...modalProps} userId={userId} />);
   };
@@ -22,6 +24,14 @@ function UserCustomers({userId}: Props) {
       panelTitle="Organization Membership"
       path={`/_admin/users/${userId}/`}
       endpoint={`/users/${userId}/customers/`}
+      isCellScoped
+      // Org memberships are cell-scoped. Query every region in parallel by
+      // default so the grid shows all of the user's orgs with their region.
+      allowAllRegions
+      // When an admin narrows to a single region, still probe the others and
+      // flag when the user also belongs to orgs elsewhere.
+      probeAllRegions
+      probeAllRegionsHint="This user also belongs to organizations in other regions — look there too:"
       hasSearch={false}
       sortOptions={undefined}
       filters={undefined}
@@ -30,7 +40,7 @@ function UserCustomers({userId}: Props) {
       buttonGroup={
         <div>
           <Button
-            priority="primary"
+            variant="primary"
             size="sm"
             onClick={openAddToOrgModal}
             style={{
@@ -39,7 +49,7 @@ function UserCustomers({userId}: Props) {
           >
             Add to Org
           </Button>
-          <Button priority="default" size="sm" onClick={openRemoveFromOrgModal}>
+          <Button variant="secondary" size="sm" onClick={openRemoveFromOrgModal}>
             Remove from Org
           </Button>
         </div>
@@ -47,5 +57,3 @@ function UserCustomers({userId}: Props) {
     />
   );
 }
-
-export default UserCustomers;

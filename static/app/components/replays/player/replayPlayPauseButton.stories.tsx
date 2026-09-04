@@ -1,10 +1,10 @@
 import {Fragment} from 'react';
 
-import NegativeSpaceContainer from 'sentry/components/container/negativeSpaceContainer';
-import ReplaySlugChooser from 'sentry/components/replays/player/__stories__/replaySlugChooser';
-import ReplayPlayer from 'sentry/components/replays/player/replayPlayer';
-import ReplayPlayerMeasurer from 'sentry/components/replays/player/replayPlayerMeasurer';
-import ReplayPlayPauseButton from 'sentry/components/replays/player/replayPlayPauseButton';
+import {NegativeSpaceContainer} from 'sentry/components/container/negativeSpaceContainer';
+import {ReplaySlugChooser} from 'sentry/components/replays/player/__stories__/replaySlugChooser';
+import {ReplayPlayer} from 'sentry/components/replays/player/replayPlayer';
+import {ReplayPlayerMeasurer} from 'sentry/components/replays/player/replayPlayerMeasurer';
+import {ReplayPlayPauseButton} from 'sentry/components/replays/player/replayPlayPauseButton';
 import * as Storybook from 'sentry/stories';
 
 export default Storybook.story('ReplayPlayer', story => {
@@ -19,7 +19,7 @@ export default Storybook.story('ReplayPlayer', story => {
           </p>
 
           <NegativeSpaceContainer style={{height: 400}}>
-            <ReplayPlayerMeasurer measure="both">
+            <ReplayPlayerMeasurer>
               {style => <ReplayPlayer style={style} />}
             </ReplayPlayerMeasurer>
           </NegativeSpaceContainer>
@@ -45,13 +45,13 @@ export default Storybook.story('ReplayPlayer', story => {
           </p>
 
           <NegativeSpaceContainer style={{height: 200}}>
-            <ReplayPlayerMeasurer measure="both">
+            <ReplayPlayerMeasurer>
               {style => <ReplayPlayer style={style} />}
             </ReplayPlayerMeasurer>
           </NegativeSpaceContainer>
           <hr />
           <NegativeSpaceContainer style={{height: 200}}>
-            <ReplayPlayerMeasurer measure="both">
+            <ReplayPlayerMeasurer>
               {style => <ReplayPlayer style={style} />}
             </ReplayPlayerMeasurer>
           </NegativeSpaceContainer>

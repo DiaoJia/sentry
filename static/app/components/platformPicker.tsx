@@ -1,31 +1,38 @@
-import {Component, Fragment} from 'react';
+import {Fragment, useEffect, useMemo, useRef, useState} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import debounce from 'lodash/debounce';
 import {PlatformIcon} from 'platformicons';
 
-import {Button} from 'sentry/components/core/button';
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import LoadingMask from 'sentry/components/loadingMask';
-import SearchBar from 'sentry/components/searchBar';
+import {Button} from '@sentry/scraps/button';
+import {Container, Grid} from '@sentry/scraps/layout';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingMask} from 'sentry/components/loadingMask';
+import {SearchBar} from 'sentry/components/searchBar';
 import {DEFAULT_DEBOUNCE_DURATION} from 'sentry/constants';
-import categoryList, {
+import {consoles, gaming} from 'sentry/data/platformCategories';
+import {
+  categoryList,
   createablePlatforms,
   filterAliases,
 } from 'sentry/data/platformPickerCategories';
-import platforms, {otherPlatform} from 'sentry/data/platforms';
+import {otherPlatform, allPlatforms as platforms} from 'sentry/data/platforms';
 import {IconClose, IconProject} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
 import type {Organization} from 'sentry/types/organization';
 import type {PlatformIntegration} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {comparePlatformNames} from 'sentry/utils/platform';
 
 const PlatformList = styled('div')`
   display: grid;
-  gap: ${space(1)};
-  grid-template-columns: repeat(auto-fill, 112px);
-  margin-bottom: ${space(2)};
+  gap: ${p => p.theme.space.md};
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  margin-bottom: ${p => p.theme.space.xl};
 
   &.centered {
     justify-content: center;
@@ -36,10 +43,6 @@ const selectablePlatforms = platforms.filter(platform =>
   createablePlatforms.has(platform.id)
 );
 
-function startsWithPunctuation(name: string) {
-  return /^[\p{P}]/u.test(name);
-}
-
 export type Category = (typeof categoryList)[number]['id'];
 
 export type Platform = PlatformIntegration & {
@@ -49,79 +52,73 @@ export type Platform = PlatformIntegration & {
 interface PlatformPickerProps {
   setPlatform: (props: Platform | null) => void;
   defaultCategory?: Category;
-  listClassName?: string;
-  listProps?: React.HTMLAttributes<HTMLDivElement>;
   loading?: boolean;
-  modal?: boolean;
-  navClassName?: string;
   noAutoFilter?: boolean;
   organization?: Organization;
   platform?: string | null;
-  showFilterBar?: boolean;
-  showOther?: boolean;
   source?: string;
+  /**
+   * For project-creation picker events, `source` identifies the flow and `variant`
+   * identifies the SCM or legacy experience.
+   */
+  variant?: 'scm' | 'legacy';
   /**
    * When `false`, hides the close button and does not display a custom background color.
    */
   visibleSelection?: boolean;
 }
 
-type State = {
-  category: Category;
-  filter: string;
-};
+export function PlatformPicker({
+  defaultCategory,
+  noAutoFilter,
+  platform,
+  setPlatform,
+  organization,
+  source,
+  variant,
+  visibleSelection = true,
+  loading = false,
+}: PlatformPickerProps) {
+  const {isSelfHosted} = useLegacyStore(ConfigStore);
 
-class PlatformPicker extends Component<PlatformPickerProps, State> {
-  static defaultProps = {
-    showOther: true,
-    visibleSelection: true,
-  };
+  const [category, setCategory] = useState(defaultCategory ?? categoryList[0]!.id);
+  const [filter, setFilter] = useState(
+    noAutoFilter ? '' : (platform || '').split('-')[0]!
+  );
 
-  state: State = {
-    category: this.props.defaultCategory ?? categoryList[0]!.id,
-    filter: this.props.noAutoFilter ? '' : (this.props.platform || '').split('-')[0]!,
-  };
+  const availablePlatforms = useMemo(() => {
+    const gamingPlatforms = platforms.filter(p => {
+      if (!gaming.includes(p.id) || createablePlatforms.has(p.id)) {
+        return false;
+      }
+      if (isSelfHosted) {
+        return !consoles.includes(p.id);
+      }
 
-  componentDidUpdate(prevProps: Readonly<PlatformPickerProps>): void {
-    if (this.props.defaultCategory !== prevProps.defaultCategory) {
-      this.setState({category: this.props.defaultCategory ?? categoryList[0]!.id});
-    }
-  }
+      return true;
+    });
 
-  get platformList() {
-    const {category} = this.state;
+    return [...selectablePlatforms, ...gamingPlatforms];
+  }, [isSelfHosted]);
 
+  const platformList = useMemo(() => {
     const currentCategory = categoryList.find(({id}) => id === category);
 
-    const filter = this.state.filter.toLowerCase();
+    const subsetMatch = (platformIntegration: PlatformIntegration) =>
+      platformIntegration.id.includes(filter.toLowerCase()) ||
+      platformIntegration.name.toLowerCase().includes(filter.toLowerCase()) ||
+      filterAliases[platformIntegration.id]?.some(alias =>
+        alias.includes(filter.toLowerCase())
+      );
 
-    const subsetMatch = (platform: PlatformIntegration) =>
-      platform.id.includes(filter) ||
-      platform.name.toLowerCase().includes(filter) ||
-      filterAliases[platform.id]?.some(alias => alias.includes(filter));
-
-    const categoryMatch = (platform: PlatformIntegration) => {
-      return currentCategory?.platforms?.has(platform.id);
+    const categoryMatch = (platformIntegration: PlatformIntegration) => {
+      return currentCategory?.platforms?.has(platformIntegration.id);
     };
 
-    // temporary replacement of selectablePlatforms while `nintendo-switch` is behind feature flag
-    const tempSelectablePlatforms = selectablePlatforms;
-
-    if (this.props.organization?.features.includes('selectable-nintendo-platform')) {
-      const nintendo = platforms.find(p => p.id === 'nintendo-switch');
-      if (nintendo) {
-        if (!tempSelectablePlatforms.includes(nintendo)) {
-          tempSelectablePlatforms.push(nintendo);
-        }
-      }
-    }
-
     // 'other' is not part of the createablePlatforms list, therefore it won't be included in the filtered list
-    const filtered = tempSelectablePlatforms.filter(
-      this.state.filter ? subsetMatch : categoryMatch
-    );
+    const filtered = availablePlatforms.filter(filter ? subsetMatch : categoryMatch);
 
-    if (this.props.showOther && this.state.filter.toLocaleLowerCase() === 'other') {
+    if (filter.toLowerCase() === 'other') {
       // We only show 'Other' if users click on the 'Other' suggestion rendered in the not found state or type this word in the search bar
       return [otherPlatform];
     }
@@ -135,156 +132,168 @@ class PlatformPicker extends Component<PlatformPickerProps, State> {
     }
 
     // We only want to sort the platforms alphabetically if users are not viewing the 'popular' tab category
-    return filtered.sort((a, b) => {
-      if (startsWithPunctuation(a.name) && !startsWithPunctuation(b.name)) {
-        return 1;
-      }
-      if (!startsWithPunctuation(a.name) && startsWithPunctuation(b.name)) {
-        return -1;
-      }
-      return a.name.localeCompare(b.name);
-    });
-  }
+    return filtered.sort((a, b) => comparePlatformNames(a.name, b.name));
+  }, [filter, category, availablePlatforms]);
 
-  logSearch = debounce(() => {
-    if (this.state.filter) {
+  const latestValuesRef = useRef({
+    filter,
+    platformList,
+    source,
+    variant,
+    organization,
+    category,
+  });
+
+  useEffect(() => {
+    latestValuesRef.current = {
+      filter,
+      platformList,
+      source,
+      variant,
+      organization,
+      category,
+    };
+  });
+
+  const debounceSearch = useRef(
+    debounce(() => {
+      const {
+        filter: currentFilter,
+        platformList: currentPlatformList,
+        source: currentSource,
+        variant: currentVariant,
+        organization: currentOrganization,
+        category: currentCategory,
+      } = latestValuesRef.current;
+
+      if (!currentFilter) {
+        return;
+      }
       trackAnalytics('growth.platformpicker_search', {
-        search: this.state.filter.toLowerCase(),
-        num_results: this.platformList.length,
-        source: this.props.source,
-        organization: this.props.organization ?? null,
+        search: currentFilter.toLowerCase(),
+        num_results: currentPlatformList.length,
+        source: currentSource,
+        variant: currentVariant,
+        organization: currentOrganization ?? null,
       });
-    }
-  }, DEFAULT_DEBOUNCE_DURATION);
 
-  render() {
-    const platformList = this.platformList;
-    const {
-      setPlatform,
-      listProps,
-      listClassName,
-      navClassName,
-      loading = false,
-      showFilterBar = true,
-    } = this.props;
-    const {filter, category} = this.state;
+      if (!visibleSelection) {
+        return;
+      }
 
-    return (
-      <Fragment>
-        <NavContainer className={navClassName}>
-          <TabsContainer>
-            <Tabs
-              value={category}
-              onChange={val => {
-                trackAnalytics('growth.platformpicker_category', {
-                  category: val,
-                  source: this.props.source,
-                  organization: this.props.organization ?? null,
-                });
-                this.setState({category: val, filter: ''});
-              }}
-            >
-              <TabList>
-                {categoryList.map(({id, name}) => (
-                  <TabList.Item key={id}>{name}</TabList.Item>
-                ))}
-              </TabList>
-            </Tabs>
-          </TabsContainer>
-          {showFilterBar && (
-            <StyledSearchBar
-              size="sm"
-              query={filter}
-              placeholder={t('Filter Platforms')}
-              onChange={val => this.setState({filter: val}, this.logSearch)}
-            />
-          )}
-        </NavContainer>
-        <PlatformList className={listClassName} {...listProps}>
-          {platformList.map(platform => {
-            return (
-              <div key={platform.id} style={{position: 'relative'}}>
-                <TransparentLoadingMask visible={loading} />
-                <PlatformCard
-                  visibleSelection={this.props.visibleSelection}
-                  data-test-id={`platform-${platform.id}`}
-                  platform={platform}
-                  selected={this.props.platform === platform.id}
-                  onClear={(e: React.MouseEvent) => {
-                    setPlatform(null);
-                    e.stopPropagation();
-                  }}
+      const fullPlatformMatch = currentPlatformList.find(
+        platformItem => platformItem.name.toLowerCase() === currentFilter.toLowerCase()
+      );
+
+      if (!fullPlatformMatch) {
+        return;
+      }
+
+      setPlatform({...fullPlatformMatch, category: currentCategory});
+    }, DEFAULT_DEBOUNCE_DURATION)
+  ).current;
+
+  return (
+    <Fragment>
+      <Grid
+        columns={{zero: 'minmax(0, 1fr)', xl: 'minmax(0, 1fr) minmax(0, 12rem)'}}
+        gap="xl"
+        align="start"
+        marginBottom="xl"
+      >
+        <Container minWidth="0">
+          <Tabs
+            value={category}
+            onChange={val => {
+              trackAnalytics('growth.platformpicker_category', {
+                category: val,
+                source,
+                variant,
+                organization: organization ?? null,
+              });
+              setCategory(val);
+              setFilter('');
+            }}
+          >
+            <TabList>
+              {categoryList.map(({id, name}) => (
+                <TabList.Item key={id}>{name}</TabList.Item>
+              ))}
+            </TabList>
+          </Tabs>
+        </Container>
+        <Container width="100%" justifySelf="end">
+          <SearchBar
+            size="sm"
+            query={filter}
+            placeholder={t('Filter Platforms')}
+            onChange={val => {
+              setFilter(val);
+              debounceSearch();
+            }}
+          />
+        </Container>
+      </Grid>
+      <PlatformList>
+        {platformList.map(item => {
+          return (
+            <div key={item.id} style={{position: 'relative'}}>
+              <TransparentLoadingMask visible={loading} />
+              <PlatformCard
+                visibleSelection={visibleSelection}
+                data-test-id={`platform-${item.id}`}
+                platform={item}
+                selected={platform === item.id}
+                onClear={(e: React.MouseEvent) => {
+                  setPlatform(null);
+                  e.stopPropagation();
+                }}
+                onClick={() => {
+                  trackAnalytics('growth.select_platform', {
+                    platform_id: item.id,
+                    selection_source: 'manual',
+                    source,
+                    variant,
+                    organization: organization ?? null,
+                  });
+
+                  setPlatform({...item, category});
+                }}
+              />
+            </div>
+          );
+        })}
+      </PlatformList>
+      {platformList.length === 0 && (
+        <EmptyMessage
+          icon={<IconProject />}
+          title={t("We don't have an SDK for that yet!")}
+        >
+          {tct(
+            "Sure you haven't misspelled? If you're using a lesser-known platform, consider choosing a more generic SDK like Browser JavaScript, Python, Node, .NET & Java or create a generic project, by selecting [linkOther:“Other”].",
+            {
+              linkOther: (
+                <Button
+                  aria-label={t("Select 'Other'")}
+                  variant="link"
                   onClick={() => {
-                    trackAnalytics('growth.select_platform', {
-                      platform_id: platform.id,
-                      source: this.props.source,
-                      organization: this.props.organization ?? null,
-                    });
-                    setPlatform({...platform, category});
+                    setFilter(otherPlatform.name);
+                    setPlatform({...otherPlatform, category});
                   }}
                 />
-              </div>
-            );
-          })}
-        </PlatformList>
-        {platformList.length === 0 && (
-          <EmptyMessage
-            icon={<IconProject size="xl" />}
-            title={t("We don't have an SDK for that yet!")}
-          >
-            {tct(
-              `Sure you haven't misspelled? If you're using a lesser-known platform, consider choosing a more generic SDK like Browser JavaScript, Python, Node, .NET & Java or create a generic project, by selecting [linkOther:“Other”].`,
-              {
-                linkOther: (
-                  <Button
-                    aria-label={t("Select 'Other'")}
-                    priority="link"
-                    onClick={() => {
-                      this.setState({filter: otherPlatform.name});
-                      setPlatform({...otherPlatform, category});
-                    }}
-                  />
-                ),
-              }
-            )}
-          </EmptyMessage>
-        )}
-      </Fragment>
-    );
-  }
+              ),
+            }
+          )}
+        </EmptyMessage>
+      )}
+    </Fragment>
+  );
 }
 
-const TabsContainer = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
-const NavContainer = styled('div')`
-  margin-bottom: ${space(2)};
-  display: grid;
-  gap: ${space(2)};
-  grid-template-columns: 1fr minmax(0, 300px);
-  align-items: start;
-
-  &.centered {
-    grid-template-columns: none;
-    justify-content: center;
-  }
-`;
-
-const StyledSearchBar = styled(SearchBar)`
-  min-width: 6rem;
-  max-width: 12rem;
-  margin-top: -${space(0.25)};
-  margin-left: auto;
-  flex-shrink: 0;
-  flex-basis: 0;
-  flex-grow: 1;
-`;
-
 const StyledPlatformIcon = styled(PlatformIcon)`
-  margin: ${space(2)};
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
+  margin: ${p => p.theme.space.xl};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  border-radius: ${p => p.theme.radius.md};
 `;
 
 const ClearButton = styled(Button)`
@@ -298,8 +307,8 @@ const ClearButton = styled(Button)`
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: ${p => p.theme.background};
-  color: ${p => p.theme.textColor};
+  background: ${p => p.theme.tokens.background.primary};
+  color: ${p => p.theme.tokens.content.primary};
 `;
 
 const TransparentLoadingMask = styled(LoadingMask)<{visible: boolean}>`
@@ -315,14 +324,14 @@ const PlatformCard = styled(
         platform={platform.id}
         size={56}
         radius={5}
-        withLanguageIcon
+        withLanguageIcon={platform.iconConfig?.withLanguageIcon ?? true}
         format="lg"
       />
       <h3>{platform.name}</h3>
       {selected && visibleSelection && (
         <ClearButton
-          icon={<IconClose isCircled />}
-          borderless
+          icon={<IconClose />}
+          variant="transparent"
           size="xs"
           onClick={onClear}
           aria-label={t('Clear')}
@@ -342,10 +351,12 @@ const PlatformCard = styled(
   ${p =>
     p.selected &&
     p.visibleSelection &&
-    `background: ${p.theme.alert.info.backgroundLight};`}
+    css`
+      background: ${p.theme.colors.blue100};
+    `}
 
   &:hover {
-    background: ${p => p.theme.alert.muted.backgroundLight};
+    background: ${p => p.theme.tokens.background.secondary};
   }
 
   h3 {
@@ -354,14 +365,13 @@ const PlatformCard = styled(
     align-items: center;
     justify-content: center;
     width: 100%;
-    color: ${p => (p.selected ? p.theme.textColor : p.theme.subText)};
+    color: ${p =>
+      p.selected ? p.theme.tokens.content.primary : p.theme.tokens.content.secondary};
     text-align: center;
-    font-size: ${p => p.theme.fontSize.xs};
+    font-size: ${p => p.theme.font.size.xs};
     text-transform: uppercase;
     margin: 0;
-    padding: 0 ${space(0.5)};
+    padding: 0 ${p => p.theme.space.xs};
     line-height: 1.2;
   }
 `;
-
-export default PlatformPicker;

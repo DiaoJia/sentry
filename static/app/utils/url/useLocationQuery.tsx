@@ -3,8 +3,8 @@ import {useMemo} from 'react';
 import {
   decodeBoolean,
   decodeInteger,
-  type decodeList,
   decodeScalar,
+  type decodeList,
   type decodeSorts,
   type QueryValue,
 } from 'sentry/utils/queryString';
@@ -39,10 +39,13 @@ type Decoder = KnownDecoder | GenericDecoder;
  * });
  * ```
  */
-export default function useLocationQuery<
+export function useLocationQuery<
   InferredRequestShape extends Record<string, Scalar | Scalar[] | Decoder>,
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   InferredResponseShape extends {
-    readonly [Property in keyof InferredRequestShape]: InferredRequestShape[Property] extends Decoder
+    readonly [
+      Property in keyof InferredRequestShape
+    ]: InferredRequestShape[Property] extends Decoder
       ? ReturnType<InferredRequestShape[Property]>
       : InferredRequestShape[Property];
   },

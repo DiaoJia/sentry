@@ -6,10 +6,8 @@ import logging
 import math
 import os
 import re
-import time
 from collections import namedtuple
 from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -23,9 +21,16 @@ import urllib3
 from dateutil.parser import parse as parse_datetime
 from django.conf import settings
 from django.core.cache import cache
-from snuba_sdk import DeleteQuery, MetricsQuery, Request
+from sentry_sdk.traces import StreamedSpan
+from sentry_sdk.tracing_utils import has_span_streaming_enabled
+from snuba_sdk import Column, DeleteQuery, Function, MetricsQuery, Request
 from snuba_sdk.legacy import json_to_snql
+from snuba_sdk.query import SelectableExpression
 
+from sentry.api.helpers.error_upsampling import (
+    UPSAMPLED_ERROR_AGGREGATION,
+    are_any_projects_error_upsampled,
+)
 from sentry.models.environment import Environment
 from sentry.models.group import Group
 from sentry.models.grouprelease import GroupRelease
@@ -35,12 +40,15 @@ from sentry.models.projectkey import ProjectKey
 from sentry.models.release import Release
 from sentry.models.releases.release_project import ReleaseProject
 from sentry.net.http import connection_from_url
+from sentry.services.eventstore.query_preprocessing import get_all_merged_group_ids
 from sentry.snuba.dataset import Dataset
 from sentry.snuba.events import Columns
 from sentry.snuba.query_sources import QuerySource
 from sentry.snuba.referrer import validate_referrer
 from sentry.utils import json, metrics
-from sentry.utils.dates import outside_retention_with_modified_start
+from sentry.utils.concurrent import ContextPropagatingThreadPoolExecutor
+from sentry.utils.dates import deprecated_utcnow, outside_retention_with_modified_start
+from sentry.utils.tracing import set_span_data, set_span_tag, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +58,7 @@ ROUND_DOWN = object()
 
 # We limit the number of fields an user can ask for
 # in a single query to lessen the load on snuba
-MAX_FIELDS = 20
+MAX_FIELDS = 50
 
 SAFE_FUNCTIONS = frozenset(["NOT IN"])
 SAFE_FUNCTION_RE = re.compile(r"-?[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -80,7 +88,7 @@ def log_snuba_info(content):
         with open(SNUBA_INFO_FILE, "a") as file:
             file.writelines(content)
     else:
-        print(content)  # NOQA: only prints when an env variable is set
+        print(content)  # noqa: S002, T201 -- only prints when an env variable is set
 
 
 SNUBA_INFO = (
@@ -242,6 +250,10 @@ SPAN_EAP_COLUMN_MAP = {
     "user.ip": "attr_str[sentry.user.ip]",
     "user.geo.subregion": "attr_str[sentry.user.geo.subregion]",
     "user.geo.country_code": "attr_str[sentry.user.geo.country_code]",
+    "gen_ai.request.reasoning.level": "attr_str[gen_ai.request.reasoning.level]",
+    "cloudflare.durable_object.query.bindings": "attr_num[cloudflare.durable_object.query.bindings]",
+    "cloudflare.durable_object.response.rows_read": "attr_num[cloudflare.durable_object.response.rows_read]",
+    "cloudflare.durable_object.response.rows_written": "attr_num[cloudflare.durable_object.response.rows_written]",
     "http.decoded_response_content_length": "attr_num[http.decoded_response_content_length]",
     "http.response_content_length": "attr_num[http.response_content_length]",
     "http.response_transfer_size": "attr_num[http.response_transfer_size]",
@@ -346,6 +358,15 @@ class UnqualifiedQueryError(SnubaError):
     """
 
 
+class EmptyGroupIdIntersectionError(SnubaError):
+    """
+    Raised by SnubaQueryParams when the intersection of `group_id` IN-constraints
+    is empty, meaning the query cannot match any rows. Callers that want to treat
+    this as "no results" (rather than a failure) should catch it explicitly;
+    otherwise it propagates as a generic SnubaError to preserve existing behavior.
+    """
+
+
 class UnexpectedResponseError(SnubaError):
     """
     Exception raised when the Snuba API server returns an unexpected response
@@ -363,6 +384,24 @@ class RateLimitExceeded(SnubaError):
     """
     Exception raised when a query cannot be executed due to rate limits.
     """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        policy: str | None = None,
+        quota_unit: str | None = None,
+        storage_key: str | None = None,
+        quota_used: int | None = None,
+        rejection_threshold: int | None = None,
+        throttle_threshold: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.policy = policy
+        self.quota_unit = quota_unit
+        self.storage_key = storage_key
+        self.quota_used = quota_used
+        self.rejection_threshold = rejection_threshold
+        self.throttle_threshold = throttle_threshold
 
 
 class SchemaValidationError(QueryExecutionError):
@@ -449,15 +488,6 @@ SnubaTSResult = namedtuple("SnubaTSResult", ("data", "start", "end", "rollup"))
 
 
 @contextmanager
-def timer(name, prefix="snuba.client"):
-    t = time.time()
-    try:
-        yield
-    finally:
-        metrics.timing(f"{prefix}.{name}", time.time() - t)
-
-
-@contextmanager
 def options_override(overrides):
     """\
     NOT THREAD SAFE!
@@ -504,7 +534,7 @@ class RetrySkipTimeout(urllib3.Retry):
         Just rely on the parent class unless we have a read timeout. In that case
         immediately give up
         """
-        with sentry_sdk.start_span(op="snuba_pool.retry.increment") as span:
+        with start_span(op="snuba_pool.retry.increment", name="snuba_pool.retry.increment") as span:
             # This next block is all debugging to try to track down a bug where we're seeing duplicate snuba requests
             # Wrapping the entire thing in a try/except to be safe cause none of it actually needs to run
             try:
@@ -512,14 +542,14 @@ class RetrySkipTimeout(urllib3.Retry):
                     error_class = error.__class__
                     module = error_class.__module__
                     name = error_class.__name__
-                    span.set_tag("snuba_pool.retry.error", f"{module}.{name}")
+                    set_span_tag(span, "snuba_pool.retry.error", f"{module}.{name}")
                 else:
-                    span.set_tag("snuba_pool.retry.error", "None")
-                span.set_tag("snuba_pool.retry.total", self.total)
-                span.set_tag("snuba_pool.response.status", "unknown")
+                    set_span_tag(span, "snuba_pool.retry.error", "None")
+                set_span_tag(span, "snuba_pool.retry.total", self.total)
+                set_span_tag(span, "snuba_pool.response.status", "unknown")
                 if response:
                     if response.status:
-                        span.set_tag("snuba_pool.response.status", response.status)
+                        set_span_tag(span, "snuba_pool.response.status", response.status)
             except Exception:
                 pass
 
@@ -553,7 +583,6 @@ _snuba_pool = connection_from_url(
     timeout=settings.SENTRY_SNUBA_TIMEOUT,
     maxsize=10,
 )
-_query_thread_pool = ThreadPoolExecutor(max_workers=10)
 
 
 epoch_naive = datetime(1970, 1, 1, tzinfo=None)
@@ -593,7 +622,7 @@ def get_snuba_column_name(name, dataset=Dataset.Events):
         if dataset == Dataset.Events:
             return name
         else:
-            return f"tags[{name.replace("[", "").replace("]", "").replace('"', "")}]"
+            return f"tags[{name.replace('[', '').replace(']', '').replace('"', '')}]"
 
     measurement_name = get_measurement_name(name)
     span_op_breakdown_name = get_span_op_breakdown_name(name)
@@ -631,9 +660,9 @@ def get_function_index(column_expr, depth=0):
             # The assumption here is that a list that follows a string means
             # the string is a function name
             if isinstance(column_expr[i], str) and isinstance(column_expr[i + 1], (tuple, list)):
-                assert column_expr[i] in SAFE_FUNCTIONS or SAFE_FUNCTION_RE.match(
+                assert column_expr[i] in SAFE_FUNCTIONS or SAFE_FUNCTION_RE.match(column_expr[i]), (
                     column_expr[i]
-                ), column_expr[i]
+                )
                 index = i
                 break
             else:
@@ -684,7 +713,7 @@ def get_query_params_to_update_for_projects(
         project_ids = list(set(query_params.filter_keys["project_id"]))
     elif query_params.filter_keys:
         # Otherwise infer the project_ids from any related models
-        with timer("get_related_project_ids"):
+        with metrics.timer("snuba.client.get_related_project_ids"):
             project_ids = infer_project_ids_from_related_models(query_params.filter_keys)
     elif query_params.conditions:
         project_ids = []
@@ -744,7 +773,7 @@ def _prepare_start_end(
     if not start:
         start = datetime(2008, 5, 8)
     if not end:
-        end = datetime.utcnow() + timedelta(seconds=1)
+        end = deprecated_utcnow() + timedelta(seconds=1)
 
     # convert to naive UTC datetimes, as Snuba only deals in UTC
     # and this avoids offset-naive and offset-aware issues
@@ -780,7 +809,7 @@ def _prepare_query_params(query_params: SnubaQueryParams, referrer: str | None =
     kwargs = deepcopy(query_params.kwargs)
     query_params_conditions = deepcopy(query_params.conditions)
 
-    with timer("get_snuba_map"):
+    with metrics.timer("snuba.client.get_snuba_map"):
         forward, reverse = get_snuba_translators(
             query_params.filter_keys, is_grouprelease=query_params.is_grouprelease
         )
@@ -872,8 +901,8 @@ class SnubaQueryParams:
     def __init__(
         self,
         dataset=None,
-        start=None,
-        end=None,
+        start: datetime | None = None,
+        end: datetime | None = None,
         groupby=None,
         conditions=None,
         filter_keys=None,
@@ -892,7 +921,7 @@ class SnubaQueryParams:
         # This shows up in unittests: https://github.com/getsentry/sentry/pull/15939
         # We generally however require that the API user is aware of the exclusive
         # end.
-        self.end = end or datetime.utcnow() + timedelta(seconds=1)
+        self.end = end or deprecated_utcnow() + timedelta(seconds=1)
         self.groupby = groupby or []
         self.conditions = conditions or []
         self.aggregations = aggregations or []
@@ -901,6 +930,72 @@ class SnubaQueryParams:
         self.referrer = referrer
         self.is_grouprelease = is_grouprelease
         self.kwargs = kwargs
+
+        # Groups can be merged together, but snuba is immutable(ish). In order to
+        # account for merges, here we expand queries to include all group IDs that have
+        # been merged together.
+
+        if self.dataset in {
+            Dataset.Events,
+            Dataset.IssuePlatform,
+        }:
+            self._preprocess_group_id_redirects()
+
+    def _preprocess_group_id_redirects(self):
+        # Conditions are a series of "AND" statements. For "group_id", to dedupe,
+        # we pre-collapse these. This helps us reduce the size of queries.
+        in_groups = None
+        out_groups: set[int | str] = set()
+        if "group_id" in self.filter_keys:
+            self.filter_keys = self.filter_keys.copy()
+            in_groups = set(self.filter_keys["group_id"])
+            del self.filter_keys["group_id"]
+
+        new_conditions = []
+
+        for triple in self.conditions:
+            if triple[0] != "group_id":
+                new_conditions.append(triple)
+                continue
+
+            op = triple[1]
+            # IN statements need to intersect
+            if op == "IN":
+                new_in_groups = set(triple[2])
+                if in_groups is not None:
+                    new_in_groups = in_groups.intersection(new_in_groups)
+                in_groups = new_in_groups
+            elif op == "=":
+                new_in_groups = {triple[2]}
+                if in_groups is not None:
+                    new_in_groups = in_groups.intersection(new_in_groups)
+                in_groups = new_in_groups
+            # NOT IN statements can union and be differenced at the end
+            elif op == "NOT IN":
+                out_groups.update(triple[2])
+            elif op == "!=":
+                out_groups.add(triple[2])
+
+        out_groups = get_all_merged_group_ids(out_groups)
+        triple = None
+        # If there is an "IN" statement, we don't need a "NOT IN" statement. We can
+        # just subtract the NOT IN groups from the IN groups.
+        if in_groups is not None:
+            in_groups.difference_update(out_groups)
+
+            # An "group_id IN ()" clause breaks clickhouse.
+            # Better to make the exception (& expectations) clear.
+            if len(in_groups) > 0:
+                triple = ["group_id", "IN", get_all_merged_group_ids(in_groups)]
+            else:
+                raise EmptyGroupIdIntersectionError("Found empty intersection of group_ids")
+        elif len(out_groups) > 0:
+            triple = ["group_id", "NOT IN", out_groups]
+
+        if triple is not None:
+            new_conditions.append(triple)
+
+        self.conditions = new_conditions
 
 
 def raw_query(
@@ -1092,8 +1187,14 @@ def _apply_cache_and_build_results(
 ) -> ResultSet:
     parent_api: str = "<missing>"
     scope = sentry_sdk.get_current_scope()
-    if scope.transaction:
-        parent_api = scope.transaction.name
+
+    if has_span_streaming_enabled(sentry_sdk.get_client().options):
+        span = scope.streamed_span
+        if type(span) is StreamedSpan:
+            parent_api = span._segment.name
+    else:
+        if scope.transaction:
+            parent_api = scope.transaction.name
 
     # Store the original position of the query so that we can maintain the order
     snuba_requests_list: list[tuple[int, SnubaRequest]] = []
@@ -1141,34 +1242,37 @@ def _apply_cache_and_build_results(
 
 
 def _is_rejected_query(body: Any) -> bool:
-    return (
+    return bool(
         "quota_allowance" in body
         and "summary" in body["quota_allowance"]
-        and "rejected_by" in body["quota_allowance"]["summary"]
-        and body["quota_allowance"]["summary"]["rejected_by"] is not None
+        and body["quota_allowance"]["summary"].get("rejected_by")
     )
 
 
 def _bulk_snuba_query(snuba_requests: Sequence[SnubaRequest]) -> ResultSet:
     snuba_requests_list = list(snuba_requests)
 
-    with sentry_sdk.start_span(op="snuba_query") as span:
-        span.set_tag("snuba.num_queries", len(snuba_requests_list))
+    with start_span(op="snuba_query", name="snuba_query") as span:
+        set_span_tag(span, "snuba.num_queries", len(snuba_requests_list))
 
         if len(snuba_requests_list) > 1:
-            query_results = list(
-                _query_thread_pool.map(
-                    _snuba_query,
-                    [
-                        (
-                            sentry_sdk.get_isolation_scope(),
-                            sentry_sdk.get_current_scope(),
-                            snuba_request,
-                        )
-                        for snuba_request in snuba_requests_list
-                    ],
+            with ContextPropagatingThreadPoolExecutor(
+                thread_name_prefix=__name__,
+                max_workers=10,
+            ) as query_thread_pool:
+                query_results = list(
+                    query_thread_pool.map(
+                        _snuba_query,
+                        [
+                            (
+                                sentry_sdk.get_isolation_scope(),
+                                sentry_sdk.get_current_scope(),
+                                snuba_request,
+                            )
+                            for snuba_request in snuba_requests_list
+                        ],
+                    )
                 )
-            )
         else:
             # No need to submit to the thread pool if we're just performing a single query
             query_results = [
@@ -1198,7 +1302,7 @@ def _bulk_snuba_query(snuba_requests: Sequence[SnubaRequest]) -> ResultSet:
                         log_snuba_info("{}.err: {}".format(referrer, body["error"]))
             except ValueError:
                 if response.status != 200:
-                    logger.exception(
+                    logger.warning(
                         "snuba.query.invalid-json",
                         extra={"response.data": response.data},
                     )
@@ -1208,19 +1312,25 @@ def _bulk_snuba_query(snuba_requests: Sequence[SnubaRequest]) -> ResultSet:
             allocation_policy_prefix = "allocation_policy."
             bytes_scanned = body.get("profile", {}).get("progress_bytes", None)
             if bytes_scanned is not None:
-                span.set_data(f"{allocation_policy_prefix}.bytes_scanned", bytes_scanned)
+                set_span_data(span, f"{allocation_policy_prefix}.bytes_scanned", bytes_scanned)
             if _is_rejected_query(body):
                 quota_allowance_summary = body["quota_allowance"]["summary"]
                 for k, v in quota_allowance_summary.items():
                     if isinstance(v, dict):
                         for nested_k, nested_v in v.items():
-                            span.set_tag(allocation_policy_prefix + k + "." + nested_k, nested_v)
+                            set_span_tag(
+                                span, allocation_policy_prefix + k + "." + nested_k, nested_v
+                            )
                             sentry_sdk.set_tag(
                                 allocation_policy_prefix + k + "." + nested_k, nested_v
                             )
+                            sentry_sdk.set_attribute(
+                                allocation_policy_prefix + k + "." + nested_k, nested_v
+                            )
                     else:
-                        span.set_tag(allocation_policy_prefix + k, v)
+                        set_span_tag(span, allocation_policy_prefix + k, v)
                         sentry_sdk.set_tag(allocation_policy_prefix + k, v)
+                        sentry_sdk.set_attribute(allocation_policy_prefix + k, v)
 
             if response.status != 200:
                 _log_request_query(snuba_requests_list[index].request)
@@ -1231,7 +1341,37 @@ def _bulk_snuba_query(snuba_requests: Sequence[SnubaRequest]) -> ResultSet:
                 if body.get("error"):
                     error = body["error"]
                     if response.status == 429:
+                        try:
+                            if (
+                                "quota_allowance" not in body
+                                or "summary" not in body["quota_allowance"]
+                            ):
+                                # Should not hit this - snuba gives us quota_allowance with a 429
+                                raise RateLimitExceeded(error["message"])
+                            quota_allowance_summary = body["quota_allowance"]["summary"]
+                            rejected_by = quota_allowance_summary["rejected_by"]
+                            throttled_by = quota_allowance_summary["throttled_by"]
+
+                            policy_info = rejected_by or throttled_by
+
+                            if policy_info:
+                                raise RateLimitExceeded(
+                                    error["message"],
+                                    policy=policy_info["policy"],
+                                    quota_unit=policy_info["quota_unit"],
+                                    storage_key=policy_info["storage_key"],
+                                    quota_used=policy_info["quota_used"],
+                                    rejection_threshold=policy_info.get("rejection_threshold"),
+                                    throttle_threshold=policy_info.get("throttle_threshold"),
+                                )
+                        except KeyError:
+                            logger.warning(
+                                "Failed to parse rate limit error details from Snuba response",
+                                extra={"error": error["message"]},
+                            )
+
                         raise RateLimitExceeded(error["message"])
+
                     elif error["type"] == "schema":
                         raise SchemaValidationError(error["message"])
                     elif error["type"] == "invalid_query":
@@ -1287,8 +1427,13 @@ def _snuba_query(
     thread_isolation_scope, thread_current_scope, snuba_request = params
     with sentry_sdk.scope.use_isolation_scope(thread_isolation_scope):
         with sentry_sdk.scope.use_scope(thread_current_scope):
-            headers = snuba_request.headers
             request = snuba_request.request
+            headers = snuba_request.headers
+            # Delete queries do not benefit from compression
+            should_compress = not isinstance(request.query, DeleteQuery)
+            if should_compress:
+                headers = {**headers, "Accept-Encoding": "zstd"}
+
             try:
                 referrer = headers.get("referer", "unknown")
 
@@ -1301,6 +1446,10 @@ def _snuba_query(
                 # We set both span + sdk level, this is cause 1 txn/error might query snuba more than once
                 # but we still want to know a general sense of how referrers impact performance
                 sentry_sdk.set_tag("query.referrer", referrer)
+                sentry_sdk.set_attribute("query.referrer", referrer)
+
+                # Whether client asked snuba to zstd-compress the resp.
+                sentry_sdk.set_attribute("snuba.request_compressed", should_compress)
 
                 if isinstance(request.query, MetricsQuery):
                     return (
@@ -1337,14 +1486,14 @@ def _raw_delete_query(
         )
 
     # Enter hub such that http spans are properly nested
-    with timer("delete_query"):
+    with metrics.timer("snuba.client.delete_query"):
         referrer = headers.get("referer", "unknown")
-        with sentry_sdk.start_span(op="snuba_delete.validation", name=referrer) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_delete.validation", name=referrer) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             body = request.serialize()
 
-        with sentry_sdk.start_span(op="snuba_delete.run", name=body) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_delete.run", name=body) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             return _snuba_pool.urlopen(
                 "DELETE", f"/{query.storage_name}", body=body, headers=headers
             )
@@ -1352,17 +1501,17 @@ def _raw_delete_query(
 
 def _raw_mql_query(request: Request, headers: Mapping[str, str]) -> urllib3.response.HTTPResponse:
     # Enter hub such that http spans are properly nested
-    with timer("mql_query"):
+    with metrics.timer("snuba.client.mql_query"):
         referrer = headers.get("referer", "unknown")
 
         # TODO: This can be changed back to just `serialize` after we remove SnQL support for MetricsQuery
         serialized_req = request.serialize()
-        with sentry_sdk.start_span(op="snuba_mql.validation", name=referrer) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_mql.validation", name=referrer) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             body = serialized_req
 
-        with sentry_sdk.start_span(op="snuba_mql.run", name=serialized_req) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_mql.run", name=serialized_req) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             return _snuba_pool.urlopen(
                 "POST", f"/{request.dataset}/mql", body=body, headers=headers
             )
@@ -1370,16 +1519,16 @@ def _raw_mql_query(request: Request, headers: Mapping[str, str]) -> urllib3.resp
 
 def _raw_snql_query(request: Request, headers: Mapping[str, str]) -> urllib3.response.HTTPResponse:
     # Enter hub such that http spans are properly nested
-    with timer("snql_query"):
+    with metrics.timer("snuba.client.snql_query"):
         referrer = headers.get("referer", "<unknown>")
 
         serialized_req = request.serialize()
-        with sentry_sdk.start_span(op="snuba_snql.validation", name=referrer) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_snql.validation", name=referrer) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             body = serialized_req
 
-        with sentry_sdk.start_span(op="snuba_snql.run", name=serialized_req) as span:
-            span.set_tag("snuba.referrer", referrer)
+        with start_span(op="snuba_snql.run", name=serialized_req) as span:
+            set_span_tag(span, "snuba.referrer", referrer)
             return _snuba_pool.urlopen(
                 "POST", f"/{request.dataset}/snql", body=body, headers=headers
             )
@@ -1387,8 +1536,8 @@ def _raw_snql_query(request: Request, headers: Mapping[str, str]) -> urllib3.res
 
 def query(
     dataset=None,
-    start=None,
-    end=None,
+    start: datetime | None = None,
+    end: datetime | None = None,
     groupby=None,
     conditions=None,
     filter_keys=None,
@@ -1402,6 +1551,13 @@ def query(
     filter_keys = filter_keys or {}
     selected_columns = selected_columns or []
     groupby = groupby or []
+
+    if dataset == Dataset.Events and filter_keys.get("project_id"):
+        project_filter = filter_keys.get("project_id")
+        project_ids = (
+            project_filter if isinstance(project_filter, (list, tuple)) else [project_filter]
+        )
+        _convert_count_aggregations_for_error_upsampling(aggregations, project_ids)
 
     try:
         body = raw_query(
@@ -1431,7 +1587,7 @@ def query(
 
     assert expected_cols == got_cols, f"expected {expected_cols}, got {got_cols}"
 
-    with timer("process_result"):
+    with metrics.timer("snuba.client.process_result"):
         if totals:
             return (
                 nest_groups(body["data"], groupby, aggregate_names + selected_names),
@@ -1525,7 +1681,7 @@ def resolve_column(dataset) -> Callable:
             if dataset == Dataset.Events:
                 return col
             else:
-                return f"tags[{col.replace("[", "").replace("]", "").replace('"', "")}]"
+                return f"tags[{col.replace('[', '').replace(']', '').replace('"', '')}]"
 
         return f"tags[{col}]"
 
@@ -1613,7 +1769,7 @@ def aliased_query(**kwargs):
     This method should be used sparingly. Instead prefer to use sentry.eventstore
     sentry.tagstore, or sentry.snuba.discover instead when reading data.
     """
-    with sentry_sdk.start_span(op="sentry.snuba.aliased_query"):
+    with start_span(op="sentry.snuba.aliased_query", name="sentry.snuba.aliased_query"):
         return _aliased_query_impl(**kwargs)
 
 
@@ -1665,8 +1821,36 @@ def aliased_query_params(
         selected_columns = [c for c in selected_columns if c]
 
     if aggregations:
+        new_aggs = []
         for aggregation in aggregations:
             derived_columns.append(aggregation[2])
+
+            if aggregation[0] == UPSAMPLED_ERROR_AGGREGATION:
+                # Special-case: upsampled_count aggregation - this aggregation type
+                # requires special handling to convert it into a selected column
+                # with the appropriate SNQL function structure
+                if selected_columns is None:
+                    selected_columns = []
+                selected_columns.append(
+                    get_upsampled_count_snql_with_alias(
+                        aggregation[2]
+                        if len(aggregation) > 2 and aggregation[2] is not None
+                        else UPSAMPLED_ERROR_AGGREGATION
+                    )
+                )
+            else:
+                new_aggs.append(aggregation)
+        aggregations = new_aggs
+
+    # Apply error upsampling conversion for Events dataset when project_ids are present.
+    # This mirrors the behavior in query(), ensuring aliased_query paths also convert count()
+    # to sum(sample_weight) for allowlisted projects.
+    if dataset == Dataset.Events and filter_keys and filter_keys.get("project_id") and aggregations:
+        project_filter = filter_keys.get("project_id")
+        project_ids = (
+            project_filter if isinstance(project_filter, (list, tuple)) else [project_filter]
+        )
+        _convert_count_aggregations_for_error_upsampling(aggregations, project_ids)
 
     if conditions:
         if condition_resolver:
@@ -2059,3 +2243,47 @@ def process_value(value: None | str | int | float | list[str] | list[int] | list
         return value
 
     return value
+
+
+def get_upsampled_count_snql_with_alias(alias: str) -> list[SelectableExpression]:
+    return Function(
+        function="toInt64",
+        parameters=[
+            Function(
+                function="sum",
+                parameters=[
+                    Function(
+                        function="ifNull",
+                        parameters=[Column(name="sample_weight"), 1],
+                        alias=None,
+                    )
+                ],
+                alias=None,
+            )
+        ],
+        alias=alias,
+    )
+
+
+def _convert_count_aggregations_for_error_upsampling(
+    aggregations: list[list[Any]], project_ids: Sequence[int]
+) -> None:
+    """
+    Converts count() aggregations to upsampled_count() for error upsampled projects.
+
+    This function modifies the aggregations list in-place, swapping any "count()"
+    or "count" aggregation functions to "upsampled_count" when any of the projects
+    are configured for error upsampling.
+
+    Args:
+        aggregations: List of aggregation specifications in format [function, column, alias]
+        project_ids: List of project IDs being queried
+    """
+    if not are_any_projects_error_upsampled(project_ids):
+        return
+
+    for aggregation in aggregations:
+        if len(aggregation) >= 1:
+            # Handle both "count()" and "count" formats
+            if aggregation[0] in ("count()", "count"):
+                aggregation[0] = "toInt64(sum(ifNull(sample_weight, 1)))"

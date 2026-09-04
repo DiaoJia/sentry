@@ -5,10 +5,9 @@ from collections.abc import Sequence
 from typing import Any
 
 import sentry_sdk
-from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
-from sentry import options
+from sentry import features, options
 from sentry.models.dashboard_widget import (
     DashboardWidgetQuery,
     DashboardWidgetQueryOnDemand,
@@ -29,11 +28,11 @@ from sentry.snuba.dataset import Dataset
 from sentry.snuba.metrics.extraction import OnDemandMetricSpecVersioning
 from sentry.snuba.referrer import Referrer
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import performance_tasks
 from sentry.utils import metrics
 from sentry.utils.cache import cache
 from sentry.utils.query import RangeQuerySetWrapper
+from sentry.utils.tracing import trace
 
 logger = logging.getLogger("sentry.tasks.on_demand_metrics")
 
@@ -88,22 +87,14 @@ class HighCardinalityWidgetException(Exception):
 
 @instrumented_task(
     name="sentry.tasks.on_demand_metrics.schedule_on_demand_check",
-    queue="on_demand_metrics",
-    max_retries=0,
-    soft_time_limit=60,
-    time_limit=120,
+    namespace=performance_tasks,
     expires=180,
-    taskworker_config=TaskworkerConfig(
-        namespace=performance_tasks,
-        expires=180,
-        processing_deadline_duration=120,
-    ),
+    processing_deadline_duration=120,
 )
 def schedule_on_demand_check() -> None:
     """
     # Summary
-    This task schedules work to be done to check cardinality in group-by columns in dashboard widgets,
-    offloading it from `build_project_config` in the relay task (specifically in :func:`sentry.relay.config.metric_extraction.get_metric_extraction_config`).
+    This task schedules work to check cardinality in group-by columns in dashboard widgets.
 
     Spawns a series of child tasks :func:`process_widget_specs`, and limits them using
     a stateful (cached) count + modulo to spread out the work over `total_batches` number of scheduled task runs.
@@ -186,16 +177,9 @@ def schedule_on_demand_check() -> None:
 
 @instrumented_task(
     name="sentry.tasks.on_demand_metrics.process_widget_specs",
-    queue="on_demand_metrics",
-    max_retries=0,
-    soft_time_limit=60,
-    time_limit=120,
+    namespace=performance_tasks,
     expires=180,
-    taskworker_config=TaskworkerConfig(
-        namespace=performance_tasks,
-        expires=180,
-        processing_deadline_duration=120,
-    ),
+    processing_deadline_duration=120,
 )
 def process_widget_specs(widget_query_ids: list[int], **kwargs: Any) -> None:
     """
@@ -415,7 +399,7 @@ def _get_widget_query_low_cardinality(
     return all(field_cardinality.values())
 
 
-@sentry_sdk.tracing.trace
+@trace
 def check_field_cardinality(
     query_columns: list[str] | None,
     organization: Organization,
@@ -423,6 +407,9 @@ def check_field_cardinality(
     is_task: bool = False,
     widget_query: DashboardWidgetQuery | None = None,
 ) -> dict[str, str]:
+    if not features.has("organizations:on-demand-metrics-extraction-widgets", organization):
+        return {}
+
     if not query_columns:
         return {}
     if is_task:
@@ -449,10 +436,14 @@ def check_field_cardinality(
     with sentry_sdk.isolation_scope() as scope:
         if widget_query:
             scope.set_tag("widget_query.widget_id", widget_query.id)
+            scope.set_attribute("widget_query.widget_id", widget_query.id)
             scope.set_tag("widget_query.org_slug", organization.slug)
+            scope.set_attribute("widget_query.org_slug", organization.slug)
             scope.set_tag("widget_query.conditions", widget_query.conditions)
+            scope.set_attribute("widget_query.conditions", widget_query.conditions)
         else:
             scope.set_tag("cardinality_check.org_slug", organization.slug)
+            scope.set_attribute("cardinality_check.org_slug", organization.slug)
 
         try:
             processed_results, columns_to_check = _query_cardinality(
@@ -465,15 +456,17 @@ def check_field_cardinality(
 
                 if not column_low_cardinality:
                     scope.set_tag("widget_query.column_name", column)
+                    scope.set_attribute("widget_query.column_name", column)
                     if widget_query:
-                        sentry_sdk.capture_exception(
-                            HighCardinalityWidgetException(
-                                f"Cardinality exceeded for dashboard_widget_query:{widget_query.id} with count:{count} and column:{column}"
-                            )
+                        sentry_sdk.capture_message(
+                            "On Demand Metrics: Cardinality exceeded for dashboard_widget_query",
+                            level="warning",
+                            tags={
+                                "widget_query.id": widget_query.id,
+                                "widget_query.column_name": column,
+                                "widget_query.count": count,
+                            },
                         )
-        except SoftTimeLimitExceeded as error:
-            scope.set_tag("widget_soft_deadline", True)
-            sentry_sdk.capture_exception(error)
         except Exception as error:
             sentry_sdk.capture_exception(error)
 
@@ -482,7 +475,7 @@ def check_field_cardinality(
     return {key: cardinality_map.get(value, True) for key, value in cache_keys.items()}
 
 
-@sentry_sdk.tracing.trace
+@trace
 def _query_cardinality(
     query_columns: list[str], organization: Organization, period: str = "30m"
 ) -> tuple[EventsResponse, list[str]]:

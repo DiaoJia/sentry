@@ -5,7 +5,7 @@ from sentry.testutils.cases import TestCase
 
 
 class TextExternalIssueCreator(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.user = self.create_user(name="foo")
@@ -22,8 +22,8 @@ class TextExternalIssueCreator(TestCase):
         )
         self.install = app_service.get_many(filter=dict(installation_ids=[self.orm_install.id]))[0]
 
-    def test_creates_platform_external_issue(self):
-        result = ExternalIssueCreator(
+    def test_creates_platform_external_issue(self) -> None:
+        result, created = ExternalIssueCreator(
             install=self.install,
             group=self.group,
             web_url="https://example.com/project/issue-id",
@@ -31,16 +31,17 @@ class TextExternalIssueCreator(TestCase):
             identifier="issue-1",
         ).run()
 
-        external_issue = PlatformExternalIssue.objects.all()[0]
+        external_issue = PlatformExternalIssue.objects.order_by("id")[0]
         assert result == external_issue
+        assert created is True
         assert external_issue.group_id == self.group.id
         assert external_issue.project_id == self.group.project.id
         assert external_issue.web_url == "https://example.com/project/issue-id"
         assert external_issue.display_name == "Projectname#issue-1"
         assert external_issue.service_type == self.sentry_app.slug
 
-    def test_updates_platform_external_issue(self):
-        result1 = ExternalIssueCreator(
+    def test_updates_platform_external_issue(self) -> None:
+        result1, created1 = ExternalIssueCreator(
             install=self.install,
             group=self.group,
             web_url="https://example.com/project/issue-id",
@@ -48,7 +49,7 @@ class TextExternalIssueCreator(TestCase):
             identifier="issue-1",
         ).run()
 
-        result2 = ExternalIssueCreator(
+        result2, created2 = ExternalIssueCreator(
             install=self.install,
             group=self.group,
             web_url="https://example.com/project/issue-id-2",
@@ -56,13 +57,15 @@ class TextExternalIssueCreator(TestCase):
             identifier="issue-2",
         ).run()
 
-        new_issue = PlatformExternalIssue.objects.all()[0]
+        new_issue = PlatformExternalIssue.objects.order_by("id")[0]
 
         # assert issue has been updated
         assert result1.id == new_issue.id
         assert result1.group_id == new_issue.group_id
         assert result1.web_url != new_issue.web_url
         assert result1.display_name != new_issue.display_name
+        assert created1 is True
+        assert created2 is False
 
         # assert new issue has the fields we specified
         assert result2 == new_issue

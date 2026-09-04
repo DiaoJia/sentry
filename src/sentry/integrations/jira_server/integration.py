@@ -8,20 +8,18 @@ from urllib.parse import urlparse
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from django import forms
-from django.core.validators import URLValidator
-from django.http import HttpResponseRedirect
 from django.http.request import HttpRequest
-from django.http.response import HttpResponseBase
 from django.urls import reverse
-from django.utils.decorators import method_decorator
 from django.utils.translation import gettext as _
-from django.views.decorators.csrf import csrf_exempt
+from rest_framework import serializers
+from rest_framework.fields import BooleanField, CharField, URLField
 
 from sentry import features
+from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
 from sentry.integrations.base import (
     FeatureDescription,
     IntegrationData,
+    IntegrationDomain,
     IntegrationFeatures,
     IntegrationMetadata,
     IntegrationProvider,
@@ -29,22 +27,33 @@ from sentry.integrations.base import (
 from sentry.integrations.jira.tasks import migrate_issues
 from sentry.integrations.jira_server.utils.choice import build_user_choice
 from sentry.integrations.mixins import ResolveSyncAction
-from sentry.integrations.mixins.issues import IssueSyncIntegration
+from sentry.integrations.mixins.issues import IntegrationSyncTargetNotFound, IssueSyncIntegration
 from sentry.integrations.models.external_actor import ExternalActor
 from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.models.integration_external_project import IntegrationExternalProject
-from sentry.integrations.pipeline_types import IntegrationPipelineT, IntegrationPipelineViewT
+from sentry.integrations.pipeline import IntegrationPipeline
 from sentry.integrations.services.integration import integration_service
-from sentry.integrations.types import ExternalProviders, IntegrationProviderSlug
+from sentry.integrations.types import (
+    ExternalProviders,
+    IntegrationIssueConfigField,
+    IntegrationProviderSlug,
+)
+from sentry.integrations.utils.external_issue_key import PROVIDER_ISSUE_ID_KEY
+from sentry.integrations.utils.metrics import (
+    IntegrationPipelineViewEvent,
+    IntegrationPipelineViewType,
+)
 from sentry.models.group import Group
 from sentry.organizations.services.organization.service import organization_service
+from sentry.pipeline.types import PipelineStepResult
+from sentry.pipeline.views.base import ApiPipelineSteps
 from sentry.shared_integrations.exceptions import (
     ApiError,
     ApiHostError,
     ApiUnauthorized,
+    IntegrationConfigurationError,
     IntegrationError,
     IntegrationFormError,
-    IntegrationInstallationConfigurationError,
 )
 from sentry.silo.base import all_silo_function
 from sentry.users.models.identity import Identity
@@ -53,7 +62,6 @@ from sentry.users.services.user import RpcUser
 from sentry.users.services.user.service import user_service
 from sentry.utils.hashlib import sha1_text
 from sentry.utils.http import absolute_uri
-from sentry.web.helpers import render_to_response
 
 from .client import JiraServerClient, JiraServerSetupClient
 
@@ -160,152 +168,149 @@ class _Config(TypedDict):
     disabledReason: NotRequired[str]
 
 
-class InstallationForm(forms.Form):
-    url = forms.CharField(
-        label=_("Jira URL"),
-        help_text=_("The base URL for your Jira Server instance, including the host and protocol."),
-        widget=forms.TextInput(attrs={"placeholder": "https://jira.example.com"}),
-        validators=[URLValidator()],
-    )
-    verify_ssl = forms.BooleanField(
-        label=_("Verify SSL"),
-        help_text=_(
-            "By default, we verify SSL certificates " "when making requests to your Jira instance."
-        ),
-        widget=forms.CheckboxInput(),
-        required=False,
-        initial=True,
-    )
-    consumer_key = forms.CharField(
-        label=_("Jira Consumer Key"),
-        widget=forms.TextInput(attrs={"placeholder": "sentry-consumer-key"}),
-    )
-    private_key = forms.CharField(
-        label=_("Jira Consumer Private Key"),
-        widget=forms.Textarea(
-            attrs={
-                "placeholder": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
-            }
-        ),
-    )
+class InstallationConfigData(TypedDict):
+    url: str
+    consumer_key: str
+    private_key: str
+    verify_ssl: bool
 
-    def clean_url(self):
-        """Strip off trailing / as they cause invalid URLs downstream"""
-        return self.cleaned_data["url"].rstrip("/")
 
-    def clean_private_key(self):
-        data = self.cleaned_data["private_key"]
+class InstallationConfigSerializer(CamelSnakeSerializer[InstallationConfigData]):
+    url = URLField(required=True)
+    consumer_key = CharField(required=True, max_length=200)
+    private_key = CharField(required=True)
+    verify_ssl = BooleanField(required=False, default=True)
 
+    def validate_private_key(self, value: str) -> str:
         try:
-            load_pem_private_key(data.encode("utf-8"), None, default_backend())
+            load_pem_private_key(value.encode("utf-8"), None, default_backend())
         except Exception:
-            raise forms.ValidationError(
+            raise serializers.ValidationError(
                 "Private key must be a valid SSH private key encoded in a PEM format."
             )
-        return data
-
-    def clean_consumer_key(self):
-        data = self.cleaned_data["consumer_key"]
-        if len(data) > 200:
-            raise forms.ValidationError("Consumer key is limited to 200 characters.")
-        return data
+        return value
 
 
-class InstallationConfigView(IntegrationPipelineViewT):
+class InstallationConfigApiStep:
     """
-    Collect the OAuth client credentials from the user.
+    Collect the Jira Server consumer credentials and verify them by fetching an
+    OAuth 1.0a request token. The token is stored on pipeline state so the next
+    step can build an authorize URL and exchange it for an access token.
     """
 
-    def dispatch(self, request: HttpRequest, pipeline: IntegrationPipelineT) -> HttpResponseBase:
-        if request.method == "POST":
-            form = InstallationForm(request.POST)
-            if form.is_valid():
-                form_data = form.cleaned_data
+    step_name = "installation_config"
 
-                pipeline.bind_state("installation_data", form_data)
-                return pipeline.next_step()
-        else:
-            form = InstallationForm()
+    def get_step_data(self, pipeline: IntegrationPipeline, request: HttpRequest) -> dict[str, Any]:
+        return {}
 
-        return render_to_response(
-            template="sentry/integrations/jira-server-config.html",
-            context={"form": form},
-            request=request,
-        )
+    def get_serializer_cls(self) -> type:
+        return InstallationConfigSerializer
 
-
-class OAuthLoginView(IntegrationPipelineViewT):
-    """
-    Start the OAuth dance by creating a request token
-    and redirecting the user to approve it.
-    """
-
-    @method_decorator(csrf_exempt)
-    def dispatch(self, request: HttpRequest, pipeline: IntegrationPipelineT) -> HttpResponseBase:
-        if "oauth_token" in request.GET:
-            return pipeline.next_step()
-
-        config = pipeline.fetch_state("installation_data")
-        if config is None:
-            return pipeline.error("Missing installation_data")
+    def handle_post(
+        self,
+        validated_data: InstallationConfigData,
+        pipeline: IntegrationPipeline,
+        request: HttpRequest,
+    ) -> PipelineStepResult:
+        validated_data["url"] = validated_data["url"].rstrip("/")
 
         client = JiraServerSetupClient(
-            config.get("url"),
-            config.get("consumer_key"),
-            config.get("private_key"),
-            config.get("verify_ssl"),
+            validated_data["url"],
+            validated_data["consumer_key"],
+            validated_data["private_key"],
+            validated_data["verify_ssl"],
         )
-        try:
-            request_token = client.get_request_token()
-        except ApiError as error:
-            logger.info(
-                "identity.jira-server.request-token",
-                extra={"url": config.get("url"), "error": error},
-            )
-            return pipeline.error(f"Could not fetch a request token from Jira. {error}")
 
+        with IntegrationPipelineViewEvent(
+            IntegrationPipelineViewType.OAUTH_LOGIN,
+            IntegrationDomain.PROJECT_MANAGEMENT,
+            JiraServerIntegrationProvider.key,
+        ).capture() as lifecycle:
+            try:
+                request_token = client.get_request_token()
+            except ApiError as error:
+                lifecycle.record_failure(str(error), extra={"url": validated_data["url"]})
+                return PipelineStepResult.error(
+                    f"Could not fetch a request token from Jira. {error}"
+                )
+
+            if not request_token.get("oauth_token") or not request_token.get("oauth_token_secret"):
+                lifecycle.record_failure(
+                    "missing oauth_token", extra={"url": validated_data["url"]}
+                )
+                return PipelineStepResult.error("Missing oauth_token")
+
+        pipeline.bind_state("installation_data", validated_data)
         pipeline.bind_state("request_token", request_token)
-        if not request_token.get("oauth_token"):
-            logger.info(
-                "identity.jira-server.oauth-token",
-                extra={"url": config.get("url")},
-            )
-            return pipeline.error("Missing oauth_token")
-
-        authorize_url = client.get_authorize_url(request_token)
-
-        return HttpResponseRedirect(authorize_url)
+        return PipelineStepResult.advance()
 
 
-class OAuthCallbackView(IntegrationPipelineViewT):
+class OAuthCallbackData(TypedDict):
+    oauth_token: str
+
+
+class OAuthCallbackSerializer(CamelSnakeSerializer[OAuthCallbackData]):
+    oauth_token = CharField(required=True)
+
+
+class OAuthStepData(TypedDict):
+    oauthUrl: str
+
+
+class OAuthApiStep:
     """
-    Complete the OAuth dance by exchanging our request token
-    into an access token.
+    Build the Jira Server authorize URL from the previously-fetched request
+    token, then exchange the callback's oauth_token (which Jira Server uses as
+    the verifier) for an access token.
     """
 
-    @method_decorator(csrf_exempt)
-    def dispatch(self, request: HttpRequest, pipeline: IntegrationPipelineT) -> HttpResponseBase:
-        config = pipeline.fetch_state("installation_data")
-        if config is None:
-            return pipeline.error("Missing installation_data")
+    step_name = "oauth_callback"
 
-        client = JiraServerSetupClient(
-            config.get("url"),
-            config.get("consumer_key"),
-            config.get("private_key"),
-            config.get("verify_ssl"),
+    def _client(self, pipeline: IntegrationPipeline) -> JiraServerSetupClient:
+        installation = pipeline.fetch_state("installation_data")
+        if installation is None:
+            raise AssertionError("pipeline called out of order")
+        return JiraServerSetupClient(
+            installation["url"],
+            installation["consumer_key"],
+            installation["private_key"],
+            installation["verify_ssl"],
         )
 
-        try:
-            access_token = client.get_access_token(
-                pipeline.fetch_state("request_token"), request.GET["oauth_token"]
-            )
-            pipeline.bind_state("access_token", access_token)
+    def get_step_data(self, pipeline: IntegrationPipeline, request: HttpRequest) -> OAuthStepData:
+        request_token = pipeline.fetch_state("request_token")
+        if request_token is None:
+            raise AssertionError("pipeline called out of order")
+        return {"oauthUrl": self._client(pipeline).get_authorize_url(request_token)}
 
-            return pipeline.next_step()
-        except ApiError as error:
-            logger.info("identity.jira-server.access-token", extra={"error": error})
-            return pipeline.error("Could not fetch an access token from Jira")
+    def get_serializer_cls(self) -> type:
+        return OAuthCallbackSerializer
+
+    def handle_post(
+        self,
+        validated_data: OAuthCallbackData,
+        pipeline: IntegrationPipeline,
+        request: HttpRequest,
+    ) -> PipelineStepResult:
+        request_token = pipeline.fetch_state("request_token")
+        if request_token is None:
+            raise AssertionError("pipeline called out of order")
+
+        with IntegrationPipelineViewEvent(
+            IntegrationPipelineViewType.OAUTH_CALLBACK,
+            IntegrationDomain.PROJECT_MANAGEMENT,
+            JiraServerIntegrationProvider.key,
+        ).capture() as lifecycle:
+            try:
+                access_token = self._client(pipeline).get_access_token(
+                    request_token, validated_data["oauth_token"]
+                )
+            except ApiError as error:
+                lifecycle.record_failure(str(error))
+                return PipelineStepResult.error("Could not fetch an access token from Jira")
+
+        pipeline.bind_state("access_token", access_token)
+        return PipelineStepResult.advance()
 
 
 # Hide linked issues fields because we don't have the necessary UI for fully specifying
@@ -562,7 +567,11 @@ class JiraServerIntegration(IssueSyncIntegration):
 
         default_comment = "Linked Sentry Issue: [{}|{}]".format(
             group.qualified_short_id,
-            absolute_uri(group.get_absolute_url(params={"referrer": "jira_server"})),
+            absolute_uri(
+                group.get_absolute_url(
+                    params={"referrer": IntegrationProviderSlug.JIRA_SERVER.value}
+                )
+            ),
         )
         fields.append(
             {
@@ -612,6 +621,8 @@ class JiraServerIntegration(IssueSyncIntegration):
             "key": issue_id,
             "title": fields.get("summary"),
             "description": fields.get("description"),
+            # Jira reassigns the key when an issue moves projects; the id never changes.
+            "metadata": {PROVIDER_ISSUE_ID_KEY: issue.get("id")},
         }
 
     def create_comment(self, issue_id, user_id, group_note):
@@ -820,7 +831,7 @@ class JiraServerIntegration(IssueSyncIntegration):
 
         client = self.get_client()
 
-        project_field = {
+        project_field: IntegrationIssueConfigField = {
             "name": "project",
             "label": "Jira Project",
             "choices": [(p["id"], p["key"]) for p in jira_projects],
@@ -989,7 +1000,7 @@ class JiraServerIntegration(IssueSyncIntegration):
 
         issue_type_meta = client.get_issue_fields(jira_project, issue_type)
         if not issue_type_meta:
-            raise IntegrationInstallationConfigurationError(
+            raise IntegrationConfigurationError(
                 "Could not fetch issue create configuration from Jira."
             )
 
@@ -1267,30 +1278,32 @@ class JiraServerIntegration(IssueSyncIntegration):
             if jira_user is None:
                 # TODO(jess): do we want to email people about these types of failures?
                 logger.info(
-                    "jira.assignee-not-found",
+                    "jira_server.assignee-not-found",
                     extra=logging_context,
                 )
-                raise IntegrationError("Failed to assign user to Jira Server issue")
+                raise IntegrationSyncTargetNotFound("No matching Jira Server user found")
         try:
             id_field = client.user_id_field()
             client.assign_issue(external_issue.key, jira_user and jira_user.get(id_field))
-        except ApiUnauthorized:
+        except ApiUnauthorized as e:
             logger.info(
-                "jira.user-assignment-unauthorized",
+                "jira_server.user-assignment-unauthorized",
                 extra={
                     **logging_context,
                 },
             )
-            raise IntegrationError("Insufficient permissions to assign user to Jira Server issue")
+            raise IntegrationConfigurationError(
+                "Insufficient permissions to assign user to Jira Server issue"
+            ) from e
         except ApiError as e:
             logger.info(
-                "jira.user-assignment-request-error",
+                "jira_server.user-assignment-request-error",
                 extra={
                     **logging_context,
                     "error": str(e),
                 },
             )
-            raise IntegrationError("Failed to assign user to Jira Server issue")
+            raise IntegrationError("Failed to assign user to Jira Server issue") from e
 
     def sync_status_outbound(
         self, external_issue: ExternalIssue, is_resolved: bool, project_id: int
@@ -1370,6 +1383,9 @@ class JiraServerIntegration(IssueSyncIntegration):
             }
         )
 
+    def _get_debug_metadata_keys(self) -> list[str]:
+        return ["base_url", "domain_name", "verify_ssl"]
+
 
 class JiraServerIntegrationProvider(IntegrationProvider):
     key = IntegrationProviderSlug.JIRA_SERVER.value
@@ -1387,10 +1403,8 @@ class JiraServerIntegrationProvider(IntegrationProvider):
         ]
     )
 
-    setup_dialog_config = {"width": 1030, "height": 1000}
-
-    def get_pipeline_views(self) -> list[IntegrationPipelineViewT]:
-        return [InstallationConfigView(), OAuthLoginView(), OAuthCallbackView()]
+    def get_pipeline_api_steps(self) -> ApiPipelineSteps[IntegrationPipeline]:
+        return [InstallationConfigApiStep(), OAuthApiStep()]
 
     def build_integration(self, state: Mapping[str, Any]) -> IntegrationData:
         install = state["installation_data"]
@@ -1413,7 +1427,7 @@ class JiraServerIntegrationProvider(IntegrationProvider):
 
         return {
             "name": install["consumer_key"],
-            "provider": "jira_server",
+            "provider": IntegrationProviderSlug.JIRA_SERVER.value,
             "external_id": external_id,
             "metadata": {
                 "base_url": install["url"],
@@ -1422,7 +1436,7 @@ class JiraServerIntegrationProvider(IntegrationProvider):
                 "webhook_secret": webhook_secret,
             },
             "user_identity": {
-                "type": "jira_server",
+                "type": IntegrationProviderSlug.JIRA_SERVER.value,
                 "external_id": external_id,
                 "scopes": [],
                 "data": credentials,

@@ -2,9 +2,9 @@ import {act, render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import {Slider} from 'sentry/components/slider';
 
-describe('Slider', function () {
-  it('renders', function () {
-    render(<Slider label="Test" min={0} max={10} step={1} defaultValue={5} />);
+describe('Slider', () => {
+  it('renders', () => {
+    render(<Slider label="Test" max={10} defaultValue={5} />);
 
     expect(screen.getByRole('group', {name: 'Test'})).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('5'); // <output /> element
@@ -16,12 +16,12 @@ describe('Slider', function () {
     expect(slider).toHaveAttribute('max', '10');
   });
 
-  it('renders without label/output', function () {
-    render(<Slider aria-label="Test" min={0} max={10} step={1} defaultValue={5} />);
+  it('renders without label/output', () => {
+    render(<Slider aria-label="Test" max={10} defaultValue={5} />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it('calls onChange/onChangeEnd', async function () {
+  it('calls onChange/onChangeEnd', async () => {
     const onChangeMock = jest.fn();
     const onChangeEndMock = jest.fn();
     render(
@@ -49,12 +49,11 @@ describe('Slider', function () {
     expect(onChangeEndMock).toHaveBeenCalledWith(6);
   });
 
-  it('works with larger step size', async function () {
+  it('works with larger step size', async () => {
     const onChangeEndMock = jest.fn();
     render(
       <Slider
         label="Test"
-        min={0}
         max={10}
         step={5}
         defaultValue={5}
@@ -73,16 +72,10 @@ describe('Slider', function () {
     expect(onChangeEndMock).toHaveBeenCalledWith(10);
   });
 
-  it('supports advanced keyboard navigation', async function () {
+  it('supports advanced keyboard navigation', async () => {
     const onChangeEndMock = jest.fn();
     render(
-      <Slider
-        label="Test"
-        min={5}
-        max={100}
-        defaultValue={5}
-        onChangeEnd={onChangeEndMock}
-      />
+      <Slider label="Test" min={5} defaultValue={5} onChangeEnd={onChangeEndMock} />
     );
 
     // To focus on the slider, we should call the focus() method. The slider input element
@@ -117,7 +110,7 @@ describe('Slider', function () {
     expect(onChangeEndMock).toHaveBeenCalledWith(100);
   });
 
-  it('works with two thumbs', async function () {
+  it('works with two thumbs', async () => {
     const onChangeEndMock = jest.fn();
     render(
       <Slider

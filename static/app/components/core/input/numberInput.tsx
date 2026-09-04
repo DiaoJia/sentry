@@ -7,15 +7,16 @@ import {useNumberField} from '@react-aria/numberfield';
 import {mergeRefs} from '@react-aria/utils';
 import {useNumberFieldState} from '@react-stately/numberfield';
 
-import {Button} from 'sentry/components/core/button';
-import type {InputStylesProps} from 'sentry/components/core/input';
-import {InputGroup} from 'sentry/components/core/input/inputGroup';
+import {Button} from '@sentry/scraps/button';
+import type {InputStylesProps} from '@sentry/scraps/input';
+import {InputGroup} from '@sentry/scraps/input';
+import {useTranslation} from '@sentry/scraps/translationContext';
+
 import {IconChevron} from 'sentry/icons/iconChevron';
-import {space} from 'sentry/styles/space';
-import type {FormSize} from 'sentry/utils/theme';
 
 interface NumberInputProps
-  extends InputStylesProps,
+  extends
+    InputStylesProps,
     AriaNumberFieldProps,
     Pick<
       React.InputHTMLAttributes<HTMLInputElement>,
@@ -39,6 +40,7 @@ export function NumberInput({
   className,
   ...props
 }: NumberInputProps) {
+  const {t} = useTranslation();
   const localRef = useRef<HTMLInputElement>(null);
 
   const ariaProps = {
@@ -79,31 +81,42 @@ export function NumberInput({
       />
       <InputGroup.TrailingItems>
         <StepWrap size={size}>
-          <StepButton ref={incrementButtonRef} size="zero" borderless {...incrementProps}>
-            <StyledIconChevron direction="up" />
-          </StepButton>
-          <StepButton ref={decrementButtonRef} size="zero" borderless {...decrementProps}>
-            <StyledIconChevron direction="down" />
-          </StepButton>
+          <StepButton
+            ref={incrementButtonRef}
+            size="zero"
+            variant="transparent"
+            {...incrementProps}
+            aria-label={incrementProps['aria-label'] ?? t('Increment')}
+            icon={<StyledIconChevron direction="up" />}
+          />
+          <StepButton
+            ref={decrementButtonRef}
+            size="zero"
+            variant="transparent"
+            {...decrementProps}
+            aria-label={decrementProps['aria-label'] ?? t('Decrement')}
+            icon={<StyledIconChevron direction="down" />}
+          />
         </StepWrap>
       </InputGroup.TrailingItems>
     </InputGroup>
   );
 }
 
-const StepWrap = styled('div')<{size?: FormSize}>`
+const StepWrap = styled('div')<{size?: NonNullable<NumberInputProps['size']>}>`
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: ${space(1.5)};
+  width: ${p => p.theme.space.lg};
   height: ${p => (p.size === 'xs' ? '1rem' : '1.25rem')};
 `;
 
 const StepButton = styled(Button)`
   display: flex;
   height: 50%;
-  padding: 0 ${space(0.25)};
-  color: ${p => p.theme.subText};
+  padding: 0 ${p => p.theme.space['2xs']};
+  min-height: 0;
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledIconChevron = styled(IconChevron)`

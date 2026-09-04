@@ -8,6 +8,7 @@ from sentry.incidents.models.incident import IncidentActivity
 from sentry.interfaces.user import EventUserApiContext
 from sentry.users.services.user.serial import serialize_generic_user
 from sentry.users.services.user.service import user_service
+from sentry.workflow_engine.utils.legacy_metric_tracking import report_used_legacy_models
 
 
 class IncidentActivitySerializerResponse(TypedDict):
@@ -16,13 +17,13 @@ class IncidentActivitySerializerResponse(TypedDict):
     user: EventUserApiContext
     type: int
     value: str
-    previousValue: str
+    previousValue: str | None
     comment: str
     dateCreated: datetime
 
 
 @register(IncidentActivity)
-class IncidentActivitySerializer(Serializer):
+class IncidentActivitySerializer(Serializer[IncidentActivitySerializerResponse]):
     def get_attrs(self, item_list, user, **kwargs):
         prefetch_related_objects(item_list, "incident__organization")
         serialized_users = user_service.serialize_many(
@@ -33,6 +34,9 @@ class IncidentActivitySerializer(Serializer):
         return {item: {"user": user_lookup.get(str(item.user_id))} for item in item_list}
 
     def serialize(self, obj, attrs, user, **kwargs) -> IncidentActivitySerializerResponse:
+        # Mark that we're using legacy IncidentActivity models (which depend on Incident -> AlertRule)
+        report_used_legacy_models()
+
         incident = obj.incident
 
         return {

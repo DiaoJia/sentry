@@ -1,0 +1,107 @@
+import * as Sentry from '@sentry/react';
+import {useQueryClient, useMutation} from '@tanstack/react-query';
+
+import {addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {t} from 'sentry/locale';
+import {GroupStore} from 'sentry/stores/groupStore';
+import type {Actor} from 'sentry/types/core';
+import type {Group} from 'sentry/types/group';
+import {buildTeamId, buildUserId} from 'sentry/utils';
+import type {ApiResponse} from 'sentry/utils/api/apiFetch';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {uniqueId} from 'sentry/utils/guid';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {groupQueryKey} from 'sentry/views/issueDetails/useGroup';
+
+type AssignedBy = 'suggested_assignee' | 'assignee_selector';
+
+type AssignIssueVariables = {
+  actor: Pick<Actor, 'id' | 'type'> | null;
+  groupId: string;
+  orgSlug: string;
+  assignedBy?: AssignedBy;
+};
+
+type AssignIssueContext = {
+  changeId: string;
+};
+
+function getAssignIssueSuccessMessage(assignedTo: Group['assignedTo']) {
+  if (!assignedTo) {
+    return t('Issue unassigned');
+  }
+
+  if (assignedTo.type === 'team') {
+    return t('Assigned issue to #%s', assignedTo.name);
+  }
+
+  return t('Assigned issue to %s', assignedTo.name || assignedTo.email);
+}
+
+function makeActorId(actor: Pick<Actor, 'id' | 'type'>) {
+  switch (actor.type) {
+    case 'user':
+      return buildUserId(actor.id);
+    case 'team':
+      return buildTeamId(actor.id);
+    default:
+      Sentry.withScope(scope => {
+        scope.setExtra('actor', actor);
+        Sentry.captureException('Unknown assignee type');
+      });
+      return '';
+  }
+}
+
+export function useAssignIssueMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation<Group, RequestError, AssignIssueVariables, AssignIssueContext>({
+    mutationFn: variables => {
+      const actorId = variables.actor ? makeActorId(variables.actor) : '';
+      return fetchMutation<Group>({
+        method: 'PUT',
+        url: getApiUrl('/organizations/$organizationIdOrSlug/issues/$issueId/', {
+          path: {
+            organizationIdOrSlug: variables.orgSlug,
+            issueId: variables.groupId,
+          },
+        }),
+        data: {
+          assignedTo: actorId,
+          assignedBy: variables.assignedBy,
+        },
+      });
+    },
+    onMutate: variables => {
+      const changeId = uniqueId();
+      // TODO: Remove this when we no longer rely on GroupStore for updates
+      GroupStore.onAssignTo(changeId, variables.groupId, {email: ''});
+      return {changeId};
+    },
+    onSuccess: (response, variables, onMutateResult) => {
+      const queryKey = groupQueryKey({
+        organizationSlug: variables.orgSlug,
+        groupId: variables.groupId,
+      });
+
+      // Update react query cache so that useGroup() reflects the new assignee.
+      queryClient.setQueriesData<ApiResponse<Group>>({queryKey}, prev =>
+        prev ? {...prev, json: {...prev.json, assignedTo: response.assignedTo}} : prev
+      );
+      // Dual-write to GroupStore
+      // TODO: Remove this when we no longer rely on GroupStore for updates
+      GroupStore.onAssignToSuccess(onMutateResult.changeId, variables.groupId, response);
+      queryClient.invalidateQueries({queryKey});
+      addSuccessMessage(getAssignIssueSuccessMessage(response.assignedTo));
+    },
+    onError: (error, variables, onMutateResult) => {
+      // TODO: Remove this when we no longer rely on GroupStore for updates
+      // This will show an alert to the user, remember to replace that functionality
+      if (onMutateResult) {
+        GroupStore.onAssignToError(onMutateResult.changeId, variables.groupId, error);
+      }
+    },
+  });
+}

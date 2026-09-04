@@ -8,29 +8,25 @@ import {
   MOCK_DATA_SECTION_PROPS_ONE_EXTRA_FLAG,
   MOCK_FLAGS,
 } from 'sentry/components/events/featureFlags/testUtils';
+import {mockElementSize} from 'sentry/utils/fixtures/virtualization';
+import {GroupDataContextProvider} from 'sentry/views/issueDetails/groupDataContext';
 
 async function renderFlagDrawer() {
-  // Needed to mock useVirtualizer lists.
-  jest
-    .spyOn(window.Element.prototype, 'getBoundingClientRect')
-    .mockImplementation(() => ({
-      x: 0,
-      y: 0,
-      width: 0,
-      height: 30,
-      left: 0,
-      top: 0,
-      right: 0,
-      bottom: 0,
-      toJSON: jest.fn(),
-    }));
-  render(<EventFeatureFlagSection {...MOCK_DATA_SECTION_PROPS_ONE_EXTRA_FLAG} />);
+  mockElementSize({width: 0, height: 30});
+  render(
+    <GroupDataContextProvider
+      group={MOCK_DATA_SECTION_PROPS_ONE_EXTRA_FLAG.group}
+      project={MOCK_DATA_SECTION_PROPS_ONE_EXTRA_FLAG.group.project}
+    >
+      <EventFeatureFlagSection {...MOCK_DATA_SECTION_PROPS_ONE_EXTRA_FLAG} />
+    </GroupDataContextProvider>
+  );
   await userEvent.click(screen.getByRole('button', {name: 'View 1 More Flag'}));
   return screen.getByRole('complementary', {name: 'Feature flags drawer'});
 }
 
-describe('FeatureFlagDrawer', function () {
-  beforeEach(function () {
+describe('FeatureFlagDrawer', () => {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/issues/1/events/',
       body: [],
@@ -40,11 +36,11 @@ describe('FeatureFlagDrawer', function () {
       body: {data: []},
     });
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/tags/`,
+      url: '/organizations/org-slug/issues/1/tags/',
       body: TagsFixture(),
     });
   });
-  it('renders the drawer as expected', async function () {
+  it('renders the drawer as expected', async () => {
     const drawerScreen = await renderFlagDrawer();
     expect(
       within(drawerScreen).getByRole('button', {name: 'Close Drawer'})
@@ -76,10 +72,10 @@ describe('FeatureFlagDrawer', function () {
     }
   });
 
-  it('allows search to affect displayed flags', async function () {
+  it('allows search to affect displayed flags', async () => {
     const drawerScreen = await renderFlagDrawer();
 
-    const [webVitalsFlag, enableReplay] = MOCK_FLAGS.filter(f => f.result === true);
+    const [webVitalsFlag, enableReplay] = MOCK_FLAGS.filter(f => f.result);
     expect(within(drawerScreen).getByText(webVitalsFlag!.flag)).toBeInTheDocument();
     expect(within(drawerScreen).getByText(enableReplay!.flag)).toBeInTheDocument();
 
@@ -92,10 +88,10 @@ describe('FeatureFlagDrawer', function () {
     expect(within(drawerScreen).queryByText(enableReplay!.flag)).not.toBeInTheDocument();
   });
 
-  it('allows sort dropdown to affect displayed flags', async function () {
+  it('allows sort dropdown to affect displayed flags', async () => {
     const drawerScreen = await renderFlagDrawer();
 
-    const [webVitalsFlag, enableReplay] = MOCK_FLAGS.filter(f => f.result === true);
+    const [webVitalsFlag, enableReplay] = MOCK_FLAGS.filter(f => f.result);
 
     // the flags are reversed by default, so webVitalsFlag should be following enableReplay
     expect(
@@ -121,9 +117,6 @@ describe('FeatureFlagDrawer', function () {
     ).toBe(document.DOCUMENT_POSITION_PRECEDING);
 
     await userEvent.click(sortControl);
-    await userEvent.click(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    );
     await userEvent.click(within(drawerScreen).getByRole('option', {name: 'Z-A'}));
     await userEvent.click(sortControl); // close dropdown
 
@@ -133,70 +126,5 @@ describe('FeatureFlagDrawer', function () {
         .getByText(webVitalsFlag!.flag)
         .compareDocumentPosition(within(drawerScreen).getByText(enableReplay!.flag))
     ).toBe(document.DOCUMENT_POSITION_FOLLOWING);
-  });
-
-  it('renders a sort dropdown with Evaluation Order as the default', async function () {
-    const drawerScreen = await renderFlagDrawer();
-
-    const control = within(drawerScreen).getByRole('button', {name: 'Sort Flags'});
-    expect(control).toBeInTheDocument();
-    await userEvent.click(control);
-    expect(
-      within(drawerScreen).getByRole('option', {name: 'Evaluation Order'})
-    ).toBeInTheDocument();
-    expect(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    ).toBeInTheDocument();
-  });
-
-  it('renders a sort dropdown which affects the granular sort dropdown', async function () {
-    const drawerScreen = await renderFlagDrawer();
-
-    const control = within(drawerScreen).getByRole('button', {name: 'Sort Flags'});
-    expect(control).toBeInTheDocument();
-    await userEvent.click(control);
-    await userEvent.click(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    );
-    expect(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    ).toHaveAttribute('aria-selected', 'true');
-    expect(within(drawerScreen).getByRole('option', {name: 'A-Z'})).toHaveAttribute(
-      'aria-selected',
-      'true'
-    );
-  });
-
-  it('renders a sort dropdown which hides the invalid options', async function () {
-    const drawerScreen = await renderFlagDrawer();
-
-    const control = within(drawerScreen).getByRole('button', {name: 'Sort Flags'});
-    expect(control).toBeInTheDocument();
-    await userEvent.click(control);
-    await userEvent.click(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    );
-    expect(
-      within(drawerScreen).getByRole('option', {name: 'Alphabetical'})
-    ).toHaveAttribute('aria-selected', 'true');
-    expect(
-      within(drawerScreen).queryByRole('option', {name: 'Newest First'})
-    ).not.toBeInTheDocument();
-    expect(
-      within(drawerScreen).queryByRole('option', {name: 'Oldest First'})
-    ).not.toBeInTheDocument();
-
-    await userEvent.click(
-      within(drawerScreen).getByRole('option', {name: 'Evaluation Order'})
-    );
-    expect(
-      within(drawerScreen).getByRole('option', {name: 'Evaluation Order'})
-    ).toHaveAttribute('aria-selected', 'true');
-    expect(
-      within(drawerScreen).queryByRole('option', {name: 'Z-A'})
-    ).not.toBeInTheDocument();
-    expect(
-      within(drawerScreen).queryByRole('option', {name: 'A-Z'})
-    ).not.toBeInTheDocument();
   });
 });

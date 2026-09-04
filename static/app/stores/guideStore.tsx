@@ -1,14 +1,10 @@
 import {createStore} from 'reflux';
 
-import getGuidesContent from 'sentry/components/assistant/getGuidesContent';
-import type {
-  Guide,
-  GuidesContent,
-  GuidesServerData,
-} from 'sentry/components/assistant/types';
-import ConfigStore from 'sentry/stores/configStore';
-import HookStore from 'sentry/stores/hookStore';
-import ModalStore from 'sentry/stores/modalStore';
+import {getGuidesContent} from 'sentry/components/assistant/getGuidesContent';
+import type {Guide, GuidesServerData} from 'sentry/components/assistant/types';
+import {getOverride} from 'sentry/overrideRegistry';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {ModalStore} from 'sentry/stores/modalStore';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 
@@ -162,7 +158,7 @@ const storeConfig: GuideStoreDefinition = {
       return;
     }
 
-    const guidesContent: GuidesContent = getGuidesContent(this.state.organization);
+    const guidesContent = getGuidesContent();
     // map server guide state (i.e. seen status) with guide content
     const guides = guidesContent.reduce((acc: Guide[], content) => {
       const serverGuide = data.find(guide => guide.guide === content.guide);
@@ -198,7 +194,7 @@ const storeConfig: GuideStoreDefinition = {
       return guide;
     });
     this.state = {...this.state, guides: newGuides, forceShow: false};
-    this.updateCurrentGuide();
+    this.updateCurrentGuide(dismissed);
   },
 
   nextStep() {
@@ -239,7 +235,7 @@ const storeConfig: GuideStoreDefinition = {
       return;
     }
 
-    if (!prevGuide || prevGuide.guide !== nextGuide.guide) {
+    if (prevGuide?.guide !== nextGuide.guide) {
       this.recordCue(nextGuide.guide);
       this.state = {...this.state, prevGuide: nextGuide};
     }
@@ -296,17 +292,14 @@ const storeConfig: GuideStoreDefinition = {
 
     this.updatePrevGuide(nextGuide);
     const currentStep =
-      this.state.currentGuide &&
-      nextGuide &&
-      this.state.currentGuide.guide === nextGuide.guide
+      this.state.currentGuide && this.state.currentGuide.guide === nextGuide?.guide
         ? this.state.currentStep
         : 0;
     this.state = {...this.state, currentGuide: nextGuide, currentStep};
 
     this.trigger(this.state);
-    HookStore.get('callback:on-guide-update').map(cb => cb(nextGuide, {dismissed}));
+    getOverride('callback:on-guide-update')?.(nextGuide, {dismissed});
   },
 };
 
-const GuideStore = createStore(storeConfig);
-export default GuideStore;
+export const GuideStore = createStore(storeConfig);

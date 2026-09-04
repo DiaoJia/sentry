@@ -1,27 +1,27 @@
 import {Fragment, useCallback, useState} from 'react';
+import {useQuery} from '@tanstack/react-query';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelAlert from 'sentry/components/panels/panelAlert';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {FieldGroup} from '@sentry/scraps/form';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {Project, ProjectKey} from 'sentry/types/project';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {projectKeysApiOptions} from 'sentry/utils/projectKeys';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 import {LoaderSettings} from 'sentry/views/settings/project/projectKeys/details/loaderSettings';
+import {useProjectSettingsOutlet} from 'sentry/views/settings/project/projectSettingsLayout';
 
-function ProjectLoaderScript({project}: {project: Project}) {
+export default function ProjectLoaderScript() {
   const organization = useOrganization();
-  const apiEndpoint = `/projects/${organization.slug}/${project.slug}/keys/`;
+  const {project} = useProjectSettingsOutlet();
   const [updatedProjectKeys, setUpdatedProjectKeys] = useState<ProjectKey[]>([]);
 
   const {
@@ -29,9 +29,9 @@ function ProjectLoaderScript({project}: {project: Project}) {
     isPending,
     error,
     refetch: refetchProjectKeys,
-  } = useApiQuery<ProjectKey[]>([apiEndpoint], {
-    staleTime: 0,
-  });
+  } = useQuery(
+    projectKeysApiOptions({orgSlug: organization.slug, projSlug: project.slug})
+  );
 
   const handleUpdateProjectKey = useCallback(
     (projectKey: ProjectKey) => {
@@ -40,7 +40,7 @@ function ProjectLoaderScript({project}: {project: Project}) {
       );
       const newUpdatedProjectKeys =
         existingProjectIndex > -1
-          ? [...updatedProjectKeys].map((updatedProjectKey, index) => {
+          ? Array.from(updatedProjectKeys, (updatedProjectKey, index) => {
               return index === existingProjectIndex ? projectKey : updatedProjectKey;
             })
           : [...updatedProjectKeys, projectKey];
@@ -52,10 +52,9 @@ function ProjectLoaderScript({project}: {project: Project}) {
 
   return (
     <Fragment>
-      <SettingsPageHeader title={t('Loader Script')} />
-
-      <TextBlock>
-        {tct(
+      <SettingsPageHeader
+        title={t('Loader Script')}
+        subtitle={tct(
           'The Loader Script is the easiest way to initialize the Sentry SDK. The Loader Script automatically keeps your Sentry SDK up to date and offers configuration for different Sentry features. [docsLink:Learn more about the Loader Script]. Note: The Loader Script is bound to a Client Key (DSN), to create a new Script, go to the [clientKeysLink:Client Keys page].',
           {
             docsLink: (
@@ -68,7 +67,7 @@ function ProjectLoaderScript({project}: {project: Project}) {
             ),
           }
         )}
-      </TextBlock>
+      />
 
       {isPending && <LoadingIndicator />}
       {!!error && (
@@ -110,32 +109,31 @@ function LoaderItem({
   projectKey: ProjectKey;
 }) {
   return (
-    <Panel>
-      <PanelHeader hasButtons>
-        {tct('Client Key: [name]', {name: projectKey.name})}
+    <FieldGroup
+      hasButtons
+      title={
+        <Flex align="center" justify="between" flexGrow={1}>
+          {tct('Client Key: [name]', {name: projectKey.name})}
+          <LinkButton
+            size="xs"
+            to={`/settings/${organization.slug}/projects/${project.slug}/keys/${projectKey.id}/`}
+          >
+            {t('View Key Details')}
+          </LinkButton>
+        </Flex>
+      }
+    >
+      <Alert variant="info" system>
+        {t('Note that it can take a few minutes until changed options are live.')}
+      </Alert>
 
-        <LinkButton
-          size="xs"
-          to={`/settings/${organization.slug}/projects/${project.slug}/keys/${projectKey.id}/`}
-        >
-          {t('View Key Details')}
-        </LinkButton>
-      </PanelHeader>
-      <PanelBody>
-        <PanelAlert type="info">
-          {t('Note that it can take a few minutes until changed options are live.')}
-        </PanelAlert>
-
-        <LoaderSettings
-          orgSlug={organization.slug}
-          keyId={projectKey.id}
-          project={project}
-          data={projectKey}
-          updateData={onUpdateProjectKey}
-        />
-      </PanelBody>
-    </Panel>
+      <LoaderSettings
+        orgSlug={organization.slug}
+        keyId={projectKey.id}
+        project={project}
+        data={projectKey}
+        updateData={onUpdateProjectKey}
+      />
+    </FieldGroup>
   );
 }
-
-export default ProjectLoaderScript;

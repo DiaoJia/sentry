@@ -15,12 +15,11 @@ from sentry.models.project import Project
 
 
 class BoostLatestReleasesBias(Bias):
-
     datetime_format = "%Y-%m-%dT%H:%M:%SZ"
 
     def generate_rules(self, project: Project, base_sample_rate: float) -> list[PolymorphicRule]:
         factor = apply_dynamic_factor(base_sample_rate, LATEST_RELEASES_BOOST_FACTOR)
-        boosted_releases = ProjectBoostedReleases(project.id).get_extended_boosted_releases()
+        boosted_releases = ProjectBoostedReleases(project).get_extended_boosted_releases()
 
         return cast(
             list[PolymorphicRule],

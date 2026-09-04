@@ -1,35 +1,29 @@
-import type {AlertProps} from 'sentry/components/core/alert';
-import type {createFilter} from 'sentry/components/forms/controls/reactSelectWrapper';
-import type {ChoiceMapperProps} from 'sentry/components/forms/fields/choiceMapperField';
-import type {SelectAsyncFieldProps} from 'sentry/components/forms/fields/selectAsyncField';
-import type FormModel from 'sentry/components/forms/model';
-import type {SliderProps} from 'sentry/components/slider';
-import type {SelectValue} from 'sentry/types/core';
-import type {AvatarProject, Project} from 'sentry/types/project';
+import type {AlertProps} from '@sentry/scraps/alert';
+import type {SelectValue, createFilter} from '@sentry/scraps/select';
 
-export const FieldType = [
-  'array',
-  'blank',
-  'bool',
-  'boolean',
-  'choice_mapper',
-  'datetime',
-  'email',
-  'file',
-  'hidden',
-  'multichoice',
-  'number',
-  'radio',
-  'secret',
-  'separator',
-  'string',
-  'text',
-  'url',
-  'table',
-  'project_mapper',
-  'sentry_project_selector',
-  'select_async',
-] as const;
+import type {ChoiceMapperProps} from 'sentry/components/forms/fields/choiceMapperField';
+import type {FormModel} from 'sentry/components/forms/model';
+import type {SliderProps} from 'sentry/components/slider';
+
+type FieldType =
+  | 'array'
+  | 'blank'
+  | 'bool'
+  | 'boolean'
+  | 'choice_mapper'
+  | 'datetime'
+  | 'email'
+  | 'file'
+  | 'hidden'
+  | 'multichoice'
+  | 'number'
+  | 'radio'
+  | 'secret'
+  | 'separator'
+  | 'string'
+  | 'text'
+  | 'url'
+  | 'table';
 
 export type FieldValue = any;
 
@@ -80,7 +74,7 @@ interface BaseField {
   resetsForm?: boolean;
   rows?: number;
   saveMessage?: React.ReactNode | ((params: {value: FieldValue}) => string);
-  saveMessageAlertType?: AlertProps['type'];
+  saveMessageAlertVariant?: AlertProps['variant'];
   /**
    * If false, disable saveOnBlur for field, instead show a save/cancel button
    */
@@ -155,47 +149,15 @@ export interface TableType {
   columnLabels: Record<PropertyKey, React.ReactNode>;
   type: 'table';
   /**
-   * The confirmation message before a a row is deleted
+   * The confirmation message before a row is deleted
    */
   confirmDeleteMessage?: string;
   // TODO(TS): Should we have addButtonText and allowEmpty here as well?
 }
 
-// maps a sentry project to another field
-export type ProjectMapperType = {
-  iconType: string;
-  mappedDropdown: {
-    items: Array<{label: string; url: string; value: string | number}>;
-    placeholder: string;
-  };
-  nextButton: {
-    allowedDomain: string;
-    text: string;
-    // url comes from the `next` parameter in the QS
-    description?: string;
-  };
-  sentryProjects: Array<AvatarProject & {id: number; name: string}>;
-  type: 'project_mapper';
-};
-
 type ChoiceMapperType = {
   type: 'choice_mapper';
 } & ChoiceMapperProps;
-
-// selects a sentry project with avatars
-type SentryProjectSelectorType = {
-  projects: Project[];
-  type: 'sentry_project_selector';
-  avatarSize?: number;
-};
-
-type SentryOrganizationRoleSelectorType = {
-  type: 'sentry_organization_role_selector';
-};
-
-type SelectAsyncType = {
-  type: 'select_async';
-} & SelectAsyncFieldProps;
 
 export type Field = (
   | CustomType
@@ -205,12 +167,8 @@ export type Field = (
   | NumberType
   | RangeType
   | TableType
-  | ProjectMapperType
-  | SentryProjectSelectorType
-  | SentryOrganizationRoleSelectorType
-  | SelectAsyncType
   | ChoiceMapperType
-  | {type: (typeof FieldType)[number]}
+  | {type: FieldType}
   | FileType
   | DateTimeType
 ) &
@@ -220,7 +178,6 @@ export type FieldObject = Field | (() => React.ReactNode);
 
 export type JsonFormObject = {
   fields: FieldObject[];
-  initiallyCollapsed?: boolean;
   title?: React.ReactNode;
 };
 

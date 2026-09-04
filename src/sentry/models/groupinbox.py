@@ -5,12 +5,12 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, TypedDict
 
-import sentry_sdk
 from django.db import models
 from django.utils import timezone
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, JSONField, Model, region_silo_model
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base_query_set import BaseQuerySet
 from sentry.models.activity import Activity
 from sentry.models.group import Group
@@ -20,6 +20,7 @@ from sentry.models.grouphistory import (
     record_group_history,
 )
 from sentry.types.activity import ActivityType
+from sentry.utils.tracing import start_span
 
 if TYPE_CHECKING:
     from sentry.models.team import Team
@@ -45,7 +46,7 @@ class GroupInboxRemoveAction(Enum):
     MARK_REVIEWED = "mark_reviewed"
 
 
-@region_silo_model
+@cell_silo_model
 class GroupInbox(Model):
     """
     A Group that is in the inbox.
@@ -57,7 +58,7 @@ class GroupInbox(Model):
     project = FlexibleForeignKey("sentry.Project", null=True, db_constraint=False)
     organization = FlexibleForeignKey("sentry.Organization", null=True, db_constraint=False)
     reason = models.PositiveSmallIntegerField(null=False, default=GroupInboxReason.NEW.value)
-    reason_details = JSONField(null=True)
+    reason_details = LegacyTextJSONField(default=dict, null=True)
     date_added = models.DateTimeField(default=timezone.now, db_index=True)
 
     class Meta:
@@ -71,9 +72,6 @@ def add_group_to_inbox(
     reason: GroupInboxReason,
     reason_details: InboxReasonDetails | None = None,
 ) -> GroupInbox:
-    if reason_details is not None and reason_details["until"] is not None:
-        reason_details["until"] = reason_details["until"].replace(microsecond=0)
-
     group_inbox, _ = GroupInbox.objects.get_or_create(
         group=group,
         defaults={
@@ -104,6 +102,7 @@ def remove_group_from_inbox(
                 user_id=user.id,
             )
             record_group_history(group, GroupHistoryStatus.REVIEWED, actor=user)
+
     except GroupInbox.DoesNotExist:
         pass
 
@@ -113,7 +112,7 @@ def bulk_remove_groups_from_inbox(
     action: GroupInboxRemoveAction | None = None,
     user: User | RpcUser | Team | None = None,
 ) -> None:
-    with sentry_sdk.start_span(name="bulk_remove_groups_from_inbox"):
+    with start_span(name="bulk_remove_groups_from_inbox"):
         try:
             group_inbox = GroupInbox.objects.filter(group__in=groups)
             group_inbox.delete()
@@ -137,7 +136,7 @@ def bulk_remove_groups_from_inbox(
 
 
 class InboxReasonDetails(TypedDict):
-    until: datetime | None
+    until: str | None  # datetime str
     count: int | None
     window: int | None
     user_count: int | None

@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from django.db import router
+from django.db.models import Q
+
+from sentry import options
 from sentry.constants import ObjectStatus
 from sentry.db.models.base import Model
+from sentry.ratelimits.leaky_bucket import LeakyBucketRateLimiter
+from sentry.silo.safety import unguarded_write
 from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.service import user_service
 from sentry.utils import metrics
 from sentry.utils.query import bulk_delete_objects
 
+logger = logging.getLogger(__name__)
+
 _leaf_re = re.compile(r"^(UserReport|Event|Group)(.+)")
 
+_MAX_RATE_LIMIT_SLEEP = 1.0
 
 if TYPE_CHECKING:
     from sentry.deletions.manager import DeletionTaskManager
@@ -61,12 +71,14 @@ class ModelRelation(BaseRelation):
         model: type[ModelT],
         query: Mapping[str, Any],
         task: type[BaseDeletionTask[Any]] | None = None,
-        partition_key: str | None = None,
+        mark_in_progress: bool | None = None,
+        rate_limit_option: str | None = None,
     ) -> None:
-        params = {"model": model, "query": query}
-
-        if partition_key:
-            params["partition_key"] = partition_key
+        params: dict[str, Any] = {"model": model, "query": query}
+        if mark_in_progress is not None:
+            params["mark_in_progress"] = mark_in_progress
+        if rate_limit_option is not None:
+            params["rate_limit_option"] = rate_limit_option
 
         super().__init__(params=params, task=task)
 
@@ -79,6 +91,14 @@ class BaseDeletionTask(Generic[ModelT]):
 
     DEFAULT_CHUNK_SIZE = 100
 
+    # Whether to mark instances as ``ObjectStatus.DELETION_IN_PROGRESS`` before
+    # deleting them.
+    mark_in_progress_default = True
+
+    # Name of an int option used to rate limit the aggregate deletion throughput
+    # for this task's model across all concurrent deletions. None disables throttling.
+    rate_limit_option_default: str | None = None
+
     def __init__(
         self,
         manager: DeletionTaskManager,
@@ -86,22 +106,25 @@ class BaseDeletionTask(Generic[ModelT]):
         transaction_id: str | None = None,
         actor_id: int | None = None,
         chunk_size: int | None = None,
+        mark_in_progress: bool | None = None,
+        rate_limit_option: str | None = None,
     ):
         self.manager = manager
         self.skip_models = set(skip_models) if skip_models else None
         self.transaction_id = transaction_id
         self.actor_id = actor_id
         self.chunk_size = chunk_size if chunk_size is not None else self.DEFAULT_CHUNK_SIZE
-
-    def __repr__(self) -> str:
-        return "<{}: skip_models={} transaction_id={} actor_id={}>".format(
-            type(self),
-            self.skip_models,
-            self.transaction_id,
-            self.actor_id,
+        self.mark_in_progress = (
+            mark_in_progress if mark_in_progress is not None else self.mark_in_progress_default
+        )
+        self.rate_limit_option = (
+            rate_limit_option if rate_limit_option is not None else self.rate_limit_option_default
         )
 
-    def chunk(self) -> bool:
+    def __repr__(self) -> str:
+        return f"<{type(self)}: skip_models={self.skip_models} transaction_id={self.transaction_id} actor_id={self.actor_id}>"
+
+    def chunk(self, apply_filter: bool = False) -> bool:
         """
         Deletes a chunk of this instance's data. Return ``True`` if there is
         more work, or ``False`` if the entity has been removed.
@@ -142,7 +165,8 @@ class BaseDeletionTask(Generic[ModelT]):
         This **should** not be called with arbitrary types, but rather should
         be used for only the base type this task was instantiated against.
         """
-        self.mark_deletion_in_progress(instance_list)
+        if self.mark_in_progress:
+            self.mark_deletion_in_progress(instance_list)
 
         child_relations = self.get_child_relations_bulk(instance_list)
         child_relations = self.filter_relations(child_relations)
@@ -197,16 +221,16 @@ class ModelDeletionTask(BaseDeletionTask[ModelT]):
         self.order_by = order_by
 
     def __repr__(self) -> str:
-        return "<{}: model={} query={} order_by={} transaction_id={} actor_id={}>".format(
-            type(self),
-            self.model,
-            self.query,
-            self.order_by,
-            self.transaction_id,
-            self.actor_id,
-        )
+        return f"<{type(self)}: model={self.model} query={self.query} order_by={self.order_by} transaction_id={self.transaction_id} actor_id={self.actor_id}>"
 
-    def chunk(self) -> bool:
+    def get_query_filter(self) -> None | Q:
+        """
+        Override this to add additional filters to the queryset.
+        Returns a Q object or None.
+        """
+        return None
+
+    def chunk(self, apply_filter: bool = False) -> bool:
         """
         Deletes a chunk of this instance's data. Return ``True`` if there is
         more work, or ``False`` if all matching entities have been removed.
@@ -214,8 +238,14 @@ class ModelDeletionTask(BaseDeletionTask[ModelT]):
         query_limit = self.query_limit
         remaining = self.chunk_size
 
-        while remaining > 0:
+        while remaining >= 0:
             queryset = getattr(self.model, self.manager_name).filter(**self.query)
+
+            if apply_filter:
+                query_filter = self.get_query_filter()
+                if query_filter is not None:
+                    queryset = queryset.filter(query_filter)
+
             if self.order_by:
                 queryset = queryset.order_by(self.order_by)
 
@@ -224,11 +254,40 @@ class ModelDeletionTask(BaseDeletionTask[ModelT]):
             if not queryset:
                 return False
 
+            self._throttle_deletes(len(queryset))
             self.delete_bulk(queryset)
             remaining = remaining - len(queryset)
 
         # We have more work to do as we didn't run out of rows to delete.
         return True
+
+    def _throttle_deletes(self, num_rows: int) -> None:
+        """
+        Rate limit deletion throughput for this model across all concurrent deletion tasks.
+        """
+        option_name = self.rate_limit_option
+        if not option_name or num_rows <= 0:
+            return
+
+        rate = options.get(option_name)
+        if not rate or rate <= 0:
+            return
+
+        limiter = LeakyBucketRateLimiter(
+            burst_limit=max(rate, self.query_limit),
+            drip_rate=rate,
+            key=f"deletions.rate_limit:{option_name}",
+        )
+        waited = False
+        while True:
+            info = limiter.use_and_get_info(incr_by=num_rows)
+            if info.wait_time <= 0:
+                break
+            waited = True
+            time.sleep(min(info.wait_time, _MAX_RATE_LIMIT_SLEEP))
+
+        if waited:
+            metrics.incr("deletions.rate_limited", tags={"model": self.model.__name__})
 
     def delete_instance(self, instance: ModelT) -> None:
         instance_id = instance.id
@@ -239,7 +298,7 @@ class ModelDeletionTask(BaseDeletionTask[ModelT]):
             model_name = type(instance).__name__
             if not _leaf_re.search(model_name):
                 self.logger.info(
-                    "object.delete.executed",
+                    f"object.delete.executed ({model_name})",
                     extra={
                         "object_id": instance_id,
                         "transaction_id": self.transaction_id,
@@ -270,36 +329,24 @@ class BulkModelDeletionTask(ModelDeletionTask[ModelT]):
 
     DEFAULT_CHUNK_SIZE = 10000
 
-    def __init__(
-        self,
-        manager: DeletionTaskManager,
-        model: type[ModelT],
-        query: Mapping[str, Any],
-        partition_key: str | None = None,
-        **kwargs: Any,
-    ):
-        super().__init__(manager, model, query, **kwargs)
-
-        self.partition_key = partition_key
-
-    def chunk(self) -> bool:
+    def chunk(self, apply_filter: bool = False) -> bool:
         return self._delete_instance_bulk()
 
     def _delete_instance_bulk(self) -> bool:
         try:
-            return bulk_delete_objects(
-                model=self.model,
-                limit=self.chunk_size,
-                transaction_id=self.transaction_id,
-                partition_key=self.partition_key,
-                **self.query,
-            )
+            with unguarded_write(using=router.db_for_write(self.model)):
+                return bulk_delete_objects(
+                    model=self.model,
+                    limit=self.chunk_size,
+                    transaction_id=self.transaction_id,
+                    **self.query,
+                )
         finally:
             # Don't log Group and Event child object deletions.
             model_name = self.model.__name__
             if not _leaf_re.search(model_name):
                 self.logger.info(
-                    "object.delete.bulk_executed",
+                    f"object.delete.bulk_executed ({model_name})",
                     extra=dict(
                         {
                             "transaction_id": self.transaction_id,

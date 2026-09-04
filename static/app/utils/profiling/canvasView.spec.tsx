@@ -19,7 +19,7 @@ const makeCanvasAndView = (
   canvas: HTMLCanvasElement,
   flamegraph: Flamegraph,
   origin: vec2 = vec2.fromValues(0, 0),
-  configSpaceTransform: Rect = Rect.Empty()
+  configSpaceTransform: Rect = Rect.empty()
 ) => {
   const flamegraphCanvas = new FlamegraphCanvas(canvas, origin);
   const canvasView = new CanvasView<Flamegraph>({
@@ -179,7 +179,7 @@ describe('CanvasView', () => {
       it('is zoomed in', () => {
         const {view} = makeCanvasAndView(canvas, flamegraph);
 
-        // Duration is is 1000, so we can't go over the end of the profile
+        // Duration is 1000, so we can't go over the end of the profile
         view.setConfigView(new Rect(600, 0, 500, 50));
         expect(view.configView).toEqual(new Rect(500, 0, 500, 50));
       });

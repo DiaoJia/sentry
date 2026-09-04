@@ -66,7 +66,7 @@ REINDEXED_INTS = {12345678: "release"}
 
 
 @override_settings(SENTRY_METRICS_INDEXER_REINDEXED_INTS=REINDEXED_INTS)
-def test_reverse_resolve_reindexed():
+def test_reverse_resolve_reindexed() -> None:
     """
     If we have deleted a record accidentally and whose id still lives in
     ClickHouse, then we need to account for the re-indexed id. Since the
@@ -104,14 +104,13 @@ def test_reverse_resolve_reindexed():
         if parse_mri(string) is not None
     ],
 )
-def test_shared_mri_string_range(mri, id):
+def test_shared_mri_string_range(mri, id) -> None:
     parsed_mri = parse_mri(mri)
     assert parsed_mri is not None, mri
     start, end = {
         "sessions": (1, 99),
         "transactions": (100, 199),
         "spans": (400, 499),
-        "escalating_issues": (500, 599),
         "profiles": (600, 699),
         "bundle_analysis": (700, 799),
         "metric_stats": (800, 899),
@@ -120,6 +119,6 @@ def test_shared_mri_string_range(mri, id):
     start += PREFIX
     end += PREFIX
 
-    assert (
-        start <= id <= end
-    ), f"id for MRI: {mri} fall outside of expected range. Expected {start} - {end}, got {id}"
+    assert start <= id <= end, (
+        f"id for MRI: {mri} fall outside of expected range. Expected {start} - {end}, got {id}"
+    )

@@ -1,25 +1,25 @@
 import {Component} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
+import type {Location} from 'history';
 
-import {updateProjects} from 'sentry/actionCreators/pageFilters';
-import ErrorPanel from 'sentry/components/charts/errorPanel';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import IdBadge from 'sentry/components/idBadge';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import Panel from 'sentry/components/panels/panel';
-import {PanelTable} from 'sentry/components/panels/panelTable';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
+import {ErrorPanel} from 'sentry/components/charts/errorPanel';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {IdBadge} from 'sentry/components/idBadge';
+import {updateProjects} from 'sentry/components/pageFilters/actions';
+import {Panel} from 'sentry/components/panels/panel';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconGraph, IconSettings, IconWarning} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DataCategoryInfo} from 'sentry/types/core';
-import type {WithRouterProps} from 'sentry/types/legacyReactRouter';
 import type {Project} from 'sentry/types/project';
-// eslint-disable-next-line no-restricted-imports
-import withSentryRouter from 'sentry/utils/withSentryRouter';
+import {useLocation} from 'sentry/utils/useLocation';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 import {formatUsageWithUnits, getFormatUsageOptions} from './utils';
 
@@ -28,13 +28,15 @@ const DOCS_URL = 'https://docs.sentry.io/product/accounts/membership/#restrictin
 type Props = {
   dataCategory: DataCategoryInfo;
   headers: React.ReactNode[];
+  location: Location;
+  navigate: ReactRouter3Navigate;
   usageStats: TableStat[];
   errors?: Record<string, Error>;
   isEmpty?: boolean;
   isError?: boolean;
   isLoading?: boolean;
   showStoredOutcome?: boolean;
-} & WithRouterProps;
+};
 
 export type TableStat = {
   accepted: number;
@@ -53,21 +55,22 @@ class UsageTable extends Component<Props> {
     if (errorMessage.projectStats.responseJSON.detail === 'No projects available') {
       return (
         <EmptyMessage
-          icon={<IconWarning color="gray300" legacySize="48px" />}
+          icon={<IconWarning />}
           title={t(
             "You don't have access to any projects, or your organization has no projects."
           )}
-          description={tct('Learn more about [link:Project Access]', {
+        >
+          {tct('Learn more about [link:Project Access]', {
             link: <ExternalLink href={DOCS_URL} />,
           })}
-        />
+        </EmptyMessage>
       );
     }
-    return <IconWarning color="gray300" legacySize="48px" />;
+    return <IconWarning variant="muted" legacySize="48px" />;
   };
 
   loadProject(projectId: number) {
-    updateProjects([projectId], this.props.router, {
+    updateProjects([projectId], this.props.location, this.props.navigate, {
       save: true,
       environments: [], // Clear environments when switching projects
     });
@@ -79,85 +82,82 @@ class UsageTable extends Component<Props> {
     const {project, total, accepted, accepted_stored, filtered, invalid, rate_limited} =
       stat;
 
-    return [
-      <CellProject key={0}>
-        <Link to={stat.projectLink}>
-          <StyledIdBadge
-            avatarSize={16}
-            disableLink
-            hideOverflow
-            project={project}
-            displayName={project.slug}
-          />
-        </Link>
-      </CellProject>,
-      <CellStat key={1}>
-        {formatUsageWithUnits(
-          total,
-          dataCategory.plural,
-          getFormatUsageOptions(dataCategory.plural)
-        )}
-      </CellStat>,
-      <CellStat key={2}>
-        {formatUsageWithUnits(
-          accepted,
-          dataCategory.plural,
-          getFormatUsageOptions(dataCategory.plural)
-        )}
-        {showStoredOutcome && (
-          <SubText>
-            {`(${formatUsageWithUnits(
-              accepted_stored,
-              dataCategory.plural,
-              getFormatUsageOptions(dataCategory.plural)
-            )})`}
-          </SubText>
-        )}
-      </CellStat>,
-      <CellStat key={3}>
-        {formatUsageWithUnits(
-          filtered,
-          dataCategory.plural,
-          getFormatUsageOptions(dataCategory.plural)
-        )}
-      </CellStat>,
-      <CellStat key={4}>
-        {formatUsageWithUnits(
-          rate_limited,
-          dataCategory.plural,
-          getFormatUsageOptions(dataCategory.plural)
-        )}
-      </CellStat>,
-      <CellStat key={5}>
-        {formatUsageWithUnits(
-          invalid,
-          dataCategory.plural,
-          getFormatUsageOptions(dataCategory.plural)
-        )}
-      </CellStat>,
-      <CellStat key={6}>
-        <ButtonBar gap={1}>
-          <Button
-            icon={<IconGraph type="bar" />}
-            title="Go to project level stats"
-            data-test-id={project.slug}
-            size="xs"
-            onClick={() => {
-              this.loadProject(parseInt(stat.project.id, 10));
-            }}
-          >
-            {t('View Stats')}
-          </Button>
-          <LinkButton
-            icon={<IconSettings />}
-            size="xs"
-            aria-label={t('Project Settings')}
-            title={t('Go to project settings')}
-            to={stat.projectSettingsLink}
-          />
-        </ButtonBar>
-      </CellStat>,
-    ];
+    return (
+      <SimpleTable.Row key={project.id}>
+        <RowCellProject>
+          <Link to={stat.projectLink}>
+            <StyledIdBadge
+              avatarSize={16}
+              disableLink
+              hideOverflow
+              project={project}
+              displayName={project.slug}
+            />
+          </Link>
+        </RowCellProject>
+        <RowCellStat>
+          {formatUsageWithUnits(
+            total,
+            dataCategory.plural,
+            getFormatUsageOptions(dataCategory.plural)
+          )}
+        </RowCellStat>
+        <RowCellStat>
+          {formatUsageWithUnits(
+            accepted,
+            dataCategory.plural,
+            getFormatUsageOptions(dataCategory.plural)
+          )}
+          {showStoredOutcome && (
+            <SubText>
+              {`(${formatUsageWithUnits(
+                accepted_stored,
+                dataCategory.plural,
+                getFormatUsageOptions(dataCategory.plural)
+              )})`}
+            </SubText>
+          )}
+        </RowCellStat>
+        <RowCellStat>
+          {formatUsageWithUnits(
+            filtered,
+            dataCategory.plural,
+            getFormatUsageOptions(dataCategory.plural)
+          )}
+        </RowCellStat>
+        <RowCellStat>
+          {formatUsageWithUnits(
+            rate_limited,
+            dataCategory.plural,
+            getFormatUsageOptions(dataCategory.plural)
+          )}
+        </RowCellStat>
+        <RowCellStat>
+          {formatUsageWithUnits(
+            invalid,
+            dataCategory.plural,
+            getFormatUsageOptions(dataCategory.plural)
+          )}
+        </RowCellStat>
+        <RowCellStat>
+          <Grid flow="column" align="center" gap="md">
+            <Button
+              icon={<IconGraph type="bar" />}
+              data-test-id={project.slug}
+              size="xs"
+              onClick={() => {
+                this.loadProject(parseInt(stat.project.id, 10));
+              }}
+            >
+              {t('View Project Stats')}
+            </Button>
+            <LinkButton icon={<IconSettings />} size="xs" to={stat.projectSettingsLink}>
+              {t('Project Settings')}
+            </LinkButton>
+          </Grid>
+        </RowCellStat>
+      </SimpleTable.Row>
+    );
   }
 
   render() {
@@ -172,30 +172,68 @@ class UsageTable extends Component<Props> {
     }
 
     return (
-      <StyledPanelTable isLoading={isLoading} isEmpty={isEmpty} headers={headers}>
-        {usageStats.map(s => this.renderTableRow(s))}
-      </StyledPanelTable>
+      <StyledSimpleTable
+        header={
+          <SimpleTable.HeaderRow>
+            {headers.map((header, i) => (
+              <SimpleTable.HeaderCell key={i}>{header}</SimpleTable.HeaderCell>
+            ))}
+          </SimpleTable.HeaderRow>
+        }
+      >
+        {isLoading && <SimpleTable.Loading />}
+        {!isLoading && isEmpty && (
+          <SimpleTable.Empty>{t('No data available')}</SimpleTable.Empty>
+        )}
+        {!isLoading && usageStats.map(s => this.renderTableRow(s))}
+      </StyledSimpleTable>
     );
   }
 }
 
-export default withSentryRouter(UsageTable);
+/**
+ * Wrapper that injects `navigate` and `location` hooks into UsageTable.
+ */
+function UsageTableWithHooks(props: Omit<Props, 'navigate' | 'location'>) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return <UsageTable {...props} navigate={navigate} location={location} />;
+}
 
-const StyledPanelTable = styled(PanelTable)`
+// eslint-disable-next-line @sentry/no-default-exports
+export default UsageTableWithHooks;
+
+const StyledSimpleTable = styled(SimpleTable)`
   grid-template-columns: repeat(7, auto);
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
+  @container (min-width: ${p => p.theme.container.xl}) {
     grid-template-columns: 1fr repeat(6, minmax(0, auto));
   }
 `;
 
-export const CellStat = styled('div')`
+const cellStatStyle = css`
   display: flex;
   align-items: center;
   font-variant-numeric: tabular-nums;
   justify-content: right;
 `;
 
+/**
+ * Header cells; `usageStatsProjects` builds the `headers` array out of these, so
+ * they stay plain elements rather than table cells.
+ */
+export const CellStat = styled('div')`
+  ${cellStatStyle}
+`;
+
 export const CellProject = styled(CellStat)`
+  justify-content: left;
+`;
+
+const RowCellStat = styled(SimpleTable.RowCell)`
+  ${cellStatStyle}
+`;
+
+const RowCellProject = styled(RowCellStat)`
   justify-content: left;
 `;
 
@@ -206,6 +244,6 @@ const StyledIdBadge = styled(IdBadge)`
 `;
 
 const SubText = styled('span')`
-  color: ${p => p.theme.subText};
-  margin-left: ${space(0.5)};
+  color: ${p => p.theme.tokens.content.secondary};
+  margin-left: ${p => p.theme.space.xs};
 `;

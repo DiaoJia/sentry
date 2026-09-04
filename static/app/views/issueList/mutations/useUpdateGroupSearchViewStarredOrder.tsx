@@ -1,17 +1,13 @@
+import {useQueryClient, useMutation} from '@tanstack/react-query';
+
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import {t} from 'sentry/locale';
-import {defined} from 'sentry/utils';
-import {
-  getApiQueryData,
-  setApiQueryData,
-  useMutation,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
-import {makeFetchGroupSearchViewsKey} from 'sentry/views/issueList/queries/useFetchGroupSearchViews';
-import {makeFetchStarredGroupSearchViewsKey} from 'sentry/views/issueList/queries/useFetchStarredGroupSearchViews';
-import type {GroupSearchView, StarredGroupSearchView} from 'sentry/views/issueList/types';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {starredGroupSearchViewsApiOptions} from 'sentry/views/issueList/queries/starredGroupSearchViews';
+import {groupSearchViewsApiOptions} from 'sentry/views/issueList/queries/useFetchGroupSearchViews';
 
 type UpdateGroupSearchViewStarredOrderVariables = {
   orgSlug: string;
@@ -24,16 +20,23 @@ export const useUpdateGroupSearchViewStarredOrder = () => {
 
   return useMutation<void, RequestError, UpdateGroupSearchViewStarredOrderVariables>({
     mutationFn: ({orgSlug, viewIds}: UpdateGroupSearchViewStarredOrderVariables) =>
-      api.requestPromise(`/organizations/${orgSlug}/group-search-views/starred/order/`, {
-        method: 'PUT',
-        data: {view_ids: viewIds},
-      }),
+      api.requestPromise(
+        getApiUrl(
+          '/organizations/$organizationIdOrSlug/group-search-views/starred/order/',
+          {
+            path: {organizationIdOrSlug: orgSlug},
+          }
+        ),
+        {
+          method: 'PUT',
+          data: {view_ids: viewIds},
+        }
+      ),
     onSuccess: (_, parameters) => {
       // Reorder the existing views in the cache
-      const groupSearchViews = getApiQueryData<GroupSearchView[]>(
-        queryClient,
-        makeFetchGroupSearchViewsKey({orgSlug: parameters.orgSlug})
-      );
+      const groupSearchViews = queryClient.getQueryData(
+        groupSearchViewsApiOptions({orgSlug: parameters.orgSlug}).queryKey
+      )?.json;
       if (!groupSearchViews) {
         return;
       }
@@ -41,10 +44,9 @@ export const useUpdateGroupSearchViewStarredOrder = () => {
         .map(id => groupSearchViews.find(view => parseInt(view.id, 10) === id))
         .filter(defined);
 
-      setApiQueryData<StarredGroupSearchView[]>(
-        queryClient,
-        makeFetchStarredGroupSearchViewsKey({orgSlug: parameters.orgSlug}),
-        newViewsOrder
+      queryClient.setQueryData(
+        starredGroupSearchViewsApiOptions({orgSlug: parameters.orgSlug}).queryKey,
+        prevData => (prevData ? {...prevData, json: newViewsOrder} : prevData)
       );
     },
     onError: () => {

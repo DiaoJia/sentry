@@ -1,24 +1,60 @@
+import {
+  Fragment,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from 'react';
+import {css, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {useDebouncedValue} from '@tanstack/react-pacer';
+import {useQueryState} from 'nuqs';
 
-import LoadingError from 'sentry/components/loadingError';
-import {SimpleTable} from 'sentry/components/workflowEngine/simpleTable';
+import NoAlertsImage from 'sentry-images/features/alerts-not-found.svg';
+
+import {Button} from '@sentry/scraps/button';
+import {EmptyState} from '@sentry/scraps/emptyState';
+import {Container, Flex} from '@sentry/scraps/layout';
+
+import {
+  GridLineLabels,
+  GridLineOverlay,
+} from 'sentry/components/checkInTimeline/gridLines';
+import {useTimeWindowConfig} from 'sentry/components/checkInTimeline/hooks/useTimeWindowConfig';
+import {getNextSort} from 'sentry/components/tables/getNextSort';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {SelectAllHeaderCheckbox} from 'sentry/components/workflowEngine/ui/selectAllHeaderCheckbox';
+import {IconChevron} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Detector} from 'sentry/types/workflowEngine/detectors';
-import type {Sort} from 'sentry/utils/discover/fields';
-import {useLocation} from 'sentry/utils/useLocation';
-import {useNavigate} from 'sentry/utils/useNavigate';
+import {defined} from 'sentry/utils/defined';
+import {useDimensions} from 'sentry/utils/useDimensions';
+import {
+  DetectorsTableActions,
+  DetectorsTableActionsBanner,
+} from 'sentry/views/detectors/components/detectorListTable/actions';
 import {
   DetectorListRow,
   DetectorListRowSkeleton,
 } from 'sentry/views/detectors/components/detectorListTable/detectorListRow';
-import {DETECTOR_LIST_PAGE_LIMIT} from 'sentry/views/detectors/constants';
+import {IssueStreamDetectorContextProvider} from 'sentry/views/detectors/components/detectorListTable/issueStreamDetectorContext';
+import {DETECTOR_LIST_PAGE_LIMIT} from 'sentry/views/detectors/list/common/constants';
+import {useDetectorListSort} from 'sentry/views/detectors/list/common/useDetectorListSort';
+import {
+  useMonitorViewContext,
+  type MonitorListAdditionalColumn,
+} from 'sentry/views/detectors/monitorViewContext';
+import {detectorTypeIsUserCreateable} from 'sentry/views/detectors/utils/detectorTypeConfig';
+import {useCanEditDetectors} from 'sentry/views/detectors/utils/useCanEditDetector';
 
 type DetectorListTableProps = {
+  allResultsVisible: boolean;
   detectors: Detector[];
   isError: boolean;
   isPending: boolean;
   isSuccess: boolean;
-  sort: Sort | undefined;
+  queryCount: string;
 };
 
 function LoadingSkeletons() {
@@ -27,136 +63,516 @@ function LoadingSkeletons() {
   ));
 }
 
-function HeaderCell({
+export function HeaderCell({
   children,
-  name,
   sortKey,
-  sort,
+  ...props
 }: {
-  children: React.ReactNode;
-  name: string;
-  sort: Sort | undefined;
+  children?: React.ReactNode;
   divider?: boolean;
   sortKey?: string;
-}) {
-  const location = useLocation();
-  const navigate = useNavigate();
-  const isSortedByField = sort?.field === sortKey;
+} & Omit<ComponentProps<typeof SimpleTable.HeaderCell>, 'sort'>) {
+  const [sort, setSort] = useDetectorListSort();
+  const [, setCursor] = useQueryState('cursor');
   const handleSort = () => {
     if (!sortKey) {
       return;
     }
-    const newSort =
-      sort && isSortedByField ? `${sort.kind === 'asc' ? '-' : ''}${sortKey}` : sortKey;
-    navigate({
-      pathname: location.pathname,
-      query: {...location.query, sort: newSort, cursor: undefined},
-    });
+    setSort(getNextSort(sortKey, sort ?? undefined, 'asc'));
+    setCursor(null);
   };
 
   return (
     <SimpleTable.HeaderCell
-      name={name}
-      sort={sort}
-      sortKey={sortKey}
-      handleSortClick={handleSort}
+      {...props}
+      sort={sort && sortKey === sort?.field ? sort.kind : undefined}
+      handleSortClick={sortKey ? handleSort : undefined}
     >
       {children}
     </SimpleTable.HeaderCell>
   );
 }
 
-function DetectorListTable({
+export function DetectorListTable({
   detectors,
   isPending,
   isError,
   isSuccess,
-  sort,
+  queryCount,
+  allResultsVisible,
 }: DetectorListTableProps) {
+  const [selected, setSelectedIds] = useState(new Set<string>());
+  const [allInQuerySelected, setAllInQuerySelected] = useState(false);
+  const [isVisualizationExpanded, setIsVisualizationExpanded] = useState(false);
+
+  // Selecting every match only holds while something is selected, so emptying the
+  // selection has to clear it too.
+  const setSelected = useCallback((ids: Set<string>) => {
+    setSelectedIds(ids);
+    if (ids.size === 0) {
+      setAllInQuerySelected(false);
+    }
+  }, []);
+
+  const detectorIds = new Set(detectors.map(d => d.id));
+  const togglePageSelected = (pageSelected: boolean) => {
+    if (pageSelected) {
+      setSelected(detectorIds);
+    } else {
+      setSelected(new Set<string>());
+    }
+  };
+  const pageSelected =
+    !isPending && detectorIds.size !== 0 && detectorIds.difference(selected).size === 0;
+  const anySelected = selected.size > 0;
+
+  const handleSelect = useCallback(
+    (id: string) => {
+      const newSelected = new Set(selected);
+      if (newSelected.has(id)) {
+        newSelected.delete(id);
+      } else {
+        newSelected.add(id);
+      }
+      setSelected(newSelected);
+    },
+    [selected, setSelected]
+  );
+
+  const canEnable = useMemo(
+    () => detectors.some(d => selected.has(d.id) && !d.enabled),
+    [detectors, selected]
+  );
+  const canDisable = useMemo(
+    () => detectors.some(d => selected.has(d.id) && d.enabled),
+    [detectors, selected]
+  );
+
+  const uniqueProjectIds = useMemo(
+    () => [...new Set(detectors.map(d => d.projectId).filter(defined))],
+    [detectors]
+  );
+
+  const selectedDetectors = detectors.filter(d => selected.has(d.id));
+  const canEditDetectors = useCanEditDetectors({detectors: selectedDetectors});
+  const hasSystemCreatedDetectors = selectedDetectors.some(
+    d => !detectorTypeIsUserCreateable(d.type)
+  );
+
+  const elementRef = useRef<HTMLTableCellElement>(null);
+  const {width: containerWidth} = useDimensions({elementRef});
+  const [timelineWidth] = useDebouncedValue(containerWidth, {wait: 1000});
+  const timeWindowConfig = useTimeWindowConfig({timelineWidth});
+
+  const {
+    additionalColumns = [],
+    renderVisualization,
+    renderTimelineOverlay,
+  } = useMonitorViewContext();
+  const hasVisualization = defined(renderVisualization);
+
   return (
-    <Container>
-      <DetectorListSimpleTable>
-        <SimpleTable.Header>
-          <HeaderCell name="name" sortKey="name" sort={sort}>
-            {t('Name')}
-          </HeaderCell>
-          <HeaderCell name="type" divider sortKey="type" sort={sort}>
-            {t('Type')}
-          </HeaderCell>
-          <HeaderCell name="last-issue" divider sort={sort}>
-            {t('Last Issue')}
-          </HeaderCell>
-          <HeaderCell name="assignee" divider sort={sort}>
-            {t('Assignee')}
-          </HeaderCell>
-          <HeaderCell
-            name="connected-automations"
-            divider
-            sortKey="connectedWorkflows"
-            sort={sort}
-          >
-            {t('Automations')}
-          </HeaderCell>
-        </SimpleTable.Header>
-        {isError && <LoadingError message={t('Error loading monitors')} />}
-        {isPending && <LoadingSkeletons />}
-        {isSuccess && detectors.length > 0 ? (
-          detectors.map(detector => (
-            <DetectorListRow key={detector.id} detector={detector} />
-          ))
-        ) : (
-          <SimpleTable.Empty>{t('No monitors found')}</SimpleTable.Empty>
+    <Container containerType="inline-size">
+      <DetectorListSimpleTable
+        hasVisualization={hasVisualization}
+        isVisualizationExpanded={isVisualizationExpanded}
+        additionalColumns={additionalColumns}
+        header={
+          selected.size === 0 ? (
+            <SimpleTable.HeaderRow>
+              <HeaderCell sortKey="name">
+                <Flex gap="md" align="center">
+                  <SelectAllHeaderCheckbox
+                    checked={pageSelected || (anySelected ? 'indeterminate' : false)}
+                    onChange={checked => togglePageSelected(checked)}
+                  />
+                  <span>{t('Name')}</span>
+                </Flex>
+              </HeaderCell>
+              <HeaderCell data-column-name="type" divider sortKey="type">
+                {t('Type')}
+              </HeaderCell>
+              <HeaderCell data-column-name="last-issue" divider sortKey="latestGroup">
+                {t('Last Issue')}
+              </HeaderCell>
+              <HeaderCell data-column-name="assignee" divider>
+                {t('Assignee')}
+              </HeaderCell>
+              <HeaderCell
+                data-column-name="connected-automations"
+                divider
+                sortKey="connectedWorkflows"
+              >
+                {t('Alerts')}
+              </HeaderCell>
+              {additionalColumns.map(col => (
+                <Fragment key={col.id}>{col.renderHeaderCell()}</Fragment>
+              ))}
+              {hasVisualization && detectors.length > 0 && (
+                <VisualizationHeaderCell
+                  data-column-name="visualization"
+                  ref={elementRef}
+                  role="columnheader"
+                  scope="col"
+                >
+                  <GridLineLabels timeWindowConfig={timeWindowConfig} />
+                </VisualizationHeaderCell>
+              )}
+              {hasVisualization && (
+                <VisualizationExpandButtonCell role="columnheader" scope="col">
+                  <Button
+                    size="xs"
+                    variant="transparent"
+                    icon={
+                      <IconChevron
+                        isDouble
+                        direction={isVisualizationExpanded ? 'right' : 'left'}
+                      />
+                    }
+                    aria-label={
+                      isVisualizationExpanded
+                        ? t('Collapse visualization')
+                        : t('Expand visualization')
+                    }
+                    tooltipProps={{
+                      title: isVisualizationExpanded
+                        ? t('Collapse visualization')
+                        : t('Expand visualization'),
+                    }}
+                    onClick={() => setIsVisualizationExpanded(v => !v)}
+                  />
+                </VisualizationExpandButtonCell>
+              )}
+            </SimpleTable.HeaderRow>
+          ) : (
+            <DetectorsTableActions
+              key="actions"
+              selected={selected}
+              pageSelected={pageSelected}
+              togglePageSelected={togglePageSelected}
+              queryCount={queryCount}
+              allInQuerySelected={allInQuerySelected}
+              setAllInQuerySelected={setAllInQuerySelected}
+              showDisable={canDisable}
+              showEnable={canEnable}
+              canEdit={canEditDetectors}
+              hasSystemCreatedDetectors={hasSystemCreatedDetectors}
+              // TODO: Check if metric detector limit is reached
+              detectorLimitReached={false}
+            />
+          )
+        }
+      >
+        {selected.size > 0 && (
+          <DetectorsTableActionsBanner
+            selected={selected}
+            pageSelected={pageSelected}
+            allResultsVisible={allResultsVisible}
+            queryCount={queryCount}
+            allInQuerySelected={allInQuerySelected}
+            setAllInQuerySelected={setAllInQuerySelected}
+          />
         )}
+        {isError && <SimpleTable.Empty>{t('Error loading monitors')}</SimpleTable.Empty>}
+        {isPending && <LoadingSkeletons />}
+        {isSuccess && detectors.length === 0 && (
+          <SimpleTable.Empty>
+            <EmptyState
+              title={t('No monitors found.')}
+              description={t("Sorry, we couldn't find what you were looking for.")}
+              illustration={<img src={NoAlertsImage} />}
+            />
+          </SimpleTable.Empty>
+        )}
+        {hasVisualization && detectors.length > 0 && (
+          <GridLineOverlayRow>
+            <GridLineOverlayCell>
+              <PositionedGridLineOverlay
+                stickyCursor
+                allowZoom
+                showCursor
+                cursorOffsets={{right: 40}}
+                additionalUi={renderTimelineOverlay?.({timeWindowConfig})}
+                timeWindowConfig={timeWindowConfig}
+                cursorOverlayAnchor="top"
+                cursorOverlayAnchorOffset={10}
+              />
+            </GridLineOverlayCell>
+          </GridLineOverlayRow>
+        )}
+        <IssueStreamDetectorContextProvider projectIds={uniqueProjectIds}>
+          {detectors.map(detector => (
+            <DetectorListRow
+              key={detector.id}
+              detector={detector}
+              selected={selected.has(detector.id)}
+              onSelect={handleSelect}
+            />
+          ))}
+        </IssueStreamDetectorContextProvider>
       </DetectorListSimpleTable>
     </Container>
   );
 }
 
-const Container = styled('div')`
-  container-type: inline-size;
-`;
+type ColumnNames =
+  | 'name'
+  | 'type'
+  | 'assignee'
+  | 'last-issue'
+  | 'connected-automations'
+  | 'visualization';
 
-const DetectorListSimpleTable = styled(SimpleTable)`
+function makeGridSizes(additionalColumns: MonitorListAdditionalColumn[]) {
+  const additionalColumnSizes = additionalColumns
+    .map(col => col.columnWidth ?? 'auto')
+    .join(' ');
+
+  return css`
+    --detector-table-name: 2fr;
+    --detector-table-type: 90px;
+    --detector-table-assignee: 90px;
+    --detector-table-last-issue: 1.5fr;
+    --detector-table-connected-automations: 110px;
+
+    /* Table visualization has two columns to account for the expand button */
+    --detector-table-visualization: ${additionalColumnSizes} 3fr max-content;
+  `;
+}
+
+function makeGridTemplate(columns: ColumnNames[]) {
+  return `grid-template-columns:
+    ${columns.map(col => `var(--detector-table-${col})`).join('\n    ')};`;
+}
+
+const gridDefinitions = (
+  p: {theme: Theme},
+  additionalColumns: MonitorListAdditionalColumn[]
+) => {
+  return css`
+    ${makeGridSizes(additionalColumns)};
+
+    @container (min-width: ${p.theme.container.sm}) {
+      ${makeGridTemplate(['name', 'type'])}
+
+      [data-column-name='type'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container.xl}) {
+      ${makeGridTemplate(['name', 'type', 'assignee'])}
+
+      [data-column-name='assignee'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container['3xl']}) {
+      ${makeGridTemplate(['name', 'type', 'last-issue', 'assignee'])}
+
+      [data-column-name='last-issue'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container['4xl']}) {
+      ${makeGridTemplate([
+        'name',
+        'type',
+        'last-issue',
+        'assignee',
+        'connected-automations',
+      ])}
+
+      [data-column-name='connected-automations'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container['5xl']}) {
+      ${makeGridTemplate([
+        'name',
+        'type',
+        'last-issue',
+        'assignee',
+        'connected-automations',
+      ])}
+    }
+  `;
+};
+
+// When there is a visualization, prioritize showing it over other columns
+const gridDefinitionsWithVisualization = (
+  p: {theme: Theme},
+  additionalColumns: MonitorListAdditionalColumn[]
+) => {
+  const additionalColumnDisplay = additionalColumns.map(
+    col => css`
+      [data-column-name='${col.id}'] {
+        display: flex;
+      }
+    `
+  );
+
+  return css`
+    ${makeGridSizes(additionalColumns)};
+
+    @container (min-width: ${p.theme.container.xl}) {
+      ${makeGridTemplate(['name', 'visualization'])}
+
+      [data-column-name='visualization'] {
+        display: block;
+      }
+
+      ${additionalColumnDisplay}
+    }
+
+    @container (min-width: ${p.theme.container['3xl']}) {
+      ${makeGridTemplate(['name', 'assignee', 'visualization'])}
+
+      [data-column-name='assignee'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container['4xl']}) {
+      ${makeGridTemplate(['name', 'last-issue', 'assignee', 'visualization'])}
+
+      [data-column-name='last-issue'] {
+        display: flex;
+      }
+    }
+
+    @container (min-width: ${p.theme.container['5xl']}) {
+      ${makeGridTemplate([
+        'name',
+        'last-issue',
+        'assignee',
+        'connected-automations',
+        'visualization',
+      ])}
+
+      [data-column-name='connected-automations'] {
+        display: flex;
+      }
+    }
+  `;
+};
+
+// When visualization is expanded, only show name and visualization
+const gridDefinitionsWithVisualizationExpanded = (
+  p: {theme: Theme},
+  additionalColumns: MonitorListAdditionalColumn[]
+) => {
+  const additionalColumnDisplay = additionalColumns.map(
+    col => css`
+      [data-column-name='${col.id}'] {
+        display: flex;
+      }
+    `
+  );
+
+  return css`
+    ${makeGridSizes(additionalColumns)};
+
+    @container (min-width: ${p.theme.container.xl}) {
+      ${makeGridTemplate(['name', 'visualization'])}
+
+      [data-column-name='visualization'] {
+        display: block;
+      }
+
+      ${additionalColumnDisplay}
+    }
+  `;
+};
+
+const DetectorListSimpleTable = styled(SimpleTable)<{
+  additionalColumns: MonitorListAdditionalColumn[];
+  hasVisualization: boolean;
+  isVisualizationExpanded: boolean;
+}>`
   grid-template-columns: 1fr;
+  overflow: clip;
 
-  .type,
-  .last-issue,
-  .assignee,
-  .connected-automations {
+  [data-column-name='type'],
+  [data-column-name='last-issue'],
+  [data-column-name='assignee'],
+  [data-column-name='connected-automations'],
+  [data-column-name='visualization'] {
     display: none;
   }
 
-  @container (min-width: ${p => p.theme.breakpoints.xsmall}) {
-    grid-template-columns: 3fr 0.8fr;
+  ${p =>
+    p.additionalColumns.map(
+      col => css`
+        [data-column-name='${col.id}'] {
+          display: none;
+        }
+      `
+    )}
 
-    .type {
-      display: flex;
+  ${p => {
+    if (p.isVisualizationExpanded) {
+      return gridDefinitionsWithVisualizationExpanded(p, p.additionalColumns);
     }
-  }
-
-  @container (min-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: 3fr 0.8fr 1.5fr 0.8fr;
-
-    .last-issue {
-      display: flex;
+    if (p.hasVisualization) {
+      return gridDefinitionsWithVisualization(p, p.additionalColumns);
     }
-  }
+    return gridDefinitions(p, p.additionalColumns);
+  }}
 
-  @container (min-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: 3fr 0.8fr 1.5fr 0.8fr;
-
-    .assignee {
-      display: flex;
-    }
-  }
-
-  @container (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: 4.5fr 0.8fr 1.5fr 0.8fr 2fr;
-
-    .connected-automations {
-      display: flex;
+  @container (min-width: ${p => p.theme.container.xl}) {
+    [data-column-name='visualization'] {
+      grid-column: -3 / -1;
     }
   }
 `;
 
-export default DetectorListTable;
+const GridLineOverlayRow = styled(SimpleTable.Row)`
+  position: static;
+  pointer-events: none;
+  grid-row: 1;
+
+  &:not(:last-child) {
+    border-bottom: 0;
+  }
+`;
+
+const GridLineOverlayCell = styled(SimpleTable.RowCell)`
+  grid-column: -3 / -1;
+  padding: 0;
+`;
+
+const PositionedGridLineOverlay = styled(GridLineOverlay)`
+  pointer-events: none;
+  top: 0;
+
+  display: none;
+
+  @container (min-width: ${p => p.theme.container.xl}) {
+    display: block;
+  }
+`;
+
+const VisualizationHeaderCell = styled('th')`
+  grid-column: -3 / -1;
+  border-left: 1px solid ${p => p.theme.tokens.border.secondary};
+  min-height: 50px;
+  min-width: 0;
+`;
+
+const VisualizationExpandButtonCell = styled('th')`
+  grid-row: 1;
+  grid-column: -1;
+  padding: ${p => p.theme.space.lg} ${p => p.theme.space.xl};
+  display: none;
+  z-index: 4;
+
+  @container (min-width: ${p => p.theme.container.xl}) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+`;

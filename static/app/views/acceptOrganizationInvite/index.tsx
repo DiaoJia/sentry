@@ -1,22 +1,24 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
+import {useMutation} from '@tanstack/react-query';
+
+import {Alert} from '@sentry/scraps/alert';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Heading} from '@sentry/scraps/text';
 
 import {logout} from 'sentry/actionCreators/account';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import NarrowLayout from 'sentry/components/narrowLayout';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {NarrowLayout} from 'sentry/components/narrowLayout';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t, tct} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
-import {useApiQuery, useMutation} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApiQuery} from 'sentry/utils/queryClient';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useApi} from 'sentry/utils/useApi';
 import {useParams} from 'sentry/utils/useParams';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
 
 type InviteDetails = {
   existingMember: boolean;
@@ -52,12 +54,12 @@ function AcceptActions({
           )}
         </p>
       )}
-      <Actions>
+      <Flex justify="between" align="center" marginBottom="2xl">
         <ActionsLeft>
           {inviteDetails.hasAuthProvider && !inviteDetails.requireSso && (
             <LinkButton
               data-test-id="sso-login"
-              priority="primary"
+              variant="primary"
               href={`/auth/login/${inviteDetails.orgSlug}/`}
             >
               {t('Join with %s', inviteDetails.ssoProvider)}
@@ -66,7 +68,7 @@ function AcceptActions({
 
           <Button
             data-test-id="join-organization"
-            priority="primary"
+            variant="primary"
             busy={isAccepting}
             disabled={isAccepting}
             onClick={acceptInvite}
@@ -74,7 +76,7 @@ function AcceptActions({
             {t('Join the %s organization', inviteDetails.orgSlug)}
           </Button>
         </ActionsLeft>
-      </Actions>
+      </Flex>
     </Fragment>
   );
 }
@@ -85,7 +87,7 @@ function ExistingMemberAlert() {
 
   return (
     <Alert.Container>
-      <Alert type="warning" data-test-id="existing-member">
+      <Alert variant="warning" data-test-id="existing-member">
         {tct(
           'Your account ([email]) is already a member of this organization. [switchLink:Switch accounts]?',
           {
@@ -117,15 +119,15 @@ function Warning2fa({inviteDetails}: {inviteDetails: InviteDetails}) {
           {orgSlug: inviteDetails.orgSlug}
         )}
       </p>
-      <Actions>
+      <Flex justify="between" align="center" marginBottom="2xl">
         <LinkButton
           external
-          priority="primary"
+          variant="primary"
           href={`${sentryUrl}/settings/account/security/`}
         >
           {t('Configure Two-Factor Auth')}
         </LinkButton>
-      </Actions>
+      </Flex>
     </Fragment>
   );
 }
@@ -166,12 +168,12 @@ function AuthenticationActions({inviteDetails}: {inviteDetails: InviteDetails}) 
         </p>
       )}
 
-      <Actions>
+      <Flex justify="between" align="center" marginBottom="2xl">
         <ActionsLeft>
           {inviteDetails.hasAuthProvider && (
             <LinkButton
               data-test-id="sso-login"
-              priority="primary"
+              variant="primary"
               href={`/auth/login/${inviteDetails.orgSlug}/`}
             >
               {t('Join with %s', inviteDetails.ssoProvider)}
@@ -180,7 +182,7 @@ function AuthenticationActions({inviteDetails}: {inviteDetails: InviteDetails}) 
           {!inviteDetails.requireSso && (
             <LinkButton
               data-test-id="create-account"
-              priority="primary"
+              variant="primary"
               href="/auth/register/"
             >
               {t('Create a new account')}
@@ -196,25 +198,29 @@ function AuthenticationActions({inviteDetails}: {inviteDetails: InviteDetails}) 
             {t('Login using an existing account')}
           </ExternalLink>
         )}
-      </Actions>
+      </Flex>
     </Fragment>
   );
 }
 
 function AcceptOrganizationInvite() {
   const api = useApi({persistInFlight: true});
-  const params = useParams<{memberId: string; token: string; orgId?: string}>();
-
-  const orgSlug = params.orgId || ConfigStore.get('customerDomain')?.subdomain || null;
+  const params = useParams<{memberId: string; orgId: string; token: string}>();
 
   const {
     data: inviteDetails,
     isPending,
     isError,
   } = useApiQuery<InviteDetails>(
-    orgSlug
-      ? [`/accept-invite/${orgSlug}/${params.memberId}/${params.token}/`]
-      : [`/accept-invite/${params.memberId}/${params.token}/`],
+    [
+      getApiUrl('/accept-invite/$organizationIdOrSlug/$memberId/$token/', {
+        path: {
+          organizationIdOrSlug: params.orgId,
+          memberId: params.memberId,
+          token: params.token,
+        },
+      }),
+    ],
     {
       staleTime: Infinity,
       retry: false,
@@ -228,16 +234,14 @@ function AcceptOrganizationInvite() {
   } = useMutation({
     mutationFn: () =>
       api.requestPromise(
-        orgSlug
-          ? `/accept-invite/${orgSlug}/${params.memberId}/${params.token}/`
-          : `/accept-invite/${params.memberId}/${params.token}/`,
+        `/accept-invite/${params.orgId}/${params.memberId}/${params.token}/`,
         {
           method: 'POST',
         }
       ),
     onSuccess: () => {
       if (inviteDetails?.orgSlug) {
-        window.location.href = `/${inviteDetails.orgSlug}/`;
+        testableWindowLocation.assign(`/${inviteDetails.orgSlug}/`);
       }
     },
   });
@@ -250,7 +254,7 @@ function AcceptOrganizationInvite() {
     return (
       <NarrowLayout>
         <Alert.Container>
-          <Alert type="warning">
+          <Alert variant="warning" showIcon={false}>
             {tct(
               'This organization invite link is invalid. It may be expired, or you may need to [switchLink:sign in with a different account].',
               {
@@ -260,7 +264,10 @@ function AcceptOrganizationInvite() {
                     data-test-id="existing-member-link"
                     onClick={e => {
                       e.preventDefault();
-                      logout(api, `/accept/${params.memberId}/${params.token}/`);
+                      logout(
+                        api,
+                        `/accept/${params.orgId}/${params.memberId}/${params.token}/`
+                      );
                     }}
                   />
                 ),
@@ -275,10 +282,10 @@ function AcceptOrganizationInvite() {
   return (
     <NarrowLayout>
       <SentryDocumentTitle title={t('Accept Organization Invite')} />
-      <SettingsPageHeader title={t('Accept organization invite')} />
+      <Heading as="h1">{t('Accept organization invite')}</Heading>
       {isAcceptError && (
         <Alert.Container>
-          <Alert type="error">
+          <Alert variant="danger" showIcon={false}>
             {t('Failed to join this organization. Please try again')}
           </Alert>
         </Alert.Container>
@@ -307,15 +314,9 @@ function AcceptOrganizationInvite() {
   );
 }
 
-const Actions = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: ${space(3)};
-`;
 const ActionsLeft = styled('span')`
   > a {
-    margin-right: ${space(1)};
+    margin-right: ${p => p.theme.space.md};
   }
 `;
 

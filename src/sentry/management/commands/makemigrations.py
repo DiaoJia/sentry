@@ -1,6 +1,7 @@
 import os
 import sys
 
+from django.apps.registry import apps
 from django.conf import settings
 from django.core.management.commands import makemigrations
 from django.db.migrations.loader import MigrationLoader
@@ -29,7 +30,7 @@ def validate(migrations_filepath: str, latest_migration_by_app: dict[str, str]) 
 
     for app_label, name in sorted(latest_migration_by_app.items()):
         if infile[app_label] != name:
-            print(  # noqa: S002
+            print(  # noqa: S002, T201
                 f"ERROR: The latest migration does not match the one in the lockfile -> `{app_label}` app: {name} vs {infile[app_label]}"
             )
             # makemigrations.Command --check exits with 1 if a migration needs to be generated
@@ -60,10 +61,14 @@ class Command(makemigrations.Command):
         for migration in loader.disk_migrations.values():
             name = migration.name
             app_label = migration.app_label
-            if (
-                settings.MIGRATIONS_LOCKFILE_APP_WHITELIST
-                and app_label not in settings.MIGRATIONS_LOCKFILE_APP_WHITELIST
-            ):
+            app_cfg = apps.get_app_config(app_label)
+
+            if app_cfg.module is None or app_cfg.module.__file__ is None:
+                raise AssertionError(f"{app_cfg.name} is missing __init__.py")
+
+            rel = os.path.relpath(app_cfg.module.__file__, settings.MIGRATIONS_LOCKFILE_PATH)
+            # do not lock migrations from outside the tree
+            if "/site-packages/" in rel or rel.startswith("../"):
                 continue
             latest_migration_by_app[app_label] = max(
                 latest_migration_by_app.get(app_label, "0"), name, key=_migration_sort_key

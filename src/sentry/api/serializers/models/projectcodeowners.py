@@ -31,6 +31,7 @@ class ProjectCodeOwnersSerializer(Serializer):
         }
         for item in item_list:
             code_mapping = item.repository_project_path_config
+            repository = code_mapping.project_repository.repository
 
             integration = integrations[item.repository_project_path_config.integration_id]
             install = integration.get_installation(
@@ -42,7 +43,7 @@ class ProjectCodeOwnersSerializer(Serializer):
             ):
                 try:
                     codeowners_response = install.get_codeowner_file(
-                        code_mapping.repository, ref=code_mapping.default_branch
+                        repository, ref=code_mapping.default_branch
                     )
                     if codeowners_response is not None:
                         codeowners_url = codeowners_response["html_url"]
@@ -73,15 +74,19 @@ class ProjectCodeOwnersSerializer(Serializer):
             for rule in schema["rules"]:
                 for rule_owner in rule["owners"]:
                     rule_owner["name"] = rule_owner.pop("identifier")
+                    # Stringify owner IDs for API response (stored as int in DB)
+                    if "id" in rule_owner:
+                        rule_owner["id"] = str(rule_owner["id"])
 
     def serialize(self, obj, attrs, user, **kwargs):
-        from sentry.api.validators.project_codeowners import validate_codeowners_associations
+        from sentry.api.validators.project_codeowners import build_codeowners_associations
 
         data = {
             "id": str(obj.id),
             "raw": obj.raw,
             "dateCreated": obj.date_added,
             "dateUpdated": obj.date_updated,
+            "dateSynced": obj.date_synced,
             "codeMappingId": str(obj.repository_project_path_config_id),
             "provider": attrs.get("provider", "unknown"),
         }
@@ -96,13 +101,18 @@ class ProjectCodeOwnersSerializer(Serializer):
             data["ownershipSyntax"] = convert_schema_to_rules_text(obj.schema)
 
         if "errors" in self.expand:
-            _, errors = validate_codeowners_associations(obj.raw, obj.project)
+            _, errors = build_codeowners_associations(obj.raw, obj.project)
             data["errors"] = errors
 
         if "renameIdentifier" in self.expand and hasattr(obj, "schema") and obj.schema:
             self.rename_schema_identifier_for_parsing(obj.schema)
 
         if "hasTargetingContext" in self.expand:
+            if obj.schema and obj.schema.get("rules"):
+                for rule in obj.schema["rules"]:
+                    for rule_owner in rule["owners"]:
+                        if "id" in rule_owner:
+                            rule_owner["id"] = str(rule_owner["id"])
             data["schema"] = obj.schema
             data["codeOwnersUrl"] = attrs.get("codeOwnersUrl", "unknown")
 

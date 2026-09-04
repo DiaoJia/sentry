@@ -1,18 +1,34 @@
 import {duration} from 'moment-timezone';
+import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
-import {RRWebInitFrameEventsFixture} from 'sentry-fixture/replay/rrweb';
+import {
+  RRWebFullSnapshotFrameEventFixture,
+  RRWebInitFrameEventsFixture,
+} from 'sentry-fixture/replay/rrweb';
 import {ReplayRecordFixture} from 'sentry-fixture/replayRecord';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
+import {stubIframeScrollTo} from 'sentry-test/iframeScrollTo';
 import {render as baseRender, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import type {Organization} from 'sentry/types/organization';
-import useLoadReplayReader from 'sentry/utils/replays/hooks/useLoadReplayReader';
-import ReplayReader from 'sentry/utils/replays/replayReader';
-import type RequestError from 'sentry/utils/requestError/requestError';
+import type {ResponseMeta} from 'sentry/types/api';
+import {useLoadReplayReader} from 'sentry/utils/replays/hooks/useLoadReplayReader';
+import {ReplayReader} from 'sentry/utils/replays/replayReader';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
 import ReplayClipPreview from './replayClipPreview';
 
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useMatches: jest.fn(() => [
+    {
+      id: '0',
+      pathname: '/organizations/sentry-emerging-tech/issues/',
+      params: {},
+      data: undefined,
+      handle: {path: '/organizations/:orgId/issues/:groupId/'},
+    },
+  ]),
+}));
 jest.mock('sentry/utils/replays/hooks/useLoadReplayReader');
 
 const mockUseLoadReplayReader = jest.mocked(useLoadReplayReader);
@@ -24,7 +40,7 @@ const mockReplayId = '761104e184c64d439ee1014b72b4d83b';
 const mockEventTimestamp = new Date('2022-09-22T16:59:41Z');
 const mockEventTimestampMs = mockEventTimestamp.getTime();
 
-const mockButtonHref = `/organizations/${mockOrgSlug}/replays/761104e184c64d439ee1014b72b4d83b/?referrer=%2Forganizations%2F%3AorgId%2Fissues%2F%3AgroupId%2Freplays%2F&t=57&t_main=errors`;
+const mockButtonHref = `/organizations/${mockOrgSlug}/explore/replays/761104e184c64d439ee1014b72b4d83b/?referrer=%2Forganizations%2F%3AorgId%2Fissues%2F%3AgroupId%2F&t=57&t_main=errors`;
 
 // Get replay data with the mocked replay reader params
 const mockReplay = ReplayReader.factory({
@@ -39,9 +55,14 @@ const mockReplay = ReplayReader.factory({
   }),
   errors: [],
   fetching: false,
-  attachments: RRWebInitFrameEventsFixture({
-    timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
-  }),
+  attachments: [
+    ...RRWebInitFrameEventsFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+    RRWebFullSnapshotFrameEventFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+  ],
   clipWindow: {
     startTimestampMs: mockEventTimestampMs - 5_000,
     endTimestampMs: mockEventTimestampMs + 5_000,
@@ -65,26 +86,21 @@ mockUseLoadReplayReader.mockImplementation(() => {
   };
 });
 
-const render = (children: React.ReactElement, orgParams: Partial<Organization> = {}) => {
-  const {router, organization} = initializeOrg({
-    organization: {slug: mockOrgSlug, ...orgParams},
-    router: {
-      routes: [
-        {path: '/'},
-        {path: '/organizations/:orgId/issues/:groupId/'},
-        {path: 'replays/'},
-      ],
-      location: {
-        pathname: '/organizations/org-slug/replays/',
-        query: {},
-      },
-    },
-  });
+const render = (
+  children: React.ReactElement,
+  orgParams: Parameters<typeof OrganizationFixture>[0] = {}
+) => {
+  const organization = OrganizationFixture({slug: mockOrgSlug, ...orgParams});
 
   return baseRender(children, {
-    router,
     organization,
-    deprecatedRouterMocks: true,
+    initialRouterConfig: {
+      location: {
+        pathname: `/organizations/${mockOrgSlug}/issues/`,
+        query: {},
+      },
+      route: '/organizations/:orgId/issues/',
+    },
   });
 };
 
@@ -102,6 +118,8 @@ jest.mock('screenfull', () => ({
 }));
 
 describe('ReplayClipPreview', () => {
+  beforeAll(stubIframeScrollTo);
+
   beforeEach(() => {
     mockIsFullscreen.mockReturnValue(false);
 
@@ -147,14 +165,16 @@ describe('ReplayClipPreview', () => {
     expect(screen.getByTestId('replay-loading-placeholder')).toBeInTheDocument();
   });
 
-  it('Should throw error when there is a fetch error', () => {
+  it('Should throw an error when server did not find the replay', () => {
     // Change the mocked hook to return a fetch error
     mockUseLoadReplayReader.mockImplementationOnce(() => {
       return {
         attachmentError: undefined,
         attachments: [],
         errors: [],
-        fetchError: {status: 400} as RequestError,
+        fetchError: new RequestError('GET', '/replay/', new Error('server error'), {
+          status: 500,
+        } as ResponseMeta),
         isError: true,
         isPending: false,
         onRetry: jest.fn(),
@@ -169,6 +189,45 @@ describe('ReplayClipPreview', () => {
     render(<ReplayClipPreview {...defaultProps} />);
 
     expect(screen.getByTestId('replay-error')).toBeVisible();
+    expect(
+      screen.getByText('There was an error loading the replay.')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Retry'})).toBeInTheDocument();
+  });
+
+  it('Should show a missing replay alert for 404 fetch errors', () => {
+    mockUseLoadReplayReader.mockImplementationOnce(() => {
+      return {
+        attachmentError: undefined,
+        attachments: [],
+        errors: [],
+        fetchError: new RequestError('GET', '/replay/', new Error('not found'), {
+          status: 404,
+        } as ResponseMeta),
+        isError: true,
+        isPending: false,
+        onRetry: jest.fn(),
+        projectSlug: ProjectFixture().slug,
+        replay: null,
+        replayId: mockReplayId,
+        replayRecord: ReplayRecordFixture(),
+        status: 'error' as const,
+      };
+    });
+
+    render(<ReplayClipPreview {...defaultProps} />);
+
+    expect(
+      screen.getByText(/A replay isn't available for this event/)
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', {name: 'check your replay usage'})).toHaveAttribute(
+      'href',
+      `/settings/${mockOrgSlug}/stats/?dataCategory=replays`
+    );
+    expect(
+      screen.queryByText('There was an error loading the replay.')
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: 'Retry'})).not.toBeInTheDocument();
   });
 
   it('Should throw throttled error when fetch returns 429', () => {
@@ -176,7 +235,9 @@ describe('ReplayClipPreview', () => {
       return {
         attachments: [],
         errors: [],
-        fetchError: {status: 429} as RequestError,
+        fetchError: new RequestError('GET', '/replay/', new Error('throttled'), {
+          status: 429,
+        } as ResponseMeta),
         attachmentError: undefined,
         isError: true,
         isPending: false,
@@ -200,7 +261,11 @@ describe('ReplayClipPreview', () => {
         attachments: [],
         errors: [],
         fetchError: undefined,
-        attachmentError: [{status: 429} as RequestError],
+        attachmentError: [
+          new RequestError('GET', '/replay/', new Error('throttled'), {
+            status: 429,
+          } as ResponseMeta),
+        ],
         isError: true,
         isPending: false,
         onRetry: jest.fn(),

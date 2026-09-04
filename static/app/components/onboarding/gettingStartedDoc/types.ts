@@ -1,13 +1,56 @@
+import type React from 'react';
+
 import type {Client} from 'sentry/api';
-import type {StepProps} from 'sentry/components/onboarding/gettingStartedDoc/step';
+import type {ContentBlock} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/types';
 import type {ReleaseRegistrySdk} from 'sentry/components/onboarding/gettingStartedDoc/useSourcePackageRegistries';
 import type {Organization} from 'sentry/types/organization';
-import type {PlatformKey, Project, ProjectKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project, ProjectKey} from 'sentry/types/project';
+
+export type {ContentBlock} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/types';
 
 type GeneratorFunction<T, Params> = (params: Params) => T;
 type WithGeneratorProperties<T extends Record<string, any>, Params> = {
   [key in keyof T]: GeneratorFunction<T[key], Params>;
 };
+
+export enum StepType {
+  INSTALL = 'install',
+  CONFIGURE = 'configure',
+  VERIFY = 'verify',
+}
+
+interface BaseStepProps {
+  /**
+   * The content blocks to display
+   */
+  content: ContentBlock[];
+  /**
+   * Whether the step instructions are collapsible
+   */
+  collapsible?: boolean;
+  /**
+   * Fired when the optional toggle is clicked.
+   * Useful for when we want to fire analytics events.
+   */
+  onOptionalToggleClick?: (showOptionalConfig: boolean) => void;
+  /**
+   * Additional items to be displayed to the right of the step title, e.g. a button to copy the configuration to the clipboard.
+   */
+  trailingItems?: React.ReactNode;
+}
+
+interface StepPropsWithTitle extends BaseStepProps {
+  title: string;
+  type?: undefined;
+}
+
+interface StepPropsWithoutTitle extends BaseStepProps {
+  type: StepType;
+  title?: undefined;
+}
+
+export type OnboardingStep = StepPropsWithTitle | StepPropsWithoutTitle;
 
 export interface PlatformOption<Value extends string = string> {
   /**
@@ -16,6 +59,10 @@ export interface PlatformOption<Value extends string = string> {
   items: Array<{
     label: string;
     value: Value;
+    /**
+     * Optional leading items to display before the label (e.g., icons)
+     */
+    leadingItems?: React.ReactNode;
   }>;
   /**
    * The name of the option
@@ -27,7 +74,7 @@ export interface PlatformOption<Value extends string = string> {
   defaultValue?: string;
 }
 
-export type BasePlatformOptions = Record<string, PlatformOption<string>>;
+export type BasePlatformOptions = Record<string, PlatformOption>;
 
 export type SelectedPlatformOptions<
   PlatformOptions extends BasePlatformOptions = BasePlatformOptions,
@@ -39,11 +86,28 @@ export enum DocsPageLocation {
   PROFILING_PAGE = 1,
 }
 
+/**
+ * Which flow is rendering the setup docs. Drives which analytics event names the
+ * shared docs components fire (dsn copied, next step, source maps, js loader),
+ * the copy-as-markdown `source`, and the gaming-SDK-access `origin`.
+ *
+ * Replaces the old `newOrg` + `hasScmOnboarding` boolean pair, which could not
+ * express the four flows that reach these components. When absent, consumers
+ * fall back to the pre-enum default (the plain project-creation/legacy names).
+ */
+export type DocsFlow =
+  | 'onboarding'
+  | 'onboarding-scm'
+  | 'project-creation'
+  | 'project-creation-scm';
+
 export enum ProductSolution {
   ERROR_MONITORING = 'error-monitoring',
   PERFORMANCE_MONITORING = 'performance-monitoring',
   SESSION_REPLAY = 'session-replay',
   PROFILING = 'profiling',
+  LOGS = 'logs',
+  METRICS = 'metrics',
 }
 
 export interface DocsParams<
@@ -52,6 +116,8 @@ export interface DocsParams<
   api: Client;
   dsn: ProjectKey['dsn'];
   isFeedbackSelected: boolean;
+  isLogsSelected: boolean;
+  isMetricsSelected: boolean;
   isPerformanceSelected: boolean;
   isProfilingSelected: boolean;
   isReplaySelected: boolean;
@@ -59,11 +125,11 @@ export interface DocsParams<
   organization: Organization;
   platformKey: PlatformKey;
   platformOptions: SelectedPlatformOptions<PlatformOptions>;
-  projectId: Project['id'];
+  project: Project;
   projectKeyId: ProjectKey['id'];
-  projectSlug: Project['slug'];
   sourcePackageRegistries: {isLoading: boolean; data?: ReleaseRegistrySdk};
   urlPrefix: string;
+  docsFlow?: DocsFlow;
   /**
    * The page where the docs are being displayed
    */
@@ -76,7 +142,6 @@ export interface DocsParams<
     name?: boolean;
     screenshot?: boolean;
   };
-  newOrg?: boolean;
   profilingOptions?: {
     defaultProfilingMode?: 'transaction' | 'continuous';
   };
@@ -95,21 +160,31 @@ interface NextStep {
 export interface OnboardingConfig<
   PlatformOptions extends BasePlatformOptions = BasePlatformOptions,
 > extends WithGeneratorProperties<
-    {
-      configure: StepProps[];
-      install: StepProps[];
-      verify: StepProps[];
-      introduction?: React.ReactNode | React.ReactNode[];
-      nextSteps?: Array<NextStep | null>;
-      onPageLoad?: () => void;
-      onPlatformOptionsChange?: (
-        platformOptions: SelectedPlatformOptions<PlatformOptions>
-      ) => void;
-      onProductSelectionChange?: (products: ProductSolution[]) => void;
-      onProductSelectionLoad?: (products: ProductSolution[]) => void;
-    },
-    DocsParams<PlatformOptions>
-  > {}
+  {
+    configure: OnboardingStep[];
+    install: OnboardingStep[];
+    verify: OnboardingStep[];
+    introduction?: React.ReactNode | React.ReactNode[];
+    nextSteps?: Array<NextStep | null>;
+    onPageLoad?: () => void;
+    onPlatformOptionsChange?: (
+      platformOptions: SelectedPlatformOptions<PlatformOptions>
+    ) => void;
+    onProductSelectionChange?: (params: {
+      previousProducts: ProductSolution[];
+      products: ProductSolution[];
+    }) => void;
+    onProductSelectionLoad?: (products: ProductSolution[]) => void;
+  },
+  DocsParams<PlatformOptions>
+> {
+  /**
+   * When true, the "Copy instructions" button is hidden for this guide.
+   * Use when the guide includes its own copy mechanism
+   * (e.g. AI-assisted setup prompt).
+   */
+  hideInstructionsCopy?: boolean;
+}
 
 export interface Docs<PlatformOptions extends BasePlatformOptions = BasePlatformOptions> {
   onboarding: OnboardingConfig<PlatformOptions>;
@@ -119,6 +194,9 @@ export interface Docs<PlatformOptions extends BasePlatformOptions = BasePlatform
   feedbackOnboardingCrashApi?: OnboardingConfig<PlatformOptions>;
   feedbackOnboardingJsLoader?: OnboardingConfig<PlatformOptions>;
   feedbackOnboardingNpm?: OnboardingConfig<PlatformOptions>;
+  logsOnboarding?: OnboardingConfig<PlatformOptions>;
+  mcpOnboarding?: OnboardingConfig<PlatformOptions>;
+  metricsOnboarding?: OnboardingConfig<PlatformOptions>;
   performanceOnboarding?: OnboardingConfig<PlatformOptions>;
   platformOptions?: PlatformOptions;
   profilingOnboarding?: OnboardingConfig<PlatformOptions>;

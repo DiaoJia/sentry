@@ -1,14 +1,15 @@
 import {useMemo} from 'react';
-import styled from '@emotion/styled';
 
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
+import {Flex} from '@sentry/scraps/layout';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+
 import type {
   BasePlatformOptions,
   PlatformOption,
   SelectedPlatformOptions,
 } from 'sentry/components/onboarding/gettingStartedDoc/types';
-import {space} from 'sentry/styles/space';
-import useRouter from 'sentry/utils/useRouter';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 /**
  * Hook that returns the currently selected platform option values from the URL
@@ -17,8 +18,7 @@ import useRouter from 'sentry/utils/useRouter';
 export function useUrlPlatformOptions<PlatformOptions extends BasePlatformOptions>(
   platformOptions?: PlatformOptions
 ): SelectedPlatformOptions<PlatformOptions> {
-  const router = useRouter();
-  const {query} = router.location;
+  const {query} = useLocation();
 
   return useMemo(() => {
     if (!platformOptions) {
@@ -28,9 +28,11 @@ export function useUrlPlatformOptions<PlatformOptions extends BasePlatformOption
     return Object.keys(platformOptions).reduce((acc, key) => {
       const defaultValue = platformOptions[key]!.defaultValue;
       const values = platformOptions[key]!.items.map(({value}) => value);
-      acc[key as keyof PlatformOptions] = values.includes(query[key])
-        ? query[key]
-        : (defaultValue ?? values[0]);
+      const queryValue = query[key];
+      acc[key as keyof PlatformOptions] =
+        typeof queryValue === 'string' && values.includes(queryValue)
+          ? queryValue
+          : (defaultValue ?? values[0]!);
       return acc;
     }, {} as SelectedPlatformOptions<PlatformOptions>);
   }, [platformOptions, query]);
@@ -67,10 +69,6 @@ type PlatformOptionsControlProps = {
    */
   platformOptions: Record<string, PlatformOption>;
   /**
-   * Object with default value for each option
-   */
-  defaultOptions?: Record<string, string[]>;
-  /**
    * Fired when the value changes
    */
   onChange?: (options: SelectedPlatformOptions) => void;
@@ -80,36 +78,34 @@ export function PlatformOptionsControl({
   platformOptions,
   onChange,
 }: PlatformOptionsControlProps) {
-  const router = useRouter();
+  const location = useLocation();
+  const navigate = useNavigate();
   const urlOptionValues = useUrlPlatformOptions(platformOptions);
 
   const handleChange = (key: string, value: string) => {
     onChange?.({[key]: value});
-    router.replace({
-      ...router.location,
-      query: {
-        ...router.location.query,
-        [key]: value,
+    navigate(
+      {
+        ...location,
+        query: {
+          ...location.query,
+          [key]: value,
+        },
       },
-    });
+      {replace: true}
+    );
   };
 
   return (
-    <Options>
+    <Flex wrap="wrap" gap="md">
       {Object.entries(platformOptions).map(([key, platformOption]) => (
         <OptionControl
           key={key}
           option={platformOption}
-          value={urlOptionValues[key] ?? (platformOption.items[0]?.value as string)}
+          value={urlOptionValues[key] ?? platformOption.items[0]?.value!}
           onChange={value => handleChange(key, value)}
         />
       ))}
-    </Options>
+    </Flex>
   );
 }
-
-const Options = styled('div')`
-  display: flex;
-  flex-wrap: wrap;
-  gap: ${space(1)};
-`;

@@ -4,16 +4,16 @@ from unittest.mock import patch
 from sentry.discover.models import TeamKeyTransaction, TeamKeyTransactionModelManager
 from sentry.models.projectteam import ProjectTeam
 from sentry.signals import receivers_raise_on_send
-from sentry.testutils.cases import TransactionTestCase
+from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers import Feature
 
 
-class TeamKeyTransactionModelManagerTestCase(TransactionTestCase):
-    def test_custom_manger(self):
+class TeamKeyTransactionModelManagerTestCase(TestCase):
+    def test_custom_manger(self) -> None:
         self.assertIsInstance(TeamKeyTransaction.objects, TeamKeyTransactionModelManager)
 
     @receivers_raise_on_send()
-    def test_post_save_signal_runs_if_dynamic_sampling_is_disabled(self):
+    def test_post_save_signal_runs_if_dynamic_sampling_is_disabled(self) -> None:
         self.project = self.create_project(name="foo")
 
         team = self.create_team(organization=self.organization, name="Team A")
@@ -28,7 +28,7 @@ class TeamKeyTransactionModelManagerTestCase(TransactionTestCase):
             assert mock_task.mock_calls == []
 
     @receivers_raise_on_send()
-    def test_post_save_signal_runs_if_dynamic_sampling_is_enabled(self):
+    def test_post_save_signal_runs_if_dynamic_sampling_is_enabled(self) -> None:
         with Feature(
             {
                 "organizations:dynamic-sampling": True,

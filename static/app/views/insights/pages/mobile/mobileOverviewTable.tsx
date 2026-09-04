@@ -1,10 +1,13 @@
-import {type Theme, useTheme} from '@emotion/react';
+import {useTheme, type Theme} from '@emotion/react';
 import type {Location} from 'history';
 
-import type {GridColumnHeader} from 'sentry/components/gridEditable';
-import GridEditable, {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
-import type {CursorHandler} from 'sentry/components/pagination';
-import Pagination from 'sentry/components/pagination';
+import type {CursorHandler} from '@sentry/scraps/pagination';
+import {Pagination} from '@sentry/scraps/pagination';
+
+import type {GridColumnHeader} from 'sentry/components/tables/gridEditable';
+import {COL_WIDTH_UNDEFINED, GridEditable} from 'sentry/components/tables/gridEditable';
+import {useQueryBasedColumnResize} from 'sentry/components/tables/gridEditable/useQueryBasedColumnResize';
+import {IconStar} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {EventsMetaType} from 'sentry/utils/discover/eventView';
@@ -12,19 +15,22 @@ import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
 import type {Sort} from 'sentry/utils/discover/fields';
 import {VisuallyCompleteWithData} from 'sentry/utils/performanceForSentry';
 import {useLocation} from 'sentry/utils/useLocation';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {SPAN_HEADER_TOOLTIPS} from 'sentry/views/insights/common/components/headerTooltips/headerTooltips';
-import {renderHeadCell} from 'sentry/views/insights/common/components/tableCells/renderHeadCell';
+import {
+  getColumnSort,
+  renderHeadCell,
+} from 'sentry/views/insights/common/components/tableCells/renderHeadCell';
 import {StarredSegmentCell} from 'sentry/views/insights/common/components/tableCells/starredSegmentCell';
 import {QueryParameterNames} from 'sentry/views/insights/common/views/queryParameters';
 import {DataTitles} from 'sentry/views/insights/common/views/spans/types';
-import {StyledIconStar} from 'sentry/views/insights/pages/backend/backendTable';
 import {TransactionCell} from 'sentry/views/insights/pages/transactionCell';
-import type {EAPSpanResponse} from 'sentry/views/insights/types';
+import type {SpanResponse} from 'sentry/views/insights/types';
 
 type Row = Pick<
-  EAPSpanResponse,
+  SpanResponse,
   | 'is_starred_transaction'
   | 'transaction'
   | 'span.op'
@@ -68,6 +74,7 @@ const COLUMN_ORDER: Column[] = [
     key: 'epm()',
     name: t('TPM'),
     width: COL_WIDTH_UNDEFINED,
+    tooltip: SPAN_HEADER_TOOLTIPS.tpm,
   },
   {
     key: 'p75(measurements.frames_slow_rate)',
@@ -135,6 +142,9 @@ export function MobileOverviewTable({response, sort}: Props) {
       query: {...query, [QueryParameterNames.PAGES_CURSOR]: newCursor},
     });
   };
+  const {columns, handleResizeColumn} = useQueryBasedColumnResize({
+    columns: [...COLUMN_ORDER],
+  });
 
   return (
     <VisuallyCompleteWithData
@@ -147,24 +157,15 @@ export function MobileOverviewTable({response, sort}: Props) {
         isLoading={isLoading}
         error={response.error}
         data={data}
-        columnOrder={COLUMN_ORDER}
-        columnSortBy={[
-          {
-            key: sort.field,
-            order: sort.kind,
-          },
-        ]}
+        columnOrder={columns}
         grid={{
           prependColumnWidths: ['max-content'],
           renderPrependColumns,
-          renderHeadCell: column =>
-            renderHeadCell({
-              column,
-              sort,
-              location,
-            }),
+          getColumnSort: column => getColumnSort({column, location, sort}),
+          renderHeadCell: column => renderHeadCell({column}),
           renderBodyCell: (column, row) =>
-            renderBodyCell(column, row, meta, location, organization, theme),
+            renderBodyCell(column, row, meta, location, navigate, organization, theme),
+          onResizeColumn: handleResizeColumn,
         }}
       />
       <Pagination pageLinks={pageLinks} onCursor={handleCursor} />
@@ -172,9 +173,9 @@ export function MobileOverviewTable({response, sort}: Props) {
   );
 }
 
-function renderPrependColumns(isHeader: boolean, row?: Row | undefined) {
+function renderPrependColumns(isHeader: boolean, row?: Row) {
   if (isHeader) {
-    return [<StyledIconStar key="star" color="yellow300" isSolid />];
+    return [<IconStar key="star" variant="warning" isSolid />];
   }
 
   if (!row) {
@@ -195,6 +196,7 @@ function renderBodyCell(
   row: Row,
   meta: EventsMetaType | undefined,
   location: Location,
+  navigate: ReactRouter3Navigate,
   organization: Organization,
   theme: Theme
 ) {
@@ -203,11 +205,16 @@ function renderBodyCell(
   }
 
   if (column.key === 'transaction') {
+    // In eap, blank transaction ops are set to `default` but not in non-eap.
+    // The transaction summary is not eap yet, so we should exclude the `default` transaction.op filter
+    const spanOp =
+      row['span.op']?.toLowerCase() === 'default' ? undefined : row['span.op'];
+
     return (
       <TransactionCell
         project={row.project}
         transaction={row.transaction}
-        transactionMethod={row['span.op']}
+        transactionMethod={spanOp}
       />
     );
   }
@@ -216,6 +223,7 @@ function renderBodyCell(
 
   return renderer(row, {
     location,
+    navigate,
     organization,
     unit: meta.units?.[column.key],
     theme,

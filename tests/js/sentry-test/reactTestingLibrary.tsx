@@ -1,5 +1,13 @@
-import {type RouteObject, RouterProvider, type To, useRouteError} from 'react-router-dom';
-import {cache} from '@emotion/css'; // eslint-disable-line @emotion/no-vanilla
+import {Fragment} from 'react';
+import {createPortal} from 'react-dom';
+import {
+  Outlet,
+  RouterProvider,
+  useRouteError,
+  type RouteObject,
+  type To,
+} from 'react-router-dom';
+import {cache} from '@emotion/css'; // eslint-disable-line @sentry/no-vanilla-emotion
 import {CacheProvider, ThemeProvider} from '@emotion/react';
 import {
   createMemoryHistory,
@@ -9,68 +17,54 @@ import {
   type Router,
   type RouterNavigateOptions,
 } from '@remix-run/router';
+import {QueryClientProvider} from '@tanstack/react-query';
 import * as rtl from '@testing-library/react'; // eslint-disable-line no-restricted-imports
-import userEvent from '@testing-library/user-event'; // eslint-disable-line no-restricted-imports
+import {userEvent} from '@testing-library/user-event'; // eslint-disable-line no-restricted-imports
 import * as qs from 'query-string';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {ThemeFixture} from 'sentry-fixture/theme';
 
-import {makeTestQueryClient} from 'sentry-test/queryClient';
+import {GlobalDrawer} from '@sentry/scraps/drawer';
+import {GlobalModal} from '@sentry/scraps/modal';
 
-import {GlobalDrawer} from 'sentry/components/globalDrawer';
-import GlobalModal from 'sentry/components/globalModal';
-import type {InjectedRouter} from 'sentry/types/legacyReactRouter';
+import {CommandPaletteProvider} from 'sentry/components/commandPalette/ui/cmdk';
 import type {Organization} from 'sentry/types/organization';
-import {
-  DANGEROUS_SET_REACT_ROUTER_6_HISTORY,
-  DANGEROUS_SET_TEST_HISTORY,
-} from 'sentry/utils/browserHistory';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 import {ProvideAriaRouter} from 'sentry/utils/provideAriaRouter';
-import {QueryClientProvider} from 'sentry/utils/queryClient';
-import {OrganizationContext} from 'sentry/views/organizationContext';
-import {TestRouteContext} from 'sentry/views/routeContext';
+import {GlobalAlertProvider} from 'sentry/views/app/globalAlerts';
+import {TopBar} from 'sentry/views/navigation/topBar';
+import {LLMContextProvider} from 'sentry/views/seerExplorer/contexts/llmContext';
 
 import {instrumentUserEvent} from '../instrumentedEnv/userEventIntegration';
 
 import {initializeOrg} from './initializeOrg';
+import {SentryNuqsTestingAdapter} from './nuqsTestingAdapter';
+import {makeTestQueryClient} from './queryClient';
+import {ScrapsTestingProviders} from './scrapsTestingProviders';
 
 interface ProviderOptions {
   /**
-   * @deprecated do not use this option for new tests
-   *
-   * If enabled, the router will be mocked and will not react to user events (links, navigations, etc).
+   * Pass additional context providers
    */
-  deprecatedRouterMocks?: boolean;
-  /**
-   * Sets the history for the router.
-   */
-  history?: MemoryHistory;
+  additionalWrapper?: rtl.RenderOptions['wrapper'];
   /**
    * Sets the OrganizationContext. You may pass null to provide no organization
    */
   organization?: Partial<Organization> | null;
-  /**
-   * Sets the RouterContext.
-   */
-  router?: Partial<InjectedRouter>;
 }
 
-interface BaseRenderOptions<T extends boolean = boolean>
-  extends Pick<ProviderOptions, 'organization'>,
-    rtl.RenderOptions {
-  /**
-   * @deprecated do not use this option for new tests
-   *
-   * If enabled, the router will be mocked and will not react to user events (links, navigations, etc).
-   */
-  deprecatedRouterMocks?: T;
+interface LocationConfig {
+  pathname: string;
+  query?: Record<string, string | number | string[]>;
+  state?: any;
 }
 
-type LocationConfig =
-  | string
-  | {pathname: string; query?: Record<string, string | number | string[]>};
+export interface RouterConfig {
+  /**
+   * Child routes
+   */
+  children?: RouteObject[];
 
-type RouterConfig = {
   /**
    * Sets the initial location for the router.
    */
@@ -83,6 +77,7 @@ type RouterConfig = {
    * route: '/issues/:issueId/'
    */
   route?: string;
+
   /**
    * Sets the initial routes for the router.
    *
@@ -94,93 +89,88 @@ type RouterConfig = {
    * routes: ['/issues/:issueId/', '/issues/:issueId/events/:eventId/']
    */
   routes?: string[];
-};
+}
 
-type RenderOptions<T extends boolean = false> = T extends true
-  ? BaseRenderOptions<T> & {router?: Partial<InjectedRouter>}
-  : BaseRenderOptions<T> & {initialRouterConfig?: RouterConfig};
+export interface RenderOptions extends rtl.RenderOptions, ProviderOptions {
+  initialRouterConfig?: RouterConfig;
+  outletContext?: Record<string, unknown>;
+}
 
-type RenderReturn<T extends boolean = false> = T extends true
-  ? rtl.RenderResult
-  : rtl.RenderResult & {router: TestRouter};
+interface RenderReturn extends rtl.RenderResult {
+  router: TestRouter;
+}
 
-// Inject legacy react-router 3 style router mocked navigation functions
-// into the memory history used in react router 6
-function patchBrowserHistoryMocksEnabled(history: MemoryHistory, router: InjectedRouter) {
-  Object.defineProperty(history, 'location', {get: () => router.location});
-  history.replace = router.replace;
-  history.push = (path: any) => {
-    if (typeof path === 'object' && path.search) {
-      path.query = qs.parse(path.search);
-      delete path.search;
-      delete path.hash;
-      delete path.state;
-      delete path.key;
-    }
+interface RenderHookWithProvidersOptions<Props>
+  extends Omit<rtl.RenderHookOptions<Props>, 'wrapper'>, ProviderOptions {
+  initialRouterConfig?: RouterConfig;
+  outletContext?: Record<string, unknown>;
+}
 
-    // XXX(epurkhiser): This is a hack for react-router 3 to 6. react-router
-    // 6 will not convert objects into strings before pushing. We can detect
-    // this by looking for an empty hash, which we normally do not set for
-    // our browserHistory.push calls
-    if (typeof path === 'object' && path.hash === '') {
-      const queryString = path.query ? qs.stringify(path.query) : null;
-      path = `${path.pathname}${queryString ? `?${queryString}` : ''}`;
-    }
+interface InitialRouterOptions {
+  initialRouterConfig?: RouterConfig;
+  outletContext?: Record<string, unknown>;
+}
 
-    router.push(path);
-  };
-
-  DANGEROUS_SET_TEST_HISTORY({
-    goBack: router.goBack,
-    push: router.push,
-    replace: router.replace,
-    listen: jest.fn(() => {}),
-    listenBefore: jest.fn(),
-    getCurrentLocation: jest.fn(() => ({pathname: '', query: {}})),
-  });
+/**
+ * Mounts the TopBar slot outlets so that content routed into the TopBar (the
+ * page-frame layout renders headers/actions/feedback into these slots) is
+ * rendered and queryable in tests. The outlets are portaled to `document.body`
+ * (rather than the render container) so that `screen.*` queries still find the
+ * slotted content while leaving the test's `container` untouched (e.g. for
+ * `toBeEmptyDOMElement` assertions on components that render nothing).
+ */
+function TopBarTestSlotOutlets() {
+  return createPortal(
+    <Fragment>
+      <TopBar.Slot.Outlet name="breadcrumbs">{p => <div {...p} />}</TopBar.Slot.Outlet>
+      {/* Mirror the real TopBar, which renders the title slot as an <h1>. */}
+      <TopBar.Slot.Outlet name="title">{p => <h1 {...p} />}</TopBar.Slot.Outlet>
+      <TopBar.Slot.Outlet name="search">{p => <div {...p} />}</TopBar.Slot.Outlet>
+      <TopBar.Slot.Outlet name="actions">{p => <div {...p} />}</TopBar.Slot.Outlet>
+      <TopBar.Slot.Outlet name="feedback">{p => <div {...p} />}</TopBar.Slot.Outlet>
+    </Fragment>,
+    document.body
+  );
 }
 
 function makeAllTheProviders(options: ProviderOptions) {
-  const enableRouterMocks = options.deprecatedRouterMocks ?? false;
-  const {organization, router} = initializeOrg({
+  const {organization} = initializeOrg({
     organization: options.organization === null ? undefined : options.organization,
-    router: options.router,
   });
 
   // In some cases we may want to not provide an organization at all
   const optionalOrganization = options.organization === null ? null : organization;
+  // Any additional test providers
+  const AdditionalWrapper = options.additionalWrapper ?? Fragment;
 
   return function ({children}: {children?: React.ReactNode}) {
     const content = (
-      <OrganizationContext value={optionalOrganization}>
-        <GlobalDrawer>{children}</GlobalDrawer>
-      </OrganizationContext>
+      <TopBar.Slot.Provider>
+        <TopBarTestSlotOutlets />
+        <LLMContextProvider>
+          <OrganizationContext value={optionalOrganization}>
+            <GlobalAlertProvider>
+              <GlobalDrawer>
+                <AdditionalWrapper>{children}</AdditionalWrapper>
+              </GlobalDrawer>
+            </GlobalAlertProvider>
+          </OrganizationContext>
+        </LLMContextProvider>
+      </TopBar.Slot.Provider>
     );
 
-    const wrappedContent = enableRouterMocks ? (
-      <TestRouteContext
-        value={{
-          router,
-          location: router.location,
-          params: router.params,
-          routes: router.routes,
-        }}
-      >
-        {/* ProvideAriaRouter may not be necessary in tests but matches routes.tsx */}
-        <ProvideAriaRouter>{content}</ProvideAriaRouter>
-      </TestRouteContext>
-    ) : (
-      content
-    );
-
-    if (enableRouterMocks) {
-      patchBrowserHistoryMocksEnabled(options.history ?? createMemoryHistory(), router);
-    }
+    const wrappedContent = <ProvideAriaRouter>{content}</ProvideAriaRouter>;
 
     return (
       <CacheProvider value={{...cache, compat: true}}>
         <QueryClientProvider client={makeTestQueryClient()}>
-          <ThemeProvider theme={ThemeFixture()}>{wrappedContent}</ThemeProvider>
+          <SentryNuqsTestingAdapter defaultOptions={{shallow: false}}>
+            <ScrapsTestingProviders>
+              <CommandPaletteProvider>
+                <ThemeProvider theme={ThemeFixture()}>{wrappedContent}</ThemeProvider>
+              </CommandPaletteProvider>
+            </ScrapsTestingProviders>
+          </SentryNuqsTestingAdapter>
         </QueryClientProvider>
       </CacheProvider>
     );
@@ -205,7 +195,12 @@ function createRoutesFromConfig(
 
   if (config?.route) {
     return [
-      {path: config.route, element: children, errorElement: <ErrorBoundary />},
+      {
+        path: config.route,
+        element: children,
+        errorElement: <ErrorBoundary />,
+        children: config.children,
+      },
       emptyRoute,
     ];
   }
@@ -216,6 +211,7 @@ function createRoutesFromConfig(
         path: route,
         element: children,
         errorElement: <ErrorBoundary />,
+        children: config.children,
       })),
       emptyRoute,
     ];
@@ -228,12 +224,23 @@ function makeRouter({
   children,
   history,
   config,
+  outletContext,
 }: {
   children: React.ReactNode;
   config: RouterConfig | undefined;
   history: MemoryHistory;
+  outletContext: Record<string, unknown> | undefined;
 }) {
-  const routes = createRoutesFromConfig(children, config);
+  const childRoutes = createRoutesFromConfig(children, config);
+  const routes = outletContext
+    ? [
+        {
+          path: '/',
+          element: <Outlet context={outletContext} />,
+          children: childRoutes,
+        },
+      ]
+    : childRoutes;
 
   const router = createRouter({
     future: {
@@ -280,41 +287,42 @@ function parseLocationConfig(location: LocationConfig | undefined): InitialEntry
     return LocationFixture().pathname;
   }
 
-  if (typeof location === 'string') {
-    return location;
+  if (!location.query && !location.state) {
+    return location.pathname;
   }
+
+  const config: InitialEntry = {
+    pathname: location.pathname,
+  };
 
   if (location.query) {
-    const queryString = qs.stringify(location.query);
-    return {
-      pathname: location.pathname,
-      search: queryString ? `?${queryString}` : '',
-    };
+    config.search = parseQueryString(location.query);
   }
 
-  return location.pathname;
+  if (location.state) {
+    config.state = location.state;
+  }
+
+  return config;
 }
 
-function getInitialRouterConfig<T extends boolean = true>(
-  options: RenderOptions<T>
-): {
+function parseQueryString(query: Record<string, string | number | string[]> | undefined) {
+  if (!query) {
+    return '';
+  }
+  const queryString = qs.stringify(query);
+  return queryString ? `?${queryString}` : '';
+}
+
+function getInitialRouterConfig(options: InitialRouterOptions): {
   config: RouterConfig | undefined;
   initialEntry: InitialEntry;
-  legacyRouterConfig?: Partial<InjectedRouter>;
+  outletContext: Record<string, unknown> | undefined;
 } {
-  if (options.deprecatedRouterMocks) {
-    return {
-      initialEntry: options.router?.location?.pathname ?? LocationFixture().pathname,
-      legacyRouterConfig: options.router,
-      config: undefined,
-    };
-  }
-
-  const opts = options as RenderOptions<false>;
   return {
-    initialEntry: parseLocationConfig(opts.initialRouterConfig?.location),
-    legacyRouterConfig: undefined,
-    config: opts.initialRouterConfig,
+    initialEntry: parseLocationConfig(options.initialRouterConfig?.location),
+    config: options.initialRouterConfig,
+    outletContext: options.outletContext,
   };
 }
 
@@ -327,16 +335,12 @@ function getInitialRouterConfig<T extends boolean = true>(
  * If your component requires additional context you can pass it in the
  * options.
  *
- * To test route changes, pass `disableRouterMocks: true`. This will return a
- * `router` property which can be used to access the location or manually
- * navigate to a route. To set the initial location with mocks disabled,
- * pass an `initialRouterConfig`.
+ * To test route changes, this function returns a `router` you can use to
+ * access the location or manually navigate to a route. To set the initial
+ * location, pass an `initialRouterConfig`.
  */
-function render<T extends boolean = false>(
-  ui: React.ReactElement,
-  options: RenderOptions<T> = {} as RenderOptions<T>
-): RenderReturn<T> {
-  const {initialEntry, config, legacyRouterConfig} = getInitialRouterConfig(options);
+function render(ui: React.ReactElement, options: RenderOptions = {}): RenderReturn {
+  const {initialEntry, config, outletContext} = getInitialRouterConfig(options);
 
   const history = createMemoryHistory({
     initialEntries: [initialEntry],
@@ -344,18 +348,15 @@ function render<T extends boolean = false>(
 
   const AllTheProviders = makeAllTheProviders({
     organization: options.organization,
-    router: legacyRouterConfig,
-    deprecatedRouterMocks: options.deprecatedRouterMocks,
-    history,
+    additionalWrapper: options.additionalWrapper,
   });
 
   const memoryRouter = makeRouter({
     children: <AllTheProviders>{ui}</AllTheProviders>,
     history,
     config,
+    outletContext,
   });
-
-  DANGEROUS_SET_REACT_ROUTER_6_HISTORY(memoryRouter);
 
   const renderResult = rtl.render(
     <RouterProvider router={memoryRouter} future={{v7_startTransition: true}} />,
@@ -367,6 +368,7 @@ function render<T extends boolean = false>(
       children: <AllTheProviders>{newUi}</AllTheProviders>,
       history,
       config,
+      outletContext,
     });
 
     renderResult.rerender(
@@ -381,8 +383,55 @@ function render<T extends boolean = false>(
   return {
     ...renderResult,
     rerender,
-    ...(options.deprecatedRouterMocks ? {} : {router: testRouter}),
-  } as RenderReturn<T>;
+    router: testRouter,
+  } as RenderReturn;
+}
+
+function renderHookWithProviders<Result = unknown, Props = unknown>(
+  callback: (initialProps: Props) => Result,
+  options: RenderHookWithProvidersOptions<Props> = {}
+): rtl.RenderHookResult<Result, Props> & {router: TestRouter} {
+  const {initialEntry, config, outletContext} = getInitialRouterConfig(options);
+
+  const history = createMemoryHistory({
+    initialEntries: [initialEntry],
+  });
+
+  const AllTheProviders = makeAllTheProviders({
+    organization: options.organization,
+    additionalWrapper: options.additionalWrapper,
+  });
+
+  let memoryRouter: Router | null = null;
+
+  function Wrapper({children}: {children?: React.ReactNode}) {
+    memoryRouter = makeRouter({
+      children: <AllTheProviders>{children}</AllTheProviders>,
+      history,
+      config,
+      outletContext,
+    });
+
+    return <RouterProvider router={memoryRouter} future={{v7_startTransition: true}} />;
+  }
+
+  const {initialProps, ...rest} = options;
+
+  const hookResult = rtl.renderHook(callback, {
+    ...(rest as Omit<rtl.RenderHookOptions<Props>, 'wrapper'>),
+    initialProps,
+    wrapper: Wrapper,
+  });
+
+  if (!memoryRouter) {
+    throw new Error('renderHookWithProviders failed to initialize router');
+  }
+  const testRouter = new TestRouter(memoryRouter);
+
+  return {
+    ...hookResult,
+    router: testRouter,
+  };
 }
 
 /**
@@ -392,7 +441,7 @@ function render<T extends boolean = false>(
  */
 const fireEvent = rtl.fireEvent;
 
-function renderGlobalModal<T extends boolean = true>(options?: RenderOptions<T>) {
+function renderGlobalModal(options?: RenderOptions) {
   const result = render(<GlobalModal />, options);
 
   /**
@@ -432,11 +481,11 @@ export * from '@testing-library/react';
 
 export {
   // eslint-disable-next-line import/export
+  fireEvent,
+  // eslint-disable-next-line import/export
   render,
   renderGlobalModal,
+  renderHookWithProviders,
   userEvent,
-  // eslint-disable-next-line import/export
-  fireEvent,
   waitForDrawerToHide,
-  makeAllTheProviders,
 };

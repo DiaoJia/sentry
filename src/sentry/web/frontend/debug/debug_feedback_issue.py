@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.http import HttpRequest, HttpResponse
 from django.utils.safestring import mark_safe
 from django.views.generic import View
 
@@ -8,16 +9,19 @@ from sentry.models.rule import Rule
 from sentry.notifications.utils import get_generic_data
 from sentry.notifications.utils.links import get_group_settings_link, get_rules
 from sentry.utils import json
+from sentry.web.frontend.base import internal_cell_silo_view
 
 from .mail import COMMIT_EXAMPLE, MailPreview, make_feedback_issue
 
 
+@internal_cell_silo_view
 class DebugFeedbackIssueEmailView(View):
-    def get(self, request):
+    def get(self, request: HttpRequest) -> HttpResponse:
         org = Organization(id=1, slug="example", name="Example")
         project = Project(id=1, slug="example", name="Example", organization=org)
 
         event = make_feedback_issue(project)
+        assert event.occurrence is not None
         group = event.group
 
         rule = Rule(id=1, label="An example rule")
@@ -29,11 +33,15 @@ class DebugFeedbackIssueEmailView(View):
             text_template="sentry/emails/feedback.txt",
             context={
                 "rule": rule,
-                "rules": get_rules([rule], org, project),
+                "rules": get_rules([rule], org, project, group.type),
                 "group": group,
                 "event": event,
                 "timezone": settings.SENTRY_DEFAULT_TIME_ZONE,
-                "link": get_group_settings_link(group, None, get_rules([rule], org, project), 1337),
+                "link": get_group_settings_link(
+                    group,
+                    None,
+                    get_rules([rule], org, project, group.type),
+                ),
                 "generic_issue_data": [(section_header, mark_safe(generic_issue_data_html), None)],
                 "tags": event.tags,
                 "project_label": project.slug,

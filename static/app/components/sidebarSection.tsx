@@ -1,25 +1,25 @@
 import styled from '@emotion/styled';
 
-import {space} from 'sentry/styles/space';
+import {Container, type ContainerProps} from '@sentry/scraps/layout';
 
-export const Wrap = styled('div')`
-  margin-bottom: ${space(4)};
-`;
+export function Wrap(props: ContainerProps) {
+  return <Container marginBottom="3xl" {...props} />;
+}
 
 export const Title = styled('h6')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   display: flex;
   align-items: center;
-  gap: ${space(0.5)};
-  font-size: ${p => p.theme.fontSize.md};
-  margin: ${space(1)} 0 0;
+  gap: ${p => p.theme.space.xs};
+  font-size: ${p => p.theme.font.size.md};
+  margin: ${p => p.theme.space.md} 0 0;
 `;
 
 export const IconWrapper = styled('div')`
-  color: ${p => p.theme.subText};
-  margin-left: ${space(0.5)};
+  color: ${p => p.theme.tokens.content.secondary};
+  margin-left: ${p => p.theme.space.xs};
 `;
 
-export const Content = styled('div')`
-  margin-top: ${space(1)};
-`;
+export function Content(props: ContainerProps) {
+  return <Container marginTop="md" {...props} />;
+}

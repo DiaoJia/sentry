@@ -16,7 +16,7 @@ export function JiraIntegrationFixture(
       aspects: {
         alerts: [
           {
-            type: 'warning',
+            variant: 'warning',
             text: 'This is a an alert example',
           },
         ],
@@ -24,6 +24,7 @@ export function JiraIntegrationFixture(
       canDisable: false,
       slug: '',
     },
+    scopes: null,
     accountType: '',
     gracePeriodEnd: '',
     organizationIntegrationStatus: 'active',

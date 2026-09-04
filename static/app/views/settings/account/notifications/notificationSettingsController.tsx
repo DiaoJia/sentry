@@ -1,22 +1,15 @@
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Organization} from 'sentry/types/organization';
-import withOrganizations from 'sentry/utils/withOrganizations';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
 
-import NotificationSettings from './notificationSettings';
+import {NotificationSettings} from './notificationSettings';
 
-interface NotificationSettingsControllerProps extends RouteComponentProps {
-  organizations: Organization[];
-  organizationsLoading?: boolean;
-}
-
-function NotificationSettingsController({
-  organizationsLoading,
-}: NotificationSettingsControllerProps) {
-  if (organizationsLoading) {
+function NotificationSettingsController() {
+  const {loaded} = useLegacyStore(OrganizationsStore);
+  if (!loaded) {
     return <LoadingIndicator />;
   }
   return <NotificationSettings />;
 }
 
-export default withOrganizations(NotificationSettingsController);
+export default NotificationSettingsController;

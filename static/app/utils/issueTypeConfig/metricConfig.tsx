@@ -3,7 +3,7 @@ import {IssueType} from 'sentry/types/group';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const metricConfig: IssueCategoryConfigMapping = {
+export const metricConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
@@ -60,8 +60,6 @@ const metricConfig: IssueCategoryConfigMapping = {
       tagsTab: {enabled: false},
     },
     discover: {enabled: false},
-    regression: {enabled: true},
-    performanceDurationRegression: {enabled: true},
     stats: {enabled: false},
     tags: {enabled: false},
   },
@@ -83,7 +81,7 @@ const metricConfig: IssueCategoryConfigMapping = {
     stats: {enabled: false},
     tags: {enabled: false},
   },
-  [IssueType.METRIC_ISSUE_POC]: {
+  [IssueType.METRIC_ISSUE]: {
     actions: {
       archiveUntilOccurrence: {enabled: false},
       delete: {enabled: false},
@@ -101,12 +99,13 @@ const metricConfig: IssueCategoryConfigMapping = {
     },
     detector: {
       enabled: true,
-      title: t('Metric Alert Detector'),
-      ctaText: t('View detector details'),
+      title: t('Metric Monitor'),
+      ctaText: t('View monitor details'),
     },
     header: {
-      filterBar: {enabled: true, fixedEnvironment: true},
+      filterBar: {enabled: true, fixedEnvironment: true, searchBar: {enabled: false}},
       graph: {enabled: true, type: 'detector-history'},
+      eventNavigation: {enabled: true},
       tagDistribution: {enabled: false},
       occurrenceSummary: {enabled: false},
     },
@@ -131,7 +130,6 @@ const metricConfig: IssueCategoryConfigMapping = {
     stats: {enabled: true},
     tags: {enabled: false},
     issueSummary: {enabled: false},
+    groupingInfo: {enabled: false},
   },
 };
-
-export default metricConfig;

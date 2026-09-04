@@ -1,13 +1,16 @@
 from datetime import datetime, timezone
 
+from django.db import router
+
 from sentry.models.projectkey import ProjectKey
+from sentry.silo.safety import unguarded_write
 from sentry.testutils.cases import AcceptanceTestCase, SnubaTestCase
 from sentry.testutils.silo import no_silo_test
 
 
 @no_silo_test
 class ProjectKeysTest(AcceptanceTestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user("foo@example.com")
         self.org = self.create_organization(name="Rowdy Tiger", owner=None)
@@ -15,7 +18,8 @@ class ProjectKeysTest(AcceptanceTestCase, SnubaTestCase):
         self.project = self.create_project(organization=self.org, teams=[self.team], name="Bengal")
         self.create_member(user=self.user, organization=self.org, role="owner", teams=[self.team])
 
-        ProjectKey.objects.filter(project=self.project).delete()
+        with unguarded_write(using=router.db_for_write(ProjectKey)):
+            ProjectKey.objects.filter(project=self.project).delete()
         ProjectKey.objects.create(
             project=self.project,
             label="Default",
@@ -26,7 +30,7 @@ class ProjectKeysTest(AcceptanceTestCase, SnubaTestCase):
         self.login_as(self.user)
         self.path = f"/{self.org.slug}/{self.project.slug}/settings/keys/"
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.browser.get(self.path)
         self.browser.wait_until_not('[data-test-id="loading-indicator"]')
         self.browser.wait_until_test_id("project-keys")
@@ -34,7 +38,7 @@ class ProjectKeysTest(AcceptanceTestCase, SnubaTestCase):
 
 @no_silo_test
 class ProjectKeyDetailsTest(AcceptanceTestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user("foo@example.com")
         self.org = self.create_organization(name="Rowdy Tiger", owner=None)
@@ -53,7 +57,7 @@ class ProjectKeyDetailsTest(AcceptanceTestCase, SnubaTestCase):
         self.login_as(self.user)
         self.path = f"/{self.org.slug}/{self.project.slug}/settings/keys/{self.pk.public_key}/"
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.browser.get(self.path)
         self.browser.wait_until_not('[data-test-id="loading-indicator"]')
         self.browser.wait_until_test_id("key-details")

@@ -2,15 +2,19 @@ import {createRoot} from 'react-dom/client';
 import {createBrowserRouter, RouterProvider} from 'react-router-dom';
 import {wrapCreateBrowserRouterV6} from '@sentry/react';
 import * as Sentry from '@sentry/react';
+import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
+import {NuqsAdapter} from 'nuqs/adapters/react-router/v6';
 
+import {setApiNavigate} from 'sentry/api';
 import {commonInitialization} from 'sentry/bootstrap/commonInitialization';
 import {initializeSdk} from 'sentry/bootstrap/initializeSdk';
-import ConfigStore from 'sentry/stores/configStore';
+import {DocumentTitleManager} from 'sentry/components/sentryDocumentTitle/documentTitleManager';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {Config} from 'sentry/types/system';
-import {DANGEROUS_SET_REACT_ROUTER_6_HISTORY} from 'sentry/utils/browserHistory';
-import {QueryClient, QueryClientProvider} from 'sentry/utils/queryClient';
+import {DEFAULT_QUERY_CLIENT_CONFIG} from 'sentry/utils/queryClient';
+import {createReactRouter3Navigate} from 'sentry/utils/useNavigate';
 
-import {routes6} from 'admin/routes';
+import {routes} from 'admin/routes';
 
 export function init(config: Config) {
   initializeSdk(config);
@@ -21,19 +25,23 @@ export function init(config: Config) {
   ConfigStore.set('getsentry.sendgridApiKey', window.__sendGridApiKey);
 }
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient(DEFAULT_QUERY_CLIENT_CONFIG);
 
 const sentryCreateBrowserRouter = wrapCreateBrowserRouterV6(createBrowserRouter);
-const router = sentryCreateBrowserRouter(routes6);
+const router = sentryCreateBrowserRouter(routes);
 
-DANGEROUS_SET_REACT_ROUTER_6_HISTORY(router);
+setApiNavigate(createReactRouter3Navigate(router));
 
 export function renderApp() {
   const rootEl = document.getElementById('blk_router')!;
   const root = createRoot(rootEl);
   root.render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <DocumentTitleManager>
+        <NuqsAdapter defaultOptions={{shallow: false}}>
+          <RouterProvider router={router} />
+        </NuqsAdapter>
+      </DocumentTitleManager>
     </QueryClientProvider>
   );
 }

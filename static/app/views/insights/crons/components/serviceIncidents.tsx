@@ -1,11 +1,13 @@
 import {Fragment, useCallback} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
-import Color from 'color';
+// eslint-disable-next-line no-restricted-imports
+import color from 'color';
 import moment, {type Moment} from 'moment-timezone';
 
+import {Alert} from '@sentry/scraps/alert';
+
 import type {TimeWindowConfig} from 'sentry/components/checkInTimeline/types';
-import {Alert} from 'sentry/components/core/alert';
 import {Hovercard} from 'sentry/components/hovercard';
 import {ServiceIncidentDetails} from 'sentry/components/serviceIncidentDetails';
 import {IconExclamation} from 'sentry/icons';
@@ -102,14 +104,19 @@ function CronServiceIncidents({timeWindowConfig}: CronServiceIncidentsProps) {
           body={
             <Fragment>
               <Alert.Container>
-                <Alert type="warning">{alertMessage}</Alert>
+                <Alert variant="warning" showIcon={false}>
+                  {alertMessage}
+                </Alert>
               </Alert.Container>
               <ServiceIncidentDetails incident={inc} />
             </Fragment>
           }
         >
-          <IncidentIndicator css={position}>
-            <IconExclamation color="white" />
+          <IncidentIndicator
+            css={position}
+            data-test-id="cron-service-incident-indicator"
+          >
+            <StyledIconExclamation />
           </IncidentIndicator>
         </IncidentHovercard>
         <IncidentOverlay css={position} />
@@ -117,6 +124,10 @@ function CronServiceIncidents({timeWindowConfig}: CronServiceIncidentsProps) {
     );
   });
 }
+
+const StyledIconExclamation = styled(IconExclamation)`
+  color: ${p => p.theme.colors.white};
+`;
 
 const IncidentHovercard = styled(Hovercard)`
   width: 400px;
@@ -132,9 +143,9 @@ const IncidentOverlay = styled('div')`
   left: var(--incidentOverlayStart);
   width: calc(var(--incidentOverlayEnd) - var(--incidentOverlayStart));
   pointer-events: none;
-  background: ${p => Color(p.theme.yellow100).alpha(0.05).toString()};
-  border-left: 1px solid ${p => p.theme.yellow200};
-  border-right: 1px solid ${p => p.theme.yellow200};
+  background: ${p => color(p.theme.colors.yellow100).alpha(0.05).toString()};
+  border-left: 1px solid ${p => p.theme.colors.yellow200};
+  border-right: 1px solid ${p => p.theme.colors.yellow200};
   z-index: 2;
 `;
 
@@ -148,10 +159,11 @@ const IncidentIndicator = styled('div')`
   align-items: center;
   z-index: 2;
   height: 20px;
+  pointer-events: auto;
 
   > svg,
   &:before {
-    background: ${p => p.theme.yellow300};
+    background: ${p => p.theme.colors.yellow400};
   }
 
   > svg {

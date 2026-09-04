@@ -1,15 +1,14 @@
 import {useCallback, useEffect} from 'react';
 import * as Sentry from '@sentry/react';
 
-import ContextDataSection from 'sentry/components/events/contexts/contextDataSection';
+import {ContextDataSection} from 'sentry/components/events/contexts/contextDataSection';
+import {eventHasSyntheticTrace} from 'sentry/components/events/interfaces/performance/utils';
 import type {Event, EventContexts as EventContextValues} from 'sentry/types/event';
-import type {Group} from 'sentry/types/group';
-import useProjects from 'sentry/utils/useProjects';
+import {useProjects} from 'sentry/utils/useProjects';
 
 type Props = {
   event: Event;
   disableCollapsePersistence?: boolean;
-  group?: Group;
 };
 
 interface UnknownContextValue {
@@ -31,7 +30,25 @@ export interface ContextItem {
 }
 
 export function getOrderedContextItems(event: Event): ContextItem[] {
-  const {user, contexts} = event;
+  return getOrderedContextItemsFromContexts({
+    contexts: event.contexts,
+    user: event.user,
+    hasSyntheticTrace: eventHasSyntheticTrace(event),
+  });
+}
+
+/**
+ * Prefer `getOrderedContextItems` when an `Event` is available.
+ */
+export function getOrderedContextItemsFromContexts({
+  contexts,
+  user,
+  hasSyntheticTrace = false,
+}: {
+  contexts: Event['contexts'] | undefined;
+  hasSyntheticTrace?: boolean;
+  user?: Event['user'];
+}): ContextItem[] {
   const {data: customUserData, ...userContext} = user ?? {};
 
   // hide `flags` in the contexts section since we display this
@@ -64,7 +81,10 @@ export function getOrderedContextItems(event: Event): ContextItem[] {
   ]);
 
   const items = orderedContext
-    .filter(([_k, ctxValue]) => {
+    .filter(([alias, ctxValue]) => {
+      if (alias === 'trace' && hasSyntheticTrace) {
+        return false;
+      }
       const contextKeys = Object.keys(ctxValue ?? {});
       const isInvalid =
         // Empty context
@@ -82,7 +102,7 @@ export function getOrderedContextItems(event: Event): ContextItem[] {
   return items;
 }
 
-export function EventContexts({event, group, disableCollapsePersistence}: Props) {
+export function EventContexts({event, disableCollapsePersistence}: Props) {
   const {projects} = useProjects();
   const project = projects.find(p => p.id === event.projectID);
   const {contexts, sdk} = event;
@@ -102,7 +122,6 @@ export function EventContexts({event, group, disableCollapsePersistence}: Props)
   return (
     <ContextDataSection
       event={event}
-      group={group}
       project={project}
       disableCollapsePersistence={disableCollapsePersistence}
     />

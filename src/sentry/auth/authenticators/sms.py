@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from hashlib import md5
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from django.http.request import HttpRequest
 from django.utils.functional import classproperty
@@ -12,7 +12,7 @@ from sentry.ratelimits import backend as ratelimiter
 from sentry.utils.otp import TOTP
 from sentry.utils.sms import phone_number_as_e164, send_sms, sms_available
 
-from .base import ActivationMessageResult, OtpMixin
+from .base import ActivationMessageResult, ActivationRateLimited, OtpMixin
 
 if TYPE_CHECKING:
     from django.utils.functional import _StrPromise
@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("sentry.auth")
 
 
-class SMSRateLimitExceeded(Exception):
-    def __init__(self, phone_number: str, user_id: int | None, remote_ip) -> None:
+class SMSRateLimitExceeded(ActivationRateLimited):
+    def __init__(self, phone_number: str, user_id: int | None, remote_ip: str | None) -> None:
         super().__init__()
         self.phone_number = phone_number
         self.user_id = user_id
@@ -43,10 +43,10 @@ class SmsInterface(OtpMixin):
     code_ttl = 45
 
     @classproperty
-    def is_available(cls):
+    def is_available(cls) -> bool:
         return sms_available()
 
-    def generate_new_config(self):
+    def generate_new_config(self) -> dict[str, Any]:
         config = super().generate_new_config()
         config["phone_number"] = None
         return config
@@ -55,11 +55,11 @@ class SmsInterface(OtpMixin):
         return TOTP(self.config["secret"], digits=6, interval=self.code_ttl, default_window=1)
 
     @property
-    def phone_number(self):
+    def phone_number(self) -> str:
         return self.config["phone_number"]
 
     @phone_number.setter
-    def phone_number(self, value):
+    def phone_number(self, value: str) -> None:
         self.config["phone_number"] = value
 
     def activate(self, request: HttpRequest) -> ActivationMessageResult:
@@ -75,7 +75,8 @@ class SmsInterface(OtpMixin):
                     "A confirmation code was sent to %(phone_mask)s. "
                     "It is valid for %(ttl)d seconds."
                 )
-                % {"phone_mask": "<strong>%s</strong>" % mask, "ttl": self.code_ttl}
+                % {"phone_mask": "<strong>%s</strong>" % mask, "ttl": self.code_ttl},
+                expires_in=self.code_ttl,
             )
         return ActivationMessageResult(
             _(

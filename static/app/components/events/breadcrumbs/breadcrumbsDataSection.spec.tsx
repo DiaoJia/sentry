@@ -8,29 +8,19 @@ import {
   within,
 } from 'sentry-test/reactTestingLibrary';
 
-import BreadcrumbsDataSection from 'sentry/components/events/breadcrumbs/breadcrumbsDataSection';
+import {BreadcrumbsDataSection} from 'sentry/components/events/breadcrumbs/breadcrumbsDataSection';
 import {
   MOCK_BREADCRUMBS,
   MOCK_DATA_SECTION_PROPS,
   MOCK_EXCEPTION_ENTRY,
 } from 'sentry/components/events/breadcrumbs/testUtils';
 import {EntryType} from 'sentry/types/event';
+import {mockElementSize} from 'sentry/utils/fixtures/virtualization';
 
-// Needed to mock useVirtualizer lists.
-jest.spyOn(window.Element.prototype, 'getBoundingClientRect').mockImplementation(() => ({
-  x: 0,
-  y: 0,
-  width: 0,
-  height: 30,
-  left: 0,
-  top: 0,
-  right: 0,
-  bottom: 0,
-  toJSON: jest.fn(),
-}));
+mockElementSize({width: 0, height: 30});
 
-describe('BreadcrumbsDataSection', function () {
-  it('renders a summary of breadcrumbs with a button to view them all', async function () {
+describe('BreadcrumbsDataSection', () => {
+  it('renders a summary of breadcrumbs with a button to view them all', async () => {
     render(<BreadcrumbsDataSection {...MOCK_DATA_SECTION_PROPS} />);
 
     // Only summary crumbs should be visible by default
@@ -53,7 +43,7 @@ describe('BreadcrumbsDataSection', function () {
     }
 
     // When expanded, all should be visible
-    const viewAllButton = screen.getByRole('button', {name: 'View All Breadcrumbs'});
+    const viewAllButton = screen.getByRole('button', {name: 'View 2 more'});
     await userEvent.click(viewAllButton);
     const drawer = screen.getByRole('complementary', {name: 'breadcrumb drawer'});
     expect(drawer).toBeInTheDocument();
@@ -62,9 +52,9 @@ describe('BreadcrumbsDataSection', function () {
     }
   });
 
-  it('toggles the drawer when view all is clicked', async function () {
+  it('toggles the drawer when view all is clicked', async () => {
     render(<BreadcrumbsDataSection {...MOCK_DATA_SECTION_PROPS} />);
-    const viewAllButton = screen.getByRole('button', {name: 'View All Breadcrumbs'});
+    const viewAllButton = screen.getByRole('button', {name: 'View 2 more'});
     await userEvent.click(viewAllButton);
     const drawer = screen.getByRole('complementary', {name: 'breadcrumb drawer'});
     expect(drawer).toBeInTheDocument();
@@ -73,7 +63,7 @@ describe('BreadcrumbsDataSection', function () {
     expect(drawer).not.toBeInTheDocument();
   });
 
-  it('can switch between display time formats', async function () {
+  it('can switch between display time formats', async () => {
     const singleCrumbEvent = EventFixture({
       entries: [
         {
@@ -94,11 +84,13 @@ describe('BreadcrumbsDataSection', function () {
     );
 
     // From virtual crumb
-    expect(screen.getByText('06:01:48.762 PM')).toBeInTheDocument();
+    expect(screen.getByText('May 21, 2019 6:01:48.762 PM UTC')).toBeInTheDocument();
     expect(screen.queryByText('0ms')).not.toBeInTheDocument();
     // From event breadcrumb
-    expect(screen.getByText('06:00:48.760 PM')).toBeInTheDocument();
+    expect(screen.getByText('May 21, 2019 6:00:48.760 PM UTC')).toBeInTheDocument();
     expect(screen.queryByText('-1min 2ms')).not.toBeInTheDocument();
+
+    expect(screen.getByRole('button', {name: 'Expand'})).toBeInTheDocument();
 
     const timeControl = screen.getByRole('button', {
       name: 'Change Time Format for Breadcrumbs',
@@ -106,19 +98,19 @@ describe('BreadcrumbsDataSection', function () {
     await userEvent.click(timeControl);
 
     expect(screen.getByText('0ms')).toBeInTheDocument();
-    expect(screen.queryByText('06:01:48.762 PM')).not.toBeInTheDocument();
+    expect(screen.queryByText('May 21, 2019 6:01:48.762 PM UTC')).not.toBeInTheDocument();
     expect(screen.getByText('-1min 2ms')).toBeInTheDocument();
-    expect(screen.queryByText('06:00:48.760 PM')).not.toBeInTheDocument();
+    expect(screen.queryByText('May 21, 2019 6:00:48.760 PM UTC')).not.toBeInTheDocument();
 
     await userEvent.click(timeControl);
 
     expect(screen.queryByText('0ms')).not.toBeInTheDocument();
-    expect(screen.getByText('06:01:48.762 PM')).toBeInTheDocument();
+    expect(screen.getByText('May 21, 2019 6:01:48.762 PM UTC')).toBeInTheDocument();
     expect(screen.queryByText('-1min 2ms')).not.toBeInTheDocument();
-    expect(screen.getByText('06:00:48.760 PM')).toBeInTheDocument();
+    expect(screen.getByText('May 21, 2019 6:00:48.760 PM UTC')).toBeInTheDocument();
   });
 
-  it('opens the drawer and focuses search when the search button is pressed', async function () {
+  it('opens the drawer and focuses search when the search button is pressed', async () => {
     render(<BreadcrumbsDataSection {...MOCK_DATA_SECTION_PROPS} />);
 
     const control = screen.getByRole('button', {name: 'Open Breadcrumb Search'});

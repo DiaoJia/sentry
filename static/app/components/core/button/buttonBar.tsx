@@ -1,99 +1,150 @@
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {StyledButton} from 'sentry/components/core/button';
-// eslint-disable-next-line boundaries/element-types
-import type {ValidSize} from 'sentry/styles/space';
-// eslint-disable-next-line boundaries/element-types
-import {space} from 'sentry/styles/space';
+import {Grid, type GridProps} from '@sentry/scraps/layout';
+import {SizeProvider} from '@sentry/scraps/sizeContext';
 
-interface ButtonBarProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'className'> {
-  children: React.ReactNode;
-  gap?: ValidSize | 0;
-  merged?: boolean;
+export interface ButtonBarProps extends Omit<GridProps, 'gap'> {
+  children: NonNullable<React.ReactNode>;
+  orientation?: 'horizontal' | 'vertical';
+  size?: 'xs' | 'sm' | 'md';
 }
 
-export function ButtonBar({children, merged = false, gap = 0, ...props}: ButtonBarProps) {
-  return (
-    <StyledButtonBar merged={merged} gap={gap} {...props}>
-      {children}
-    </StyledButtonBar>
-  );
-}
+export const ButtonBar = styled(
+  ({children, orientation = 'horizontal', size, ...props}: ButtonBarProps) => {
+    const content = (
+      <Grid
+        flow={orientation === 'horizontal' ? 'column' : 'row'}
+        align="center"
+        gap="0"
+        {...props}
+      >
+        {children}
+      </Grid>
+    );
 
-const StyledButtonBar = styled('div')<{gap: ValidSize | 0; merged: boolean}>`
-  display: grid;
-  grid-auto-flow: column;
-  grid-column-gap: ${p => (p.gap === 0 ? '0' : space(p.gap))};
-  align-items: center;
+    if (size) {
+      return <SizeProvider size={size}>{content}</SizeProvider>;
+    }
 
-  ${p => p.merged && MergedButtonBarStyles}
-`;
-
-const MergedButtonBarStyles = () => css`
+    return content;
+  }
+)<ButtonBarProps>`
   /* Raised buttons show borders on both sides. Useful to create pill bars */
   & > .active {
     z-index: 2;
   }
 
+  & > [role='presentation'],
   & > .dropdown,
   & > button,
   & > input,
   & > a {
     position: relative;
 
-    /* First button is square on the right side */
-    &:first-child:not(:last-child) {
-      border-top-right-radius: 0;
-      border-bottom-right-radius: 0;
+    ${p =>
+      p.orientation === 'vertical'
+        ? css`
+            /* First button is square on the bottom side */
+            &:first-child:not(:last-child) {
+              border-bottom-left-radius: 0;
+              border-bottom-right-radius: 0;
 
-      & > .dropdown-actor > ${StyledButton} {
-        border-top-right-radius: 0;
-        border-bottom-right-radius: 0;
-      }
-    }
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-bottom-left-radius: 0;
+                border-bottom-right-radius: 0;
+              }
+            }
 
-    /* Middle buttons are square */
-    &:not(:last-child):not(:first-child) {
-      border-radius: 0;
+            /* Middle buttons are square */
+            &:not(:last-child):not(:first-child),
+            &:not(:last-child):not(:first-child)[role='presentation'] > button,
+            &:not(:last-child):not(:first-child)[role='presentation'] > a {
+              border-radius: 0;
 
-      & > .dropdown-actor > ${StyledButton} {
-        border-radius: 0;
-      }
-    }
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-radius: 0;
+              }
+            }
 
-    /* Middle buttons only need one border so we don't get a double line */
-    &:first-child {
-      & + .dropdown:not(:last-child),
-      & + a:not(:last-child),
-      & + input:not(:last-child),
-      & + button:not(:last-child) {
-        margin-left: -1px;
-      }
-    }
+            /* Middle buttons only need one border so we don't get a double line */
+            & + [role='presentation'] > button,
+            & + [role='presentation'] > a,
+            & + .dropdown:not(:last-child),
+            & + a:not(:last-child),
+            & + input:not(:last-child),
+            & + button:not(:last-child) {
+              margin-top: -1px;
+            }
 
-    /* Middle buttons only need one border so we don't get a double line */
-    /* stylelint-disable-next-line no-duplicate-selectors */
-    &:not(:last-child):not(:first-child) {
-      & + .dropdown,
-      & + button,
-      & + input,
-      & + a {
-        margin-left: -1px;
-      }
-    }
+            /* Last button is square on the top side */
+            &:last-child:not(:first-child) {
+              border-top-left-radius: 0;
+              border-top-right-radius: 0;
+              margin-top: -1px;
 
-    /* Last button is square on the left side */
-    &:last-child:not(:first-child) {
-      border-top-left-radius: 0;
-      border-bottom-left-radius: 0;
-      margin-left: -1px;
+              &[role='presentation'] > button,
+              &[role='presentation'] > a,
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-top-left-radius: 0;
+                border-top-right-radius: 0;
+                margin-top: -1px;
+              }
+            }
+          `
+        : css`
+            /* First button is square on the right side */
+            &:first-child:not(:last-child) {
+              border-top-right-radius: 0;
+              border-bottom-right-radius: 0;
 
-      & > .dropdown-actor > ${StyledButton} {
-        border-top-left-radius: 0;
-        border-bottom-left-radius: 0;
-        margin-left: -1px;
-      }
-    }
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-top-right-radius: 0;
+                border-bottom-right-radius: 0;
+              }
+            }
+
+            /* Middle buttons are square */
+            &:not(:last-child):not(:first-child),
+            &:not(:last-child):not(:first-child)[role='presentation'] > button,
+            &:not(:last-child):not(:first-child)[role='presentation'] > a {
+              border-radius: 0;
+
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-radius: 0;
+              }
+            }
+
+            /* Middle buttons only need one border so we don't get a double line */
+            & + [role='presentation'] > button,
+            & + [role='presentation'] > a,
+            & + .dropdown:not(:last-child),
+            & + a:not(:last-child),
+            & + input:not(:last-child),
+            & + button:not(:last-child) {
+              margin-left: -1px;
+            }
+
+            /* Last button is square on the left side */
+            &:last-child:not(:first-child) {
+              border-top-left-radius: 0;
+              border-bottom-left-radius: 0;
+              margin-left: -1px;
+
+              &[role='presentation'] > button,
+              &[role='presentation'] > a,
+              & > .dropdown-actor > button,
+              & > .dropdown-actor > a {
+                border-top-left-radius: 0;
+                border-bottom-left-radius: 0;
+                margin-left: -1px;
+              }
+            }
+          `}
   }
 `;

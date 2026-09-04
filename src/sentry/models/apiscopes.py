@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import TypedDict
+from typing import TypedDict, overload
 
 from django.contrib.postgres.fields.array import ArrayField
 from django.db import models
@@ -20,20 +20,26 @@ def add_scope_hierarchy(curr_scopes: Sequence[str]) -> list[str]:
     return sorted(new_scopes)
 
 
-class ApiScopes(Sequence):
-    project = (("project:read"), ("project:write"), ("project:admin"), ("project:releases"))
+class ApiScopes(Sequence[str]):
+    project = (
+        ("project:read"),
+        ("project:write"),
+        ("project:admin"),
+        ("project:releases"),
+        ("project:distribution"),
+    )
 
     team = (("team:read"), ("team:write"), ("team:admin"))
 
     event = (("event:read"), ("event:write"), ("event:admin"))
 
-    org = (("org:read"), ("org:write"), ("org:integrations"), ("org:admin"))
+    org = (("org:read"), ("org:write"), ("org:integrations"), ("org:admin"), ("org:ci"))
 
     member = (("member:read"), ("member:write"), ("member:admin"), ("member:invite"))
 
     alerts = (("alerts:read"), ("alerts:write"))
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.scopes = (
             self.__class__.project
             + self.__class__.team
@@ -43,13 +49,19 @@ class ApiScopes(Sequence):
             + self.__class__.alerts
         )
 
-    def __getitem__(self, value):
+    @overload
+    def __getitem__(self, value: int) -> str: ...
+
+    @overload
+    def __getitem__(self, value: slice) -> Sequence[str]: ...
+
+    def __getitem__(self, value: int | slice) -> str | Sequence[str]:
         return self.scopes.__getitem__(value)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.scopes)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.scopes.__repr__()
 
 
@@ -85,6 +97,8 @@ class HasApiScopes(models.Model):
             "alerts:read": bool,
             "alerts:write": bool,
             "member:invite": bool,
+            "project:distribution": bool,
+            "org:ci": bool,
         },
     )
     assert set(ScopesDict.__annotations__) == set(ApiScopes())

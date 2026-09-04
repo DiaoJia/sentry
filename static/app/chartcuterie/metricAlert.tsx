@@ -1,15 +1,15 @@
 import type {Theme} from '@emotion/react';
 import type {LineSeriesOption, YAXisComponentOption} from 'echarts';
 
-import type {AreaChartSeries} from 'sentry/components/charts/areaChart';
-import XAxis from 'sentry/components/charts/components/xAxis';
-import AreaSeries from 'sentry/components/charts/series/areaSeries';
-import type {SessionApiResponse} from 'sentry/types/organization';
-import type {MetricChartData} from 'sentry/views/alerts/rules/metric/details/metricChartOption';
+import type {MetricChartData} from 'sentry/chartcuterie/metricChartOption';
 import {
   getMetricAlertChartOption,
   transformSessionResponseToSeries,
-} from 'sentry/views/alerts/rules/metric/details/metricChartOption';
+} from 'sentry/chartcuterie/metricChartOption';
+import type {AreaChartSeries} from 'sentry/components/charts/areaChart';
+import {XAxis} from 'sentry/components/charts/components/xAxis';
+import {AreaSeries} from 'sentry/components/charts/series/areaSeries';
+import type {SessionApiResponse} from 'sentry/types/organization';
 
 import {DEFAULT_FONT_FAMILY, makeSlackChartDefaults, slackChartSize} from './slack';
 import type {RenderDescriptor} from './types';
@@ -25,7 +25,7 @@ function transformAreaSeries(series: AreaChartSeries[]): LineSeriesOption[] {
         width: 0.4,
       },
       areaStyle: {
-        opacity: 1.0,
+        opacity: 1,
       },
       animation: false,
       animationThreshold: 1,
@@ -56,7 +56,7 @@ export function makeMetricAlertCharts(theme: Theme): Array<RenderDescriptor<Char
     axisLabel: {fontSize: 11, fontFamily: DEFAULT_FONT_FAMILY},
     splitLine: {
       lineStyle: {
-        color: theme.chartLineColor,
+        color: theme.colors.gray300,
         opacity: 0.3,
       },
     },
@@ -69,7 +69,7 @@ export function makeMetricAlertCharts(theme: Theme): Array<RenderDescriptor<Char
 
       return {
         ...chartOption,
-        backgroundColor: theme.background,
+        backgroundColor: theme.tokens.background.primary,
         series: transformAreaSeries(chartOption.series),
         xAxis: metricAlertXaxis,
         yAxis: {
@@ -105,7 +105,7 @@ export function makeMetricAlertCharts(theme: Theme): Array<RenderDescriptor<Char
 
       return {
         ...chartOption,
-        backgroundColor: theme.background,
+        backgroundColor: theme.tokens.background.primary,
         series: transformAreaSeries(chartOption.series),
         xAxis: metricAlertXaxis,
         yAxis: {

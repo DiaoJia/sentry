@@ -1,27 +1,30 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
-import Color from 'color';
+// eslint-disable-next-line no-restricted-imports
+import color from 'color';
 import type {LocationDescriptor} from 'history';
 import * as qs from 'query-string';
 
-import Link from 'sentry/components/links/link';
-import {generateTraceTarget} from 'sentry/components/quickTrace/utils';
+import {Link} from '@sentry/scraps/link';
+
 import type {Event} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {defined} from 'sentry/utils/defined';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {isCollapsedNode} from 'sentry/views/performance/newTraceDetails/traceGuards';
 import {TraceViewSources} from 'sentry/views/performance/newTraceDetails/traceHeader/breadcrumbs';
 import type {IssuesTraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/issuesTraceTree';
 import {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
+import type {TraceWaterfallSource} from 'sentry/views/performance/newTraceDetails/traceWaterfall';
+import {getTraceTargetFromEvent} from 'sentry/views/performance/traceDetails/traceTarget';
 
 import type {VirtualizedViewManager} from './traceRenderers/virtualizedViewManager';
 
 interface RowPosition {
   height: number;
   left: number;
-  pathToNode: ReturnType<typeof TraceTree.PathToNode>;
+  pathToNode: TraceTree.NodePath[];
   top: number;
   width: number;
 }
@@ -30,6 +33,7 @@ interface TraceOverlayProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
   event: Event;
   groupId: string | undefined;
+  source: TraceWaterfallSource;
   tree: IssuesTraceTree;
   viewManager: VirtualizedViewManager;
 }
@@ -42,6 +46,7 @@ export function IssueTraceWaterfallOverlay({
   containerRef,
   event,
   groupId,
+  source,
   tree,
   viewManager,
 }: TraceOverlayProps) {
@@ -51,19 +56,21 @@ export function IssueTraceWaterfallOverlay({
 
   const traceTarget = useMemo(
     () =>
-      generateTraceTarget(
+      getTraceTargetFromEvent(
         event,
         organization,
         {
           ...location,
           query: {
-            ...location.query,
             ...(groupId ? {groupId} : {}),
+            referrer: location.query.referrer,
           },
         },
-        TraceViewSources.ISSUE_DETAILS
+        source === 'feedback'
+          ? TraceViewSources.FEEDBACK_DETAILS
+          : TraceViewSources.ISSUE_DETAILS
       ),
-    [event, organization, location, groupId]
+    [event, organization, location, groupId, source]
   );
 
   useEffect(() => {
@@ -90,7 +97,7 @@ export function IssueTraceWaterfallOverlay({
           return;
         }
 
-        const pathToNode = TraceTree.PathToNode(node);
+        const pathToNode = node.pathToNode();
 
         if (!pathToNode) {
           return;
@@ -155,7 +162,7 @@ export function IssueTraceWaterfallOverlay({
 
 export function getTraceLinkForIssue(
   traceTarget: LocationDescriptor,
-  pathToNode?: ReturnType<typeof TraceTree.PathToNode>
+  pathToNode?: TraceTree.NodePath[]
 ) {
   if (typeof traceTarget === 'string') {
     return traceTarget;
@@ -195,6 +202,6 @@ const IssuesTraceOverlayContainer = styled(Link)`
   pointer-events: auto;
 
   &:hover {
-    background: ${p => Color(p.theme.gray300).alpha(0.1).toString()};
+    background: ${p => color(p.theme.colors.gray400).alpha(0.1).toString()};
   }
 `;

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import importlib.metadata
 import logging
 import os
 import sys
+import time
 from typing import IO, Any
 
 import click
@@ -13,6 +13,7 @@ from sentry.silo.patches.silo_aware_transaction_patch import patch_silo_aware_at
 from sentry.utils import warnings
 from sentry.utils.arroyo import initialize_arroyo_main
 from sentry.utils.sdk import configure_sdk
+from sentry.utils.security.encrypted_field_key_store import initialize_encrypted_field_key_store
 from sentry.utils.warnings import DeprecatedSettingWarning
 
 
@@ -26,35 +27,6 @@ class ConfigurationError(ValueError, click.ClickException):
 
 
 def register_plugins(settings: Any, raise_on_plugin_load_failure: bool = False) -> None:
-    from sentry.plugins.base import plugins
-
-    # entry_points={
-    #    'sentry.plugins': [
-    #         'example = sentry_plugins.example.plugin:ExamplePlugin'
-    #     ],
-    # },
-    entry_points = {
-        ep
-        for dist in importlib.metadata.distributions()
-        for ep in dist.entry_points
-        if ep.group == "sentry.plugins"
-    }
-
-    for ep in entry_points:
-        try:
-            plugin = ep.load()
-        except Exception:
-            import traceback
-
-            click.echo(f"Failed to load plugin {ep.name!r}:\n{traceback.format_exc()}", err=True)
-            if raise_on_plugin_load_failure:
-                raise
-        else:
-            plugins.register(plugin)
-
-    for plugin in plugins.all(version=None):
-        init_plugin(plugin)
-
     from sentry.integrations.manager import default_manager as integrations
     from sentry.utils.imports import import_string
 
@@ -76,41 +48,6 @@ def register_plugins(settings: Any, raise_on_plugin_load_failure: bool = False) 
             integration.setup()
         except AttributeError:
             pass
-
-
-def init_plugin(plugin: Any) -> None:
-    from sentry.plugins.base import bindings
-
-    plugin.setup(bindings)
-
-    # Register contexts from plugins if necessary
-    if hasattr(plugin, "get_custom_contexts"):
-        from sentry.interfaces.contexts import contexttype
-
-        for cls in plugin.get_custom_contexts() or ():
-            contexttype(cls)
-
-    if hasattr(plugin, "get_cron_schedule") and plugin.is_enabled():
-        schedules = plugin.get_cron_schedule()
-        if schedules:
-            settings.CELERYBEAT_SCHEDULE.update(schedules)
-
-    if hasattr(plugin, "get_worker_imports") and plugin.is_enabled():
-        imports = plugin.get_worker_imports()
-        if imports:
-            settings.CELERY_IMPORTS += tuple(imports)
-
-    if hasattr(plugin, "get_worker_queues") and plugin.is_enabled():
-        from kombu import Queue
-
-        for queue in plugin.get_worker_queues():
-            try:
-                name, routing_key = queue
-            except ValueError:
-                name = routing_key = queue
-            q = Queue(name, routing_key=routing_key)
-            q.durable = False
-            settings.CELERY_QUEUES.append(q)
 
 
 def initialize_receivers() -> None:
@@ -154,6 +91,30 @@ options_mapper = {
     "github-login.api-domain": "GITHUB_API_DOMAIN",
     "github-login.extended-permissions": "GITHUB_EXTENDED_PERMISSIONS",
     "github-login.organization": "GITHUB_ORGANIZATION",
+}
+
+# Backward-compat promotion for self-hosted: config.yml keys that were migrated
+# to Django settings still work when SENTRY_SELF_HOSTED is True.
+self_hosted_options_mapper = {
+    "system.base-hostname": "SENTRY_BASE_HOSTNAME",
+    "system.organization-base-hostname": "SENTRY_ORGANIZATION_BASE_HOSTNAME",
+    "system.organization-url-template": "SENTRY_ORGANIZATION_URL_TEMPLATE",
+    "system.region-api-url-template": "SENTRY_REGION_API_URL_TEMPLATE",
+    "intercom.sentry-api-secret": "SENTRY_INTERCOM_API_SECRET",
+    "relay.static_auth": "SENTRY_RELAY_STATIC_AUTH",
+    "objectstore.config": "SENTRY_OBJECTSTORE_CONFIG",
+    "viewer-context.enabled": "SENTRY_VIEWER_CONTEXT_ENABLED",
+    "analytics.backend": "SENTRY_ANALYTICS_BACKEND",
+    "analytics.options": "SENTRY_ANALYTICS_OPTIONS",
+    "mail.list-namespace": "SENTRY_MAIL_LIST_NAMESPACE",
+    "filestore.backend": "SENTRY_FILE_STORAGE_BACKEND",
+    "filestore.options": "SENTRY_FILE_STORAGE_CONFIG",
+    "filestore.relocation-backend": "SENTRY_RELOCATION_FILE_STORAGE_BACKEND",
+    "filestore.relocation-options": "SENTRY_RELOCATION_FILE_STORAGE_CONFIG",
+    "filestore.profiles-backend": "SENTRY_PROFILES_FILE_STORAGE_BACKEND",
+    "filestore.profiles-options": "SENTRY_PROFILES_FILE_STORAGE_CONFIG",
+    "filestore.control.backend": "SENTRY_CONTROL_FILE_STORAGE_BACKEND",
+    "filestore.control.options": "SENTRY_CONTROL_FILE_STORAGE_CONFIG",
 }
 
 
@@ -209,9 +170,14 @@ def bootstrap_options(settings: Any, config: str | None = None) -> None:
     # Now go back through all of SENTRY_OPTIONS and promote
     # back into settings. This catches the case when values are defined
     # only in SENTRY_OPTIONS and no config.yml file
+    effective_mapper = (
+        {**options_mapper, **self_hosted_options_mapper}
+        if settings.SENTRY_SELF_HOSTED
+        else options_mapper
+    )
     for o in (settings.SENTRY_DEFAULT_OPTIONS, settings.SENTRY_OPTIONS):
         for k, v in o.items():
-            if k in options_mapper:
+            if k in effective_mapper:
                 # Map the mail.backend aliases to something Django understands
                 if k == "mail.backend":
                     try:
@@ -219,7 +185,7 @@ def bootstrap_options(settings: Any, config: str | None = None) -> None:
                     except KeyError:
                         pass
                 # Escalate the few needed to actually get the app bootstrapped into settings
-                setattr(settings, options_mapper[k], v)
+                setattr(settings, effective_mapper[k], v)
 
 
 def configure_structlog() -> None:
@@ -231,7 +197,6 @@ def configure_structlog() -> None:
     import structlog
     from django.conf import settings
 
-    from sentry import options
     from sentry.logging import LoggingFormat
 
     kwargs: dict[str, Any] = {
@@ -244,11 +209,7 @@ def configure_structlog() -> None:
         ],
     }
 
-    fmt_from_env = os.environ.get("SENTRY_LOG_FORMAT")
-    if fmt_from_env:
-        settings.SENTRY_OPTIONS["system.logging-format"] = fmt_from_env.lower()
-
-    fmt = options.get("system.logging-format")
+    fmt = settings.SENTRY_LOGGING_FORMAT
 
     if fmt == LoggingFormat.HUMAN:
         from sentry.logging.handlers import HumanRenderer
@@ -306,6 +267,22 @@ def show_big_error(message: str | list[str]) -> None:
 def initialize_app(config: dict[str, Any], skip_service_validation: bool = False) -> None:
     settings = config["settings"]
 
+    # Instrumentation to diagnose slow/hanging startup (e.g. the process-spans
+    # flusher subprocess timing out during configure()). Opt-in via the
+    # SENTRY_TRACE_STARTUP env var. Logging isn't configured until
+    # configure_structlog() runs partway through this function, so emit
+    # breadcrumbs straight to stderr with cumulative timing.
+    _trace_startup = bool(os.environ.get("SENTRY_TRACE_STARTUP"))
+    _init_start = time.monotonic()
+
+    def _trace(step: str) -> None:
+        if not _trace_startup:
+            return
+        sys.stderr.write(f"[initialize_app] +{time.monotonic() - _init_start:6.1f}s {step}\n")
+        sys.stderr.flush()
+
+    _trace("start")
+
     # Just reuse the integration app for Single Org / Self-Hosted as
     # it doesn't make much sense to use 2 separate apps for SSO and
     # integration.
@@ -317,19 +294,27 @@ def initialize_app(config: dict[str, Any], skip_service_validation: bool = False
             }
         )
 
+    _trace("bootstrap_options")
     bootstrap_options(settings, config["options"])
+
+    # The SENTRY_LOG_FORMAT env var (e.g. the `--logformat` CLI flag) overrides
+    # the SENTRY_LOGGING_FORMAT setting from server.py.
+    fmt_from_env = os.environ.get("SENTRY_LOG_FORMAT")
+    if fmt_from_env:
+        settings.SENTRY_LOGGING_FORMAT = fmt_from_env.lower()
 
     logging.raiseExceptions = settings.DEBUG
 
+    _trace("configure_structlog")
     configure_structlog()
 
     # Commonly setups don't correctly configure themselves for production envs
     # so lets try to provide a bit more guidance
-    if settings.CELERY_ALWAYS_EAGER and not settings.DEBUG:
+    if settings.TASKWORKER_ALWAYS_EAGER and not settings.DEBUG:
         warnings.warn(
             "Sentry is configured to run asynchronous tasks in-process. "
             "This is not recommended within production environments. "
-            "See https://develop.sentry.dev/services/queue/ for more information."
+            "See https://develop.sentry.dev/backend/application/domains/tasks/ for more information."
         )
 
     if settings.SENTRY_SINGLE_ORGANIZATION:
@@ -360,35 +345,55 @@ def initialize_app(config: dict[str, Any], skip_service_validation: bool = False
 
     import django
 
+    _trace("django.setup")
     django.setup()
 
+    _trace("validate_regions")
     validate_regions(settings)
 
+    _trace("validate_outbox_config")
     validate_outbox_config()
 
+    _trace("monkeypatch_django_migrations")
     monkeypatch_django_migrations()
 
+    _trace("patch_silo_aware_atomic")
     patch_silo_aware_atomic()
 
+    _trace("apply_legacy_settings")
     apply_legacy_settings(settings)
 
+    _trace("bind_cache_to_option_store")
     bind_cache_to_option_store()
 
+    _trace("register_plugins")
     register_plugins(settings)
 
+    _trace("initialize_receivers")
     initialize_receivers()
 
+    _trace("validate_options")
     validate_options(settings)
 
+    _trace("validate_snuba")
     validate_snuba()
 
+    _trace("configure_sdk")
     configure_sdk()
 
+    _trace("setup_services")
     setup_services(validate=not skip_service_validation)
 
+    _trace("import_grouptype")
     import_grouptype()
 
+    _trace("initialize_arroyo_main")
     initialize_arroyo_main()
+
+    # Encryption keys should be initialized before any
+    # database queries that use encrypted fields are made
+    _trace("initialize_encrypted_field_key_store")
+    initialize_encrypted_field_key_store()
 
     # Hacky workaround to dynamically set the CSRF_TRUSTED_ORIGINS for self hosted
     if settings.SENTRY_SELF_HOSTED and not settings.CSRF_TRUSTED_ORIGINS:
@@ -400,6 +405,8 @@ def initialize_app(config: dict[str, Any], skip_service_validation: bool = False
         else:
             # For first time users that have not yet set system url prefix, let's default to localhost url
             settings.CSRF_TRUSTED_ORIGINS = ["http://localhost:9000", "http://127.0.0.1:9000"]
+
+    _trace("done")
 
 
 def setup_services(validate: bool = True) -> None:
@@ -450,16 +457,22 @@ def setup_services(validate: bool = True) -> None:
 def validate_options(settings: Any) -> None:
     from sentry.options import default_manager
 
-    default_manager.validate(settings.SENTRY_OPTIONS, warn=True)
+    if settings.SENTRY_SELF_HOSTED:
+        opts = {
+            k: v for k, v in settings.SENTRY_OPTIONS.items() if k not in self_hosted_options_mapper
+        }
+    else:
+        opts = settings.SENTRY_OPTIONS
+    default_manager.validate(opts, warn=True)
 
 
 def validate_regions(settings: Any) -> None:
-    from sentry.types.region import load_from_config
+    from sentry.types.cell import load_from_config
 
-    if not settings.SENTRY_REGION_CONFIG:
+    if not settings.SENTRY_CELLS:
         return
 
-    load_from_config(settings.SENTRY_REGION_CONFIG).validate_all()
+    load_from_config(settings.SENTRY_CELLS, settings.SENTRY_LOCALITIES).validate_all()
 
 
 def monkeypatch_django_migrations() -> None:
@@ -513,29 +526,27 @@ def bind_cache_to_option_store() -> None:
     # loaded at this point, so we can plug in the cache backend before
     # continuing to initialize the remainder of the application.
     from django.core.cache import cache as default_cache
+    from django.core.cache import caches
+    from django.utils.connection import ConnectionProxy
 
     from sentry.options import default_store
 
-    default_store.set_cache_impl(default_cache)
+    # Prefer the 'options' cache profile if defined.
+    # Use a ConnectionProxy as caches['options'] performs
+    # poorly in threaded contexts.
+    # We type ignore because django's types are lies and default_cache
+    # is ConnectionProxy.
+    backend = default_cache
+    if "options" in settings.CACHES:
+        backend = ConnectionProxy(caches, "options")  # type: ignore[assignment]
+    default_store.set_cache_impl(backend)
 
 
 def apply_legacy_settings(settings: Any) -> None:
     from sentry import options
 
-    # SENTRY_USE_QUEUE used to determine if Celery was eager or not
-    if hasattr(settings, "SENTRY_USE_QUEUE"):
-        warnings.warn(
-            DeprecatedSettingWarning(
-                "SENTRY_USE_QUEUE",
-                "CELERY_ALWAYS_EAGER",
-                "https://develop.sentry.dev/services/queue/",
-            )
-        )
-        settings.CELERY_ALWAYS_EAGER = not settings.SENTRY_USE_QUEUE
-
     for old, new in (
         ("SENTRY_ADMIN_EMAIL", "system.admin-email"),
-        ("SENTRY_SYSTEM_MAX_EVENTS_PER_MINUTE", "system.rate-limit"),
         ("SENTRY_ENABLE_EMAIL_REPLIES", "mail.enable-replies"),
         ("SENTRY_SMTP_HOSTNAME", "mail.reply-hostname"),
         ("MAILGUN_API_KEY", "mail.mailgun-api-key"),
@@ -550,7 +561,19 @@ def apply_legacy_settings(settings: Any) -> None:
     ):
         if new not in settings.SENTRY_OPTIONS and hasattr(settings, old):
             warnings.warn(DeprecatedSettingWarning(old, "SENTRY_OPTIONS['%s']" % new))
-            settings.SENTRY_OPTIONS[new] = getattr(settings, old)
+            value = getattr(settings, old)
+            settings.SENTRY_OPTIONS[new] = value
+            # bootstrap_options already ran and promoted these option keys into their
+            # Django settings, so writing SENTRY_OPTIONS here is too late for any key
+            # whose consumers read the setting (e.g. filestore.* -> SENTRY_FILE_STORAGE_*).
+            # Re-promote the legacy value so the override actually takes effect.
+            effective_mapper = (
+                {**options_mapper, **self_hosted_options_mapper}
+                if settings.SENTRY_SELF_HOSTED
+                else options_mapper
+            )
+            if new in effective_mapper:
+                setattr(settings, effective_mapper[new], value)
 
     if hasattr(settings, "SENTRY_REDIS_OPTIONS"):
         if "redis.clusters" in settings.SENTRY_OPTIONS:
@@ -691,13 +714,16 @@ See: https://github.com/getsentry/snuba#sentry--snuba"""
 
 
 def validate_outbox_config() -> None:
-    from sentry.hybridcloud.models.outbox import ControlOutboxBase, RegionOutboxBase
+    from sentry.hybridcloud.models.outbox import CellOutboxBase, ControlOutboxBase
+    from sentry.issues.models.groupactionlogoutbox import GroupActionLogOutbox
 
-    for outbox_name in settings.SENTRY_OUTBOX_MODELS["CONTROL"]:
+    for outbox_name in settings.SENTRY_HYBRIDCLOUD_OUTBOX_MODELS["CONTROL"]:
         ControlOutboxBase.from_outbox_name(outbox_name)
 
-    for outbox_name in settings.SENTRY_OUTBOX_MODELS["REGION"]:
-        RegionOutboxBase.from_outbox_name(outbox_name)
+    for outbox_name in settings.SENTRY_HYBRIDCLOUD_OUTBOX_MODELS["CELL"]:
+        CellOutboxBase.from_outbox_name(outbox_name)
+
+    CellOutboxBase.from_outbox_name(GroupActionLogOutbox._meta.label)
 
 
 def import_grouptype() -> None:

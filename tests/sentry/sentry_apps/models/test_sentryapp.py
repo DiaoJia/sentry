@@ -1,15 +1,21 @@
+import orjson
+from django.core.serializers import serialize as django_serialize
+
+from sentry.backup.helpers import DatetimeSafeDjangoJSONEncoder
+from sentry.backup.sanitize import sanitize
 from sentry.constants import SentryAppStatus
 from sentry.hybridcloud.models.outbox import ControlOutbox
 from sentry.hybridcloud.outbox.category import OutboxCategory
 from sentry.models.apiapplication import ApiApplication
 from sentry.sentry_apps.models.sentry_app import SentryApp
 from sentry.testutils.cases import TestCase
-from sentry.testutils.silo import control_silo_test, create_test_regions
+from sentry.testutils.helpers.options import override_options
+from sentry.testutils.silo import control_silo_test, create_test_cells
 
 
-@control_silo_test(regions=create_test_regions("us", "eu"))
+@control_silo_test(cells=create_test_cells("us", "eu"))
 class SentryAppTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user()
         self.org = self.create_organization(owner=self.user)
         self.proxy = self.create_user()
@@ -26,41 +32,48 @@ class SentryAppTest(TestCase):
         )
         self.sentry_app.save()
 
-    def test_paranoid(self):
+    def test_paranoid(self) -> None:
         self.sentry_app.save()
         self.sentry_app.delete()
         assert self.sentry_app.date_deleted is not None
         assert self.sentry_app not in SentryApp.objects.all()
 
-    def test_date_updated(self):
+    @override_options({"sentry-apps.disable-paranoia": True})
+    def test_paranoid_querying_disabled(self) -> None:
+        self.sentry_app.save()
+        self.sentry_app.delete()
+        assert self.sentry_app.date_deleted is not None
+        assert self.sentry_app in SentryApp.objects.all()
+
+    def test_date_updated(self) -> None:
         self.sentry_app.save()
         date_updated = self.sentry_app.date_updated
         self.sentry_app.save()
         assert not self.sentry_app.date_updated == date_updated
 
-    def test_related_names(self):
+    def test_related_names(self) -> None:
         self.sentry_app.save()
         assert self.sentry_app.application is not None
         assert self.sentry_app.proxy_user is not None
         assert self.sentry_app.application.sentry_app == self.sentry_app
         assert self.sentry_app.proxy_user.sentry_app == self.sentry_app
 
-    def test_is_unpublished(self):
+    def test_is_unpublished(self) -> None:
         self.sentry_app.status = SentryAppStatus.UNPUBLISHED
         self.sentry_app.save()
         assert self.sentry_app.is_unpublished
 
-    def test_is_published(self):
+    def test_is_published(self) -> None:
         self.sentry_app.status = SentryAppStatus.PUBLISHED
         self.sentry_app.save()
         assert self.sentry_app.is_published
 
-    def test_is_internal(self):
+    def test_is_internal(self) -> None:
         self.sentry_app.status = SentryAppStatus.INTERNAL
         self.sentry_app.save()
         assert self.sentry_app.is_internal
 
-    def test_is_installed_on(self):
+    def test_is_installed_on(self) -> None:
         other_app = self.create_sentry_app()
         self.create_sentry_app_installation(
             organization=self.org, slug=self.sentry_app.slug, prevent_token_exchange=True
@@ -68,14 +81,14 @@ class SentryAppTest(TestCase):
         assert self.sentry_app.is_installed_on(self.org)
         assert not other_app.is_installed_on(self.org)
 
-    def test_not_installed_on_org(self):
+    def test_not_installed_on_org(self) -> None:
         other_org = self.create_organization()
         self.create_sentry_app_installation(
             organization=other_org, slug=self.sentry_app.slug, prevent_token_exchange=True
         )
         assert not self.sentry_app.is_installed_on(self.org)
 
-    def test_save_outbox_update(self):
+    def test_save_outbox_update(self) -> None:
         # Clear the outbox created in setup()
         ControlOutbox.objects.filter(category=OutboxCategory.SENTRY_APP_UPDATE).delete()
 
@@ -83,17 +96,37 @@ class SentryAppTest(TestCase):
         outboxes = ControlOutbox.objects.filter(category=OutboxCategory.SENTRY_APP_UPDATE).all()
         assert len(outboxes) == 2
         assert outboxes[0].shard_identifier == self.sentry_app.id
-        assert outboxes[0].region_name
+        assert outboxes[0].cell_name
 
-    def test_regions_with_installations(self):
-        self.us_org = self.create_organization(name="us test name", region="us")
+    def test_cells_with_installations(self) -> None:
+        self.us_org = self.create_organization(name="us test name", cell="us")
         self.create_sentry_app_installation(
             organization=self.us_org, slug=self.sentry_app.slug, prevent_token_exchange=True
         )
-        assert self.sentry_app.regions_with_installations() == {"us"}
+        assert self.sentry_app.cells_with_installations() == {"us"}
 
-        self.eu_org = self.create_organization(name="eu test name", region="eu")
+        self.eu_org = self.create_organization(name="eu test name", cell="eu")
         self.create_sentry_app_installation(
             organization=self.eu_org, slug=self.sentry_app.slug, prevent_token_exchange=True
         )
-        assert self.sentry_app.regions_with_installations() == {"us", "eu"}
+        assert self.sentry_app.cells_with_installations() == {"us", "eu"}
+
+    def test_sanitize_relocation_json_scrubs_webhook_headers(self) -> None:
+        # webhook_headers can hold auth tokens, so the relocation export must never
+        # include them. Exercise the real export path: serialize -> sanitize.
+        self.sentry_app.webhook_headers = ["Authorization: Bearer super-secret-token"]
+        self.sentry_app.save()
+
+        json_data = orjson.loads(
+            django_serialize(
+                "json",
+                [self.sentry_app],
+                use_natural_foreign_keys=False,
+                cls=DatetimeSafeDjangoJSONEncoder,
+            )
+        )
+        sanitized = sanitize(json_data)
+
+        fields = sanitized[0]["fields"]
+        assert fields["webhook_headers"] == "[]"
+        assert "super-secret-token" not in orjson.dumps(sanitized).decode()

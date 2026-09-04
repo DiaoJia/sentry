@@ -9,19 +9,31 @@ from django.db import models
 from django.db.models.signals import post_delete, post_save
 from django.utils import timezone
 
-from sentry import options  # noqa
+from sentry.analytics.events.codeowners_assignment import CodeOwnersAssignment
+from sentry.analytics.events.issueowners_assignment import IssueOwnersAssignment
+from sentry.analytics.events.suspectcommit_assignment import SuspectCommitAssignment
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import Model, region_silo_model, sane_repr
-from sentry.db.models.fields import FlexibleForeignKey, JSONField
-from sentry.eventstore.models import Event, GroupEvent
-from sentry.issues.ownership.grammar import Matcher, Rule, load_schema, resolve_actors
+from sentry.db.models import Model, cell_silo_model, sane_repr
+from sentry.db.models.fields import FlexibleForeignKey
+from sentry.issues.action_log.publish import action_context_scope
+from sentry.issues.action_log.types import SYSTEM_ACTOR, ActionSource
+from sentry.issues.ownership.grammar import (
+    CODEOWNERS,
+    Matcher,
+    OwnershipSchema,
+    Rule,
+    load_schema,
+    resolve_actors,
+)
 from sentry.models.activity import Activity
 from sentry.models.group import Group
 from sentry.models.groupowner import OwnerRuleType
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.types.activity import ActivityType
 from sentry.types.actor import Actor
 from sentry.utils import metrics
 from sentry.utils.cache import cache
+from sentry.utils.tracing import trace
 
 if TYPE_CHECKING:
     from sentry.models.projectcodeowners import ProjectCodeOwners
@@ -34,13 +46,13 @@ logger = logging.getLogger(__name__)
 READ_CACHE_DURATION = 3600
 
 
-@region_silo_model
+@cell_silo_model
 class ProjectOwnership(Model):
     __relocation_scope__ = RelocationScope.Organization
 
     project = FlexibleForeignKey("sentry.Project", unique=True)
     raw = models.TextField(null=True)
-    schema: models.Field[dict[str, Any] | None, dict[str, Any] | None] = JSONField(null=True)
+    schema = models.JSONField(null=True)
     fallthrough = models.BooleanField(default=True)
     # Auto Assignment through Ownership Rules & Code Owners
     auto_assignment = models.BooleanField(default=True)
@@ -61,7 +73,9 @@ class ProjectOwnership(Model):
         return f"projectownership_project_id:1:{project_id}"
 
     @classmethod
-    def get_combined_schema(self, ownership, codeowners):
+    def get_combined_schema(
+        self, ownership: ProjectOwnership, codeowners: ProjectCodeOwners | None
+    ) -> OwnershipSchema | None:
         if codeowners and codeowners.schema:
             ownership.schema = (
                 codeowners.schema
@@ -125,6 +139,12 @@ class ProjectOwnership(Model):
 
         rules = cls._matching_ownership_rules(ownership, data)
 
+        # CODEOWNERS exclusion: if the last matching codeowners rule has no owners,
+        # it means "no ownership" — remove all codeowners rules from the match set
+        codeowners_matches = [r for r in rules if r.matcher.type == CODEOWNERS]
+        if codeowners_matches and not codeowners_matches[-1].owners:
+            rules = [r for r in rules if r.matcher.type != CODEOWNERS]
+
         if not rules:
             return [], None
 
@@ -166,7 +186,7 @@ class ProjectOwnership(Model):
 
     @classmethod
     @metrics.wraps("projectownership.get_issue_owners")
-    @sentry_sdk.trace
+    @trace
     def get_issue_owners(
         cls, project_id: int, data: Mapping[str, Any], limit: int = 2
     ) -> Sequence[tuple[Rule, Sequence[Team | RpcUser], str]]:
@@ -207,6 +227,9 @@ class ProjectOwnership(Model):
 
         with metrics.timer("projectownership.get_issue_owners_codeowners_rules"):
             codeowners_rules = list(reversed(cls._matching_ownership_rules(codeowners, data)))
+            # CODEOWNERS exclusion: last matching rule (first after reversal) has no owners
+            if codeowners_rules and not codeowners_rules[0].owners:
+                return rules_with_owners
             hydrated_codeowners_rules = cls._hydrate_rules(
                 project_id, codeowners_rules, OwnerRuleType.CODEOWNERS.value
             )
@@ -228,7 +251,11 @@ class ProjectOwnership(Model):
 
         if ownership.auto_assignment:
             autoassignment_types.extend(
-                [GroupOwnerType.OWNERSHIP_RULE.value, GroupOwnerType.CODEOWNERS.value]
+                [
+                    GroupOwnerType.OWNERSHIP_RULE.value,
+                    GroupOwnerType.CODEOWNERS.value,
+                    GroupOwnerType.SEER_SUGGESTED.value,
+                ]
             )
         return autoassignment_types
 
@@ -267,7 +294,6 @@ class ProjectOwnership(Model):
             return
 
         with metrics.timer("projectownership.get_autoassign_owners"):
-
             ownership = cls.get_ownership_cached(project_id)
             if not ownership:
                 ownership = cls(project_id=project_id)
@@ -299,12 +325,17 @@ class ProjectOwnership(Model):
                 return
             logging_extra["resolved_owner"] = owner
 
+            if isinstance(owner, RpcUser) and owner.is_active is False:
+                return
+
             activity_details = {}
             if issue_owner.type == GroupOwnerType.SUSPECT_COMMIT.value:
                 activity_details["integration"] = ActivityIntegration.SUSPECT_COMMITTER.value
             elif issue_owner.type == GroupOwnerType.OWNERSHIP_RULE.value:
                 activity_details["integration"] = ActivityIntegration.PROJECT_OWNERSHIP.value
                 activity_details["rule"] = (issue_owner.context or {}).get("rule", "")
+            elif issue_owner.type == GroupOwnerType.SEER_SUGGESTED.value:
+                activity_details["integration"] = ActivityIntegration.SEER_SUGGESTED.value
             else:
                 activity_details["integration"] = ActivityIntegration.CODEOWNERS.value
                 activity_details["rule"] = (issue_owner.context or {}).get("rule", "")
@@ -336,27 +367,52 @@ class ProjectOwnership(Model):
             ):
                 return
 
-            assignment = GroupAssignee.objects.assign(
-                group,
-                owner,
-                create_only=not force_autoassign,
-                extra=activity_details,
-                force_autoassign=force_autoassign,
-            )
+            with action_context_scope(source=ActionSource.SYSTEM, actor=SYSTEM_ACTOR):
+                assignment = GroupAssignee.objects.assign(
+                    group,
+                    owner,
+                    create_only=not force_autoassign,
+                    extra=activity_details,
+                    force_autoassign=force_autoassign,
+                )
 
             if assignment["new_assignment"] or assignment["updated_assignment"]:
-                analytics.record(
-                    (
-                        "codeowners.assignment"
-                        if activity_details.get("integration")
-                        == ActivityIntegration.CODEOWNERS.value
-                        else "issueowners.assignment"
-                    ),
-                    organization_id=organization_id or ownership.project.organization_id,
-                    project_id=project_id,
-                    group_id=group.id,
-                    updated_assignment=assignment["updated_assignment"],
-                )
+                try:
+                    if activity_details.get("integration") == ActivityIntegration.CODEOWNERS.value:
+                        analytics.record(
+                            CodeOwnersAssignment(
+                                organization_id=organization_id
+                                or ownership.project.organization_id,
+                                project_id=project_id,
+                                group_id=group.id,
+                                updated_assignment=assignment["updated_assignment"],
+                            )
+                        )
+                    elif (
+                        activity_details.get("integration")
+                        == ActivityIntegration.SUSPECT_COMMITTER.value
+                    ):
+                        analytics.record(
+                            SuspectCommitAssignment(
+                                organization_id=organization_id
+                                or ownership.project.organization_id,
+                                project_id=project_id,
+                                group_id=group.id,
+                                updated_assignment=assignment["updated_assignment"],
+                            )
+                        )
+                    else:
+                        analytics.record(
+                            IssueOwnersAssignment(
+                                organization_id=organization_id
+                                or ownership.project.organization_id,
+                                project_id=project_id,
+                                group_id=group.id,
+                                updated_assignment=assignment["updated_assignment"],
+                            )
+                        )
+                except Exception as e:
+                    sentry_sdk.capture_exception(e)
 
     @classmethod
     def _matching_ownership_rules(
@@ -396,8 +452,7 @@ def process_resource_change(instance, change, **kwargs):
         instance if change == "updated" else None,
         READ_CACHE_DURATION,
     )
-    GroupOwner.invalidate_assignee_exists_cache(instance.project.id)
-    GroupOwner.invalidate_debounce_issue_owners_evaluation_cache(instance.project_id)
+    GroupOwner.set_project_ownership_version(instance.project_id)
 
 
 # Signals update the cached reads used in post_processing

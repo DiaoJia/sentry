@@ -1,9 +1,17 @@
 from collections import defaultdict
-from typing import DefaultDict, TypedDict
+from datetime import datetime
+from typing import TypedDict
 
+from sentry import features
 from sentry.api.serializers import Serializer, register
 from sentry.constants import ALL_ACCESS_PROJECTS
-from sentry.discover.models import DatasetSourcesTypes, DiscoverSavedQuery, DiscoverSavedQueryTypes
+from sentry.discover.models import (
+    DatasetSourcesTypes,
+    DiscoverSavedQuery,
+    DiscoverSavedQueryLastVisited,
+    DiscoverSavedQueryTypes,
+)
+from sentry.explore.models import ExploreSavedQuery, ExploreSavedQueryDataset
 from sentry.users.api.serializers.user import UserSerializerResponse
 from sentry.users.services.user.service import user_service
 from sentry.utils.dates import outside_retention_with_modified_start, parse_timestamp
@@ -27,6 +35,8 @@ class DiscoverSavedQueryResponseOptional(TypedDict, total=False):
     display: str
     topEvents: int
     interval: str
+    exploreQuery: dict
+    lastVisited: str
 
 
 class DiscoverSavedQueryResponse(DiscoverSavedQueryResponseOptional):
@@ -43,9 +53,68 @@ class DiscoverSavedQueryResponse(DiscoverSavedQueryResponseOptional):
 
 
 @register(DiscoverSavedQuery)
-class DiscoverSavedQueryModelSerializer(Serializer):
+class DiscoverSavedQueryModelSerializer(Serializer[DiscoverSavedQueryResponse]):
+    def partial_serialize_explore_query(self, query: ExploreSavedQuery) -> dict:
+        query_keys = [
+            "environment",
+            "query",
+            "range",
+            "start",
+            "end",
+            "interval",
+        ]
+        data = {
+            "id": str(query.id),
+            "name": query.name,
+            "projects": [project.id for project in query.projects.all()],
+            "dataset": ExploreSavedQueryDataset.get_type_name(query.dataset),
+            "expired": False,
+            "isPrebuilt": query.prebuilt_id is not None,
+            "changedReason": query.changed_reason,
+        }
+
+        for key in query_keys:
+            if query.query.get(key) is not None:
+                data[key] = query.query[key]
+
+        # expire queries that are beyond the retention period
+        if "start" in query.query:
+            start, end = parse_timestamp(query.query["start"]), parse_timestamp(query.query["end"])
+            if start and end:
+                expired, modified_start = outside_retention_with_modified_start(
+                    start, end, query.organization
+                )
+                data["expired"] = expired
+                data["start"] = modified_start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        if query.query.get("all_projects"):
+            data["projects"] = list(ALL_ACCESS_PROJECTS)
+
+        return data
+
     def get_attrs(self, item_list, user, **kwargs):
-        result: DefaultDict[str, dict] = defaultdict(lambda: {"created_by": {}})
+        result: defaultdict[str, dict] = defaultdict(
+            lambda: {"created_by": {}, "explore_query": None}
+        )
+
+        organization = item_list[0].organization if item_list else None
+        has_migrate_feature = (
+            organization is not None
+            and user.id is not None
+            and features.has(
+                "organizations:discover-queries-in-all-queries", organization, actor=user
+            )
+        )
+
+        user_last_visited: dict[int, datetime] = {}
+        if has_migrate_feature:
+            user_last_visited = dict(
+                DiscoverSavedQueryLastVisited.objects.filter(
+                    discover_saved_query__in=item_list,
+                    user_id=user.id,
+                    organization=organization,
+                ).values_list("discover_saved_query_id", "last_visited")
+            )
 
         service_serialized = user_service.serialize_many(
             filter={
@@ -59,10 +128,35 @@ class DiscoverSavedQueryModelSerializer(Serializer):
         )
         serialized_users = {user["id"]: user for user in service_serialized}
 
+        # Batch fetch and serialize explore queries
+        explore_query_ids = [
+            discover_query.explore_query_id
+            for discover_query in item_list
+            if discover_query.explore_query_id is not None
+            and discover_query.dataset == DiscoverSavedQueryTypes.TRANSACTION_LIKE
+        ]
+        if explore_query_ids:
+            explore_queries = ExploreSavedQuery.objects.filter(
+                id__in=explore_query_ids
+            ).prefetch_related("projects")
+            serialized_explore_queries = {
+                query.id: self.partial_serialize_explore_query(query) for query in explore_queries
+            }
+        else:
+            serialized_explore_queries = {}
+
         for discover_saved_query in item_list:
             result[discover_saved_query]["created_by"] = serialized_users.get(
                 str(discover_saved_query.created_by_id)
             )
+            if discover_saved_query.explore_query_id in serialized_explore_queries:
+                result[discover_saved_query]["explore_query"] = serialized_explore_queries.get(
+                    discover_saved_query.explore_query_id
+                )
+            if has_migrate_feature:
+                result[discover_saved_query]["user_last_visited"] = user_last_visited.get(
+                    discover_saved_query.id
+                )
 
         return result
 
@@ -97,6 +191,9 @@ class DiscoverSavedQueryModelSerializer(Serializer):
             "createdBy": attrs.get("created_by"),
         }
 
+        if "user_last_visited" in attrs:
+            data["lastVisited"] = attrs["user_last_visited"]
+
         for key in query_keys:
             if obj.query.get(key) is not None:
                 data[key] = obj.query[key]  # type: ignore[literal-required]
@@ -113,5 +210,8 @@ class DiscoverSavedQueryModelSerializer(Serializer):
 
         if obj.query.get("all_projects"):
             data["projects"] = list(ALL_ACCESS_PROJECTS)
+
+        if attrs.get("explore_query") is not None:
+            data["exploreQuery"] = attrs.get("explore_query")
 
         return data

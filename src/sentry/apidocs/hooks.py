@@ -10,9 +10,6 @@ from drf_spectacular.generators import EndpointEnumerator, SchemaGenerator
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.apidocs.api_ownership_allowlist_dont_modify import API_OWNERSHIP_ALLOWLIST_DONT_MODIFY
-from sentry.apidocs.api_publish_status_allowlist_dont_modify import (
-    API_PUBLISH_STATUS_ALLOWLIST_DONT_MODIFY,
-)
 from sentry.apidocs.build import OPENAPI_TAGS
 from sentry.apidocs.utils import SentryApiBuildError
 
@@ -36,6 +33,8 @@ _OWNERSHIP_FILE = "api_ownership_stats_dont_modify.json"
 # but do not want to document it
 EXCLUSION_PATH_PREFIXES = [
     "/api/0/monitors/",
+    # Legacy aliases for the documented agents/conversations endpoints.
+    "/api/0/organizations/{organization_id_or_slug}/ai-conversations/",
     # Issue URLS have an expression of group|issue that resolves to `var`
     "/api/0/{var}/{issue_id}/",
 ]
@@ -80,7 +79,6 @@ def __write_ownership_data(ownership_data: dict[ApiOwner, dict]):
             ApiPublishStatus.EXPERIMENTAL.value: sorted(
                 ownership_data[team][ApiPublishStatus.EXPERIMENTAL]
             ),
-            ApiPublishStatus.UNKNOWN.value: sorted(ownership_data[team][ApiPublishStatus.UNKNOWN]),
         }
         index += __get_line_count_for_team_stats(ownership_data[team])
     dir = os.path.dirname(os.path.realpath(__file__))
@@ -103,14 +101,24 @@ class CustomGenerator(SchemaGenerator):
     endpoint_inspector_cls = CustomEndpointEnumerator
 
 
+# Collected during preprocessing, used in postprocessing
+_ENDPOINT_SERVERS: dict[str, list[dict[str, Any]]] = {}
+
+
 def custom_preprocessing_hook(endpoints: Any) -> Any:  # TODO: organize method, rename
+    _ENDPOINT_SERVERS.clear()
+
     filtered = []
     ownership_data: dict[ApiOwner, dict] = {}
     for path, path_regex, method, callback in endpoints:
+        # Collect servers from endpoint class for postprocessing
+        endpoint_servers = getattr(callback.view_class, "servers", None)
+        if endpoint_servers is not None:
+            _ENDPOINT_SERVERS[path] = endpoint_servers
+
         owner_team = callback.view_class.owner
         if owner_team not in ownership_data:
             ownership_data[owner_team] = {
-                ApiPublishStatus.UNKNOWN: set(),
                 ApiPublishStatus.PUBLIC: set(),
                 ApiPublishStatus.PRIVATE: set(),
                 ApiPublishStatus.EXPERIMENTAL: set(),
@@ -124,18 +132,11 @@ def custom_preprocessing_hook(endpoints: Any) -> Any:  # TODO: organize method, 
                     + "If you can't find your team in ApiOwners feel free to add the associated github group. ",
                 )
 
-        # Fail if method is not included in publish_status or has unknown status
-        if (
-            method not in callback.view_class.publish_status
-            or callback.view_class.publish_status[method] is ApiPublishStatus.UNKNOWN
-        ):
-            if (
-                path not in API_PUBLISH_STATUS_ALLOWLIST_DONT_MODIFY
-                or method not in API_PUBLISH_STATUS_ALLOWLIST_DONT_MODIFY[path]
-            ):
-                raise SentryApiBuildError(
-                    f"All methods must have a known publish_status. Please add a valid publish status for Endpoint {callback.view_class} {method} method.",
-                )
+        # Fail if a method does not declare a publish_status
+        if method not in callback.view_class.publish_status:
+            raise SentryApiBuildError(
+                f"All methods must declare a publish_status. Please add a valid publish status for Endpoint {callback.view_class} {method} method.",
+            )
 
         if any(path.startswith(p) for p in EXCLUSION_PATH_PREFIXES):
             pass
@@ -163,9 +164,9 @@ def custom_preprocessing_hook(endpoints: Any) -> Any:  # TODO: organize method, 
 
 
 def dereference_schema(
-    schema: Mapping[str, Any],
+    schema: dict[str, Any],
     schema_components: Mapping[str, Any],
-) -> Mapping[str, Any]:
+) -> dict[str, Any]:
     """
     Dereferences the schema reference if it exists. Otherwise, returns the schema as is.
     """
@@ -177,7 +178,7 @@ def dereference_schema(
 
 
 def _validate_request_body(
-    request_body: Mapping[str, Any], schema_components: Mapping[str, Any], endpoint_name: str
+    request_body: dict[str, Any], schema_components: Mapping[str, Any], endpoint_name: str
 ) -> None:
     """
     1. Dereferences schema if needed.
@@ -197,16 +198,18 @@ def _validate_request_body(
     for body_param, param_data in schema["properties"].items():
         # Ensure body parameters have a description. Our API docs don't
         # display body params without a description, so it's easy to miss them.
-        # We should be explicitly excluding them as better practice however.
 
         # There is an edge case where a body param might be reference that we should ignore for now
         if "description" not in param_data and "$ref" not in param_data:
             raise SentryApiBuildError(
-                f"""Body parameter '{body_param}' is missing a description for endpoint {endpoint_name}. You can either:
-            1. Add a 'help_text' kwarg to the serializer field
-            2. Remove the field if you're using an inline_serializer
-            3. For a DRF serializer, you must explicitly exclude this field by decorating the request serializer with
-            @extend_schema_serializer(exclude_fields=[{body_param}])."""
+                f"""Body parameter '{body_param}' is missing a description for endpoint {endpoint_name}.
+
+            Add a 'help_text' kwarg to the serializer field, or remove the field if you're
+            using an inline_serializer.
+
+            Withholding it instead -- @sentry_schema_serializer(omit_from_public_schema=
+            {{"{body_param}": "<why>"}}) -- drops it from the schema and every generated SDK.
+            Only do that if the field should not be public at all, never to fix this error."""
             )
 
     # Required params are stored in a list and not in the param itself
@@ -222,14 +225,35 @@ def _validate_request_body(
 
 
 def custom_postprocessing_hook(result: Any, generator: Any, **kwargs: Any) -> Any:
+    # Add servers override from endpoint class definitions
+    for path, servers in _ENDPOINT_SERVERS.items():
+        if path in result["paths"]:
+            for method_info in result["paths"][path].values():
+                method_info["servers"] = servers
+
     _fix_issue_paths(result)
+    _fix_nullable_enums(result)
 
     # Fetch schema component references
     schema_components = result["components"]["schemas"]
 
+    # The API docs derive each page's URL slug from its summary, so two public
+    # operations sharing a summary would collide on the same docs URL.
+    summaries_seen: dict[str, str] = {}
+
     for path, endpoints in result["paths"].items():
         for method_info in endpoints.values():
             endpoint_name = f"'{method_info['operationId']}'"
+
+            summary = method_info.get("summary")
+            if summary is not None:
+                if summary in summaries_seen:
+                    raise SentryApiBuildError(
+                        f"Duplicate summary {summary!r} on endpoints {summaries_seen[summary]} "
+                        f"and {endpoint_name}. Summaries must be unique because the API docs "
+                        "derive each page's URL from them."
+                    )
+                summaries_seen[summary] = endpoint_name
 
             _check_tag(method_info, endpoint_name)
             _check_description(
@@ -281,6 +305,23 @@ def _check_tag(method_info: Mapping[str, Any], endpoint_name: str) -> None:
 def _check_description(json_body: Mapping[str, Any], err_str: str) -> None:
     if json_body.get("description") is None:
         raise SentryApiBuildError(err_str)
+
+
+def _fix_nullable_enums(node: Any) -> None:
+    """Add null to the values of any nullable enum schema.
+
+    A nullable enum must list null among its enum values; otherwise strict validators
+    reject a null value even when "nullable: true" is set, because in OpenAPI 3.0 the
+    enum membership constraint is evaluated independently of nullability.
+    """
+    if isinstance(node, dict):
+        if node.get("nullable") and isinstance(node.get("enum"), list) and None not in node["enum"]:
+            node["enum"].append(None)
+        for value in node.values():
+            _fix_nullable_enums(value)
+    elif isinstance(node, list):
+        for item in node:
+            _fix_nullable_enums(item)
 
 
 def _fix_issue_paths(result: Any) -> Any:

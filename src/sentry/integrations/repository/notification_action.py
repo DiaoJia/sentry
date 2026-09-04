@@ -5,12 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from logging import Logger, getLogger
 
-from django.db.models import Q
+from django.db.models import F, Q
 
 from sentry.integrations.repository.base import (
     BaseNewNotificationMessage,
     BaseNotificationMessage,
-    NotificationMessageValidationError,
 )
 from sentry.models.group import Group
 from sentry.notifications.models.notificationmessage import NotificationMessage
@@ -44,37 +43,11 @@ class NotificationActionNotificationMessage(BaseNotificationMessage):
         )
 
 
-class NotificationActionNotificationMessageValidationError(NotificationMessageValidationError):
-    pass
-
-
-class ActionAndGroupActionValidationError(NotificationActionNotificationMessageValidationError):
-    message = "both action and group need to exist together with a reference"
-
-
-@dataclass
+@dataclass(kw_only=True)
 class NewNotificationActionNotificationMessage(BaseNewNotificationMessage):
-    action_id: int | None = None
-    group_id: int | None = None
+    action_id: int
+    group_id: int
     open_period_start: datetime | None = None
-
-    def get_validation_error(self) -> Exception | None:
-        error = super().get_validation_error()
-        if error is not None:
-            return error
-
-        if self.message_identifier is not None:
-            # If a message_identifier exists, that means a successful notification happened for a rule action and fire
-            # This means that neither of them can be empty
-            if self.action_id is None or self.group_id is None:
-                return ActionAndGroupActionValidationError()
-
-        # We can create a NotificationMessage if it has both, or neither, of action and group.
-        # The following is an XNOR check for action and group
-        if (self.action_id is not None) != (self.group_id is not None):
-            return ActionAndGroupActionValidationError()
-
-        return None
 
 
 class NotificationActionNotificationMessageRepository:
@@ -112,20 +85,22 @@ class NotificationActionNotificationMessageRepository:
         """
         try:
             base_filter = self._parent_notification_message_base_filter()
-            instance: NotificationMessage = (
+            instance = (
                 self._model.objects.filter(base_filter)
                 .filter(
                     action=action,
                     group=group,
                     open_period_start=open_period_start,
                 )
-                .latest("date_added")
+                # Order by open_period_start to encourage index use.
+                .order_by(F("open_period_start").asc(nulls_last=True), "-date_added")
+                .first()
             )
+            if instance is None:
+                return None
             return NotificationActionNotificationMessage.from_model(instance=instance)
-        except NotificationMessage.DoesNotExist:
-            return None
         except Exception as e:
-            self._logger.exception(
+            self._logger.warning(
                 "Failed to get parent notification for issue rule",
                 exc_info=e,
                 extra={
@@ -153,7 +128,7 @@ class NotificationActionNotificationMessageRepository:
             )
             return NotificationActionNotificationMessage.from_model(instance=instance)
         except Exception as e:
-            self._logger.exception(
+            self._logger.warning(
                 "failed to create new notification action notification message",
                 exc_info=e,
                 extra=data.__dict__,
@@ -174,7 +149,7 @@ class NotificationActionNotificationMessageRepository:
         It is up to the caller to iterate over all the data, or store in memory if they need all objects concurrently.
         """
         action_id_filter = Q(action__id__in=action_ids) if action_ids else Q()
-        group_id_filter = Q(group__id__in=group_ids) if group_ids else Q()
+        group_id_filter = Q(group_id__in=group_ids) if group_ids else Q()
         open_period_start_filter = (
             Q(open_period_start=open_period_start) if open_period_start else Q()
         )
@@ -187,7 +162,7 @@ class NotificationActionNotificationMessageRepository:
             for instance in query:
                 yield NotificationActionNotificationMessage.from_model(instance=instance)
         except Exception as e:
-            self._logger.exception(
+            self._logger.warning(
                 "Failed to get parent notifications on filters",
                 exc_info=e,
                 extra=filter.__dict__,

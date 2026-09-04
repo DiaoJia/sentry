@@ -1,22 +1,28 @@
 import {useState} from 'react';
 
+import {
+  Button,
+  LinkButton,
+  type ButtonProps,
+  type LinkButtonProps,
+} from '@sentry/scraps/button';
+
 import type {Client} from 'sentry/api';
-import {Button, type ButtonProps} from 'sentry/components/core/button';
-import {LinkButton, type LinkButtonProps} from 'sentry/components/core/button/linkButton';
 import type {DATA_CATEGORY_INFO} from 'sentry/constants';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
-import withApi from 'sentry/utils/withApi';
+import {withApi} from 'sentry/utils/withApi';
 
+import {openOnDemandBudgetEditModal} from 'getsentry/actionCreators/modal';
 import {sendAddEventsRequest, sendUpgradeRequest} from 'getsentry/actionCreators/upsell';
-import StartTrialButton from 'getsentry/components/startTrialButton';
+import {StartTrialButton} from 'getsentry/components/startTrialButton';
 import type {Subscription} from 'getsentry/types';
 import {
   displayBudgetName,
   getBestActionToIncreaseEventLimits,
+  type UsageAction,
 } from 'getsentry/utils/billing';
-import trackGetsentryAnalytics from 'getsentry/utils/trackGetsentryAnalytics';
-import {openOnDemandBudgetEditModal} from 'getsentry/views/onDemandBudgets/editOnDemandButton';
+import {trackGetsentryAnalytics} from 'getsentry/utils/trackGetsentryAnalytics';
 
 /**
  * Event types for quota CTAs and notifications.
@@ -25,8 +31,10 @@ import {openOnDemandBudgetEditModal} from 'getsentry/views/onDemandBudgets/editO
  *
  */
 export type EventType = {
-  [K in keyof typeof DATA_CATEGORY_INFO]: (typeof DATA_CATEGORY_INFO)[K]['isBilledCategory'] extends true
-    ? (typeof DATA_CATEGORY_INFO)[K]['name']
+  [
+    K in keyof typeof DATA_CATEGORY_INFO
+  ]: (typeof DATA_CATEGORY_INFO)[K]['isBilledCategory'] extends true
+    ? (typeof DATA_CATEGORY_INFO)[K]['singular']
     : never;
 }[keyof typeof DATA_CATEGORY_INFO];
 
@@ -36,6 +44,7 @@ type Props = {
   referrer: string;
   source: string;
   subscription: Subscription;
+  action?: UsageAction;
   buttonProps?: Partial<ButtonProps | LinkButtonProps>;
   eventTypes?: EventType[];
   handleRequestSent?: () => void;
@@ -54,6 +63,7 @@ function AddEventsCTA(props: Props) {
     subscription,
     organization,
     api,
+    action: _action,
     eventTypes,
     notificationType,
     referrer,
@@ -70,12 +80,13 @@ function AddEventsCTA(props: Props) {
     setBusy(false);
   };
 
-  const action = getBestActionToIncreaseEventLimits(organization, subscription);
+  const action =
+    _action ?? getBestActionToIncreaseEventLimits(organization, subscription);
   const commonProps: Partial<ButtonProps | LinkButtonProps> & {
     'data-test-id'?: string;
   } = {
     size: 'xs',
-    priority: 'primary',
+    variant: 'primary',
     busy,
     disabled: busy,
     'data-test-id': `btn-${action}`,
@@ -104,7 +115,7 @@ function AddEventsCTA(props: Props) {
     }, 0);
   };
 
-  const checkoutUrl = `/settings/${organization.slug}/billing/checkout/?referrer=${referrer}`;
+  const checkoutUrl = `/checkout/${organization.slug}/?referrer=${referrer}`;
   const subscriptionUrl = `/settings/${organization.slug}/billing/overview/`;
 
   switch (action) {

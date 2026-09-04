@@ -11,18 +11,17 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 
 import {PlanFixture} from 'getsentry/__fixtures__/plan';
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
-import {InvoiceItemType} from 'getsentry/types';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 import InvoiceDetails from 'getsentry/views/invoiceDetails';
 
-describe('InvoiceDetails', function () {
-  const {organization, router, routerProps} = initializeOrg();
+describe('InvoiceDetails', () => {
+  const {organization} = initializeOrg();
   const basicInvoice = InvoiceFixture(
     {
       dateCreated: '2021-09-20T22:33:38.042Z',
       items: [
         {
-          type: InvoiceItemType.SUBSCRIPTION,
+          type: 'subscription',
           description: 'Subscription to Business',
           amount: 8900,
           periodEnd: '2021-10-21',
@@ -40,7 +39,7 @@ describe('InvoiceDetails', function () {
       creditApplied: 500,
       items: [
         {
-          type: InvoiceItemType.SUBSCRIPTION,
+          type: 'subscription',
           description: 'Subscription to Business',
           amount: 8900,
           periodEnd: '2021-10-21',
@@ -48,7 +47,7 @@ describe('InvoiceDetails', function () {
           data: {},
         },
         {
-          type: InvoiceItemType.CREDIT_APPLIED,
+          type: 'credit_applied',
           description: 'Credit applied',
           amount: 500,
           periodEnd: '2021-10-21',
@@ -61,7 +60,7 @@ describe('InvoiceDetails', function () {
   );
   const params = {invoiceGuid: basicInvoice.id};
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     SubscriptionStore.set(organization.slug, {});
 
@@ -70,15 +69,27 @@ describe('InvoiceDetails', function () {
       method: 'GET',
       body: {},
     });
+    MockApiClient.addMockResponse({
+      url: `/customers/${organization.slug}/invoices/`,
+      method: 'GET',
+      body: [],
+    });
   });
 
-  it('renders basic invoice details', async function () {
+  it('renders basic invoice details', async () => {
     const mockapi = MockApiClient.addMockResponse({
       url: `/customers/${organization.slug}/invoices/${basicInvoice.id}/`,
       method: 'GET',
       body: basicInvoice,
     });
-    render(<InvoiceDetails {...routerProps} params={params} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
     await waitFor(() => expect(mockapi).toHaveBeenCalled());
 
     expect(await screen.findByText('Sentry')).toBeInTheDocument();
@@ -94,7 +105,7 @@ describe('InvoiceDetails', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders disclaimer with annual billing', async function () {
+  it('renders disclaimer with annual billing', async () => {
     const annualInvoice = InvoiceFixture(
       {
         customer: SubscriptionFixture({
@@ -110,24 +121,38 @@ describe('InvoiceDetails', function () {
       method: 'GET',
       body: annualInvoice,
     });
-    render(<InvoiceDetails {...routerProps} params={params} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
     await waitFor(() => expect(mockapi).toHaveBeenCalled());
 
     expect(
-      screen.getByText(
+      await screen.findByText(
         /Your subscription will automatically renew on or about the same day each year and your credit card on file will be charged the recurring subscription fees set forth above. In addition to recurring subscription fees, you may also be charged for monthly pay-as-you-go fees. You may cancel your subscription at any time /
       )
     ).toBeInTheDocument();
   });
 
-  it('renders credit applied', async function () {
+  it('renders credit applied', async () => {
     const mockapi = MockApiClient.addMockResponse({
       url: `/customers/${organization.slug}/invoices/${creditInvoice.id}/`,
       method: 'GET',
       body: creditInvoice,
     });
     const creditParams = {invoiceGuid: creditInvoice.id};
-    render(<InvoiceDetails {...routerProps} params={creditParams} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${creditParams.invoiceGuid}/`,
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
     await waitFor(() => expect(mockapi).toHaveBeenCalled());
 
     expect(await screen.findByText('Sentry')).toBeInTheDocument();
@@ -135,14 +160,21 @@ describe('InvoiceDetails', function () {
     expect(screen.getByText('$89.00 USD')).toBeInTheDocument();
   });
 
-  it('renders an error', async function () {
+  it('renders an error', async () => {
     const mockapi = MockApiClient.addMockResponse({
       url: `/customers/${organization.slug}/invoices/${basicInvoice.id}/`,
       method: 'GET',
       statusCode: 404,
       body: {},
     });
-    render(<InvoiceDetails {...routerProps} params={params} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
     await waitFor(() => expect(mockapi).toHaveBeenCalled());
 
     expect(
@@ -150,12 +182,7 @@ describe('InvoiceDetails', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders without pay now for self serve partner', async function () {
-    router.location = {
-      ...router.location,
-      query: {referrer: 'billing-failure'},
-    };
-
+  it('renders without pay now for self serve partner', async () => {
     const pastDueInvoice = InvoiceFixture(
       {
         amount: 8900,
@@ -163,7 +190,7 @@ describe('InvoiceDetails', function () {
         isPaid: false,
         items: [
           {
-            type: InvoiceItemType.SUBSCRIPTION,
+            type: 'subscription',
             description: 'Subscription to Business',
             amount: 8900,
             periodEnd: '2021-10-21',
@@ -187,16 +214,23 @@ describe('InvoiceDetails', function () {
       body: pastDueInvoice,
     });
 
-    render(<InvoiceDetails {...routerProps} params={pastDueParams} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${pastDueParams.invoiceGuid}/`,
+          query: {referrer: 'billing-failure'},
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
 
     await waitFor(() => expect(mockapiInvoice).toHaveBeenCalled());
 
-    expect(screen.getByText(/Invoice Details/)).toBeInTheDocument();
-    expect(screen.getByText(/AWAITING PAYMENT/)).toBeInTheDocument();
+    expect(await screen.findByText(/AWAITING PAYMENT/)).toBeInTheDocument();
     expect(screen.queryByText(/Pay Now/)).not.toBeInTheDocument();
   });
 
-  it('sends a request to email the invoice', async function () {
+  it('sends a request to email the invoice', async () => {
     const mockget = MockApiClient.addMockResponse({
       url: `/customers/${organization.slug}/invoices/${basicInvoice.id}/`,
       method: 'GET',
@@ -207,7 +241,14 @@ describe('InvoiceDetails', function () {
       url: `/customers/${organization.slug}/invoices/${basicInvoice.id}/`,
       method: 'POST',
     });
-    render(<InvoiceDetails {...routerProps} params={params} />);
+    render(<InvoiceDetails />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+        },
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
+      },
+    });
     await waitFor(() => expect(mockget).toHaveBeenCalled());
 
     const input = await screen.findByPlaceholderText('you@example.com');
@@ -227,7 +268,7 @@ describe('InvoiceDetails', function () {
     expect(screen.queryByText('user@example.com')).not.toBeInTheDocument();
   });
 
-  it('renders with open pay now with billing failure referrer', async function () {
+  it('renders with open pay now with billing failure referrer', async () => {
     const pastDueInvoice = InvoiceFixture(
       {
         amount: 8900,
@@ -235,7 +276,7 @@ describe('InvoiceDetails', function () {
         isPaid: false,
         items: [
           {
-            type: InvoiceItemType.SUBSCRIPTION,
+            type: 'subscription',
             description: 'Subscription to Business',
             amount: 8900,
             periodEnd: '2021-10-21',
@@ -259,33 +300,30 @@ describe('InvoiceDetails', function () {
     });
 
     renderGlobalModal();
-    render(<InvoiceDetails {...routerProps} params={pastDueParams} />, {
+    render(<InvoiceDetails />, {
       initialRouterConfig: {
         location: {
-          pathname: `/organizations/${organization.slug}/invoices/${pastDueInvoice.id}/`,
+          pathname: `/organizations/${organization.slug}/invoices/${pastDueParams.invoiceGuid}/`,
           query: {referrer: 'billing-failure'},
         },
-        route: `/organizations/${organization.slug}/invoices/:invoiceGuid/`,
+        route: '/organizations/:orgId/invoices/:invoiceGuid/',
       },
     });
 
     await waitFor(() => expect(mockapiInvoice).toHaveBeenCalled());
     await waitFor(() => expect(mockapiPayments).toHaveBeenCalled());
 
-    expect(screen.getByText(/Invoice Details/)).toBeInTheDocument();
-    expect(screen.getAllByText(/Pay Now/)).toHaveLength(2);
-    expect(screen.getByText(/Pay Invoice/)).toBeInTheDocument();
-    expect(screen.getByText(/Card Details/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText(/Pay Now/)).toHaveLength(2));
+    expect(screen.getByText(/Pay Bill/)).toBeInTheDocument();
     expect(screen.getByTestId('modal-backdrop')).toBeInTheDocument();
-    expect(screen.getByTestId('cancel')).toBeInTheDocument();
-    expect(screen.getByTestId('submit')).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Cancel'})).toBeInTheDocument();
   });
 
-  describe('Invoice Details Attributes', function () {
+  describe('Invoice Details Attributes', () => {
     const billingDetails = BillingDetailsFixture({taxNumber: '123456789'});
     SubscriptionFixture({organization});
 
-    beforeEach(function () {
+    beforeEach(() => {
       MockApiClient.clearMockResponses();
       SubscriptionStore.set(organization.slug, {});
 
@@ -294,15 +332,27 @@ describe('InvoiceDetails', function () {
         method: 'GET',
         body: billingDetails,
       });
+      MockApiClient.addMockResponse({
+        url: `/customers/${organization.slug}/invoices/`,
+        method: 'GET',
+        body: [],
+      });
     });
 
-    it('renders with billing address', async function () {
+    it('renders with billing address', async () => {
       const mockInvoice = MockApiClient.addMockResponse({
         url: `/customers/${organization.slug}/invoices/${basicInvoice.id}/`,
         method: 'GET',
         body: basicInvoice,
       });
-      render(<InvoiceDetails {...routerProps} params={params} />);
+      render(<InvoiceDetails />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+          },
+          route: '/organizations/:orgId/invoices/:invoiceGuid/',
+        },
+      });
 
       await waitFor(() => expect(mockInvoice).toHaveBeenCalled());
 
@@ -311,14 +361,14 @@ describe('InvoiceDetails', function () {
       ).toBeInTheDocument();
       expect(screen.getByText('Details:')).toBeInTheDocument();
       expect(screen.getByText(`${billingDetails.displayAddress}`)).toBeInTheDocument();
-      expect(screen.getByText('Tax Number:')).toBeInTheDocument();
-      expect(screen.getByText(`${billingDetails.taxNumber}`)).toBeInTheDocument();
       expect(screen.getByText(`${billingDetails.billingEmail}`)).toBeInTheDocument();
+      expect(screen.queryByText('Tax Number:')).not.toBeInTheDocument();
+      expect(screen.queryByText(`${billingDetails.taxNumber}`)).not.toBeInTheDocument();
       expect(screen.queryByText('Country Id: 1234')).not.toBeInTheDocument();
       expect(screen.queryByText('Regional Tax Id: 5678')).not.toBeInTheDocument();
     });
 
-    it('renders sentry tax ids', async function () {
+    it('renders sentry tax ids', async () => {
       const basicInvoiceWithSentryTaxIds = InvoiceFixture(
         {
           sentryTaxIds: {
@@ -339,14 +389,21 @@ describe('InvoiceDetails', function () {
         method: 'GET',
         body: basicInvoiceWithSentryTaxIds,
       });
-      render(<InvoiceDetails {...routerProps} params={params} />);
+      render(<InvoiceDetails />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+          },
+          route: '/organizations/:orgId/invoices/:invoiceGuid/',
+        },
+      });
 
       await waitFor(() => expect(mockInvoice).toHaveBeenCalled());
       expect(await screen.findByText('Country Id: 1234')).toBeInTheDocument();
       expect(screen.getByText('Regional Tax Id: 5678')).toBeInTheDocument();
     });
 
-    it('renders reverse charge row', async function () {
+    it('renders reverse charge row', async () => {
       const basicInvoiceReverseCharge = InvoiceFixture(
         {
           isReverseCharge: true,
@@ -360,7 +417,14 @@ describe('InvoiceDetails', function () {
         method: 'GET',
         body: basicInvoiceReverseCharge,
       });
-      render(<InvoiceDetails {...routerProps} params={params} />);
+      render(<InvoiceDetails />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/invoices/${params.invoiceGuid}/`,
+          },
+          route: '/organizations/:orgId/invoices/:invoiceGuid/',
+        },
+      });
 
       await waitFor(() => expect(mockInvoice).toHaveBeenCalled());
       expect(await screen.findByText('VAT')).toBeInTheDocument();

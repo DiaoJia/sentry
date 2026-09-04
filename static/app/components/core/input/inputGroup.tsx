@@ -1,29 +1,90 @@
 import {
   createContext,
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
   useContext,
   useLayoutEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
-import type {Theme} from '@emotion/react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import type {InputProps} from 'sentry/components/core/input';
-import {Input as _Input} from 'sentry/components/core/input';
-import {
-  ChonkStyledInput,
-  ChonkStyledLeadingItemsWrap,
-  ChonkStyledTextArea,
-  ChonkStyledTrailingItemsWrap,
-  InputItemsWrap,
-  type InputStyleProps,
-} from 'sentry/components/core/input/inputGroup.chonk';
-import type {TextAreaProps} from 'sentry/components/core/textarea';
-import {TextArea as _TextArea} from 'sentry/components/core/textarea';
-import type {FormSize} from 'sentry/utils/theme';
-import {withChonk} from 'sentry/utils/theme/withChonk';
+import type {InputProps} from '@sentry/scraps/input';
+
+import type {FormSize, StrictCSSObject, Theme} from 'sentry/utils/theme';
+
+// There is a cycle here if we import textarea from scraps.
+// eslint-disable-next-line @sentry/no-relative-import-paths
+import type {TextAreaProps} from '../textarea';
+// eslint-disable-next-line @sentry/no-relative-import-paths
+import {TextArea as CoreTextArea} from '../textarea';
+
+import {Input as CoreInput} from './input';
+
+interface InputStyleProps {
+  leadingWidth?: number;
+  size?: FormSize;
+  trailingWidth?: number;
+}
+
+const InputItemsWrap = styled('div')`
+  display: grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: ${p => p.theme.space.md};
+
+  /* Do not use transform here to do alignment as it will create a new stacking
+   * context, breaking things like dropdown menus */
+  position: absolute;
+  top: 0;
+  bottom: 0;
+`;
+
+const itemsPadding = {
+  md: 8,
+  sm: 6,
+  xs: 4,
+} satisfies Record<NonNullable<InputStyleProps['size']>, number>;
+
+const inputStyles = ({
+  leadingWidth,
+  trailingWidth,
+  size = 'md',
+  theme,
+}: InputStyleProps & {theme: Theme}): StrictCSSObject => ({
+  ...(leadingWidth && {
+    paddingLeft: `calc(${theme.form[size].paddingLeft}px + ${itemsPadding[size]}px + ${leadingWidth}px)`,
+  }),
+  ...(trailingWidth && {
+    paddingRight: `calc(${theme.form[size].paddingRight}px + ${itemsPadding[size]}px + ${trailingWidth}px)`,
+  }),
+});
+
+const StyledInput = styled(CoreInput)<InputStyleProps>`
+  ${inputStyles}
+`;
+
+const StyledTextArea = styled(CoreTextArea)<InputStyleProps>`
+  ${inputStyles}
+`;
+
+const StyledLeadingItemsWrap = styled(InputItemsWrap)<{
+  size: NonNullable<InputStyleProps['size']>;
+  disablePointerEvents?: boolean;
+}>`
+  left: ${p => p.theme.form[p.size].paddingLeft + 1}px;
+  ${p => p.disablePointerEvents && 'pointer-events: none;'}
+`;
+
+const StyledTrailingItemsWrap = styled(InputItemsWrap)<{
+  size: NonNullable<InputStyleProps['size']>;
+  disablePointerEvents?: boolean;
+}>`
+  right: ${p => p.theme.form[p.size].paddingRight + 1}px;
+  ${p => p.disablePointerEvents && 'pointer-events: none;'}
+`;
 
 interface InputContext {
   /**
@@ -36,8 +97,8 @@ interface InputContext {
    */
   leadingWidth?: number;
   setInputProps?: (props: Pick<InputProps, 'size' | 'disabled'>) => void;
-  setLeadingWidth?: (width: number) => void;
-  setTrailingWidth?: (width: number) => void;
+  setLeadingWidth?: Dispatch<SetStateAction<number | undefined>>;
+  setTrailingWidth?: Dispatch<SetStateAction<number | undefined>>;
   /**
    * Width of the trailing items wrap, to be added to `Input`'s padding.
    */
@@ -128,6 +189,36 @@ interface InputItemsProps extends React.HTMLAttributes<HTMLDivElement> {
   disablePointerEvents?: boolean;
 }
 
+function useInputItemsWidthRef(
+  setWidth: Dispatch<SetStateAction<number | undefined>> | undefined
+) {
+  return useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node || !setWidth) {
+        return;
+      }
+
+      const updateWidth = () => {
+        setWidth(node.offsetWidth);
+      };
+
+      // Measure synchronously when the node is mounted so the input padding is
+      // correct before the browser paints. The observer handles children that
+      // change size without replacing the items wrapper.
+      updateWidth();
+
+      const observer = new ResizeObserver(updateWidth);
+      observer.observe(node);
+
+      return () => {
+        observer.disconnect();
+        setWidth(undefined);
+      };
+    },
+    [setWidth]
+  );
+}
+
 /**
  * Container for leading input items (e.g. a search icon). To be wrapped
  * inside `InputGroup`:
@@ -137,21 +228,14 @@ interface InputItemsProps extends React.HTMLAttributes<HTMLDivElement> {
  *   </InputGroup>
  */
 function LeadingItems({children, disablePointerEvents, ...props}: InputItemsProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
   const {
     inputProps: {size = 'md', disabled},
     setLeadingWidth,
   } = useContext(InputGroupContext);
-
-  useLayoutEffect(() => {
-    if (!ref.current) {
-      return;
-    }
-    setLeadingWidth?.(ref.current.offsetWidth);
-  }, [children, setLeadingWidth, size]);
+  const ref = useInputItemsWidthRef(setLeadingWidth);
 
   return (
-    <InputLeadingItemsWrap
+    <StyledLeadingItemsWrap
       ref={ref}
       size={size}
       disablePointerEvents={disabled || disablePointerEvents}
@@ -159,7 +243,7 @@ function LeadingItems({children, disablePointerEvents, ...props}: InputItemsProp
       {...props}
     >
       {children}
-    </InputLeadingItemsWrap>
+    </StyledLeadingItemsWrap>
   );
 }
 
@@ -172,21 +256,14 @@ function LeadingItems({children, disablePointerEvents, ...props}: InputItemsProp
  *   </InputGroup>
  */
 function TrailingItems({children, disablePointerEvents, ...props}: InputItemsProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
   const {
     inputProps: {size = 'md', disabled},
     setTrailingWidth,
   } = useContext(InputGroupContext);
-
-  useLayoutEffect(() => {
-    if (!ref.current) {
-      return;
-    }
-    setTrailingWidth?.(ref.current.offsetWidth);
-  }, [children, setTrailingWidth, size]);
+  const ref = useInputItemsWidthRef(setTrailingWidth);
 
   return (
-    <InputTrailingItemsWrap
+    <StyledTrailingItemsWrap
       ref={ref}
       size={size}
       disablePointerEvents={disabled || disablePointerEvents}
@@ -194,7 +271,7 @@ function TrailingItems({children, disablePointerEvents, ...props}: InputItemsPro
       {...props}
     >
       {children}
-    </InputTrailingItemsWrap>
+    </StyledTrailingItemsWrap>
   );
 }
 
@@ -203,66 +280,11 @@ InputGroup.TextArea = TextArea;
 InputGroup.LeadingItems = LeadingItems;
 InputGroup.TrailingItems = TrailingItems;
 
-export type {InputProps, TextAreaProps};
-
 const InputGroupWrap = styled('div')<{disabled?: boolean}>`
   position: relative;
-  ${p => p.disabled && `color: ${p.theme.disabled};`};
+  ${p =>
+    p.disabled &&
+    css`
+      color: ${p.theme.tokens.content.disabled};
+    `}
 `;
-
-const getInputStyles = ({
-  leadingWidth,
-  trailingWidth,
-  size,
-  theme,
-}: InputStyleProps & {theme: Theme}) => css`
-  ${leadingWidth &&
-  css`
-    padding-left: calc(
-      ${theme.formPadding[size ?? 'md'].paddingLeft}px * 1.5 + ${leadingWidth}px
-    );
-  `}
-
-  ${trailingWidth &&
-  css`
-    padding-right: calc(
-      ${theme.formPadding[size ?? 'md'].paddingRight}px * 1.5 + ${trailingWidth}px
-    );
-  `}
-`;
-
-const StyledInput = withChonk(
-  styled(_Input)<InputStyleProps>`
-    ${getInputStyles}
-  `,
-  ChonkStyledInput
-);
-
-const StyledTextArea = withChonk(
-  styled(_TextArea)<InputStyleProps>`
-    ${getInputStyles}
-  `,
-  ChonkStyledTextArea
-);
-
-const InputLeadingItemsWrap = withChonk(
-  styled(InputItemsWrap)<{
-    size: FormSize;
-    disablePointerEvents?: boolean;
-  }>`
-    left: ${p => p.theme.formPadding[p.size].paddingLeft + 1}px;
-    ${p => p.disablePointerEvents && `pointer-events: none;`}
-  `,
-  ChonkStyledLeadingItemsWrap
-);
-
-const InputTrailingItemsWrap = withChonk(
-  styled(InputItemsWrap)<{
-    size: FormSize;
-    disablePointerEvents?: boolean;
-  }>`
-    right: ${p => p.theme.formPadding[p.size].paddingRight * 0.75 + 1}px;
-    ${p => p.disablePointerEvents && `pointer-events: none;`}
-  `,
-  ChonkStyledTrailingItemsWrap
-);

@@ -1,28 +1,27 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
+import {ExternalLink} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
-import {Tooltip} from 'sentry/components/core/tooltip';
 import {FunctionName} from 'sentry/components/events/interfaces/frame/functionName';
-import GroupingIndicator from 'sentry/components/events/interfaces/frame/groupingIndicator';
 import {
   getPlatform,
   isDotnet,
   trimPackage,
 } from 'sentry/components/events/interfaces/frame/utils';
 import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
-import ExternalLink from 'sentry/components/links/externalLink';
-import QuestionTooltip from 'sentry/components/questionTooltip';
-import Truncate from 'sentry/components/truncate';
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {Truncate} from 'sentry/components/truncate';
 import {SLOW_TOOLTIP_DELAY} from 'sentry/constants';
 import {IconOpen, IconQuestion} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Frame} from 'sentry/types/event';
 import type {Meta} from 'sentry/types/group';
-import type {PlatformKey} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
-import {isUrl} from 'sentry/utils/string/isUrl';
+import type {PlatformKey} from 'sentry/types/platform';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 
 /**
  * File paths can get very long, so increase it for the tooltips within this component.
@@ -40,17 +39,15 @@ type Props = {
    * Determines if the frame potentially originates from a third party
    */
   isPotentiallyThirdParty?: boolean;
-  isUsedForGrouping?: boolean;
   meta?: Record<any, any>;
 };
 
 type GetPathNameOutput = {key: string; value: string; meta?: Meta};
 
-function DefaultTitle({
+export function DefaultTitle({
   frame,
   platform,
   isHoverPreviewed,
-  isUsedForGrouping,
   meta,
   isPotentiallyThirdParty,
 }: Props) {
@@ -60,7 +57,7 @@ function DefaultTitle({
 
   const handleExternalLink = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.stopPropagation();
-    if (isPotentiallyThirdParty && frame.absPath && isUrl(frame.absPath)) {
+    if (isPotentiallyThirdParty && frame.absPath && isValidUrl(frame.absPath)) {
       event.preventDefault();
       openNavigateToExternalLinkModal({linkText: frame.absPath});
     }
@@ -164,7 +161,7 @@ function DefaultTitle({
       );
     }
 
-    if (frame.absPath && isUrl(frame.absPath)) {
+    if (frame.absPath && isValidUrl(frame.absPath)) {
       title.push(
         <StyledExternalLink href={frame.absPath} key="share" onClick={handleExternalLink}>
           <IconOpen size="xs" />
@@ -222,7 +219,7 @@ function DefaultTitle({
   }
 
   if (defined(frame.origAbsPath) && (frame.mapUrl || frame.map)) {
-    const text = (frame.mapUrl ?? frame.map) as string;
+    const text = (frame.mapUrl ?? frame.map)!;
     title.push(
       <StyledQuestionTooltip
         key="info-tooltip"
@@ -243,30 +240,20 @@ function DefaultTitle({
     );
   }
 
-  if (isUsedForGrouping) {
-    title.push(<StyledGroupingIndicator key="info-tooltip" />);
-  }
-
   return <Fragment>{title}</Fragment>;
 }
 
-export default DefaultTitle;
-
 const StyledExternalLink = styled(ExternalLink)`
   position: relative;
-  top: ${space(0.25)};
-  margin-left: ${space(0.5)};
+  top: ${p => p.theme.space['2xs']};
+  margin-left: ${p => p.theme.space.xs};
 `;
 
 const InFramePosition = styled('span')`
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   opacity: 0.6;
 `;
 
-const StyledGroupingIndicator = styled(GroupingIndicator)`
-  margin-left: ${space(0.75)};
-`;
-
 const StyledQuestionTooltip = styled(QuestionTooltip)`
-  margin-left: ${space(0.5)};
+  margin-left: ${p => p.theme.space.xs};
 `;

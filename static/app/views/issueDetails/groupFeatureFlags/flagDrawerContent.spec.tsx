@@ -4,24 +4,20 @@ import {FeatureFlagTagsFixture} from 'sentry-fixture/tags';
 
 import {render, screen, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import {OrderBy, SortBy} from 'sentry/components/events/featureFlags/utils';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import FlagDrawerContent from 'sentry/views/issueDetails/groupFeatureFlags/flagDrawerContent';
+import {OrderBy} from 'sentry/components/events/featureFlags/utils';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {GroupDataContextProvider} from 'sentry/views/issueDetails/groupDataContext';
+import {FlagDrawerContent} from 'sentry/views/issueDetails/groupFeatureFlags/flagDrawerContent';
 
-describe('GroupFeatureFlagsDrawerContent', function () {
+describe('GroupFeatureFlagsDrawerContent', () => {
   function getEmptyState() {
     return screen.queryByTestId('empty-state') ?? screen.getByTestId('empty-message');
   }
 
-  beforeEach(function () {
+  beforeEach(() => {
     jest.resetAllMocks();
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/tags/`,
-      body: [],
-    });
-
-    MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/suspect/flags/`,
+      url: '/organizations/org-slug/issues/1/tags/',
       body: [],
     });
 
@@ -31,20 +27,22 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     ]);
   });
 
-  it('calls flags backend and renders distribution cards', async function () {
+  it('calls flags backend and renders distribution cards', async () => {
     const mockTagsEndpoint = MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/tags/`,
+      url: '/organizations/org-slug/issues/1/tags/',
       body: FeatureFlagTagsFixture(),
     });
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -62,23 +60,25 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     expect(screen.getByText('my-rolled-out-feature')).toBeInTheDocument();
   });
 
-  it('renders error state', async function () {
+  it('renders error state', async () => {
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/tags/`,
+      url: '/organizations/org-slug/issues/1/tags/',
       statusCode: 400,
       body: {
         detail: 'Bad request',
       },
     });
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -86,20 +86,22 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     });
   });
 
-  it('renders empty state when no flags match the search', async function () {
+  it('renders empty state when no flags match the search', async () => {
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/tags/`,
+      url: '/organizations/org-slug/issues/1/tags/',
       body: FeatureFlagTagsFixture(),
     });
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search="zxf"
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search="zxf"
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -111,20 +113,22 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     expect(emptyState).toHaveTextContent('No feature flags were found for this search');
   });
 
-  it('renders empty state when no flags returned and hasFlags', async function () {
+  it('renders empty state when no flags returned and hasFlags', async () => {
     ProjectsStore.reset();
     ProjectsStore.loadInitialData([
       ProjectFixture({platform: 'javascript', hasFlags: true}),
     ]);
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -136,15 +140,17 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     expect(emptyState).toHaveTextContent('No feature flags were found for this issue');
   });
 
-  it('renders CTA when no flags returned and hasFlags is false', async function () {
+  it('renders CTA when no flags returned and hasFlags is false', async () => {
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -154,20 +160,22 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     expect(screen.getByText('Set Up Feature Flags')).toBeInTheDocument();
   });
 
-  it('does not render CTA when no flags returned and platform unsupported', async function () {
+  it('does not render CTA when no flags returned and platform unsupported', async () => {
     ProjectsStore.reset();
     ProjectsStore.loadInitialData([
       ProjectFixture({platform: 'dotnet-awslambda', hasFlags: false}),
     ]);
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {
@@ -177,17 +185,19 @@ describe('GroupFeatureFlagsDrawerContent', function () {
     expect(getEmptyState()).toBeInTheDocument();
   });
 
-  it('does not render CTA when project not found', async function () {
+  it('does not render CTA when project not found', async () => {
     ProjectsStore.reset();
 
+    const group = GroupFixture();
     render(
-      <FlagDrawerContent
-        environments={[]}
-        group={GroupFixture()}
-        search=""
-        orderBy={OrderBy.NEWEST}
-        sortBy={SortBy.EVAL_ORDER}
-      />
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDrawerContent
+          environments={[]}
+          group={group}
+          search=""
+          orderBy={OrderBy.NEWEST}
+        />
+      </GroupDataContextProvider>
     );
 
     await waitFor(() => {

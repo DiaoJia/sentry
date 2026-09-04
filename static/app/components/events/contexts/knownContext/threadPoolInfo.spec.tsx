@@ -2,7 +2,7 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import {getThreadPoolInfoContext} from 'sentry/components/events/contexts/knownContext/threadPoolInfo';
 
 const MOCK_THREAD_POOL_INFO_CONTEXT = {
@@ -27,8 +27,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('ThreadPoolInfoContext', function () {
-  it('returns values and according to the parameters', function () {
+describe('ThreadPoolInfoContext', () => {
+  it('returns values and according to the parameters', () => {
     expect(getThreadPoolInfoContext({data: MOCK_THREAD_POOL_INFO_CONTEXT})).toEqual([
       {
         key: 'available_completion_port_threads',
@@ -75,7 +75,7 @@ describe('ThreadPoolInfoContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {threadpool_info: MOCK_REDACTION}},
     });
@@ -83,8 +83,8 @@ describe('ThreadPoolInfoContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'threadpool_info'}
-        alias={'threadpool_info'}
+        type="threadpool_info"
+        alias="threadpool_info"
         value={{...MOCK_THREAD_POOL_INFO_CONTEXT, max_worker_threads: ''}}
       />
     );

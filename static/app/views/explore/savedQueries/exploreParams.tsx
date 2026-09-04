@@ -2,21 +2,24 @@ import {useCallback, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import debounce from 'lodash/debounce';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Flex} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {ProvidedFormattedQuery} from 'sentry/components/searchQueryBuilder/formattedQuery';
 import {parseQueryBuilderValue} from 'sentry/components/searchQueryBuilder/utils';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {getFieldDefinition} from 'sentry/utils/fields';
 import {useDimensions} from 'sentry/utils/useDimensions';
 import type {BaseVisualize} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import {prettifyAggregation} from 'sentry/views/explore/utils';
 
 const MORE_TOKENS_WIDTH = 32;
 
 type SingleQueryProps = {
   query: string;
   visualizes: BaseVisualize[];
+  agent?: string[];
   groupBys?: string[]; // This needs to be passed in because saveQuery relies on being within the Explore PageParamsContext to fetch params
 };
 
@@ -24,6 +27,7 @@ export function ExploreParams({
   query,
   visualizes,
   groupBys,
+  agent,
   className,
 }: SingleQueryProps & {className?: string}) {
   const yAxes = visualizes.flatMap(visualize => visualize.yAxes);
@@ -31,7 +35,7 @@ export function ExploreParams({
 
   const {width} = useDimensions({elementRef: containerRef});
   const [childWidths, setChildWidths] = useState<number[]>([]);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [containerWidth, setContainerWidth] = useState(0);
 
   const debouncedSetContainerWidth = useMemo(
     () =>
@@ -78,50 +82,64 @@ export function ExploreParams({
   const tokens = [];
   if (visualizes.length > 0) {
     tokens.push(
-      <Token key="visualize">
+      <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key="visualize">
         <ExploreParamTitle>{t('Visualize')}</ExploreParamTitle>
-      </Token>
+      </Flex>
     );
     yAxes.forEach((yAxis, index) => {
       tokens.push(
-        <Token key={`visualize-${index}`}>
-          <ExploreVisualizes>{yAxis}</ExploreVisualizes>
-        </Token>
+        <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key={`visualize-${index}`}>
+          <ExploreVisualizes>{prettifyAggregation(yAxis) ?? yAxis}</ExploreVisualizes>
+        </Flex>
       );
     });
   }
   const parsedQuery = useMemo(() => {
-    return parseQueryBuilderValue(query, getFieldDefinition);
+    return parseQueryBuilderValue(query, key => getFieldDefinition(key));
   }, [query]);
   if (query) {
     tokens.push(
-      <Token key="filter">
+      <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key="filter">
         <ExploreParamTitle>{t('Filter')}</ExploreParamTitle>
-      </Token>
+      </Flex>
     );
     parsedQuery
       ?.filter(({text}) => text.trim() !== '')
       .forEach(({text}, index) => {
         tokens.push(
-          <Token key={`filter-${index}`}>
+          <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key={`filter-${index}`}>
             <FormattedQueryWrapper>
               <ProvidedFormattedQuery query={text} />
             </FormattedQueryWrapper>
-          </Token>
+          </Flex>
         );
       });
   }
+  if (agent && agent.length > 0) {
+    tokens.push(
+      <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key="agent">
+        <ExploreParamTitle>{t('Agent')}</ExploreParamTitle>
+      </Flex>
+    );
+    agent.forEach((agentName, index) => {
+      tokens.push(
+        <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key={`agent-${index}`}>
+          <ExploreVisualizes>{agentName}</ExploreVisualizes>
+        </Flex>
+      );
+    });
+  }
   if (groupBys && groupBys.length > 0) {
     tokens.push(
-      <Token key="groupBy">
+      <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key="groupBy">
         <ExploreParamTitle>{t('Group By')}</ExploreParamTitle>
-      </Token>
+      </Flex>
     );
     groupBys.forEach((groupBy, index) => {
       tokens.push(
-        <Token key={`groupBy-${index}`}>
+        <Flex as="span" wrap="wrap" gap="xs" overflow="hidden" key={`groupBy-${index}`}>
           <ExploreGroupBys key={groupBy}>{groupBy}</ExploreGroupBys>
-        </Token>
+        </Flex>
       );
     });
   }
@@ -136,54 +154,49 @@ export function ExploreParams({
     visibleTokens.push(
       <Tooltip
         key="more"
-        title={<TooltipTokensContainer>{hiddenTokens}</TooltipTokensContainer>}
+        title={
+          <Flex as="span" wrap="wrap" gap="xs">
+            {hiddenTokens}
+          </Flex>
+        }
       >
-        <Token>
+        <Flex as="span" wrap="wrap" gap="xs" overflow="hidden">
           <ExploreMoreTokens>
             {'+' + (tokens.length - tokensToShow - 1)}
           </ExploreMoreTokens>
-        </Token>
+        </Flex>
       </Tooltip>
     );
   }
 
   return (
-    <ExploreParamsContainer className={className} ref={containerRef}>
+    <Flex
+      as="span"
+      wrap="wrap"
+      marginBottom="xl"
+      gap="md"
+      width="100%"
+      className={className}
+      ref={containerRef}
+    >
       {visibleTokens}
-    </ExploreParamsContainer>
+    </Flex>
   );
 }
 
-const ExploreParamsContainer = styled('span')`
-  display: flex;
-  flex-direction: row;
-  gap: ${space(1)};
-  flex-wrap: wrap;
-  margin-bottom: ${space(2)};
-  width: 100%;
-`;
-
-const Token = styled('span')`
-  display: flex;
-  flex-direction: row;
-  gap: ${space(0.5)};
-  overflow: hidden;
-  flex-wrap: wrap;
-`;
-
 const ExploreParamTitle = styled('span')`
   font-size: ${p => p.theme.form.sm.fontSize};
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   white-space: nowrap;
   padding-top: 3px;
 `;
 
 const ExploreVisualizes = styled('span')`
   font-size: ${p => p.theme.form.sm.fontSize};
-  background: ${p => p.theme.background};
-  padding: ${space(0.25)} ${space(0.5)};
-  border: 1px solid ${p => p.theme.innerBorder};
-  border-radius: ${p => p.theme.borderRadius};
+  background: ${p => p.theme.tokens.background.primary};
+  padding: ${p => p.theme.space['2xs']} ${p => p.theme.space.xs};
+  border: 1px solid ${p => p.theme.tokens.border.secondary};
+  border-radius: ${p => p.theme.radius.md};
   height: 24px;
   overflow: hidden;
   white-space: nowrap;
@@ -196,10 +209,4 @@ const ExploreMoreTokens = ExploreVisualizes;
 const FormattedQueryWrapper = styled('span')`
   display: inline-block;
   font-size: ${p => p.theme.form.sm.fontSize};
-`;
-
-const TooltipTokensContainer = styled('span')`
-  display: flex;
-  gap: ${space(0.5)};
-  flex-wrap: wrap;
 `;

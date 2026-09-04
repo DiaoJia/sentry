@@ -7,11 +7,16 @@ EXPORTED_ROWS_LIMIT = 10000000
 SNUBA_MAX_RESULTS = 10000
 DEFAULT_EXPIRATION = timedelta(weeks=4)
 
+DEFAULT_EXPORT_RETRIES = 3
+RECOVERABLE_RETRY_BASE_SECONDS = 30
+RECOVERABLE_RETRY_MAX_SECONDS = 300
+
 
 class ExportError(Exception):
-    def __init__(self, message, recoverable=False):
+    def __init__(self, message: str, recoverable: bool = False, delay_retry: bool = False) -> None:
         super().__init__(message)
         self.recoverable = recoverable
+        self.delay_retry = delay_retry
 
 
 class ExportStatus(str, Enum):
@@ -23,33 +28,51 @@ class ExportStatus(str, Enum):
 class ExportQueryType:
     ISSUES_BY_TAG = 0
     DISCOVER = 1
+    EXPLORE = 2
+    TRACE_ITEM_FULL_EXPORT = 3
     ISSUES_BY_TAG_STR = "Issues-by-Tag"
     DISCOVER_STR = "Discover"
+    EXPLORE_STR = "Explore"
+    TRACE_ITEM_FULL_EXPORT_STR = "trace_item_full_export"
 
     @classmethod
-    def as_choices(cls):
+    def as_choices(cls) -> tuple[tuple[int, str], ...]:
         return (
             (cls.ISSUES_BY_TAG, str(cls.ISSUES_BY_TAG_STR)),
             (cls.DISCOVER, str(cls.DISCOVER_STR)),
+            (cls.EXPLORE, str(cls.EXPLORE_STR)),
+            (cls.TRACE_ITEM_FULL_EXPORT, str(cls.TRACE_ITEM_FULL_EXPORT_STR)),
         )
 
     @classmethod
-    def as_str_choices(cls):
+    def as_str_choices(cls) -> tuple[tuple[str, str], ...]:
         return (
             (cls.ISSUES_BY_TAG_STR, cls.ISSUES_BY_TAG_STR),
             (cls.DISCOVER_STR, cls.DISCOVER_STR),
+            (cls.EXPLORE_STR, cls.EXPLORE_STR),
+            (cls.TRACE_ITEM_FULL_EXPORT_STR, cls.TRACE_ITEM_FULL_EXPORT_STR),
         )
 
     @classmethod
-    def as_str(cls, integer):
+    def as_str(cls, integer: int) -> str:
         if integer == cls.ISSUES_BY_TAG:
             return cls.ISSUES_BY_TAG_STR
         elif integer == cls.DISCOVER:
             return cls.DISCOVER_STR
+        elif integer == cls.EXPLORE:
+            return cls.EXPLORE_STR
+        elif integer == cls.TRACE_ITEM_FULL_EXPORT:
+            return cls.TRACE_ITEM_FULL_EXPORT_STR
+        raise ValueError(f"Invalid ExportQueryType: {integer}")
 
     @classmethod
-    def from_str(cls, string):
+    def from_str(cls, string: str) -> int:
         if string == cls.ISSUES_BY_TAG_STR:
             return cls.ISSUES_BY_TAG
         elif string == cls.DISCOVER_STR:
             return cls.DISCOVER
+        elif string == cls.EXPLORE_STR:
+            return cls.EXPLORE
+        elif string == cls.TRACE_ITEM_FULL_EXPORT_STR:
+            return cls.TRACE_ITEM_FULL_EXPORT
+        raise ValueError(f"Invalid ExportQueryType: {string}")

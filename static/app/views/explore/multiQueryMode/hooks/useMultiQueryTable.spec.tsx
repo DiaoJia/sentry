@@ -1,13 +1,9 @@
-import {QueryClientProvider} from '@tanstack/react-query';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
-import {OrganizationFixture} from 'sentry-fixture/organization';
 
-import {makeTestQueryClient} from 'sentry-test/queryClient';
-import {renderHook, waitFor} from 'sentry-test/reactTestingLibrary';
+import {renderHookWithProviders, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import type {Organization} from 'sentry/types/organization';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {useLocation} from 'sentry/utils/useLocation';
-import usePageFilters from 'sentry/utils/usePageFilters';
 import {SAMPLING_MODE} from 'sentry/views/explore/hooks/useProgressiveQuery';
 import {
   useMultiQueryTableAggregateMode,
@@ -15,11 +11,9 @@ import {
 } from 'sentry/views/explore/multiQueryMode/hooks/useMultiQueryTable';
 import {useReadQueriesFromLocation} from 'sentry/views/explore/multiQueryMode/locationUtils';
 import {ChartType} from 'sentry/views/insights/common/components/chart';
-import {OrganizationContext} from 'sentry/views/organizationContext';
 
 jest.mock('sentry/utils/useLocation');
-jest.mock('sentry/utils/useNavigate');
-jest.mock('sentry/utils/usePageFilters');
+jest.mock('sentry/components/pageFilters/usePageFilters');
 jest.mock('sentry/views/explore/multiQueryMode/locationUtils', () => {
   const actual = jest.requireActual('sentry/views/explore/multiQueryMode/locationUtils');
   return {
@@ -27,17 +21,6 @@ jest.mock('sentry/views/explore/multiQueryMode/locationUtils', () => {
     useReadQueriesFromLocation: jest.fn(),
   };
 });
-
-function createWrapper(org: Organization) {
-  return function TestWrapper({children}: {children: React.ReactNode}) {
-    const queryClient = makeTestQueryClient();
-    return (
-      <QueryClientProvider client={queryClient}>
-        <OrganizationContext value={org}>{children}</OrganizationContext>
-      </QueryClientProvider>
-    );
-  };
-}
 
 describe('useMultiQueryTable', () => {
   let mockNormalRequestUrl: jest.Mock;
@@ -47,9 +30,9 @@ describe('useMultiQueryTable', () => {
 
     jest.mocked(usePageFilters).mockReturnValue({
       isReady: true,
-      desyncedFilters: new Set(),
       pinnedFilters: new Set(),
       shouldPersist: true,
+      adjustments: {},
       selection: {
         datetime: {
           period: '14d',
@@ -68,8 +51,8 @@ describe('useMultiQueryTable', () => {
     ['aggregate', useMultiQueryTableAggregateMode],
     ['sample', useMultiQueryTableSampleMode],
   ])(
-    `triggers the high accuracy request when there is no data and a partial scan for %s mode`,
-    async function (_mode, hook) {
+    'triggers the high accuracy request when there is no data and a partial scan for %s mode',
+    async (_mode, hook) => {
       jest.mocked(useReadQueriesFromLocation).mockReturnValue([
         {
           query: 'test value',
@@ -105,18 +88,14 @@ describe('useMultiQueryTable', () => {
         ],
         method: 'GET',
       });
-      renderHook(
-        () =>
-          hook({
-            enabled: true,
-            groupBys: [],
-            query: 'test value',
-            sortBys: [],
-            yAxes: [],
-          }),
-        {
-          wrapper: createWrapper(OrganizationFixture()),
-        }
+      renderHookWithProviders(() =>
+        hook({
+          enabled: true,
+          groupBys: [],
+          query: 'test value',
+          sortBys: [],
+          yAxes: [],
+        })
       );
 
       expect(mockNormalRequestUrl).toHaveBeenCalledTimes(1);
@@ -125,7 +104,7 @@ describe('useMultiQueryTable', () => {
         expect.objectContaining({
           query: expect.objectContaining({
             sampling: SAMPLING_MODE.NORMAL,
-            query: 'test value !transaction.span_id:00',
+            query: 'test value',
           }),
         })
       );
@@ -137,7 +116,7 @@ describe('useMultiQueryTable', () => {
         '/organizations/org-slug/events/',
         expect.objectContaining({
           query: expect.objectContaining({
-            query: 'test value !transaction.span_id:00',
+            query: 'test value',
           }),
         })
       );
@@ -146,7 +125,7 @@ describe('useMultiQueryTable', () => {
         expect.objectContaining({
           query: expect.objectContaining({
             sampling: SAMPLING_MODE.HIGH_ACCURACY,
-            query: 'test value !transaction.span_id:00',
+            query: 'test value',
           }),
         })
       );

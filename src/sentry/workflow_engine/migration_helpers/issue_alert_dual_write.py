@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+from sentry.models.project import Project
 from sentry.models.rule import Rule
 from sentry.rules.conditions.event_frequency import EventUniqueUserFrequencyConditionWithConditions
 from sentry.rules.processing.processor import split_conditions_and_filters
@@ -21,10 +22,7 @@ from sentry.workflow_engine.models import (
     WorkflowDataConditionGroup,
 )
 from sentry.workflow_engine.models.data_condition import Condition
-from sentry.workflow_engine.processors.workflow import (
-    WorkflowDataConditionGroupType,
-    delete_workflow,
-)
+from sentry.workflow_engine.processors.workflow import WorkflowDataConditionGroupType
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +33,7 @@ def bulk_create_data_conditions(
     conditions: list[dict[str, Any]],
     dcg: DataConditionGroup,
     filters: list[dict[str, Any]] | None = None,
-):
+) -> None:
     dcg_conditions: list[DataCondition] = []
 
     for condition in conditions:
@@ -60,7 +58,7 @@ def create_if_dcg(
     conditions: list[dict[str, Any]],
     filters: list[dict[str, Any]],
     filter_match: str | None = None,
-):
+) -> DataConditionGroup:
     if filter_match == "any":  # must create IF DCG even if it's empty, to attach actions
         filter_match = DataConditionGroup.Type.ANY_SHORT_CIRCUIT.value
     elif filter_match is None:
@@ -79,8 +77,12 @@ def create_if_dcg(
     return if_dcg
 
 
-def create_workflow_actions(if_dcg: DataConditionGroup, actions: list[dict[str, Any]]) -> None:
-    notification_actions = build_notification_actions_from_rule_data_actions(actions)
+def create_workflow_actions(
+    if_dcg: DataConditionGroup, actions: list[dict[str, Any]], project: Project
+) -> None:
+    notification_actions = build_notification_actions_from_rule_data_actions(
+        actions, project=project
+    )
     dcg_actions = [
         DataConditionGroupAction(action=action, condition_group=if_dcg)
         for action in notification_actions
@@ -92,7 +94,10 @@ def update_migrated_issue_alert(rule: Rule) -> Workflow | None:
     data = rule.data
 
     try:
-        alert_rule_workflow = AlertRuleWorkflow.objects.get(rule_id=rule.id)
+        alert_rule_workflow = AlertRuleWorkflow.objects.get(
+            rule_id=rule.id,
+            workflow__organization_id=rule.project.organization_id,
+        )
     except AlertRuleWorkflow.DoesNotExist:
         # OK state, rule may not have been migrated
         logger.info(
@@ -143,7 +148,9 @@ def update_migrated_issue_alert(rule: Rule) -> Workflow | None:
     )
 
     delete_workflow_actions(if_dcg=if_dcg)
-    create_workflow_actions(if_dcg=if_dcg, actions=data["actions"])  # action(s) must exist
+    create_workflow_actions(
+        if_dcg=if_dcg, actions=data["actions"], project=rule.project
+    )  # action(s) must exist
 
     workflow.environment_id = rule.environment_id
     if frequency := data["frequency"]:
@@ -153,8 +160,6 @@ def update_migrated_issue_alert(rule: Rule) -> Workflow | None:
     workflow.owner_team_id = rule.owner_team_id
 
     workflow.name = rule.label
-
-    workflow.enabled = True
     workflow.save()
 
     return workflow
@@ -166,7 +171,7 @@ def update_dcg(
     type: WorkflowDataConditionGroupType,
     filters: list[dict[str, Any]],
     match: str | None = None,
-):
+) -> DataConditionGroup:
     DataCondition.objects.filter(condition_group=dcg).delete()
 
     if dcg.logic_type != match:
@@ -188,27 +193,7 @@ def update_dcg(
     return dcg
 
 
-def delete_migrated_issue_alert(rule: Rule) -> int | None:
-    try:
-        alert_rule_workflow = AlertRuleWorkflow.objects.get(rule_id=rule.id)
-    except AlertRuleWorkflow.DoesNotExist:
-        # OK state, rule may not have been migrated
-        logger.info(
-            "rule was not dual written or objects were already deleted, returning early",
-            extra={"rule_id": rule.id},
-        )
-        return None
-
-    workflow: Workflow = alert_rule_workflow.workflow
-    workflow_id = workflow.id
-
-    delete_workflow(workflow)
-    alert_rule_workflow.delete()
-
-    return workflow_id
-
-
-def delete_workflow_actions(if_dcg: DataConditionGroup):
+def delete_workflow_actions(if_dcg: DataConditionGroup) -> None:
     dcg_actions = DataConditionGroupAction.objects.filter(condition_group=if_dcg)
     action_ids = dcg_actions.values_list("action_id", flat=True)
     Action.objects.filter(id__in=action_ids).delete()

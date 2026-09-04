@@ -7,9 +7,9 @@ import {
   getKnownStructuredData,
 } from 'sentry/components/events/contexts/utils';
 
-describe('contexts utils', function () {
-  describe('getKnownData', function () {
-    it('filters out known data and transforms into the right way', function () {
+describe('contexts utils', () => {
+  describe('getKnownData', () => {
+    it('filters out known data and transforms into the right way', () => {
       const data = {
         device_app_hash: '2421fae1ac9237a8131e74883e52b0f7034a143f',
         build_type: 0,
@@ -48,7 +48,7 @@ describe('contexts utils', function () {
             };
           }
 
-          return undefined;
+          return;
         },
       });
 
@@ -68,7 +68,7 @@ describe('contexts utils', function () {
       ]);
     });
 
-    it('does not format the value when displaying raw', function () {
+    it('does not format the value when displaying raw', () => {
       const data = {device_app_hash: 'abc'};
       const knownDataTypes = ['device_app_hash'];
 
@@ -83,7 +83,7 @@ describe('contexts utils', function () {
             };
           }
 
-          return undefined;
+          return;
         },
       });
 
@@ -98,8 +98,8 @@ describe('contexts utils', function () {
     });
   });
 
-  describe('getKnownStructuredData', function () {
-    it('formats the output from getKnownData into StructuredEventData', function () {
+  describe('getKnownStructuredData', () => {
+    it('formats the output from getKnownData into StructuredEventData', () => {
       const data = {device_app_hash: 'abc'};
       const knownDataTypes = ['device_app_hash'];
       const knownData = getKnownData({
@@ -113,7 +113,7 @@ describe('contexts utils', function () {
             };
           }
 
-          return undefined;
+          return;
         },
       });
       const errMeta = {
@@ -135,7 +135,7 @@ describe('contexts utils', function () {
       expect(knownData[0]!.key).toEqual(knownStructuredData[0]!.key);
       expect(knownData[0]!.subject).toEqual(knownStructuredData[0]!.subject);
       render(<Fragment>{knownStructuredData[0]!.value as React.ReactNode}</Fragment>);
-      expect(screen.getByText(`${knownData[0]!.value as string}`)).toBeInTheDocument();
+      expect(screen.getByText(knownData[0]!.value as string)).toBeInTheDocument();
       expect(screen.getByTestId('annotated-text-error-icon')).toBeInTheDocument();
     });
   });

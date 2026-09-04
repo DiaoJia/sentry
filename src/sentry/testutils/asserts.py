@@ -1,6 +1,7 @@
 from functools import reduce
 
-from django.http import StreamingHttpResponse
+from django.db import models
+from django.db.models.functions import Cast
 
 from sentry.constants import ObjectStatus
 from sentry.integrations.types import EventLifecycleOutcome
@@ -42,10 +43,7 @@ def assert_commit_shape(commit):
 def assert_status_code(response, minimum: int, maximum: int | None = None):
     # Omit max to assert status_code == minimum.
     maximum = maximum or minimum + 1
-    assert minimum <= response.status_code < maximum, (
-        response.status_code,
-        response.getvalue() if isinstance(response, StreamingHttpResponse) else response.content,
-    )
+    assert minimum <= response.status_code < maximum, response
 
 
 def assert_existing_projects_status(
@@ -70,7 +68,14 @@ def org_audit_log_exists(**kwargs):
     assert kwargs
     if "organization" in kwargs:
         kwargs["organization_id"] = kwargs.pop("organization").id
-    return AuditLogEntry.objects.filter(**kwargs).exists()
+    if "data" in kwargs:
+        kwargs["data__asjsonb"] = kwargs.pop("data")
+    return (
+        # would be nice to remove this and just use JSONField but the table is too big
+        AuditLogEntry.objects.annotate(data__asjsonb=Cast("data", models.JSONField()))
+        .filter(**kwargs)
+        .exists()
+    )
 
 
 def assert_org_audit_log_exists(**kwargs):

@@ -3,10 +3,12 @@ import subprocess
 import sys
 import time
 
+from pytest import Config
+
 from sentry.utils import json
 
 
-def pytest_configure(config):
+def pytest_configure(config: Config) -> None:
     """
     Generate frontend assets before running any acceptance tests
 
@@ -28,7 +30,7 @@ def pytest_configure(config):
             last_built = int(time.time()) - data["built"]
 
             if last_built <= 3600:
-                print(  # noqa: S002
+                print(  # noqa: S002, T201
                     f"""
 ###################
 #
@@ -45,7 +47,7 @@ def pytest_configure(config):
     except Exception:
         pass
 
-    print(  # noqa: S002
+    print(  # noqa: S002, T201
         """
 ###################
 #

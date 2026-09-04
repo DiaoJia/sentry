@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import TypeVar
 
 from sentry.issues.grouptype import GroupCategory, GroupType
 from sentry.models.group import DEFAULT_TYPE_ID
@@ -7,20 +6,19 @@ from sentry.types.group import PriorityLevel
 from sentry.workflow_engine.endpoints.validators.error_detector import ErrorDetectorValidator
 from sentry.workflow_engine.handlers.detector.base import DetectorHandler
 from sentry.workflow_engine.models.data_source import DataPacket
+from sentry.workflow_engine.processors import DetectorEvaluation
 from sentry.workflow_engine.types import (
-    DetectorEvaluationResult,
     DetectorGroupKey,
     DetectorSettings,
 )
 
-T = TypeVar("T")
 
+class ErrorDetectorHandler(DetectorHandler[object]):
+    """Placeholder handler for error group types."""
 
-class ErrorDetectorHandler(DetectorHandler):
     def evaluate(
-        self, data_packet: DataPacket[T]
-    ) -> dict[DetectorGroupKey, DetectorEvaluationResult]:
-        # placeholder
+        self, data_packet: DataPacket[object]
+    ) -> dict[DetectorGroupKey, DetectorEvaluation]:
         return {}
 
 
@@ -30,7 +28,6 @@ class ErrorGroupType(GroupType):
     slug = "error"
     description = "Error"
     category = GroupCategory.ERROR.value
-    category_v2 = GroupCategory.ERROR.value
     default_priority = PriorityLevel.MEDIUM
     released = True
     detector_settings = DetectorSettings(

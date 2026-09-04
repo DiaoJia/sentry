@@ -1,36 +1,37 @@
 import {Fragment} from 'react';
+import {useMatches} from 'react-router-dom';
 import styled from '@emotion/styled';
 
-import Link from 'sentry/components/links/link';
-import Placeholder from 'sentry/components/placeholder';
-import ErrorCounts from 'sentry/components/replays/header/errorCounts';
-import ReplayViewers from 'sentry/components/replays/header/replayViewers';
+import {Link} from '@sentry/scraps/link';
+
+import {Placeholder} from 'sentry/components/placeholder';
+import {ErrorCounts} from 'sentry/components/replays/header/errorCounts';
+import {ReplayViewers} from 'sentry/components/replays/header/replayViewers';
 import {IconCursorArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import EventView from 'sentry/utils/discover/eventView';
-import getRouteStringFromRoutes from 'sentry/utils/getRouteStringFromRoutes';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {getRouteStringFromRoutes} from 'sentry/utils/getRouteStringFromRoutes';
 import {TabKey} from 'sentry/utils/replays/hooks/useActiveReplayTab';
+import type {RawReplayError} from 'sentry/utils/replays/types';
 import {useLocation} from 'sentry/utils/useLocation';
-import {useRoutes} from 'sentry/utils/useRoutes';
-import type {ReplayError, ReplayRecord} from 'sentry/views/replays/types';
+import type {ReplayRecord} from 'sentry/views/explore/replays/types';
 
 interface Props {
-  replayErrors: ReplayError[];
+  replayErrors: RawReplayError[];
   replayRecord: ReplayRecord;
   showDeadRageClicks?: boolean;
 }
 
-export default function ReplayMetaData({
+export function ReplayMetaData({
   replayErrors,
   replayRecord,
   showDeadRageClicks = true,
 }: Props) {
-  const nonFeedbackErrors = replayErrors.filter(e => e.title !== 'User Feedback');
+  const nonFeedbackErrors = replayErrors.filter(e => !e.title.includes('User Feedback'));
 
   const location = useLocation();
-  const routes = useRoutes();
-  const referrer = getRouteStringFromRoutes(routes);
+  const matches = useMatches();
+  const referrer = getRouteStringFromRoutes({matches});
   const eventView = EventView.fromLocation(location);
 
   const breadcrumbTab = {
@@ -52,7 +53,7 @@ export default function ReplayMetaData({
             {replayRecord?.count_dead_clicks ? (
               <Link to={breadcrumbTab}>
                 <ClickCount>
-                  <IconCursorArrow size="sm" color="yellow300" />
+                  <IconCursorArrow size="sm" variant="warning" />
                   {replayRecord.count_dead_clicks}
                 </ClickCount>
               </Link>
@@ -70,7 +71,7 @@ export default function ReplayMetaData({
             {replayRecord?.count_rage_clicks ? (
               <Link to={breadcrumbTab}>
                 <ClickCount>
-                  <IconCursorArrow size="sm" color="red300" />
+                  <IconCursorArrow size="sm" variant="danger" />
                   {replayRecord.count_rage_clicks}
                 </ClickCount>
               </Link>
@@ -85,7 +86,7 @@ export default function ReplayMetaData({
       <KeyMetricData>
         {replayRecord ? (
           replayRecord.is_archived ? null : (
-            <ErrorCounts replayErrors={nonFeedbackErrors} replayRecord={replayRecord} />
+            <ErrorCounts replayErrors={nonFeedbackErrors} />
           )
         ) : (
           <Placeholder width="20px" height="16px" />
@@ -113,28 +114,24 @@ const KeyMetrics = styled('dl')`
   grid-template-rows: max-content 1fr;
   grid-template-columns: repeat(4, max-content);
   grid-auto-flow: column;
-  gap: 0 ${space(3)};
+  height: 42px;
+  gap: 0 ${p => p.theme.space['2xl']};
   align-items: center;
-  align-self: end;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   margin: 0;
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    justify-self: flex-end;
-  }
 `;
 
 const KeyMetricLabel = styled('dt')`
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const KeyMetricData = styled('dd')`
-  font-size: ${p => p.theme.fontSize.xl};
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-size: ${p => p.theme.font.size.md};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   display: flex;
   align-items: center;
-  gap: ${space(1)};
-  line-height: ${p => p.theme.text.lineHeightBody};
+  gap: ${p => p.theme.space.md};
+  line-height: ${p => p.theme.font.lineHeight.comfortable};
 `;
 
 const Count = styled('span')`
@@ -142,8 +139,8 @@ const Count = styled('span')`
 `;
 
 const ClickCount = styled(Count)`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   display: flex;
-  gap: ${space(0.75)};
+  gap: ${p => p.theme.space.sm};
   align-items: center;
 `;

@@ -1,11 +1,9 @@
-from django.urls import reverse
 from rest_framework.exceptions import ErrorDetail
 
 from sentry.testutils.cases import APITestCase, SnubaTestCase, TraceTestCase
 
 
 class RelatedIssuesTest(APITestCase, SnubaTestCase, TraceTestCase):
-    endpoint = "sentry-api-0-issues-related-issues"
     FEATURES: list[str] = []
 
     def setUp(self) -> None:
@@ -16,7 +14,9 @@ class RelatedIssuesTest(APITestCase, SnubaTestCase, TraceTestCase):
         self.group_id: int | None = None
 
     def reverse_url(self) -> str:
-        return reverse(self.endpoint, kwargs={"issue_id": self.group_id})
+        return (
+            f"/api/0/organizations/{self.organization.slug}/issues/{self.group_id}/related-issues/"
+        )
 
     def _data(self, type: str, value: str) -> dict[str, object]:
         return {"type": "error", "metadata": {"type": type, "value": value}}
@@ -92,6 +92,59 @@ class RelatedIssuesTest(APITestCase, SnubaTestCase, TraceTestCase):
             "meta": {
                 "event_id": another_proj_event.event_id,
                 "trace_id": another_proj_event.trace_id,
+            },
+        }
+
+    def test_trace_connected_excludes_projects_member_cannot_access(self) -> None:
+        error_event, _, _ = self.load_errors(self.project)
+        assert error_event.group is not None
+        recommended_event = error_event.group.get_recommended_event_for_environments()
+        assert recommended_event is not None
+
+        self.organization.flags.allow_joinleave = False
+        self.organization.save()
+        team = self.create_team(organization=self.organization)
+        self.project.add_team(team)
+        member = self.create_user()
+        self.create_member(organization=self.organization, user=member, teams=[team])
+        self.login_as(user=member)
+
+        self.group_id = error_event.group_id
+        response = self.get_success_response(qs_params={"type": "trace_connected"})
+
+        assert response.json() == {
+            "type": "trace_connected",
+            # The connected issue lives in a project the member has no access to
+            "data": [],
+            "meta": {
+                "event_id": recommended_event.event_id,
+                "trace_id": error_event.trace_id,
+            },
+        }
+
+    def test_trace_connected_open_membership_spans_projects(self) -> None:
+        error_event, _, another_proj_event = self.load_errors(self.project)
+        assert error_event.group is not None
+        recommended_event = error_event.group.get_recommended_event_for_environments()
+        assert recommended_event is not None
+
+        team = self.create_team(organization=self.organization)
+        self.project.add_team(team)
+        member = self.create_user()
+        self.create_member(organization=self.organization, user=member, teams=[team])
+        self.login_as(user=member)
+
+        self.group_id = error_event.group_id
+        response = self.get_success_response(qs_params={"type": "trace_connected"})
+
+        assert response.json() == {
+            "type": "trace_connected",
+            # Open membership grants access to the whole organization, including the
+            # project the member has no team membership in
+            "data": [another_proj_event.group_id],
+            "meta": {
+                "event_id": recommended_event.event_id,
+                "trace_id": error_event.trace_id,
             },
         }
 

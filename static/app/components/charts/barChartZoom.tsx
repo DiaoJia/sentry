@@ -1,20 +1,22 @@
-import {Component} from 'react';
 import type {Location} from 'history';
 
-import DataZoomInside from 'sentry/components/charts/components/dataZoomInside';
-import ToolBox from 'sentry/components/charts/components/toolBox';
+import {DataZoomInside} from 'sentry/components/charts/components/dataZoomInside';
+import {getToolBox} from 'sentry/components/charts/components/toolBox';
+import {activateZoomAreaSelect} from 'sentry/components/charts/utils';
 import type {
   EChartChartReadyHandler,
   EChartDataZoomHandler,
+  EChartFinishedHandler,
   ECharts,
 } from 'sentry/types/echarts';
-import {browserHistory} from 'sentry/utils/browserHistory';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 type RenderProps = {
   dataZoom: ReturnType<typeof DataZoomInside>;
   onChartReady: EChartChartReadyHandler;
   onDataZoom: EChartDataZoomHandler;
-  toolBox: ReturnType<typeof ToolBox>;
+  onFinished: EChartFinishedHandler;
+  toolBox: ReturnType<typeof getToolBox>;
 };
 
 type BarChartBucket = {
@@ -49,60 +51,40 @@ type Props = {
   xAxisIndex: number[];
   /**
    * This is the minimum width of the zoom. If the targeted zoom area is
-   * smaller than is specified by this parameter, the zoom will be cancelled
-   * and the `onDataZoomCancelled` callback will be called.
+   * smaller than is specified by this parameter, the zoom will be cancelled.
    */
   minZoomWidth?: number;
-  onChartReady?: EChartChartReadyHandler;
-  onDataZoom?: EChartDataZoomHandler;
-  /**
-   * This callback is called when the zoom action was cancelled. It can happen
-   * when `minZoomWidth` is specified and the user tries to zoom on an area
-   * smaller than that.
-   */
-  onDataZoomCancelled?: () => void;
   /**
    *
    */
   onHistoryPush?: (start: number, end: number) => void;
 };
 
-class BarChartZoom extends Component<Props> {
-  zooming: (() => void) | null = null;
+export function BarChartZoom({
+  buckets,
+  children,
+  location,
+  minZoomWidth,
+  onHistoryPush,
+  paramEnd,
+  paramStart,
+  xAxisIndex,
+}: Props) {
+  const navigate = useNavigate();
 
   /**
    * Enable zoom immediately instead of having to toggle to zoom
    */
-  handleChartReady = (chart: ECharts) => {
-    this.props.onChartReady?.(chart);
-  };
+  const handleChartReady = (_chart: ECharts) => {};
 
   /**
    * Chart event when *any* rendering+animation finishes
-   *
-   * `this.zooming` acts as a callback function so that
-   * we can let the native zoom animation on the chart complete
-   * before we update URL state and re-render
    */
-  handleChartFinished = (_props: any, chart: any) => {
-    if (typeof this.zooming === 'function') {
-      this.zooming();
-      this.zooming = null;
-    }
-
-    // This attempts to activate the area zoom toolbox feature
-    const zoom = chart._componentsViews?.find((c: any) => c._features?.dataZoom);
-    if (zoom && !zoom._features.dataZoom._isZoomActive) {
-      // Calling dispatchAction will re-trigger handleChartFinished
-      chart.dispatchAction({
-        type: 'takeGlobalCursor',
-        key: 'dataZoomSelect',
-        dataZoomSelectActive: true,
-      });
-    }
+  const handleChartFinished = (_props: any, chart: any) => {
+    activateZoomAreaSelect(chart);
   };
 
-  handleDataZoom = (evt: any, chart: any) => {
+  const handleDataZoom = (_evt: any, chart: any) => {
     const model = chart.getModel();
     const {startValue, endValue} = model._payload.batch[0];
 
@@ -110,8 +92,6 @@ class BarChartZoom extends Component<Props> {
     // These values are null when the user uses the toolbox included in ECharts
     // to navigate back through zoom history, but we hide it below.
     if (startValue !== null && endValue !== null) {
-      const {buckets, location, paramStart, paramEnd, minZoomWidth, onHistoryPush} =
-        this.props;
       const {start} = buckets[startValue]!;
       const {end} = buckets[endValue]!;
 
@@ -127,52 +107,40 @@ class BarChartZoom extends Component<Props> {
         if (onHistoryPush) {
           onHistoryPush(start, end);
         } else {
-          browserHistory.push(target);
+          navigate(target);
         }
       } else {
         // Dispatch the restore action here to stop ECharts from zooming
         chart.dispatchAction({type: 'restore'});
-        this.props.onDataZoomCancelled?.();
       }
     } else {
       // Dispatch the restore action here to stop ECharts from zooming
       chart.dispatchAction({type: 'restore'});
-      this.props.onDataZoomCancelled?.();
     }
-
-    this.props.onDataZoom?.(evt, chart);
   };
 
-  render() {
-    const {children, xAxisIndex} = this.props;
-
-    const renderProps = {
-      onChartReady: this.handleChartReady,
-      onFinished: this.handleChartFinished,
-      dataZoom: DataZoomInside({xAxisIndex}),
-      // We must include data zoom in the toolbox for the zoom to work,
-      // but we do not want to show the toolbox components.
-      toolBox: ToolBox(
-        {},
-        {
-          dataZoom: {
-            title: {
-              zoom: '',
-              back: '',
-            },
-            iconStyle: {
-              borderWidth: 0,
-              color: 'transparent',
-              opacity: 0,
-            },
+  return children({
+    onChartReady: handleChartReady,
+    onFinished: handleChartFinished,
+    dataZoom: DataZoomInside({xAxisIndex}),
+    // We must include data zoom in the toolbox for the zoom to work,
+    // but we do not want to show the toolbox components.
+    toolBox: getToolBox(
+      {},
+      {
+        dataZoom: {
+          title: {
+            zoom: '',
+            back: '',
           },
-        }
-      ),
-      onDataZoom: this.handleDataZoom,
-    };
-
-    return children(renderProps);
-  }
+          iconStyle: {
+            borderWidth: 0,
+            color: 'transparent',
+            opacity: 0,
+          },
+        },
+      }
+    ),
+    onDataZoom: handleDataZoom,
+  });
 }
-
-export default BarChartZoom;

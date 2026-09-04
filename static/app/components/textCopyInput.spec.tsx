@@ -1,8 +1,9 @@
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import TextCopyInput from 'sentry/components/textCopyInput';
+import {TextCopyInput} from 'sentry/components/textCopyInput';
+import {IconTerminal} from 'sentry/icons';
 
-describe('TextCopyInput', function () {
+describe('TextCopyInput', () => {
   beforeEach(() => {
     Object.assign(navigator, {
       clipboard: {
@@ -11,9 +12,9 @@ describe('TextCopyInput', function () {
     });
   });
 
-  it('copies text to clipboard on click', async function () {
+  it('copies text to clipboard on click', async () => {
     render(<TextCopyInput>Text to Copy</TextCopyInput>);
-    const button = screen.getByRole('button', {name: 'Copy'});
+    const button = screen.getByRole('button', {name: 'Copy to clipboard'});
     expect(button).toBeInTheDocument();
 
     await userEvent.click(button);
@@ -21,7 +22,17 @@ describe('TextCopyInput', function () {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Text to Copy');
   });
 
-  it('selects text in input on click', async function () {
+  it('renders a leading icon', () => {
+    render(
+      <TextCopyInput icon={<IconTerminal aria-label="Terminal" />}>
+        Text to Copy
+      </TextCopyInput>
+    );
+
+    expect(screen.getByRole('img', {name: 'Terminal'})).toBeInTheDocument();
+  });
+
+  it('selects text in input on click', async () => {
     render(<TextCopyInput>Text to Copy</TextCopyInput>);
     const input = screen.getByRole<HTMLInputElement>('textbox');
     expect(input).toHaveValue('Text to Copy');
@@ -32,7 +43,7 @@ describe('TextCopyInput', function () {
     expect(selectSpy).toHaveBeenCalled();
   });
 
-  it('handles RTL text selection', async function () {
+  it('handles RTL text selection', async () => {
     render(<TextCopyInput rtl>Text to Copy</TextCopyInput>);
     const input = screen.getByRole<HTMLInputElement>('textbox');
     const setSelectionRangeSpy = jest.spyOn(input, 'setSelectionRange');

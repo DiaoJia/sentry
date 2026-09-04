@@ -1,53 +1,47 @@
+import {queryOptions, useQueries, useQuery} from '@tanstack/react-query';
 import chunk from 'lodash/chunk';
 
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {ReleasesSortOption} from 'sentry/constants/releases';
 import type {NewQuery} from 'sentry/types/organization';
 import type {Release} from 'sentry/types/release';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
 import type {TableData} from 'sentry/utils/discover/discoverQuery';
-import EventView from 'sentry/utils/discover/eventView';
+import {EventView} from 'sentry/utils/discover/eventView';
 import {DiscoverDatasets} from 'sentry/utils/discover/types';
-import type {ApiQueryKey} from 'sentry/utils/queryClient';
-import {useApiQuery, useQueries} from 'sentry/utils/queryClient';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {escapeFilterValue} from 'sentry/utils/tokenizeSearch';
-import useApi from 'sentry/utils/useApi';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import type {ReleasesSortByOption} from 'sentry/views/insights/common/components/releasesSort';
-import {useInsightsEap} from 'sentry/views/insights/common/utils/useEap';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-export function useReleases(
+function useReleases(
   searchTerm: string | undefined,
-  sortBy: ReleasesSortByOption | undefined
+  sortBy: ReleasesSortOption | undefined
 ) {
   const organization = useOrganization();
   const location = useLocation();
   const {selection, isReady} = usePageFilters();
   const {environments, projects} = selection;
-  const api = useApi();
-
-  const useEap = useInsightsEap();
 
   const activeSort = sortBy ?? ReleasesSortOption.DATE;
-  const releaseResults = useApiQuery<Release[]>(
-    [
-      `/organizations/${organization.slug}/releases/`,
-      {
-        query: {
-          project: projects,
-          per_page: 50,
-          environment: environments,
-          query: searchTerm,
-          sort: activeSort,
-          // Depending on the selected sortBy option, 'flatten' is needed or we get an error from the backend.
-          // A similar logic can be found in https://github.com/getsentry/sentry/blob/6209d6fbf55839bb7a2f93ef65decbf495a64974/static/app/views/releases/list/index.tsx#L106
-          flatten: activeSort === ReleasesSortOption.DATE ? 0 : 1,
-        },
+  const releaseResults = useQuery({
+    ...apiOptions.as<Release[]>()('/organizations/$organizationIdOrSlug/releases/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        project: projects,
+        per_page: 50,
+        environment: environments,
+        query: searchTerm,
+        sort: activeSort,
+        // Depending on the selected sortBy option, 'flatten' is needed or we get an error from the backend.
+        // A similar logic can be found in https://github.com/getsentry/sentry/blob/6209d6fbf55839bb7a2f93ef65decbf495a64974/static/app/views/releases/list/index.tsx#L106
+        flatten: activeSort === ReleasesSortOption.DATE ? 0 : 1,
       },
-    ],
-    {staleTime: Infinity, enabled: isReady, retry: false}
-  );
+      staleTime: Infinity,
+    }),
+    enabled: isReady,
+    retry: false,
+  });
 
   const chunks = releaseResults.data?.length ? chunk(releaseResults.data, 10) : [];
 
@@ -59,31 +53,23 @@ export function useReleases(
         query: `transaction.op:[ui.load,navigation] ${escapeFilterValue(
           `release:[${releases.map(r => `"${r.version}"`).join()}]`
         )}`,
-        dataset: useEap ? DiscoverDatasets.SPANS_EAP_RPC : DiscoverDatasets.METRICS,
+        dataset: DiscoverDatasets.SPANS,
         version: 2,
         projects: selection.projects,
       };
       const eventView = EventView.fromNewQueryWithPageFilters(newQuery, selection);
-      const queryKey = [
-        `/organizations/${organization.slug}/events/`,
-        {
+      return queryOptions({
+        ...apiOptions.as<TableData>()('/organizations/$organizationIdOrSlug/events/', {
+          path: {organizationIdOrSlug: organization.slug},
           query: {
             ...eventView.getEventsAPIPayload(location),
-            referrer: 'api.starfish.mobile-release-selector',
+            referrer: 'api.insights.mobile-release-selector',
           },
-        },
-      ] as ApiQueryKey;
-      return {
-        queryKey,
-        queryFn: () =>
-          api.requestPromise(queryKey[0], {
-            method: 'GET',
-            query: queryKey[1]?.query,
-          }) as Promise<TableData>,
-        staleTime: Infinity,
+          staleTime: Infinity,
+        }),
         enabled: isReady && !releaseResults.isPending,
         retry: false,
-      };
+      });
     }),
   });
 
@@ -119,7 +105,6 @@ export function useReleases(
       : [];
 
   return {
-    ...releaseResults,
     data: releaseStats,
     isLoading: !metricsFetched || releaseResults.isPending,
   };
@@ -128,21 +113,15 @@ export function useReleases(
 export function useReleaseSelection(): {
   isLoading: boolean;
   primaryRelease: string | undefined;
-  secondaryRelease: string | undefined;
 } {
   const location = useLocation();
 
-  const {data: releases, isLoading} = useReleases(undefined, undefined);
+  const {isLoading} = useReleases(undefined, undefined);
 
-  // If there are more than 1 release, the first one should be the older one
+  const primaryReleaseFromQuery = decodeScalar(location.query.primaryRelease);
+
   const primaryRelease =
-    decodeScalar(location.query.primaryRelease) ??
-    (releases && releases.length > 1 ? releases?.[1]?.version : releases?.[0]?.version);
+    primaryReleaseFromQuery === '' ? undefined : primaryReleaseFromQuery;
 
-  // If there are more than 1 release, the second one should be the newest one
-  const secondaryRelease =
-    decodeScalar(location.query.secondaryRelease) ??
-    (releases && releases.length > 1 ? releases?.[0]?.version : undefined);
-
-  return {primaryRelease, secondaryRelease, isLoading};
+  return {primaryRelease, isLoading};
 }

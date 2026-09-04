@@ -3,33 +3,40 @@ import React, {Fragment, useCallback, useMemo} from 'react';
 import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
+import {LinkButton} from '@sentry/scraps/button';
+import {InfoTip} from '@sentry/scraps/info';
+import {Container, Flex, Grid} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Switch} from '@sentry/scraps/switch';
+
 import {navigateTo} from 'sentry/actionCreators/navigation';
 import type {TooltipSubLabel} from 'sentry/components/charts/components/tooltip';
-import OptionSelector from 'sentry/components/charts/optionSelector';
+import {OptionSelector} from 'sentry/components/charts/optionSelector';
 import {InlineContainer, SectionHeading} from 'sentry/components/charts/styles';
 import type {DateTimeObject} from 'sentry/components/charts/utils';
 import {getSeriesApiInterval} from 'sentry/components/charts/utils';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
-import {Switch} from 'sentry/components/core/switch';
-import ExternalLink from 'sentry/components/links/externalLink';
-import NotAvailable from 'sentry/components/notAvailable';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {NotAvailable} from 'sentry/components/notAvailable';
 import {ScoreCard} from 'sentry/components/scoreCard';
 import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
 import {IconSettings} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {DataCategory, DataCategoryInfo, IntervalPeriod} from 'sentry/types/core';
+import type {
+  DataCategory,
+  DataCategoryExact,
+  DataCategoryInfo,
+  IntervalPeriod,
+} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {shouldUse24Hours} from 'sentry/utils/dates';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {getUserTimezone, shouldUse24Hours} from 'sentry/utils/dates';
 import {parsePeriodToHours} from 'sentry/utils/duration/parsePeriodToHours';
 import {hasDynamicSamplingCustomFeature} from 'sentry/utils/dynamicSampling/features';
 import type {UseApiQueryResult} from 'sentry/utils/queryClient';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useRouter from 'sentry/utils/useRouter';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 import {
   FORMAT_DATETIME_DAILY,
@@ -40,18 +47,20 @@ import {
 import {mapSeriesToChart} from './mapSeriesToChart';
 import type {UsageSeries} from './types';
 import type {ChartStats, UsageChartProps} from './usageChart';
-import UsageChart, {
+import {
   CHART_OPTIONS_DATA_TRANSFORM,
   ChartDataTransform,
   SeriesTypes,
+  UsageChart,
 } from './usageChart';
-import UsageStatsPerMin from './usageStatsPerMin';
-import {isContinuousProfiling, isDisplayUtc} from './utils';
+import {UsageStatsPerMin} from './usageStatsPerMin';
+import {isDisplayUtc} from './utils';
 
 type ChartData = {
   cardStats: {
     accepted?: string;
     accepted_stored?: string;
+    clientDiscard?: string;
     filtered?: string;
     invalid?: string;
     rateLimited?: string;
@@ -104,12 +113,6 @@ export function getEndpointQuery({
     groupBy.push('category');
     category.push('span_indexed');
   }
-  if (['profile_duration', 'profile_duration_ui'].includes(dataCategoryApiName)) {
-    groupBy.push('category');
-    category.push(
-      dataCategoryApiName === 'profile_duration' ? 'profile_chunk' : 'profile_chunk_ui'
-    );
-  }
 
   return {
     ...queryDatetime,
@@ -122,7 +125,6 @@ export function getEndpointQuery({
 }
 
 export function getChartProps({
-  dataError,
   chartData,
   dataCategory,
   clientDiscard,
@@ -143,10 +145,10 @@ export function getChartProps({
     | 'chartDateStartDisplay'
     | 'chartDateTimezoneDisplay'
     | 'chartDateEndDisplay'
-    | 'chartStats'
+    | 'cardStats'
   >;
   dataCategory: DataCategory;
-  error: RequestError | null;
+  error: Error | null;
   handleChangeState: (state: {
     clientDiscard?: boolean;
     dataCategory?: DataCategory;
@@ -163,27 +165,20 @@ export function getChartProps({
   ) => void;
   loading: boolean;
   clientDiscard?: boolean;
-  dataError?: Error;
 }): UsageChartProps & {
   footer: React.ReactNode;
   title: React.ReactNode;
 } {
-  const errors: Record<string, Error> | undefined =
-    error || dataError
-      ? {
-          ...(error ? {error} : {}),
-          ...(dataError ? {data: dataError} : {}),
-        }
-      : undefined;
+  const errors = error ? {error} : undefined;
 
   return {
     isLoading: loading,
-    isError: Boolean(error || !!dataError),
+    isError: Boolean(error),
     errors,
     title: (
       <Fragment>
         {t('Project(s) Stats')}
-        <QuestionTooltip
+        <InfoTip
           size="xs"
           title={tct(
             'You can find more information about each category in our [link:docs]',
@@ -196,7 +191,6 @@ export function getChartProps({
               ),
             }
           )}
-          isHoverable
         />
       </Fragment>
     ),
@@ -221,8 +215,14 @@ export function getChartProps({
         </InlineContainer>
         <InlineContainer>
           {(chartData.chartStats.clientDiscard ?? []).length > 0 && (
-            <Flex align="center" gap={space(1)}>
-              <strong>{t('Show client-discarded data:')}</strong>
+            <Flex align="center" gap="md">
+              <strong>
+                {chartData.cardStats.clientDiscard
+                  ? tct('Show client-discarded data ([count]):', {
+                      count: chartData.cardStats.clientDiscard,
+                    })
+                  : t('Show client-discarded data:')}
+              </strong>
               <Switch
                 onChange={() => {
                   handleChangeState({clientDiscard: !clientDiscard});
@@ -280,20 +280,19 @@ function ScoreCards({
       score={loading ? undefined : card.score}
       help={card.help}
       trend={card.trend}
-      isEstimate={card.isEstimate}
       isTooltipHoverable
     />
   ));
 }
 
 function ChartContainer({children}: {children: React.ReactNode}) {
-  return <ChartWrapper data-test-id="usage-stats-chart">{children}</ChartWrapper>;
+  return <Container column="1 / -1">{children}</Container>;
 }
 
 export interface UsageStatsOrganizationProps {
   dataCategory: DataCategory;
-  dataCategoryApiName: DataCategoryInfo['apiName'];
-  dataCategoryName: string;
+  dataCategoryApiName: DataCategoryExact;
+  dataCategoryName: DataCategoryInfo['titleName'];
   dataDatetime: DateTimeObject;
   handleChangeState: (state: {
     clientDiscard?: boolean;
@@ -317,11 +316,9 @@ export interface UsageStatsOrganizationProps {
     ) => void;
     orgStats: UseApiQueryResult<UsageSeries | undefined, RequestError>;
     usageChart: React.ReactNode;
-  }) => React.ReactNode | React.ReactNode;
+  }) => React.ReactNode;
   clientDiscard?: boolean;
-  clock24Hours?: boolean;
   endpointQuery?: ReturnType<typeof getEndpointQuery>;
-  projectDetails?: React.ReactNode[];
 }
 
 type CardMetadata = Record<
@@ -329,13 +326,12 @@ type CardMetadata = Record<
   {
     title: React.ReactNode;
     help?: React.ReactNode;
-    isEstimate?: boolean;
     score?: string;
     trend?: React.ReactNode;
   }
 >;
 
-function UsageStatsOrganization({
+export function UsageStatsOrganization({
   dataDatetime,
   projectIds,
   dataCategoryApiName,
@@ -348,7 +344,8 @@ function UsageStatsOrganization({
   children,
   endpointQuery,
 }: UsageStatsOrganizationProps) {
-  const router = useRouter();
+  const navigate = useNavigate();
+  const location = useLocation();
   const orgStatsQuery = useMemo(() => {
     return (
       endpointQuery ??
@@ -364,7 +361,9 @@ function UsageStatsOrganization({
 
   const orgStatsReponse = useApiQuery<UsageSeries | undefined>(
     [
-      `/organizations/${organization.slug}/stats_v2/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/stats_v2/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: orgStatsQuery,
       },
@@ -397,14 +396,12 @@ function UsageStatsOrganization({
     (event: ReactMouseEvent) => {
       event.preventDefault();
       const url = `/settings/${organization.slug}/projects/:projectId/filters/data-filters/`;
-      if (router) {
-        navigateTo(url, router);
-      }
+      navigateTo(url, navigate, location);
     },
-    [router, organization]
+    [navigate, location, organization]
   );
 
-  const chartDataTransform: {chartTransform: ChartDataTransform} = useMemo(() => {
+  const chartDataTransform = useMemo(() => {
     switch (chartTransform) {
       case ChartDataTransform.CUMULATIVE:
       case ChartDataTransform.PERIODIC:
@@ -455,8 +452,12 @@ function UsageStatsOrganization({
 
     const xAxisStart = moment(startTime);
     const xAxisEnd = moment(endTime);
-    const displayStart = useUtc ? moment(startTime).utc() : moment(startTime).local();
-    const displayEnd = useUtc ? moment(endTime).utc() : moment(endTime).local();
+    const displayStart = useUtc
+      ? moment(startTime).utc()
+      : moment(startTime).tz(getUserTimezone() ?? moment.tz.guess());
+    const displayEnd = useUtc
+      ? moment(endTime).utc()
+      : moment(endTime).tz(getUserTimezone() ?? moment.tz.guess());
 
     if (intervalHours < 24) {
       displayEnd.add(intervalHours, 'h');
@@ -473,27 +474,7 @@ function UsageStatsOrganization({
     };
   }, [orgStatsReponse.data, dataDatetime]);
 
-  const chartData: {
-    cardStats: {
-      accepted?: string;
-      accepted_stored?: string;
-      filtered?: string;
-      invalid?: string;
-      rateLimited?: string;
-      total?: string;
-    };
-    chartDateEnd: string;
-    chartDateEndDisplay: string;
-    chartDateInterval: IntervalPeriod;
-    chartDateStart: string;
-    chartDateStartDisplay: string;
-    chartDateTimezoneDisplay: string;
-    chartDateUtc: boolean;
-    chartStats: ChartStats;
-    chartSubLabels: TooltipSubLabel[];
-    chartTransform: ChartDataTransform;
-    dataError?: Error;
-  } = useMemo(() => {
+  const chartData = useMemo(() => {
     return {
       ...mapSeriesToChart({
         orgStats: orgStatsReponse.data,
@@ -516,7 +497,6 @@ function UsageStatsOrganization({
   const cardMetadata: CardMetadata = useMemo(() => {
     const {total, accepted, accepted_stored, invalid, rateLimited, filtered} =
       chartData.cardStats;
-    const shouldShowEstimate = isContinuousProfiling(dataCategory);
 
     return {
       total: {
@@ -568,7 +548,6 @@ function UsageStatsOrganization({
           }
         ),
         score: filtered,
-        isEstimate: shouldShowEstimate,
       },
       rateLimited: {
         title: tct('Rate Limited [dataCategory]', {dataCategory: dataCategoryName}),
@@ -585,7 +564,6 @@ function UsageStatsOrganization({
           }
         ),
         score: rateLimited,
-        isEstimate: shouldShowEstimate,
       },
       invalid: {
         title: tct('Invalid [dataCategory]', {dataCategory: dataCategoryName}),
@@ -602,7 +580,6 @@ function UsageStatsOrganization({
           }
         ),
         score: invalid,
-        isEstimate: shouldShowEstimate,
       },
     };
   }, [
@@ -654,28 +631,17 @@ function UsageStatsOrganization({
   );
 }
 
-export default UsageStatsOrganization;
-
-const PageGrid = styled('div')`
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: repeat(5, 1fr);
-  }
-`;
+function PageGrid({children}: {children: React.ReactNode}) {
+  return (
+    <Grid columns={{zero: '1fr', sm: 'repeat(2, 1fr)', '4xl': 'repeat(5, 1fr)'}} gap="xl">
+      {children}
+    </Grid>
+  );
+}
 
 const StyledScoreCard = styled(ScoreCard)`
   grid-column: auto / span 1;
   margin: 0;
-`;
-
-const ChartWrapper = styled('div')`
-  grid-column: 1 / -1;
 `;
 
 const Footer = styled('div')`
@@ -683,9 +649,9 @@ const Footer = styled('div')`
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  gap: ${space(1.5)};
-  padding: ${space(1)} ${space(3)};
-  border-top: 1px solid ${p => p.theme.border};
+  gap: ${p => p.theme.space.lg};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space['2xl']};
+  border-top: 1px solid ${p => p.theme.tokens.border.primary};
   > *:first-child {
     flex-grow: 1;
   }
@@ -697,12 +663,12 @@ const FooterDate = styled('div')`
   align-items: center;
 
   > ${SectionHeading} {
-    margin-right: ${space(1.5)};
+    margin-right: ${p => p.theme.space.lg};
   }
 
   > span:last-child {
-    font-weight: ${p => p.theme.fontWeightNormal};
-    font-size: ${p => p.theme.fontSize.md};
+    font-weight: ${p => p.theme.font.weight.sans.regular};
+    font-size: ${p => p.theme.font.size.md};
   }
 `;
 
@@ -715,26 +681,22 @@ const StyledSettingsButton = styled(LinkButton)`
   top: 2px;
 `;
 
-const StyledTextWrapper = styled('div')`
-  min-height: 22px;
-`;
-
 function SpansStored({organization, acceptedStored}: SpansStoredProps) {
   return (
-    <StyledTextWrapper>
+    <Container minHeight="22px">
       {t('%s stored', acceptedStored)}{' '}
       {organization.access.includes('org:read') &&
         hasDynamicSamplingCustomFeature(organization) && (
           <StyledSettingsButton
-            borderless
+            variant="transparent"
             size="zero"
-            icon={<IconSettings color="subText" />}
-            title={t('Dynamic Sampling Settings')}
+            icon={<IconSettings variant="muted" />}
+            tooltipProps={{title: t('Dynamic Sampling Settings')}}
             aria-label={t('Dynamic Sampling Settings')}
             to={`/settings/${organization.slug}/dynamic-sampling/`}
           />
         )}
-    </StyledTextWrapper>
+    </Container>
   );
 }
 

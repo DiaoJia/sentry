@@ -3,14 +3,13 @@ from collections.abc import Sequence
 from itertools import islice
 from typing import Any
 
-import sentry_sdk
+from taskbroker_client.retry import Retry
 
 from sentry.models.project import Project
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import performance_tasks
-from sentry.taskworker.retry import Retry
 from sentry.utils import metrics
+from sentry.utils.tracing import set_span_data, start_span
 
 from . import ClustererNamespace, rules
 from .datasource import redis
@@ -31,7 +30,7 @@ MERGE_THRESHOLD = 200
 #: very low-cardinality or very high-cardinality, so we can use a more aggressive threshold.
 MERGE_THRESHOLD_SPANS = 50
 
-#: Number of projects to process in one celery task
+#: Number of projects to process in one task
 #: The number 100 was chosen at random and might still need tweaking.
 PROJECTS_PER_TASK = 100
 
@@ -43,20 +42,12 @@ CLUSTERING_TIMEOUT_PER_PROJECT = 0.3
 
 @instrumented_task(
     name="sentry.ingest.transaction_clusterer.tasks.spawn_clusterers",
-    queue="transactions.name_clusterer",
-    default_retry_delay=5,  # copied from release monitor
-    max_retries=5,  # copied from release monitor
-    taskworker_config=TaskworkerConfig(
-        namespace=performance_tasks,
-        retry=Retry(
-            times=5,
-            delay=5,
-        ),
-    ),
+    namespace=performance_tasks,
+    retry=Retry(times=5, delay=5),
 )
 def spawn_clusterers(**kwargs: Any) -> None:
     """Look for existing transaction name sets in redis and spawn clusterers for each"""
-    with sentry_sdk.start_span(op="txcluster_spawn"):
+    with start_span(op="txcluster_spawn", name="txcluster_spawn"):
         project_count = 0
         project_iter = redis.get_active_project_ids(ClustererNamespace.TRANSACTIONS)
         while batch := list(islice(project_iter, PROJECTS_PER_TASK)):
@@ -68,19 +59,9 @@ def spawn_clusterers(**kwargs: Any) -> None:
 
 @instrumented_task(
     name="sentry.ingest.transaction_clusterer.tasks.cluster_projects",
-    queue="transactions.name_clusterer",
-    default_retry_delay=5,  # copied from release monitor
-    max_retries=5,  # copied from release monitor
-    soft_time_limit=PROJECTS_PER_TASK * CLUSTERING_TIMEOUT_PER_PROJECT,
-    time_limit=PROJECTS_PER_TASK * CLUSTERING_TIMEOUT_PER_PROJECT + 2,  # extra 2s to emit metrics
-    taskworker_config=TaskworkerConfig(
-        namespace=performance_tasks,
-        processing_deadline_duration=int(PROJECTS_PER_TASK * CLUSTERING_TIMEOUT_PER_PROJECT + 2),
-        retry=Retry(
-            times=5,
-            delay=5,
-        ),
-    ),
+    namespace=performance_tasks,
+    processing_deadline_duration=int(PROJECTS_PER_TASK * CLUSTERING_TIMEOUT_PER_PROJECT + 2),
+    retry=Retry(times=5, delay=5),
 )
 def cluster_projects(project_ids: Sequence[int]) -> None:
     projects = Project.objects.get_many_from_cache(project_ids)
@@ -88,8 +69,8 @@ def cluster_projects(project_ids: Sequence[int]) -> None:
     num_clustered = 0
     try:
         for project in projects:
-            with sentry_sdk.start_span(op="txcluster_project") as span:
-                span.set_data("project_id", project.id)
+            with start_span(op="txcluster_project", name="txcluster_project") as span:
+                set_span_data(span, "project_id", project.id)
                 tx_names = list(redis.get_transaction_names(project))
                 new_rules = []
                 if len(tx_names) >= MERGE_THRESHOLD:

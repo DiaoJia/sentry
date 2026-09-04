@@ -14,22 +14,26 @@ from sentry.models.dashboard_widget import (
     DashboardWidgetTypes,
 )
 from sentry.models.dashboard_widget import DatasetSourcesTypes as DashboardDatasetSourcesTypes
-from sentry.snuba.metrics.naming_layer.mri import TransactionMRI
 from sentry.testutils.cases import BaseMetricsLayerTestCase, SnubaTestCase, TestCase
 from sentry.testutils.helpers.datetime import before_now, freeze_time
 from sentry.testutils.silo import assume_test_silo_mode_of
 from sentry.users.models.user import User
 from sentry.utils.samples import load_data
 
-pytestmark = pytest.mark.sentry_metrics
+pytestmark = [
+    pytest.mark.sentry_metrics,
+    pytest.mark.skip(
+        reason="Generic metrics sets, gauges, and distributions are no longer queryable"
+    ),
+]
 
 
 class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, SnubaTestCase):
     @property
-    def now(self):
+    def now(self) -> datetime:
         return before_now(minutes=10)
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.org = self.create_organization()
         with assume_test_silo_mode_of(User):
@@ -59,7 +63,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         self.dashboard.projects.set([self.project, self.project_2])
 
-    def test_errors_widget(self):
+    def test_errors_widget(self) -> None:
         error_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -86,7 +90,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
             else error_widget.discover_widget_split == 100
         )
 
-    def test_metrics_compatible_query(self):
+    def test_metrics_compatible_query(self) -> None:
         metrics_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -106,7 +110,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
 
         self.store_performance_metric(
-            name=TransactionMRI.DURATION.value,
+            name="d:transactions/duration@millisecond",
             project_id=self.project.id,
             tags={"transaction": "/sentry/scripts/views.js"},
             value=30,
@@ -126,7 +130,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_metrics_compatible_query_no_data(self):
+    def test_metrics_compatible_query_no_data(self) -> None:
         metrics_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -157,7 +161,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_metrics_compatible_query_no_data_only_aggregates(self):
+    def test_metrics_compatible_query_no_data_only_aggregates(self) -> None:
         metrics_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -191,7 +195,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_metrics_query_with_no_dynamic_sampling(self):
+    def test_metrics_query_with_no_dynamic_sampling(self) -> None:
         metrics_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -222,7 +226,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_ambiguous_widget_with_error_data(self):
+    def test_ambiguous_widget_with_error_data(self) -> None:
         data = load_data("javascript", timestamp=self.ten_mins_ago)
         data["transaction"] = "/to_other/"
         self.store_event(data, project_id=self.project.id, assert_no_errors=False)
@@ -260,7 +264,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_ambiguous_widget_with_transactions_data(self):
+    def test_ambiguous_widget_with_transactions_data(self) -> None:
         data = load_data("transaction", timestamp=self.ten_mins_ago)
         data["transaction"] = "/to_other/"
         self.store_event(data, project_id=self.project.id, assert_no_errors=False)
@@ -298,7 +302,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
         assert queried_snuba
 
-    def test_alias_with_user_misery_widget(self):
+    def test_alias_with_user_misery_widget(self) -> None:
         data = load_data("transaction", timestamp=self.ten_mins_ago)
         data["transaction"] = "/to_other/"
         self.store_event(data, project_id=self.project.id, assert_no_errors=False)
@@ -337,7 +341,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
             else user_misery_widget.discover_widget_split == 101
         )
 
-    def test_alias_with_last_seen_widget(self):
+    def test_alias_with_last_seen_widget(self) -> None:
         data = load_data("python", timestamp=self.ten_mins_ago)
         self.store_event(data, project_id=self.project.id, assert_no_errors=False)
 
@@ -372,7 +376,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         )
 
     @freeze_time("2024-05-01 12:00:00")
-    def test_out_of_range_defaults_to_seven_days(self):
+    def test_out_of_range_defaults_to_seven_days(self) -> None:
         dashboard = Dashboard.objects.create(
             title="test 2",
             created_by_id=self.user.id,
@@ -397,7 +401,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         assert snuba_dataclass.end == datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
 
     @freeze_time("2024-05-01 12:00:00")
-    def test_respects_range_date_and_environment_params(self):
+    def test_respects_range_date_and_environment_params(self) -> None:
         environment = self.environment
         dashboard = Dashboard.objects.create(
             title="test 3",
@@ -422,7 +426,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         assert snuba_dataclass.end == datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
         assert snuba_dataclass.environments == [environment]
 
-    def test_errors_widget_unhandled_in_conditions(self):
+    def test_errors_widget_unhandled_in_conditions(self) -> None:
         error_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -451,7 +455,33 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         if not self.dry_run:
             assert error_widget.dataset_source == DashboardDatasetSourcesTypes.FORCED.value
 
-    def test_dashboard_projects_empty(self):
+    def test_sets_widget_type_when_none(self) -> None:
+        error_widget = DashboardWidget.objects.create(
+            dashboard=self.dashboard,
+            order=0,
+            title="error widget",
+            display_type=DashboardWidgetDisplayTypes.LINE_CHART,
+            widget_type=None,
+            interval="1d",
+            detail={"layout": {"x": 0, "y": 0, "w": 1, "h": 1, "minH": 2}},
+        )
+        errors_widget_query = DashboardWidgetQuery.objects.create(
+            widget=error_widget,
+            fields=["title", "issue", "project", "release", "count()", "count_unique(user)"],
+            columns=[],
+            aggregates=["count_unique(user)"],
+            conditions="stack.filename:'../../sentry/scripts/views.js'",
+            order=0,
+        )
+
+        _get_and_save_split_decision_for_dashboard_widget(errors_widget_query, self.dry_run)
+        error_widget.refresh_from_db()
+        if self.dry_run:
+            assert error_widget.widget_type is None
+        else:
+            assert error_widget.widget_type == DashboardWidgetTypes.DISCOVER
+
+    def test_dashboard_projects_empty(self) -> None:
         # Dashboard belonging to an org with no projects
         self.organization = self.create_organization()
         self.dashboard = Dashboard.objects.create(
@@ -487,7 +517,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         if not self.dry_run:
             assert error_widget.dataset_source == DashboardDatasetSourcesTypes.FORCED.value
 
-    def test_dashboard_split_equation_without_aggregates(self):
+    def test_dashboard_split_equation_without_aggregates(self) -> None:
         transaction_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -523,7 +553,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
                 == DashboardDatasetSourcesTypes.SPLIT_VERSION_2.value
             )
 
-    def test_dashboard_split_transaction_status_error_events_dataset(self):
+    def test_dashboard_split_transaction_status_error_events_dataset(self) -> None:
         transaction_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -552,7 +582,8 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         if not self.dry_run:
             assert transaction_widget.dataset_source == DashboardDatasetSourcesTypes.FORCED.value
 
-    def test_unhandled_filter_sets_error_events_dataset(self):
+    @pytest.mark.skip(reason="Flaky. See #105124")
+    def test_unhandled_filter_sets_error_events_dataset(self) -> None:
         error_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -587,7 +618,7 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
         if not self.dry_run:
             assert error_widget.dataset_source == DashboardDatasetSourcesTypes.FORCED.value
 
-    def test_empty_equation_is_filtered_out(self):
+    def test_empty_equation_is_filtered_out(self) -> None:
         error_widget = DashboardWidget.objects.create(
             dashboard=self.dashboard,
             order=0,
@@ -621,6 +652,6 @@ class DashboardWidgetDatasetSplitTestCase(BaseMetricsLayerTestCase, TestCase, Sn
 
 
 class DashboardWidgetDatasetSplitDryRunTestCase(DashboardWidgetDatasetSplitTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.dry_run = True

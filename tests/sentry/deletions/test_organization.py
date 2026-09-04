@@ -1,4 +1,7 @@
+from unittest.mock import patch
 from uuid import uuid4
+
+from django.db import connection
 
 from sentry.deletions.tasks.scheduled import run_scheduled_deletions
 from sentry.discover.models import DiscoverSavedQuery, DiscoverSavedQueryProject
@@ -15,6 +18,7 @@ from sentry.models.dashboard_widget import (
 )
 from sentry.models.environment import Environment, EnvironmentProject
 from sentry.models.group import Group
+from sentry.models.groupenvironment import GroupEnvironment
 from sentry.models.organization import Organization, OrganizationStatus
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.models.organizationmember import OrganizationMember
@@ -37,7 +41,13 @@ from tests.sentry.workflow_engine.test_base import BaseWorkflowTest
 
 
 class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWorkflowTest):
-    def test_simple(self):
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch("sentry.deletions.defaults.repository.notify_seer_repository_deleted")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_simple(self) -> None:
         org_owner = self.create_user()
         org = self.create_organization(name="test", owner=org_owner)
         with assume_test_silo_mode(SiloMode.CONTROL):
@@ -133,7 +143,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
             id__in=[widget_1_data.id, widget_2_data_1.id, widget_2_data_2.id]
         ).exists()
 
-    def test_no_delete_visible(self):
+    def test_no_delete_visible(self) -> None:
         org = self.create_organization(name="test")
         release = Release.objects.create(version="a" * 32, organization_id=org.id)
 
@@ -147,7 +157,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert Release.objects.filter(id=release.id).exists()
         assert not self.ScheduledDeletion.objects.filter(id=deletion.id).exists()
 
-    def test_large_child_relation_deletion(self):
+    def test_large_child_relation_deletion(self) -> None:
         org = self.create_organization(name="test")
         self.create_team(organization=org, name="test1")
         repo = Repository.objects.create(organization_id=org.id, name=org.name, provider="dummy")
@@ -174,7 +184,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not Commit.objects.filter(organization_id=org.id).exists()
         assert not CommitAuthor.objects.filter(organization_id=org.id).exists()
 
-    def test_group_first_release(self):
+    def test_group_first_release(self) -> None:
         org = self.create_organization(name="test")
         project = self.create_project(organization=org)
         release = self.create_release(project=project, user=self.user, version="1.2.3")
@@ -192,7 +202,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not Group.objects.filter(id=group.id).exists()
         assert not Organization.objects.filter(id=org.id).exists()
 
-    def test_orphan_commits(self):
+    def test_orphan_commits(self) -> None:
         # We have had a few orgs get into a state where they have commits
         # but no repositories. Ensure that we can proceed.
         org = self.create_organization(name="test")
@@ -218,7 +228,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not Commit.objects.filter(id=commit.id).exists()
         assert not CommitAuthor.objects.filter(id=author.id).exists()
 
-    def test_alert_rule(self):
+    def test_alert_rule(self) -> None:
         org = self.create_organization(name="test", owner=self.user)
         self.create_team(organization=org, name="test1")
 
@@ -251,7 +261,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not AlertRule.objects.filter(id=alert_rule.id).exists()
         assert not SnubaQuery.objects.filter(id=snuba_query.id).exists()
 
-    def test_discover_query_cleanup(self):
+    def test_discover_query_cleanup(self) -> None:
         org = self.create_organization(name="test", owner=self.user)
         self.create_team(organization=org, name="test1")
 
@@ -275,7 +285,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not DiscoverSavedQuery.objects.filter(id=query.id).exists()
         assert not DiscoverSavedQueryProject.objects.filter(id=query_project.id).exists()
 
-    def test_delete_org_simple(self):
+    def test_delete_org_simple(self) -> None:
         name_filter = {"name": "test_delete_org_simple"}
         org = self.create_organization(**name_filter)
 
@@ -290,7 +300,7 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
 
         assert Organization.objects.filter(**name_filter).count() == 0
 
-    def test_delete_org_after_project_transfer(self):
+    def test_delete_org_after_project_transfer(self) -> None:
         from_org = self.create_organization(name="from_org")
         from_user = self.create_user()
         self.create_member(user=from_user, role="member", organization=from_org)
@@ -368,7 +378,84 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
             .exists()
         )
 
-    def test_workflow_engine_cleanup(self):
+    def test_orphan_group_environment_cleanup(self) -> None:
+        # Regression test: GroupEnvironment rows orphaned after group deletion (e.g. groups
+        # deleted via a path that didn't cascade to GroupEnvironment) must not block
+        # Environment deletion. Without the explicit GroupEnvironment child relation in
+        # OrganizationDeletionTask, Django's ORM cascade from environment.delete() fires a
+        # post_delete signal per GroupEnvironment row, which causes timeouts at scale.
+        # Uses multiple environments to exercise the environment_id__in query.
+
+        org = self.create_organization(name="test")
+        project = self.create_project(organization=org)
+        env_prod = Environment.objects.create(organization_id=org.id, name="production")
+        env_staging = Environment.objects.create(organization_id=org.id, name="staging")
+        env_dev = Environment.objects.create(organization_id=org.id, name="development")
+        group1 = Group.objects.create(project=project)
+        group2 = Group.objects.create(project=project)
+        group_env1 = GroupEnvironment.objects.create(group=group1, environment=env_prod)
+        group_env2 = GroupEnvironment.objects.create(group=group1, environment=env_staging)
+        group_env3 = GroupEnvironment.objects.create(group=group2, environment=env_prod)
+        group_env4 = GroupEnvironment.objects.create(group=group2, environment=env_dev)
+
+        # Delete the groups via raw SQL to bypass Django's ORM cascade, leaving the
+        # GroupEnvironment rows orphaned (no parent group) — this is the production scenario.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM sentry_groupedmessage WHERE id IN (%s, %s)",
+                [group1.id, group2.id],
+            )
+        assert (
+            GroupEnvironment.objects.filter(
+                id__in=[group_env1.id, group_env2.id, group_env3.id, group_env4.id]
+            ).count()
+            == 4
+        )
+
+        org.update(status=OrganizationStatus.PENDING_DELETION)
+        self.ScheduledDeletion.schedule(instance=org, days=0)
+
+        with self.tasks():
+            run_scheduled_deletions()
+
+        assert not Organization.objects.filter(id=org.id).exists()
+        assert not Environment.objects.filter(organization_id=org.id).exists()
+        assert not GroupEnvironment.objects.filter(
+            id__in=[group_env1.id, group_env2.id, group_env3.id, group_env4.id]
+        ).exists()
+
+    def test_orphan_group_environment_batched_cleanup(self) -> None:
+        org = self.create_organization(name="test")
+        project = self.create_project(organization=org)
+        envs = [
+            Environment.objects.create(organization_id=org.id, name=f"env-{i}") for i in range(5)
+        ]
+        group = Group.objects.create(project=project)
+        group_envs = [GroupEnvironment.objects.create(group=group, environment=env) for env in envs]
+
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM sentry_groupedmessage WHERE id = %s", [group.id])
+
+        group_env_ids = [ge.id for ge in group_envs]
+        assert GroupEnvironment.objects.filter(id__in=group_env_ids).count() == 5
+
+        org.update(status=OrganizationStatus.PENDING_DELETION)
+        self.ScheduledDeletion.schedule(instance=org, days=0)
+
+        with (
+            patch(
+                "sentry.deletions.defaults.organization.GroupEnvironmentBulkDeletionTask.ENV_ID_BATCH_SIZE",
+                2,
+            ),
+            self.tasks(),
+        ):
+            run_scheduled_deletions()
+
+        assert not Organization.objects.filter(id=org.id).exists()
+        assert not Environment.objects.filter(organization_id=org.id).exists()
+        assert not GroupEnvironment.objects.filter(id__in=group_env_ids).exists()
+
+    def test_workflow_engine_cleanup(self) -> None:
         org = self.create_organization(name="test")
         project = self.create_project(organization=org)
 
@@ -394,3 +481,23 @@ class DeleteOrganizationTest(TransactionTestCase, HybridCloudTestMixin, BaseWork
         assert not DataConditionGroup.objects.filter(id=dcg.id).exists()
         assert not DataCondition.objects.filter(id=dc.id).exists()
         assert not Workflow.objects.filter(id=workflow.id).exists()
+
+    def test_all_projects_detector_cleanup(self) -> None:
+        org = self.create_organization()
+        project = self.create_project(organization=org)
+        all_projects_detector = self.create_all_projects_detector(organization=org)
+        project_detector = self.create_detector(project=project)
+
+        assert Detector.objects.filter(id=all_projects_detector.id).exists()
+        assert Detector.objects.filter(id=project_detector.id).exists()
+        assert all_projects_detector.project_id is None
+        assert project_detector.project_id == project.id
+
+        org.update(status=OrganizationStatus.PENDING_DELETION)
+        self.ScheduledDeletion.schedule(instance=org, days=0)
+
+        with self.tasks():
+            run_scheduled_deletions()
+
+        assert not Detector.objects.filter(id=all_projects_detector.id).exists()
+        assert not Detector.objects.filter(id=project_detector.id).exists()

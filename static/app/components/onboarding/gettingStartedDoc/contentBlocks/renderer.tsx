@@ -1,0 +1,49 @@
+import {useMemo} from 'react';
+import {useTheme} from '@emotion/react';
+import styled from '@emotion/styled';
+
+import {defaultRenderers} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/defaultRenderers';
+import {RendererContext} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/rendererContext';
+import type {ContentBlock} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/types';
+import {
+  ContentBlockCssVariables,
+  renderBlocks,
+} from 'sentry/components/onboarding/gettingStartedDoc/contentBlocks/utils';
+
+interface Props {
+  /**
+   * The content blocks to be rendered.
+   */
+  contentBlocks: Array<ContentBlock | null | undefined>;
+  /**
+   * The class name to be applied to the root element.
+   */
+  className?: string;
+  /**
+   * The spacing between the content blocks.
+   * Available as a CSS variable `var(${ContentBlockCssVariables.BLOCK_SPACING})` for styling of child elements.
+   */
+  spacing?: string;
+}
+
+export function ContentBlocksRenderer({contentBlocks, spacing, className}: Props) {
+  const theme = useTheme();
+  const resolvedSpacing = spacing ?? theme.space.xl;
+  const contextValue = useMemo(
+    () => ({
+      renderers: defaultRenderers,
+    }),
+    []
+  );
+  return (
+    <RendererContext value={contextValue}>
+      <Wrapper className={className} spacing={resolvedSpacing}>
+        {renderBlocks(contentBlocks, contextValue.renderers)}
+      </Wrapper>
+    </RendererContext>
+  );
+}
+
+const Wrapper = styled('div')<{spacing: string}>`
+  ${ContentBlockCssVariables.BLOCK_SPACING}: ${p => p.spacing};
+`;

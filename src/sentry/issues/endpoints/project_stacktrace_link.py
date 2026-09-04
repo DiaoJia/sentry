@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TypedDict
+from collections.abc import Collection
+from typing import Any, TypedDict
 
 from django.http import QueryDict
 from rest_framework.request import Request
@@ -11,9 +12,10 @@ from sentry_sdk import Scope
 from sentry import analytics
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
 from sentry.api.serializers import serialize
+from sentry.integrations.analytics import IntegrationStacktraceLinkEvent
 from sentry.integrations.api.serializers.models.integration import IntegrationSerializer
 from sentry.integrations.base import IntegrationFeatures
 from sentry.integrations.services.integration import integration_service
@@ -61,43 +63,77 @@ def set_top_tags(
 ) -> None:
     try:
         scope.set_tag("project.slug", project.slug)
+        scope.set_attribute("project.slug", project.slug)
         scope.set_tag("organization.slug", project.organization.slug)
+        scope.set_attribute("organization.slug", project.organization.slug)
         scope.set_tag("organization.early_adopter", bool(project.organization.flags.early_adopter))
-        scope.set_tag("stacktrace_link.platform", ctx["platform"])
+        scope.set_attribute(
+            "organization.early_adopter", bool(project.organization.flags.early_adopter)
+        )
+
+        platform = ctx["platform"]
+        scope.set_tag("stacktrace_link.platform", platform)
+        if platform is not None:
+            scope.set_attribute("stacktrace_link.platform", platform)
+
         scope.set_tag("stacktrace_link.code_mappings", has_code_mappings)
+        scope.set_attribute("stacktrace_link.code_mappings", has_code_mappings)
         scope.set_tag("stacktrace_link.file", ctx["file"])
+        scope.set_attribute("stacktrace_link.file", ctx["file"])
         # Add tag if filepath is Windows
         if ctx["file"] and ctx["file"].find(":\\") > -1:
             scope.set_tag("stacktrace_link.windows", True)
-        scope.set_tag("stacktrace_link.abs_path", ctx["abs_path"])
+            scope.set_attribute("stacktrace_link.windows", True)
+
+        abs_path = ctx["abs_path"]
+        scope.set_tag("stacktrace_link.abs_path", abs_path)
+        if abs_path is not None:
+            scope.set_attribute("stacktrace_link.abs_path", abs_path)
+
         if ctx["platform"] == "python":
             # This allows detecting a file that belongs to Python's 3rd party modules
             scope.set_tag("stacktrace_link.in_app", "site-packages" not in str(ctx["abs_path"]))
+            scope.set_attribute(
+                "stacktrace_link.in_app", "site-packages" not in str(ctx["abs_path"])
+            )
     except Exception:
         # If errors arises we can still proceed
         logger.exception("We failed to set a tag.")
 
 
-def set_tags(scope: Scope, result: StacktraceLinkOutcome, integrations: list[None]) -> None:
+def set_tags(scope: Scope, result: StacktraceLinkOutcome, integrations: Collection[Any]) -> None:
     scope.set_tag("stacktrace_link.found", result["source_url"] is not None)
-    scope.set_tag("stacktrace_link.source_url", result["source_url"])
-    scope.set_tag("stacktrace_link.error", result["error"])
+    scope.set_attribute("stacktrace_link.found", result["source_url"] is not None)
+
+    source_url = result["source_url"]
+    scope.set_tag("stacktrace_link.source_url", source_url)
+    if source_url is not None:
+        scope.set_attribute("stacktrace_link.source_url", source_url)
+
+    error = result["error"]
+    scope.set_tag("stacktrace_link.error", error)
+    if error is not None:
+        scope.set_attribute("stacktrace_link.error", error)
+
     if result["current_config"]:
-        scope.set_tag(
-            "stacktrace_link.tried_url", result["current_config"]["outcome"].get("attemptedUrl")
-        )
-        scope.set_tag(
-            "stacktrace_link.empty_root",
-            result["current_config"]["config"].automatically_generated == "",
-        )
+        attempted_url = result["current_config"]["outcome"].get("attemptedUrl")
+        scope.set_tag("stacktrace_link.tried_url", attempted_url)
+        if attempted_url is not None:
+            scope.set_attribute("stacktrace_link.tried_url", attempted_url)
+
         scope.set_tag(
             "stacktrace_link.auto_derived",
             result["current_config"]["config"].automatically_generated is True,
         )
+        scope.set_attribute(
+            "stacktrace_link.auto_derived",
+            result["current_config"]["config"].automatically_generated is True,
+        )
     scope.set_tag("stacktrace_link.has_integration", len(integrations) > 0)
+    scope.set_attribute("stacktrace_link.has_integration", len(integrations) > 0)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ProjectStacktraceLinkEndpoint(ProjectEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
@@ -153,7 +189,7 @@ class ProjectStacktraceLinkEndpoint(ProjectEndpoint):
         scope = Scope.get_isolation_scope()
 
         set_top_tags(scope, project, ctx, len(configs) > 0)
-        result = get_stacktrace_config(configs, ctx, project.organization)
+        result = get_stacktrace_config(configs, ctx)
         error = result["error"]
         src_path = result["src_path"]
         # Post-processing before exiting scope context
@@ -162,6 +198,7 @@ class ProjectStacktraceLinkEndpoint(ProjectEndpoint):
             serialized_config = serialize(result["current_config"]["config"], request.user)
             provider = serialized_config["provider"]["key"]
             scope.set_tag("integration_provider", provider)  # e.g. github
+            scope.set_attribute("integration_provider", provider)
 
             if not result["source_url"]:
                 error = result["current_config"]["outcome"].get("error")
@@ -175,15 +212,16 @@ class ProjectStacktraceLinkEndpoint(ProjectEndpoint):
 
         if result["current_config"] and serialized_config:
             analytics.record(
-                "integration.stacktrace.linked",
-                provider=serialized_config["provider"]["key"],
-                config_id=serialized_config["id"],
-                project_id=project.id,
-                organization_id=project.organization_id,
-                filepath=filepath,
-                status=error or "success",
-                link_fetch_iterations=result["iteration_count"],
-                platform=ctx["platform"],
+                IntegrationStacktraceLinkEvent(
+                    provider=serialized_config["provider"]["key"],
+                    config_id=serialized_config["id"],
+                    project_id=project.id,
+                    organization_id=project.organization_id,
+                    filepath=filepath,
+                    status=error or "success",
+                    link_fetch_iterations=result["iteration_count"],
+                    platform=ctx["platform"],
+                )
             )
             return Response(
                 {

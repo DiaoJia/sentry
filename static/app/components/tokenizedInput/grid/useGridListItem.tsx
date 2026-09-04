@@ -7,19 +7,29 @@ import type {Node} from '@react-types/shared';
 import {shiftFocusToChild} from 'sentry/components/tokenizedInput/token/utils';
 
 interface UseGridListItemOptions<T> {
+  focusable: boolean;
   item: Node<T>;
   ref: RefObject<HTMLDivElement | null>;
   state: ListState<T>;
 }
 
-export function useGridListItem<T>({item, ref, state}: UseGridListItemOptions<T>) {
+export function useGridListItem<T>({
+  focusable,
+  item,
+  ref,
+  state,
+}: UseGridListItemOptions<T>) {
   const {rowProps, gridCellProps} = useGridListItemAria({node: item}, state, ref);
 
   const onFocus = useCallback(
     (evt: FocusEvent<HTMLDivElement>) => {
-      shiftFocusToChild(evt.currentTarget, item, state);
+      // Only redirect when React Aria focuses the row itself. Focus events from a
+      // nested grid or input bubble through the row and must retain their target.
+      if (focusable && evt.target === evt.currentTarget) {
+        shiftFocusToChild(evt.currentTarget, item, state);
+      }
     },
-    [item, state]
+    [focusable, item, state]
   );
 
   return useMemo(() => {

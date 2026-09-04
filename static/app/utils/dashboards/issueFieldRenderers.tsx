@@ -3,22 +3,27 @@ import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import Count from 'sentry/components/count';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {Count} from 'sentry/components/count';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
 import {getRelativeSummary} from 'sentry/components/timeRangeSelector/utils';
 import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import type {Group} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import {IssueAssignee} from 'sentry/utils/dashboards/issueAssignee';
-import type {EventData} from 'sentry/utils/discover/eventView';
-import EventView from 'sentry/utils/discover/eventView';
+import type {EventData, MetaType} from 'sentry/utils/discover/eventView';
+import {EventView} from 'sentry/utils/discover/eventView';
+import type {FieldFormatterRenderFunctionPartial} from 'sentry/utils/discover/fieldRenderers';
+import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
 import {Container, FieldShortId, OverflowLink} from 'sentry/utils/discover/styles';
 import {SavedQueryDatasets} from 'sentry/utils/discover/types';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
 import {FieldKey} from 'sentry/views/dashboards/widgetBuilder/issueWidget/fields';
+import {QuickContextHoverWrapper} from 'sentry/views/discover/table/quickContext/quickContextWrapper';
+import {ContextType} from 'sentry/views/discover/table/quickContext/utils';
 
 /**
  * Types, functions and definitions for rendering fields in discover results.
@@ -29,14 +34,16 @@ type RenderFunctionBaggage = {
   eventView?: EventView;
 };
 
-type FieldFormatterRenderFunctionPartial = (
-  data: EventData,
-  baggage: RenderFunctionBaggage
-) => React.ReactNode;
+export type IssueRowMetadata = {
+  assignedTo: Group['assignedTo'];
+  links: Group['annotations'];
+  owners: Group['owners'];
+};
 
 type SpecialFieldRenderFunc = (
   data: EventData,
-  baggage: RenderFunctionBaggage
+  baggage: RenderFunctionBaggage,
+  meta: MetaType
 ) => React.ReactNode;
 
 type SpecialField = {
@@ -58,6 +65,13 @@ type SpecialFields = {
   users: SpecialField;
 };
 
+function getIssueRowMetadata(
+  meta: MetaType,
+  issueId: string
+): IssueRowMetadata | undefined {
+  return meta.issueRowMetadata?.[issueId];
+}
+
 /**
  * "Special fields" either do not map 1:1 to an single column in the event database,
  * or they require custom UI formatting that can't be handled by the datatype formatters.
@@ -65,7 +79,7 @@ type SpecialFields = {
 const SPECIAL_FIELDS: SpecialFields = {
   issue: {
     sortField: null,
-    renderFunc: (data, {organization}) => {
+    renderFunc: (data, {organization, location}) => {
       const issueID = data['issue.id'];
 
       if (!issueID) {
@@ -78,20 +92,37 @@ const SPECIAL_FIELDS: SpecialFields = {
 
       const target = {
         pathname: `/organizations/${organization.slug}/issues/${issueID}/`,
+        query: extractSelectionParameters(location.query),
       };
 
       return (
-        <Container>
+        <QuickContextHoverWrapper
+          dataRow={data}
+          contextType={ContextType.ISSUE}
+          organization={organization}
+        >
           <OverflowLink to={target} aria-label={issueID}>
             <FieldShortId shortId={`${data.issue}`} />
           </OverflowLink>
-        </Container>
+        </QuickContextHoverWrapper>
       );
     },
   },
   assignee: {
     sortField: null,
-    renderFunc: data => <IssueAssignee groupId={data.id} />,
+    renderFunc: (data, _baggage, meta) => {
+      const issueMetadata = getIssueRowMetadata(meta, data.id);
+
+      return (
+        <IssueAssignee
+          groupId={data.id}
+          projectId={data.projectId}
+          projectSlug={data.project}
+          assignedTo={issueMetadata?.assignedTo}
+          owners={issueMetadata?.owners}
+        />
+      );
+    },
   },
   lifetimeEvents: {
     sortField: null,
@@ -135,17 +166,25 @@ const SPECIAL_FIELDS: SpecialFields = {
   },
   links: {
     sortField: null,
-    renderFunc: ({links}) => (
-      <LinksContainer>
-        {links.map((link: any, index: any) => (
-          <ExternalLink key={index} href={link.url}>
-            {link.displayName}
-          </ExternalLink>
-        ))}
-      </LinksContainer>
-    ),
+    renderFunc: (data, _baggage, meta) => {
+      const links = getIssueRowMetadata(meta, data.id)?.links ?? [];
+
+      return (
+        <LinksContainer>
+          {links.map((link, index) => (
+            <ExternalLink key={index} href={link.url}>
+              {link.displayName}
+            </ExternalLink>
+          ))}
+        </LinksContainer>
+      );
+    },
   },
 };
+
+function isSpecialField(field: string): field is keyof SpecialFields {
+  return Object.hasOwn(SPECIAL_FIELDS, field);
+}
 
 const issuesCountRenderer = (
   data: EventData,
@@ -234,8 +273,8 @@ const getDiscoverUrl = (
 };
 
 export function getSortField(field: string): string | null {
-  if (SPECIAL_FIELDS.hasOwnProperty(field)) {
-    return SPECIAL_FIELDS[field as keyof typeof SPECIAL_FIELDS].sortField;
+  if (isSpecialField(field)) {
+    return SPECIAL_FIELDS[field].sortField;
   }
   switch (field) {
     case FieldKey.LAST_SEEN:
@@ -260,17 +299,17 @@ const StyledContent = styled('div')`
 
 const StyledLink = styled(Link)`
   ${contentStyle};
-  color: ${p => p.theme.gray400};
+  color: ${p => p.theme.colors.gray500};
   &:hover {
-    color: ${p => p.theme.gray400};
-    background: ${p => p.theme.hover};
+    color: ${p => p.theme.colors.gray500};
+    background: ${p => p.theme.tokens.interactive.transparent.neutral.background.hover};
   }
 `;
 
 const SecondaryCount = styled(Count)`
   :before {
     content: '/';
-    padding-left: ${space(0.25)};
+    padding-left: ${p => p.theme.space['2xs']};
     padding-right: 2px;
   }
 `;
@@ -281,16 +320,17 @@ const WrappedCount = styled(({value, ...p}: any) => (
   </div>
 ))`
   text-align: right;
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   font-variant-numeric: tabular-nums;
-  padding-left: ${space(2)};
-  color: ${p => p.theme.subText};
+  padding-left: ${p => p.theme.space.xl};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const Divider = styled('div')`
   height: 1px;
   overflow: hidden;
-  background-color: ${p => p.theme.innerBorder};
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  background-color: ${p => p.theme.tokens.border.secondary};
 `;
 
 const LinksContainer = styled('span')`
@@ -305,14 +345,13 @@ const LinksContainer = styled('span')`
  * @returns {Function}
  */
 export function getIssueFieldRenderer(
-  field: string
-): FieldFormatterRenderFunctionPartial | null {
-  if (SPECIAL_FIELDS.hasOwnProperty(field)) {
-    // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
-    return SPECIAL_FIELDS[field].renderFunc;
+  field: string,
+  meta: MetaType
+): FieldFormatterRenderFunctionPartial {
+  if (isSpecialField(field)) {
+    const specialField = SPECIAL_FIELDS[field];
+    return (data, baggage) => specialField.renderFunc(data, baggage, meta);
   }
 
-  // Return null if there is no field renderer for this field
-  // Should check the discover field renderer for this field
-  return null;
+  return getFieldRenderer(field, meta, false);
 }

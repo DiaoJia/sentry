@@ -3,16 +3,16 @@ import {ProjectFixture} from 'sentry-fixture/project';
 
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import BookmarkStar from 'sentry/components/projects/bookmarkStar';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {BookmarkStar} from 'sentry/components/projects/bookmarkStar';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 
-describe('BookmarkStar', function () {
-  afterEach(function () {
+describe('BookmarkStar', () => {
+  afterEach(() => {
     ProjectsStore.reset();
     MockApiClient.clearMockResponses();
   });
 
-  it('can star', async function () {
+  it('can star', async () => {
     const project = ProjectFixture();
     ProjectsStore.loadInitialData([project]);
     render(<BookmarkStar organization={OrganizationFixture()} project={project} />);
@@ -37,7 +37,7 @@ describe('BookmarkStar', function () {
     expect(ProjectsStore.getBySlug(project.slug)?.isBookmarked).toBe(true);
   });
 
-  it('can unstar', async function () {
+  it('can unstar', async () => {
     const project = ProjectFixture({isBookmarked: true});
     ProjectsStore.loadInitialData([project]);
     render(<BookmarkStar organization={OrganizationFixture()} project={project} />);

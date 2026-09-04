@@ -1,28 +1,37 @@
-import type {Hooks} from 'sentry/types/hooks';
+import {getOverride} from 'sentry/overrideRegistry';
 import type {Organization} from 'sentry/types/organization';
-import {rawTrackAnalyticsEvent} from 'sentry/utils/analytics';
+import type {Overrides} from 'sentry/types/overrides';
+
+/**
+ * Should NOT be used directly. Instead, use makeAnalyticsFunction to generate
+ * an analytics function.
+ *
+ * This lives here (rather than in analytics.tsx) to avoid a circular dependency:
+ * analytics.tsx imports makeAnalyticsFunction, and makeAnalyticsFunction calls
+ * rawTrackAnalyticsEvent.
+ */
+const rawTrackAnalyticsEvent: Overrides['analytics:raw-track-event'] = (data, options) =>
+  getOverride('analytics:raw-track-event')?.(data, options);
 
 const hasAnalyticsDebug = () => window.localStorage?.getItem('DEBUG_ANALYTICS') === '1';
 
 type OptionalOrg = {
   organization: Organization | string | null;
 };
-type Options = Parameters<Hooks['analytics:raw-track-event']>[1];
+type Options = Parameters<Overrides['analytics:raw-track-event']>[1];
 
 /**
  * Generates functions used to track an event for analytics.
  * Each function can only handle the event types specified by the
  * generic for EventParameters and the events in eventKeyToNameMap.
- * Can specifcy default options with the defaultOptions argument as well.
  * Can make orgnization required with the second generic.
  */
-export default function makeAnalyticsFunction<
+export function makeAnalyticsFunction<
   EventParameters extends Record<string, Record<string, any>>,
+  // This is used to provide a nice curried type for consumers.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   OrgRequirement extends OptionalOrg = OptionalOrg,
->(
-  eventKeyToNameMap: Record<keyof EventParameters, string | null>,
-  defaultOptions?: Options
-) {
+>(eventKeyToNameMap: Record<keyof EventParameters, string | null>) {
   /**
    * Function used for analytics of specifc types determined from factory function
    * Uses the current session ID or generates a new one if startSession == true.
@@ -47,8 +56,7 @@ export default function makeAnalyticsFunction<
     }
 
     // only apply options if required to make mock assertions easier
-    if (options || defaultOptions) {
-      options = {...defaultOptions, ...options};
+    if (options) {
       rawTrackAnalyticsEvent(params, options);
     } else {
       rawTrackAnalyticsEvent(params);

@@ -1,32 +1,41 @@
+import {useLocalStorageState} from 'sentry/utils/useLocalStorageState';
 import type {EventId} from 'sentry/views/settings/components/dataScrubbing/types';
 import {EventIdStatus} from 'sentry/views/settings/components/dataScrubbing/types';
 import {valueSuggestions} from 'sentry/views/settings/components/dataScrubbing/utils';
 
-import {fetchFromStorage, saveToStorage} from './localStorage';
+const ADVANCED_DATA_SCRUBBING_LOCALSTORAGE_KEY = 'advanced-data-scrubbing';
 
-function fetchSourceGroupData() {
-  const fetchedSourceGroupData = fetchFromStorage();
-  if (!fetchedSourceGroupData) {
-    const sourceGroupData: Parameters<typeof saveToStorage>[0] = {
+export function useSourceGroupData() {
+  const [sourceGroupData, setSourceGroupData] = useLocalStorageState(
+    ADVANCED_DATA_SCRUBBING_LOCALSTORAGE_KEY,
+    {
       eventId: '',
       sourceSuggestions: valueSuggestions,
-    };
-    saveToStorage(sourceGroupData);
-    return sourceGroupData;
-  }
-  return fetchedSourceGroupData;
+    }
+  );
+
+  const saveToSourceGroupData = (
+    eventId: EventId,
+    sourceSuggestions = valueSuggestions
+  ) => {
+    switch (eventId.status) {
+      case EventIdStatus.LOADING:
+        break;
+      case EventIdStatus.LOADED:
+        setSourceGroupData({eventId: eventId.value, sourceSuggestions});
+        break;
+      default:
+        setSourceGroupData({eventId: '', sourceSuggestions});
+    }
+  };
+
+  return {
+    sourceGroupData,
+    saveToSourceGroupData,
+  };
 }
 
-function saveToSourceGroupData(eventId: EventId, sourceSuggestions = valueSuggestions) {
-  switch (eventId.status) {
-    case EventIdStatus.LOADING:
-      break;
-    case EventIdStatus.LOADED:
-      saveToStorage({eventId: eventId.value, sourceSuggestions});
-      break;
-    default:
-      saveToStorage({eventId: '', sourceSuggestions});
-  }
+export function hasCaptureGroups(pattern: string) {
+  const m = pattern.match(/\(.*\)/);
+  return m !== null && m.length > 0;
 }
-
-export {fetchSourceGroupData, saveToSourceGroupData};

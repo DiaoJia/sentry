@@ -1,255 +1,329 @@
-import {useCallback, useMemo, useRef} from 'react';
+import {Fragment, type PropsWithChildren, useEffect} from 'react';
+import {css, Global, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import {InputGroup} from 'sentry/components/core/input/inputGroup';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import {IconSettings} from 'sentry/icons';
-import {IconSearch} from 'sentry/icons/iconSearch';
-import {space} from 'sentry/styles/space';
-import {useHotkeys} from 'sentry/utils/useHotkeys';
-import {useLocalStorageState} from 'sentry/utils/useLocalStorageState';
-import {useLocation} from 'sentry/utils/useLocation';
-import {useNavigate} from 'sentry/utils/useNavigate';
-import OrganizationContainer from 'sentry/views/organizationContainer';
-import RouteAnalyticsContextProvider from 'sentry/views/routeAnalyticsContextProvider';
+import {Alert} from '@sentry/scraps/alert';
+import {GlobalDrawer} from '@sentry/scraps/drawer';
+import {Container, Stack} from '@sentry/scraps/layout';
+import {TrackingContextProvider} from '@sentry/scraps/trackingContext';
 
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {handleExpressiveCodeCopyClick} from 'sentry/stories/view/expressiveCodeCopy';
+import {StorySidebar} from 'sentry/stories/view/storySidebar';
+import {
+  StoryTreeNode,
+  useFlatStoryList,
+  type StoryCategory,
+} from 'sentry/stories/view/storyTree';
+import {useLocation} from 'sentry/utils/useLocation';
+import {OrganizationContainer} from 'sentry/views/organizationContainer';
+import {RouteAnalyticsContextProvider} from 'sentry/views/routeAnalyticsContextProvider';
+
+import {StoryLanding} from './landing';
 import {StoryExports} from './storyExports';
 import {StoryHeader} from './storyHeader';
-import {StoryTableOfContents} from './storyTableOfContents';
-import {StoryTree, useStoryTree} from './storyTree';
-import {useStoriesLoader, useStoryBookFiles} from './useStoriesLoader';
+import {useStoryDarkModeTheme} from './useStoriesDarkMode';
+import {useStoriesLoader} from './useStoriesLoader';
 
-function isCoreFile(file: string) {
-  return (
-    file.includes('components/core') ||
-    file.includes('app/styles') ||
-    file.includes('app/icons')
-  );
+export function useStoryParams(): {storyCategory?: StoryCategory; storySlug?: string} {
+  const location = useLocation();
+  // Match: /scraps/:category/(one/optional/or/more/path/segments)
+  // Handles both /scraps/... and /organizations/{org}/scraps/...
+  // Supports optional trailing slashes
+  const match = location.pathname.match(/\/scraps\/([^/]+)\/(.+?)\/?$/);
+  return {
+    storyCategory: match?.[1] as StoryCategory | undefined,
+    storySlug: match?.[2] ?? undefined,
+  };
 }
 
 export default function Stories() {
-  const searchInput = useRef<HTMLInputElement>(null);
-  const location = useLocation<{name: string; query?: string}>();
-  const files = useStoryBookFiles();
-
-  // If no story is selected, show the landing page stories
-  const storyFiles = useMemo(() => {
-    if (!location.query.name) {
-      return files.filter(
-        file =>
-          file.endsWith('styles/colors.mdx') ||
-          file.endsWith('styles/typography.stories.tsx')
-      );
-    }
-    return [location.query.name];
-  }, [files, location.query.name]);
-
-  const story = useStoriesLoader({files: storyFiles});
-  const [storyRepresentation, setStoryRepresentation] = useLocalStorageState<
-    'category' | 'filesystem'
-  >('story-representation', 'category');
-
-  const query = location.query.query ?? '';
-  const filesByOwner = useMemo(() => {
-    const map: Record<'core' | 'shared', string[]> = {
-      core: [],
-      shared: [],
-    };
-    for (const file of files) {
-      if (isCoreFile(file)) {
-        map.core.push(file);
-      } else {
-        map.shared.push(file);
-      }
-    }
-    return map;
-  }, [files]);
-
-  const coreTree = useStoryTree(filesByOwner.core, {
-    query,
-    representation: storyRepresentation,
-  });
-  const sharedTree = useStoryTree(filesByOwner.shared, {
-    query,
-    representation: storyRepresentation,
-  });
-
-  const navigate = useNavigate();
-  const onSearchInputChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      navigate(
-        {
-          query: {...location.query, query: e.target.value, name: location.query.name},
-        },
-        {replace: true}
-      );
-    },
-    [location.query, navigate]
-  );
-
-  const storiesSearchHotkeys = useMemo(() => {
-    return [{match: '/', callback: () => searchInput.current?.focus()}];
-  }, []);
-  useHotkeys(storiesSearchHotkeys);
-
-  return (
-    <RouteAnalyticsContextProvider>
-      <OrganizationContainer>
-        <Layout>
-          <HeaderContainer>
-            <StoryHeader />
-          </HeaderContainer>
-
-          <SidebarContainer>
-            <InputGroup>
-              <InputGroup.LeadingItems disablePointerEvents>
-                <IconSearch />
-              </InputGroup.LeadingItems>
-              <InputGroup.Input
-                ref={searchInput}
-                placeholder="Search stories"
-                defaultValue={location.query.query ?? ''}
-                onChange={onSearchInputChange}
-              />
-              <InputGroup.TrailingItems>
-                <StoryRepresentationToggle
-                  storyRepresentation={storyRepresentation}
-                  setStoryRepresentation={setStoryRepresentation}
-                />
-              </InputGroup.TrailingItems>
-              {/* @TODO (JonasBadalic): Implement clear button when there is an active query */}
-            </InputGroup>
-            <StoryTreeContainer>
-              <StoryTreeTitle>Design System</StoryTreeTitle>
-              <StoryTree nodes={coreTree} />
-              <StoryTreeTitle>Shared</StoryTreeTitle>
-              <StoryTree nodes={sharedTree} />
-            </StoryTreeContainer>
-          </SidebarContainer>
-
-          {story.isLoading ? (
-            <VerticalScroll style={{gridArea: 'body'}}>
-              <LoadingIndicator />
-            </VerticalScroll>
-          ) : story.isError ? (
-            <VerticalScroll style={{gridArea: 'body'}}>
-              <Alert.Container>
-                <Alert type="error" showIcon>
-                  <strong>{story.error.name}:</strong> {story.error.message}
-                </Alert>
-              </Alert.Container>
-            </VerticalScroll>
-          ) : story.isSuccess ? (
-            <StoryMainContainer>
-              {story.data.map(s => {
-                return <StoryExports key={s.filename} story={s} />;
-              })}
-            </StoryMainContainer>
-          ) : (
-            <VerticalScroll style={{gridArea: 'body'}}>
-              <strong>The file you selected does not export a story.</strong>
-            </VerticalScroll>
-          )}
-          <StoryIndexContainer>
-            <StoryTableOfContents />
-          </StoryIndexContainer>
-        </Layout>
-      </OrganizationContainer>
-    </RouteAnalyticsContextProvider>
+  const location = useLocation();
+  return isLandingPage(location) && !location.query.name ? (
+    <StoriesLanding />
+  ) : (
+    <StoryDetail />
   );
 }
 
-function StoryRepresentationToggle(props: {
-  setStoryRepresentation: (value: 'category' | 'filesystem') => void;
-  storyRepresentation: 'category' | 'filesystem';
-}) {
+function StoriesLanding() {
   return (
-    <CompactSelect
-      trigger={triggerProps => (
-        <Button
-          borderless
-          icon={<IconSettings />}
-          size="xs"
-          aria-label="Toggle story representation"
-          {...triggerProps}
-          tabIndex={-1}
-        />
-      )}
-      defaultValue={props.storyRepresentation}
-      options={[
-        {label: 'Category', value: 'category'},
-        {label: 'Filesystem', value: 'filesystem'},
-      ]}
-      onChange={option => props.setStoryRepresentation(option.value)}
-    />
+    <StoriesLayout>
+      <StoryMainContainer
+        as="main"
+        column="2"
+        containerType="inline-size"
+        gap="xl"
+        row="1"
+      >
+        <StoryLanding />
+      </StoryMainContainer>
+    </StoriesLayout>
   );
+}
+
+function StoryDetail() {
+  const location = useLocation();
+  const {storyCategory, storySlug} = useStoryParams();
+  const stories = useFlatStoryList();
+
+  let storyNode = getStoryFromParams(stories, {
+    category: storyCategory,
+    slug: storySlug,
+  });
+
+  // If we don't have a story node, try to find it by the filesystem path
+  if (!storyNode && location.query.name) {
+    const nodes = Object.values(stories).flat();
+    const queue = [...nodes];
+
+    while (queue.length > 0) {
+      const node = queue.pop();
+      if (!node) {
+        break;
+      }
+
+      if (node.filesystemPath === location.query.name) {
+        storyNode = node;
+        break;
+      }
+
+      for (const key in node.children) {
+        queue.push(node.children[key]!);
+      }
+    }
+  }
+
+  const story = useStoriesLoader({
+    files: storyNode ? [storyNode.filesystemPath] : [],
+  });
+
+  return (
+    <StoriesLayout>
+      {story.isLoading ? (
+        <Container
+          as="main"
+          padding="xl"
+          overflowX="visible"
+          overflowY="auto"
+          row="1"
+          column="2"
+        >
+          <LoadingIndicator />
+        </Container>
+      ) : story.isError ? (
+        <Container
+          as="main"
+          padding="xl"
+          overflowX="visible"
+          overflowY="auto"
+          row="1"
+          column="2"
+        >
+          <Alert.Container>
+            <Alert variant="danger">
+              <strong>{story.error.name}:</strong> {story.error.message}
+            </Alert>
+          </Alert.Container>
+        </Container>
+      ) : story.isSuccess ? (
+        <StoryMainContainer
+          as="main"
+          column="2"
+          containerType="inline-size"
+          gap="xl"
+          row="1"
+          onClick={handleExpressiveCodeCopyClick}
+        >
+          {story.data.map(s => {
+            return <StoryExports key={s.filename} story={s} />;
+          })}
+        </StoryMainContainer>
+      ) : (
+        <Container
+          as="main"
+          padding="xl"
+          overflowX="visible"
+          overflowY="auto"
+          row="1"
+          column="2"
+        >
+          <strong>The file you selected does not export a story.</strong>
+        </Container>
+      )}
+    </StoriesLayout>
+  );
+}
+
+function useStoriesFavicon() {
+  useEffect(() => {
+    const faviconNode = document.querySelector<HTMLLinkElement>(
+      'link[rel="icon"][type="image/png"]'
+    );
+    if (!faviconNode) {
+      return () => {};
+    }
+
+    const originalHref = faviconNode.href;
+    const url = new URL(originalHref);
+    const storiesFaviconPath = `${url.origin}${url.pathname.replace(/\/[^/]+$/, '/favicon-stories.png')}`;
+
+    const applyStoriesFavicon = () => {
+      if (faviconNode.href !== storiesFaviconPath) {
+        faviconNode.href = storiesFaviconPath;
+      }
+    };
+
+    applyStoriesFavicon();
+
+    const observer = new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'href') {
+          applyStoriesFavicon();
+        }
+      }
+    });
+
+    observer.observe(faviconNode, {
+      attributes: true,
+      attributeFilter: ['href'],
+    });
+
+    return () => {
+      observer.disconnect();
+      faviconNode.href = originalHref;
+    };
+  }, []);
+}
+
+const storiesTracking: React.ComponentProps<
+  typeof TrackingContextProvider
+>['value'] = props => {
+  // eslint-disable-next-line no-console
+  console.log('analyticsEvent', props);
+};
+
+function StoriesLayout(props: PropsWithChildren) {
+  useStoriesFavicon();
+  return (
+    <TrackingContextProvider value={storiesTracking}>
+      <Fragment>
+        <GlobalStoryStyles key="global-story-styles" />
+        <RouteAnalyticsContextProvider>
+          <GlobalDrawer>
+            <OrganizationContainer>
+              <Layout>
+                <HeaderContainer>
+                  <StoryHeader />
+                </HeaderContainer>
+                <StorySidebar />
+                {props.children}
+              </Layout>
+            </OrganizationContainer>
+          </GlobalDrawer>
+        </RouteAnalyticsContextProvider>
+      </Fragment>
+    </TrackingContextProvider>
+  );
+}
+
+function isLandingPage(location: ReturnType<typeof useLocation>) {
+  // Handles both /scraps and /organizations/{org}/scraps
+  return /\/scraps\/?$/.test(location.pathname);
+}
+
+function getStoryFromParams(
+  stories: ReturnType<typeof useFlatStoryList>,
+  context: {category?: StoryCategory; slug?: string}
+): StoryTreeNode | undefined {
+  if (stories.length === 0) {
+    return undefined;
+  }
+
+  const queue = [...stories];
+
+  while (queue.length > 0) {
+    const node = queue.pop();
+    if (!node) {
+      break;
+    }
+
+    if (node.category === context.category && node.slug === context.slug) {
+      return node;
+    }
+
+    for (const key in node.children) {
+      queue.push(node.children[key]!);
+    }
+  }
+
+  return undefined;
+}
+
+function GlobalStoryStyles() {
+  const theme = useTheme();
+  const darkTheme = useStoryDarkModeTheme();
+  const location = useLocation();
+  const isIndex = isLandingPage(location);
+  const styles = css`
+    /* match body background with header story styles */
+    body {
+      background-color: ${
+        isIndex
+          ? darkTheme.tokens.background.secondary
+          : theme.tokens.background.secondary
+      };
+    }
+    /* fixed position color block to match overscroll color to story background */
+    body::after {
+      content: '';
+      display: block;
+      position: fixed;
+      inset: 0;
+      top: unset;
+      background-color: ${theme.tokens.background.primary};
+      height: 50vh;
+      z-index: -1;
+      pointer-events: none;
+    }
+    /* adjust position of global .messages-container element */
+    .messages-container {
+      margin-top: 52px;
+      margin-left: 256px;
+      z-index: ${theme.zIndex.header};
+      background: ${theme.tokens.background.primary};
+    }
+  `;
+  return <Global styles={styles} />;
 }
 
 const Layout = styled('div')`
-  --stories-grid-space: ${space(2)};
+  background: ${p => p.theme.tokens.background.primary};
+  --stories-grid-space: 0;
 
   display: grid;
-  grid-template:
-    'head head head' max-content
-    'aside body index' auto / 200px 1fr;
-  gap: var(--stories-grid-space);
+  grid-template-rows: 1fr;
+  grid-template-columns: 256px minmax(auto, 1fr);
   place-items: stretch;
-
-  height: 100vh;
-  padding: var(--stories-grid-space);
+  min-height: calc(100dvh - 52px);
+  padding-bottom: ${p => p.theme.space['3xl']};
+  position: absolute;
+  top: 52px;
+  left: 0;
+  right: 0;
 `;
 
-const HeaderContainer = styled('div')`
-  grid-area: head;
+const HeaderContainer = styled('header')`
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: ${p => p.theme.zIndex.header};
+  background: ${p => p.theme.tokens.background.primary};
 `;
 
-const SidebarContainer = styled('div')`
-  grid-area: aside;
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-  min-height: 0;
-  position: relative;
-  z-index: 10;
-`;
-
-const StoryTreeContainer = styled('div')`
-  overflow-y: scroll;
-  flex-grow: 1;
-`;
-
-const StoryTreeTitle = styled('p')`
-  margin-bottom: ${space(1)};
-`;
-
-const StoryIndexContainer = styled('div')`
-  grid-area: index;
-`;
-
-const VerticalScroll = styled('main')`
-  overflow-x: hidden;
-  overflow-y: scroll;
-  grid-area: body;
-`;
-
-/**
- * Avoid <Panel> here because nested panels will have a modified theme.
- * Therefore stories will look different in prod.
- */
-const StoryMainContainer = styled(VerticalScroll)`
-  background: ${p => p.theme.background};
-  border-radius: ${p => p.theme.borderRadius};
-  border: 1px solid ${p => p.theme.border};
-
-  grid-area: body;
-
-  padding: var(--stories-grid-space);
-  padding-top: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+const StoryMainContainer = styled(Stack)`
+  color: ${p => p.theme.tokens.content.primary};
 
   h1,
   h2,
@@ -257,6 +331,23 @@ const StoryMainContainer = styled(VerticalScroll)`
   h4,
   h5,
   h6 {
-    scroll-margin-top: ${space(3)};
+    scroll-margin-top: 80px;
+  }
+
+  div + .expressive-code .frame {
+    border-radius: 0 0 ${p => p.theme.radius.md} ${p => p.theme.radius.md};
+    pre {
+      border-radius: 0 0 ${p => p.theme.radius.md} ${p => p.theme.radius.md};
+    }
+  }
+
+  .expressive-code .frame {
+    margin: 0;
+    box-shadow: none;
+    border: none;
+    pre {
+      background: hsla(254, 18%, 15%, 1);
+      border: 0;
+    }
   }
 `;

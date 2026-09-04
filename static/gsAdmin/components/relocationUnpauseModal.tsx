@@ -1,76 +1,109 @@
-import {Fragment} from 'react';
+import {useMutation} from '@tanstack/react-query';
+import {z} from 'zod';
+
+import {defaultFormOptions, useScrapsForm} from '@sentry/scraps/form';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import ApiForm from 'sentry/components/forms/apiForm';
-import SelectField from 'sentry/components/forms/fields/selectField';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
 import type {Relocation} from 'admin/types';
 import {RelocationSteps} from 'admin/types';
-import titleCase from 'getsentry/utils/titleCase';
+import {titleCase} from 'getsentry/utils/titleCase';
 
 type Props = ModalRenderProps & {
   relocation: Relocation;
   onSuccess?: (relocation: Relocation) => void;
 };
 
-function RelocationUnpauseModal({
+const schema = z.object({
+  untilStep: z.string(),
+});
+
+export function RelocationUnpauseModal({
   Body,
   Header,
+  Footer,
   relocation,
   onSuccess,
   closeModal,
 }: Props) {
   const currentStep = RelocationSteps[relocation.step];
-  const choices = Object.keys(RelocationSteps)
-    // @ts-expect-error TS(7015): Element implicitly has an 'any' type because index... Remove this comment to see the full error message
-    .filter(step => RelocationSteps[step] > currentStep && step !== 'COMPLETED')
-    .map(step => [step, titleCase(step)]);
-  choices.unshift(['NONE', 'Completion']);
+  const options = Object.keys(RelocationSteps)
+    .filter(
+      step =>
+        RelocationSteps[step as keyof typeof RelocationSteps] > currentStep &&
+        step !== 'COMPLETED'
+    )
+    .map(step => ({value: step, label: titleCase(step)}));
+  options.unshift({value: 'NONE', label: 'Completion'});
+
+  const mutation = useMutation({
+    mutationFn: (data: {untilStep?: string}) =>
+      fetchMutation<Relocation>({
+        method: 'PUT',
+        url: getApiUrl('/relocations/$relocationUuid/unpause/', {
+          path: {relocationUuid: relocation.uuid},
+        }),
+        data,
+        options: {host: relocation.region.url},
+      }),
+    onSuccess: rawRelocation => {
+      addSuccessMessage(
+        'All current or future pauses for this relocation have been removed.'
+      );
+      onSuccess?.(rawRelocation);
+      closeModal();
+    },
+    onError: (error: unknown) => {
+      const fallback = 'Failed to unpause relocation.';
+      if (!(error instanceof RequestError)) {
+        addErrorMessage(fallback);
+        return;
+      }
+      const detail = error.responseJSON?.detail;
+      const message = typeof detail === 'string' ? detail : detail?.message;
+      addErrorMessage(message ?? fallback);
+    },
+  });
+
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {untilStep: ''},
+    validators: {onDynamic: schema},
+    onSubmit: ({value}) => {
+      const payload: {untilStep?: string} = {};
+      if (value.untilStep && value.untilStep !== 'NONE') {
+        payload.untilStep = value.untilStep;
+      }
+      return mutation.mutateAsync(payload).catch(() => {});
+    },
+  });
 
   return (
-    <Fragment>
+    <form.AppForm form={form}>
       <Header closeButton>Unpause Relocation</Header>
       <Body>
-        <ApiForm
-          apiMethod="PUT"
-          apiEndpoint={`/relocations/${relocation.uuid}/unpause/`}
-          hostOverride={relocation.region.url}
-          onSubmit={(data: Record<string, any>) => {
-            const payload: Record<string, any> = {};
-            if (data.untilStep !== 'NONE') {
-              payload.untilStep = data.untilStep;
-            }
-            return payload;
-          }}
-          onSubmitSuccess={(rawRelocation: Relocation) => {
-            if (onSuccess) {
-              onSuccess(rawRelocation);
-            }
-            closeModal();
-            addSuccessMessage(
-              'All current or future pauses for this relocation have been removed.'
-            );
-          }}
-          onSubmitError={error => {
-            addErrorMessage(error.responseJSON?.detail);
-          }}
-          initialData={relocation || {untilStep: 'NONE'}}
-          submitLabel="Unpause"
-        >
-          <SelectField
-            choices={choices}
-            flexibleControlStateSize={false}
-            help="Optionally select another future step to pause at:"
-            inline={false}
-            label="Until"
-            name="untilStep"
-            stacked
-          />
-        </ApiForm>
+        <form.AppField name="untilStep">
+          {field => (
+            <field.Layout.Stack
+              label="Until"
+              hintText="Optionally select another future step to pause at:"
+            >
+              <field.Select
+                value={field.state.value}
+                onChange={field.handleChange}
+                options={options}
+              />
+            </field.Layout.Stack>
+          )}
+        </form.AppField>
       </Body>
-    </Fragment>
+      <Footer>
+        <form.SubmitButton>Unpause</form.SubmitButton>
+      </Footer>
+    </form.AppForm>
   );
 }
-
-export default RelocationUnpauseModal;

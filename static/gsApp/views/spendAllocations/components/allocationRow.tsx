@@ -1,18 +1,17 @@
 import {useState} from 'react';
 import {useTheme} from '@emotion/react';
-import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Button} from '@sentry/scraps/button';
+import {InfoText} from '@sentry/scraps/info';
+
 import {IconDelete, IconEdit} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 import {displayPrice} from 'getsentry/views/amCheckout/utils';
 import type {BigNumUnits} from 'getsentry/views/spendAllocations/utils';
 import {bigNumFormatter} from 'getsentry/views/spendAllocations/utils';
 
-import {Centered, Divider, HalvedWithDivider} from './styles';
+import {Cell, Centered, Divider, HalvedWithDivider} from './styles';
 import type {SpendAllocation} from './types';
 
 type AllocationRowProps = {
@@ -22,7 +21,7 @@ type AllocationRowProps = {
   openForm: (e: React.MouseEvent) => void;
 };
 
-function AllocationRow({
+export function AllocationRow({
   allocation,
   deleteAction,
   metricUnit,
@@ -34,13 +33,18 @@ function AllocationRow({
 
   return (
     <tr data-test-id="allocation-row">
-      <TableData>{allocation.targetSlug}</TableData>
-      <TableData />
-      <TableData>
+      <Cell>{allocation.targetSlug}</Cell>
+      <Cell />
+      <Cell>
         <HalvedWithDivider>
           {allocation.costPerItem === 0 && (
             <Centered>
-              <Tooltip title="Cost per event is unavailable for base plans">--</Tooltip>
+              <InfoText
+                variant="inherit"
+                title={t('Cost per event is unavailable for base plans')}
+              >
+                N/A
+              </InfoText>
             </Centered>
           )}
           {allocation.costPerItem > 0 && (
@@ -54,18 +58,26 @@ function AllocationRow({
             <Divider />
           </Centered>
           <Centered>
-            <Tooltip title={allocation.reservedQuantity.toLocaleString()}>
+            <InfoText
+              variant="inherit"
+              title={allocation.reservedQuantity.toLocaleString()}
+            >
               {bigNumFormatter(allocation.reservedQuantity, undefined, metricUnit)}
-            </Tooltip>
+            </InfoText>
           </Centered>
         </HalvedWithDivider>
-      </TableData>
-      <TableData />
-      <TableData>
+      </Cell>
+      <Cell />
+      <Cell>
         <HalvedWithDivider>
           {allocation.costPerItem === 0 && (
             <Centered>
-              <Tooltip title="Cost per event is unavailable for base plans">--</Tooltip>
+              <InfoText
+                variant="inherit"
+                title={t('Cost per event is unavailable for base plans')}
+              >
+                N/A
+              </InfoText>
             </Centered>
           )}
           {allocation.costPerItem > 0 && (
@@ -79,7 +91,12 @@ function AllocationRow({
             <Divider />
           </Centered>
           <Centered>
-            <Tooltip
+            <InfoText
+              variant={
+                allocation.consumedQuantity > allocation.reservedQuantity
+                  ? 'danger'
+                  : 'inherit'
+              }
               title={(allocation.consumedQuantity > allocation.reservedQuantity
                 ? `${allocation.consumedQuantity} (${
                     allocation.consumedQuantity - allocation.reservedQuantity
@@ -87,20 +104,12 @@ function AllocationRow({
                 : allocation.consumedQuantity
               ).toLocaleString()}
             >
-              <span
-                style={
-                  allocation.consumedQuantity > allocation.reservedQuantity
-                    ? {color: theme.red400}
-                    : {}
-                }
-              >
-                {bigNumFormatter(allocation.consumedQuantity, 2, metricUnit)}
-              </span>
-            </Tooltip>
+              {bigNumFormatter(allocation.consumedQuantity, 2, metricUnit)}
+            </InfoText>
           </Centered>
         </HalvedWithDivider>
-      </TableData>
-      <TableData style={{textAlign: 'right'}}>
+      </Cell>
+      <Cell textAlign="right">
         {allocation.targetType !== 'Organization' && (
           <Button
             aria-label={t('Edit')}
@@ -109,8 +118,8 @@ function AllocationRow({
             onClick={openForm}
             style={
               editHovered
-                ? {color: theme.gray300, marginRight: space(1)}
-                : {marginRight: space(1)}
+                ? {color: theme.colors.gray300, marginRight: theme.space.md}
+                : {marginRight: theme.space.md}
             }
             onMouseEnter={() => setEditHovered(true)}
             onMouseLeave={() => setEditHovered(false)}
@@ -123,20 +132,14 @@ function AllocationRow({
             icon={<IconDelete />}
             size="xs"
             onClick={deleteAction}
-            priority="danger"
-            style={deleteHovered ? {color: theme.red400} : {}}
+            variant="danger"
+            style={deleteHovered ? {color: theme.colors.red500} : {}}
             onMouseEnter={() => setDeleteHovered(true)}
             onMouseLeave={() => setDeleteHovered(false)}
             data-test-id="delete"
           />
         )}
-      </TableData>
+      </Cell>
     </tr>
   );
 }
-
-export default AllocationRow;
-
-const TableData = styled('td')`
-  padding: ${space(2)};
-`;

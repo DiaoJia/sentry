@@ -1,8 +1,9 @@
 import logging
 import re
-from gzip import GzipFile
+from gzip import BadGzipFile, GzipFile
 from io import BytesIO
 
+import zstandard
 from django.conf import settings
 from django.urls import reverse
 from rest_framework import status
@@ -12,11 +13,13 @@ from rest_framework.response import Response
 from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationReleasePermission
-from sentry.api.utils import generate_region_url
+from sentry.api.utils import generate_locality_url
 from sentry.models.files.fileblob import FileBlob
 from sentry.models.files.utils import MAX_FILE_SIZE
+from sentry.models.organization import Organization
+from sentry.preprod.authentication import LaunchpadRpcSignatureAuthentication
 from sentry.ratelimits.config import RateLimitConfig
 from sentry.utils.http import absolute_uri
 
@@ -26,6 +29,11 @@ MAX_CONCURRENCY = settings.DEBUG and 1 or 8
 HASH_ALGORITHM = "sha1"
 SENTRYCLI_SEMVER_RE = re.compile(r"^sentry-cli\/(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)")
 API_PREFIX = "/api/0"
+# IMPORTANT: All values in CHUNK_UPLOAD_ACCEPT must be maintained for backwards compatibility
+# with Sentry CLI 2.x and older. Sentry CLI 3.x completely ignores the CHUNK_UPLOAD_ACCEPT
+# field (starting with 3.1.0), but older CLI versions still depend on these values being
+# present in the server's response. Removing any of these values would break functionality
+# for CLI 2.x and older.
 CHUNK_UPLOAD_ACCEPT = (
     "debug_files",  # DIF assemble
     "release_files",  # Release files assemble
@@ -38,28 +46,102 @@ CHUNK_UPLOAD_ACCEPT = (
     "artifact_bundles_v2",  # The `assemble` endpoint will check for missing chunks
     "proguard",  # Chunk-uploaded proguard mappings
     "preprod_artifacts",  # Preprod artifacts (mobile builds, etc.)
+    "dartsymbolmap",  # Dart/Flutter symbol mapping files
 )
+
+CHUNK_UPLOAD_COMPRESSION = ("gzip", "zstd")
+
+
+class ChunkTooLarge(OSError):
+    """Raised when a (possibly decompressed) chunk exceeds the per-chunk size limit."""
+
+
+def _read_bounded(reader, limit):
+    """Read up to ``limit`` bytes from ``reader``; raise :class:`ChunkTooLarge` if more.
+
+    Loops until the reader signals EOF or we exceed ``limit``. The loop matters
+    for ``ZstdDecompressor.stream_reader``, which may short-read when its
+    underlying source does (a real file-backed ``TemporaryUploadedFile`` can);
+    without looping, a bomb payload that happens to short-read past the cap
+    could slip through. Peak memory stays bounded at ``limit + 1`` bytes.
+    """
+    buf = bytearray()
+    while True:
+        chunk = reader.read(limit + 1 - len(buf))
+        if not chunk:
+            return bytes(buf)
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise ChunkTooLarge("Chunk size too large")
 
 
 class GzipChunk(BytesIO):
     def __init__(self, file):
-        data = GzipFile(fileobj=file, mode="rb").read()
+        reader = GzipFile(fileobj=file, mode="rb")
+        data = _read_bounded(reader, settings.SENTRY_CHUNK_UPLOAD_BLOB_SIZE)
         self.size = len(data)
         self.name = file.name
         super().__init__(data)
 
 
-@region_silo_endpoint
+class ZstdChunk(BytesIO):
+    def __init__(self, file):
+        # `read_across_frames=True` mirrors the behaviour of `GzipFile.read()`
+        # (which reads across concatenated gzip members) and matches the
+        # convention in `src/sentry/models/eventattachment.py`. Without it a
+        # multi-frame zstd payload would silently decode only the first frame
+        # and produce a misleading checksum-mismatch error.
+        reader = zstandard.ZstdDecompressor().stream_reader(file, read_across_frames=True)
+        data = _read_bounded(reader, settings.SENTRY_CHUNK_UPLOAD_BLOB_SIZE)
+        self.size = len(data)
+        self.name = file.name
+        super().__init__(data)
+
+
+class ChunkUploadPermission(OrganizationReleasePermission):
+    """
+    Allow OrganizationReleasePermission OR Launchpad service authentication
+    """
+
+    def _is_launchpad_authenticated(self, request: Request) -> bool:
+        """Check if the request is authenticated via Launchpad service."""
+        return isinstance(
+            getattr(request, "successful_authenticator", None), LaunchpadRpcSignatureAuthentication
+        )
+
+    def has_permission(self, request: Request, view) -> bool:
+        # Allow access for Launchpad service authentication
+        if self._is_launchpad_authenticated(request):
+            return True
+
+        # Fall back to standard organization permission check
+        return super().has_permission(request, view)
+
+    def has_object_permission(self, request: Request, view, organization) -> bool:
+        # Allow access for Launchpad service authentication
+        if self._is_launchpad_authenticated(request):
+            return True
+
+        # Fall back to standard organization permission check
+        return super().has_object_permission(request, view, organization)
+
+
+@cell_silo_endpoint
 class ChunkUploadEndpoint(OrganizationEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
         "POST": ApiPublishStatus.PRIVATE,
     }
     owner = ApiOwner.OWNERS_INGEST
-    permission_classes = (OrganizationReleasePermission,)
+
+    authentication_classes = OrganizationEndpoint.authentication_classes + (
+        LaunchpadRpcSignatureAuthentication,
+    )
+
+    permission_classes = (ChunkUploadPermission,)
     rate_limits = RateLimitConfig(group="CLI")
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         """
         Return chunk upload parameters
         ``````````````````````````````
@@ -99,13 +181,15 @@ class ChunkUploadEndpoint(OrganizationEndpoint):
             else:
                 # We need to generate region specific upload URLs when possible to avoid hitting the API proxy
                 # which tends to cause timeouts and performance issues for uploads.
-                url = absolute_uri(relative_url, generate_region_url())
+                url = absolute_uri(relative_url, generate_locality_url())
         else:
             # If user overridden upload url prefix, we want an absolute, versioned endpoint, with user-configured prefix
             url = absolute_uri(relative_url, endpoint)
 
         compression = (
-            [] if organization.id in options.get("chunk-upload.no-compression") else ["gzip"]
+            []
+            if organization.id in options.get("chunk-upload.no-compression")
+            else list(CHUNK_UPLOAD_COMPRESSION)
         )
         accept = CHUNK_UPLOAD_ACCEPT
 
@@ -132,9 +216,13 @@ class ChunkUploadEndpoint(OrganizationEndpoint):
         """
         Upload chunks and store them as FileBlobs
         `````````````````````````````````````````
-
         Requests to this endpoint should use the region-specific domain
         eg. `us.sentry.io` or `de.sentry.io`
+
+        Chunks may be compressed with ``gzip`` or ``zstd``. Codec is selected
+        via the ``Content-Encoding`` request header; the legacy ``file_gzip``
+        multipart field is still accepted but cannot be combined with the
+        header.
 
         :pparam file file: The filename should be sha1 hash of the content.
                             Also not you can add up to MAX_CHUNKS_PER_REQUEST files
@@ -147,37 +235,67 @@ class ChunkUploadEndpoint(OrganizationEndpoint):
         logger = logging.getLogger("sentry.files")
         logger.info("chunkupload.start")
 
-        files = []
-        if request.FILES:
-            files = request.FILES.getlist("file")
-            files += [GzipChunk(chunk) for chunk in request.FILES.getlist("file_gzip")]
+        encoding = request.headers.get("Content-Encoding", "").strip().lower()
+        if encoding and encoding not in CHUNK_UPLOAD_COMPRESSION:
+            logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response(
+                {"error": "Unsupported Content-Encoding"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
-        if len(files) == 0:
-            # No files uploaded is ok
+        files_plain = request.FILES.getlist("file")
+        files_gzip_legacy = request.FILES.getlist("file_gzip")
+
+        if encoding and files_gzip_legacy:
+            logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response(
+                {"error": "Cannot combine Content-Encoding with file_gzip field"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        files = []
+        checksums = []
+        total_size = 0
+
+        # Validate if chunks exceed the maximum chunk limit before attempting to decompress them.
+        num_files = len(files_plain) + len(files_gzip_legacy)
+
+        if num_files > MAX_CHUNKS_PER_REQUEST:
+            logger.info("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response({"error": "Too many chunks"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # No files uploaded is ok
+        if num_files == 0:
             logger.info("chunkupload.end", extra={"status": status.HTTP_200_OK})
             return Response(status=status.HTTP_200_OK)
 
+        try:
+            for chunk, name in get_files(request, encoding):
+                if chunk.size > settings.SENTRY_CHUNK_UPLOAD_BLOB_SIZE:
+                    logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+                    return Response(
+                        {"error": "Chunk size too large"}, status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                total_size += chunk.size
+                if total_size > MAX_REQUEST_SIZE:
+                    logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+                    return Response(
+                        {"error": "Request too large"}, status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                files.append(chunk)
+                checksums.append(name)
+        except ChunkTooLarge:
+            logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response({"error": "Chunk size too large"}, status=status.HTTP_400_BAD_REQUEST)
+        except zstandard.ZstdError:
+            logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response({"error": "Invalid zstd payload"}, status=status.HTTP_400_BAD_REQUEST)
+        except (BadGzipFile, EOFError):
+            logger.warning("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
+            return Response({"error": "Invalid gzip payload"}, status=status.HTTP_400_BAD_REQUEST)
+
         logger.info("chunkupload.post.files", extra={"len": len(files)})
-
-        # Validate file size
-        checksums = []
-        size = 0
-        for chunk in files:
-            size += chunk.size
-            if chunk.size > settings.SENTRY_CHUNK_UPLOAD_BLOB_SIZE:
-                logger.info("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
-                return Response(
-                    {"error": "Chunk size too large"}, status=status.HTTP_400_BAD_REQUEST
-                )
-            checksums.append(chunk.name)
-
-        if size > MAX_REQUEST_SIZE:
-            logger.info("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
-            return Response({"error": "Request too large"}, status=status.HTTP_400_BAD_REQUEST)
-
-        if len(files) > MAX_CHUNKS_PER_REQUEST:
-            logger.info("chunkupload.end", extra={"status": status.HTTP_400_BAD_REQUEST})
-            return Response({"error": "Too many chunks"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             FileBlob.from_files(zip(files, checksums), organization=organization, logger=logger)
@@ -187,3 +305,18 @@ class ChunkUploadEndpoint(OrganizationEndpoint):
 
         logger.info("chunkupload.end", extra={"status": status.HTTP_200_OK})
         return Response(status=status.HTTP_200_OK)
+
+
+def get_files(request: Request, encoding: str):
+    for chunk in request.FILES.getlist("file"):
+        if encoding == "gzip":
+            yield GzipChunk(chunk), chunk.name
+        elif encoding == "zstd":
+            yield ZstdChunk(chunk), chunk.name
+        else:
+            yield chunk, chunk.name
+
+    # Legacy: older clients send gzipped chunks under `file_gzip` with no
+    # Content-Encoding header. Prefer `Content-Encoding: gzip` on `file`.
+    for chunk in request.FILES.getlist("file_gzip"):
+        yield GzipChunk(chunk), chunk.name

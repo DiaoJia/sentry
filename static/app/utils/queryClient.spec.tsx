@@ -2,7 +2,9 @@ import {Fragment} from 'react';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import {useApiQuery} from 'sentry/utils/queryClient';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {DEFAULT_QUERY_CLIENT_CONFIG, useApiQuery} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
 type ResponseData = {
   value: number;
@@ -12,20 +14,18 @@ beforeEach(() => {
   jest.restoreAllMocks();
 });
 
-describe('queryClient', function () {
-  describe('useQuery', function () {
-    it('can do a simple fetch', async function () {
+describe('queryClient', () => {
+  describe('useQuery', () => {
+    it('can do a simple fetch', async () => {
       const mock = MockApiClient.addMockResponse({
-        url: '/some/test/path/',
+        url: '/api-tokens/',
         body: {value: 5},
-        headers: {'Custom-Header': 'header value'},
       });
 
       function TestComponent() {
-        const {data, getResponseHeader} = useApiQuery<ResponseData>(
-          ['/some/test/path/'],
-          {staleTime: 0}
-        );
+        const {data} = useApiQuery<ResponseData>([getApiUrl('/api-tokens/')], {
+          staleTime: 0,
+        });
 
         if (!data) {
           return null;
@@ -34,7 +34,6 @@ describe('queryClient', function () {
         return (
           <Fragment>
             <div>{data.value}</div>
-            <div>{getResponseHeader?.('Custom-Header')}</div>
           </Fragment>
         );
       }
@@ -42,20 +41,19 @@ describe('queryClient', function () {
       render(<TestComponent />);
 
       expect(await screen.findByText('5')).toBeInTheDocument();
-      expect(screen.getByText('header value')).toBeInTheDocument();
 
-      expect(mock).toHaveBeenCalledWith('/some/test/path/', expect.anything());
+      expect(mock).toHaveBeenCalledWith('/api-tokens/', expect.anything());
     });
 
-    it('can do a fetch with provided query object', async function () {
+    it('can do a fetch with provided query object', async () => {
       const mock = MockApiClient.addMockResponse({
-        url: '/some/test/path/',
+        url: '/api-tokens/',
         body: {value: 5},
       });
 
       function TestComponent() {
         const {data} = useApiQuery<ResponseData>(
-          ['/some/test/path/', {query: {filter: 'red'}}],
+          [getApiUrl('/api-tokens/'), {query: {filter: 'red'}}],
           {staleTime: 0}
         );
 
@@ -71,19 +69,19 @@ describe('queryClient', function () {
       expect(await screen.findByText('5')).toBeInTheDocument();
 
       expect(mock).toHaveBeenCalledWith(
-        '/some/test/path/',
+        '/api-tokens/',
         expect.objectContaining({query: {filter: 'red'}})
       );
     });
 
-    it('can return error state', async function () {
+    it('can return error state', async () => {
       MockApiClient.addMockResponse({
-        url: '/some/test/path',
+        url: '/api-tokens/',
         statusCode: 500,
       });
 
       function TestComponent() {
-        const query = useApiQuery<ResponseData>(['/some/test/path'], {
+        const query = useApiQuery<ResponseData>([getApiUrl('/api-tokens/')], {
           staleTime: 0,
         });
 
@@ -93,6 +91,31 @@ describe('queryClient', function () {
       render(<TestComponent />);
 
       expect(await screen.findByText('something bad happened')).toBeInTheDocument();
+    });
+  });
+
+  describe('default retry', () => {
+    const retry = DEFAULT_QUERY_CLIENT_CONFIG.defaultOptions?.queries?.retry as (
+      failureCount: number,
+      error: Error
+    ) => boolean;
+
+    const errorWithStatus = (status: number) => {
+      const err = new RequestError('GET', '/x/', new Error('request failed'));
+      err.status = status;
+      return err;
+    };
+
+    it.each([400, 401, 402, 403, 404])('does not retry on %s status', status => {
+      expect(retry(0, errorWithStatus(status))).toBe(false);
+    });
+
+    it.each([
+      [0, true],
+      [2, true],
+      [3, false],
+    ])('retries other errors when failureCount is %i', (failureCount, expected) => {
+      expect(retry(failureCount, errorWithStatus(500))).toBe(expected);
     });
   });
 });

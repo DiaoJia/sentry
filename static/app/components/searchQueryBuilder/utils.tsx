@@ -5,22 +5,107 @@ import type {FieldDefinitionGetter} from 'sentry/components/searchQueryBuilder/t
 import {
   BooleanOperator,
   FilterType,
+  InvalidReason,
+  parseSearch,
+  Token,
   type ParseResult,
   type ParseResultToken,
-  parseSearch,
   type SearchConfig,
-  Token,
   type TokenResult,
 } from 'sentry/components/searchSyntax/parser';
+import {getKeyName} from 'sentry/components/searchSyntax/utils';
+import {t} from 'sentry/locale';
 import {SavedSearchType, type TagCollection} from 'sentry/types/group';
-import {FieldValueType} from 'sentry/utils/fields';
+import {FieldKind, FieldValueType, type FieldDefinition} from 'sentry/utils/fields';
 
-export const INTERFACE_TYPE_LOCALSTORAGE_KEY = 'search-query-builder-interface';
+function getFilterKeysFromQuery(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
 
-function getSearchConfigFromKeys(
-  keys: TagCollection,
-  getFieldDefinition: FieldDefinitionGetter
-): Partial<SearchConfig> {
+  const keys = new Set<string>();
+  const filterKeyPattern = /(?:^|[\s(])!?([^\s():]+):/g;
+
+  for (const match of value.matchAll(filterKeyPattern)) {
+    if (match[1]) {
+      keys.add(match[1]);
+    }
+  }
+
+  return Array.from(keys);
+}
+
+export function getFieldDefinitionForFilterKey(
+  key: string,
+  getFieldDefinition: FieldDefinitionGetter,
+  filterKeys?: TagCollection
+): FieldDefinition | null {
+  const fieldDef = getFieldDefinition(key);
+  if (fieldDef) {
+    return fieldDef;
+  }
+
+  switch (filterKeys?.[key]?.kind) {
+    case FieldKind.MEASUREMENT:
+    case FieldKind.NUMERIC_METRICS:
+      return {kind: FieldKind.FIELD, valueType: FieldValueType.NUMBER};
+    case FieldKind.BOOLEAN:
+      return {kind: FieldKind.FIELD, valueType: FieldValueType.BOOLEAN};
+    case FieldKind.TAG:
+      return {kind: FieldKind.FIELD, valueType: FieldValueType.STRING};
+    default:
+      return null;
+  }
+}
+
+function addKeyToSearchConfig(
+  config: Partial<SearchConfig>,
+  key: string,
+  getFieldDefinition: FieldDefinitionGetter,
+  filterKeys: TagCollection
+) {
+  const fieldDef = getFieldDefinitionForFilterKey(key, getFieldDefinition, filterKeys);
+  if (!fieldDef) {
+    return;
+  }
+
+  if (fieldDef.allowComparisonOperators) {
+    config.textOperatorKeys!.add(key);
+  }
+
+  switch (fieldDef.valueType) {
+    case FieldValueType.BOOLEAN:
+      config.booleanKeys!.add(key);
+      break;
+    case FieldValueType.NUMBER:
+    case FieldValueType.INTEGER:
+    case FieldValueType.PERCENTAGE:
+    case FieldValueType.CURRENCY:
+      config.numericKeys!.add(key);
+      break;
+    case FieldValueType.DATE:
+      config.dateKeys!.add(key);
+      break;
+    case FieldValueType.DURATION:
+      config.durationKeys!.add(key);
+      break;
+    case FieldValueType.SIZE:
+      config.sizeKeys!.add(key);
+      break;
+    default:
+      break;
+  }
+}
+
+function getSearchConfigFromKeys({
+  keys,
+  getFieldDefinition,
+  queryKeys = [],
+}: {
+  getFieldDefinition: FieldDefinitionGetter;
+  keys: TagCollection;
+  queryKeys?: string[];
+}): Partial<SearchConfig> {
   const config = {
     textOperatorKeys: new Set<string>(),
     booleanKeys: new Set<string>(),
@@ -31,40 +116,70 @@ function getSearchConfigFromKeys(
     sizeKeys: new Set<string>(),
   } satisfies Partial<SearchConfig>;
 
-  for (const key in keys) {
-    const fieldDef = getFieldDefinition(key);
-    if (!fieldDef) {
-      continue;
-    }
+  for (const key of Object.keys(keys)) {
+    addKeyToSearchConfig(config, key, getFieldDefinition, keys);
+  }
 
-    if (fieldDef.allowComparisonOperators) {
-      config.textOperatorKeys.add(key);
-    }
-
-    switch (fieldDef.valueType) {
-      case FieldValueType.BOOLEAN:
-        config.booleanKeys.add(key);
-        break;
-      case FieldValueType.NUMBER:
-      case FieldValueType.INTEGER:
-      case FieldValueType.PERCENTAGE:
-        config.numericKeys.add(key);
-        break;
-      case FieldValueType.DATE:
-        config.dateKeys.add(key);
-        break;
-      case FieldValueType.DURATION:
-        config.durationKeys.add(key);
-        break;
-      case FieldValueType.SIZE:
-        config.sizeKeys.add(key);
-        break;
-      default:
-        break;
-    }
+  for (const key of queryKeys) {
+    addKeyToSearchConfig(config, key, getFieldDefinition, keys);
   }
 
   return config;
+}
+
+/**
+ * True when the filter key matches an entry in `invalidFilterKeys`.
+ *
+ * Aggregate filters are compared by both the full key (`p95(span.duration)`) and the
+ * bare function name (`p95`), so callers can mark aggregates invalid the same way
+ * metrics does via validate → `invalidFilterKeys` (which returns bare names).
+ */
+export function isInvalidFilterKey(
+  key: TokenResult<Token.FILTER>['key'],
+  invalidFilterKeys: readonly string[] | undefined
+): boolean {
+  if (!invalidFilterKeys?.length) {
+    return false;
+  }
+
+  const keyWithArgs = getKeyName(key, {aggregateWithArgs: true});
+  if (invalidFilterKeys.includes(keyWithArgs)) {
+    return true;
+  }
+
+  // KEY_AGGREGATE: also match bare name so `invalidFilterKeys: ['p95']` catches `p95(...)`.
+  const bareKey = getKeyName(key);
+  return bareKey !== keyWithArgs && invalidFilterKeys.includes(bareKey);
+}
+
+function markInvalidFilterKeys(
+  tokens: ParseResult | null,
+  invalidFilterKeys: string[] | undefined,
+  invalidKeyMessage?: string
+): ParseResult | null {
+  if (!tokens || !invalidFilterKeys?.length) {
+    return tokens;
+  }
+
+  return tokens.map(token => {
+    if (token.type !== Token.FILTER) {
+      return token;
+    }
+
+    if (!isInvalidFilterKey(token.key, invalidFilterKeys)) {
+      return token;
+    }
+
+    return {
+      ...token,
+      invalid: {
+        type: InvalidReason.INVALID_KEY,
+        reason:
+          invalidKeyMessage ??
+          t('Invalid key. "%s" is not a supported search key.', token.key.text),
+      },
+    };
+  });
 }
 
 export function parseQueryBuilderValue(
@@ -74,27 +189,44 @@ export function parseQueryBuilderValue(
     filterKeys: TagCollection;
     disallowFreeText?: boolean;
     disallowLogicalOperators?: boolean;
+    disallowNegation?: boolean;
     disallowUnsupportedFilters?: boolean;
     disallowWildcard?: boolean;
+    filterKeyAliases?: TagCollection;
     getFilterTokenWarning?: (key: string) => React.ReactNode;
+    invalidFilterKeys?: string[];
     invalidMessages?: SearchConfig['invalidMessages'];
   }
 ): ParseResult | null {
-  return collapseTextTokens(
-    parseSearch(value || ' ', {
-      flattenParenGroups: true,
-      disallowFreeText: options?.disallowFreeText,
-      getFilterTokenWarning: options?.getFilterTokenWarning,
-      validateKeys: options?.disallowUnsupportedFilters,
-      disallowWildcard: options?.disallowWildcard,
-      disallowedLogicalOperators: options?.disallowLogicalOperators
-        ? new Set([BooleanOperator.AND, BooleanOperator.OR])
-        : undefined,
-      disallowParens: options?.disallowLogicalOperators,
-      ...getSearchConfigFromKeys(options?.filterKeys ?? {}, getFieldDefinition),
-      invalidMessages: options?.invalidMessages,
-      supportedTags: options?.filterKeys,
-    })
+  return markInvalidFilterKeys(
+    collapseTextTokens(
+      parseSearch(value || ' ', {
+        flattenParenGroups: true,
+        disallowFreeText: options?.disallowFreeText,
+        getFilterTokenWarning: options?.getFilterTokenWarning,
+        validateKeys: options?.disallowUnsupportedFilters,
+        disallowWildcard: options?.disallowWildcard,
+        disallowNegation: options?.disallowNegation,
+        disallowedLogicalOperators: options?.disallowLogicalOperators
+          ? new Set([BooleanOperator.AND, BooleanOperator.OR])
+          : undefined,
+        disallowParens: options?.disallowLogicalOperators,
+        ...getSearchConfigFromKeys({
+          keys: options?.filterKeys ?? {},
+          getFieldDefinition,
+          queryKeys: options?.disallowUnsupportedFilters
+            ? []
+            : getFilterKeysFromQuery(value),
+        }),
+        invalidMessages: options?.invalidMessages,
+        supportedTags: {
+          ...(options?.filterKeys ? options.filterKeys : {}),
+          ...(options?.filterKeyAliases ? options.filterKeyAliases : {}),
+        },
+      })
+    ),
+    options?.invalidFilterKeys,
+    options?.invalidMessages?.[InvalidReason.INVALID_KEY]
   );
 }
 
@@ -164,7 +296,8 @@ export function collapseTextTokens(tokens: ParseResult | null) {
       return acc;
     }
 
-    return [...acc, token];
+    acc.push(token);
+    return acc;
   }, []);
 }
 
@@ -194,6 +327,18 @@ export function isDateToken(token: TokenResult<Token.FILTER>) {
   );
 }
 
+export function isNumericFilterToken(token: TokenResult<Token.FILTER>): boolean {
+  return [
+    FilterType.NUMERIC,
+    FilterType.DURATION,
+    FilterType.SIZE,
+    FilterType.AGGREGATE_NUMERIC,
+    FilterType.AGGREGATE_PERCENTAGE,
+    FilterType.AGGREGATE_DURATION,
+    FilterType.AGGREGATE_SIZE,
+  ].includes(token.filter);
+}
+
 export function recentSearchTypeToLabel(type: SavedSearchType | undefined) {
   switch (type) {
     case SavedSearchType.ISSUE:
@@ -220,7 +365,7 @@ export function findNearestFreeTextKey(
   startKey: Key | null,
   direction: 'right' | 'left'
 ): Key | null {
-  let key: Key | null = startKey;
+  let key = startKey;
   while (key) {
     const item = state.collection.getItem(key);
     if (!item) {

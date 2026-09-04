@@ -1,16 +1,19 @@
 import isPropValid from '@emotion/is-prop-valid';
 import styled from '@emotion/styled';
 
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
-import {Radio} from 'sentry/components/core/radio';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Grid} from '@sentry/scraps/layout';
+import {Radio} from '@sentry/scraps/radio';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import type {RadioGroupProps} from 'sentry/components/forms/controls/radioGroup';
 import type {InputFieldProps, OnEvent} from 'sentry/components/forms/fields/inputField';
-import FormField from 'sentry/components/forms/formField';
-import {space} from 'sentry/styles/space';
+import {FormField} from 'sentry/components/forms/formField';
 
-interface SegmentedRadioFieldProps<Choices extends string = string>
-  extends Omit<InputFieldProps, 'type'> {
+interface SegmentedRadioFieldProps<Choices extends string = string> extends Omit<
+  InputFieldProps,
+  'type'
+> {
   choices?: RadioGroupProps<Choices>['choices'];
 }
 
@@ -24,7 +27,7 @@ function handleChange(
   onBlur(id, e);
 }
 
-function SegmentedRadioField<Choices extends string = string>(
+export function SegmentedRadioField<Choices extends string = string>(
   props: SegmentedRadioFieldProps<Choices>
 ) {
   return (
@@ -49,14 +52,23 @@ function RadioControlGroup<C extends string>({
   value,
   disabled: groupDisabled,
   disabledChoices = [],
-  choices = [],
+  choices,
   label,
   onChange,
   tooltipPosition,
   ...props
 }: RadioGroupProps<C>) {
   return (
-    <Container {...props} role="radiogroup" aria-label={label}>
+    <Grid
+      {...props}
+      flow={{zero: 'row', xl: 'column'}}
+      autoColumns="minmax(0, 1fr)"
+      autoRows="minmax(0, 1fr)"
+      overflow="hidden"
+      radius="md"
+      role="radiogroup"
+      aria-label={label}
+    >
       {choices.map(([id, name, description], index) => {
         const disabledChoice = disabledChoices.find(([choiceId]) => choiceId === id);
         const disabledChoiceReason = disabledChoice?.[1];
@@ -86,21 +98,9 @@ function RadioControlGroup<C extends string>({
           </Tooltip>
         );
       })}
-    </Container>
+    </Grid>
   );
 }
-
-const Container = styled('div')`
-  display: grid;
-  grid-auto-flow: row;
-  grid-auto-columns: minmax(0, 1fr);
-  grid-auto-rows: minmax(0, 1fr);
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    grid-auto-flow: column;
-  }
-  overflow: hidden;
-  border-radius: ${p => p.theme.borderRadius};
-`;
 
 const shouldForwardProp = (p: PropertyKey) =>
   typeof p === 'string' && !['disabled', 'animate'].includes(p) && isPropValid(p);
@@ -110,47 +110,47 @@ const RadioItem = styled('label', {shouldForwardProp})<{
   disabled?: boolean;
 }>`
   position: relative;
-  padding: ${space(1)} ${space(1.5)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.lg};
   display: flex;
   flex-direction: column;
-  gap: ${space(0.25)};
+  gap: ${p => p.theme.space['2xs']};
   cursor: ${p => (p.disabled ? 'default' : 'pointer')};
   outline: none;
-  font-weight: ${p => p.theme.fontWeightNormal};
-  border: 1px solid ${p => p.theme.border};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
   margin: 0;
 
   &[aria-checked='true'] {
-    border-color: ${p => p.theme.purple300} !important;
-    box-shadow: inset 0 0 0 1px ${p => p.theme.purple300};
+    border-color: ${p => p.theme.tokens.border.accent.vibrant} !important;
+    box-shadow: inset 0 0 0 1px ${p => p.theme.tokens.focus.default};
     z-index: ${p => p.theme.zIndex.initial};
   }
 
   &:first-child {
-    border-top-left-radius: ${p => p.theme.borderRadius};
-    border-top-right-radius: ${p => p.theme.borderRadius};
+    border-top-left-radius: ${p => p.theme.radius.md};
+    border-top-right-radius: ${p => p.theme.radius.md};
   }
   &:last-child {
-    border-bottom-left-radius: ${p => p.theme.borderRadius};
-    border-bottom-right-radius: ${p => p.theme.borderRadius};
+    border-bottom-left-radius: ${p => p.theme.radius.md};
+    border-bottom-right-radius: ${p => p.theme.radius.md};
   }
 
   &:nth-child(n + 2) {
     border-top-color: transparent;
   }
 
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
+  @container (min-width: ${p => p.theme.container.xl}) {
     &:nth-child(n + 2) {
-      border-top-color: ${p => p.theme.gray200};
+      border-top-color: ${p => p.theme.colors.gray200};
       border-left-color: transparent;
     }
     &:first-child {
       border-top-right-radius: 0;
-      border-bottom-left-radius: ${p => p.theme.borderRadius};
+      border-bottom-left-radius: ${p => p.theme.radius.md};
     }
     &:last-child {
       border-bottom-left-radius: 0;
-      border-top-right-radius: ${p => p.theme.borderRadius};
+      border-top-right-radius: ${p => p.theme.radius.md};
     }
   }
 
@@ -168,15 +168,13 @@ const RadioItem = styled('label', {shouldForwardProp})<{
 
 const RadioLineText = styled('div', {shouldForwardProp})<{disabled?: boolean}>`
   opacity: ${p => (p.disabled ? 0.4 : null)};
-  font-size: ${p => p.theme.fontSize.md};
-  font-weight: ${p => p.theme.fontWeightBold};
-  color: ${p => p.theme.gray500};
+  font-size: ${p => p.theme.font.size.md};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  color: ${p => p.theme.colors.gray800};
 `;
 
 const Description = styled('div')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
   line-height: 1.4em;
 `;
-
-export default SegmentedRadioField;

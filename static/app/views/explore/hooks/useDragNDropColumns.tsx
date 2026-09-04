@@ -1,82 +1,57 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useRef} from 'react';
 import type {DragEndEvent} from '@dnd-kit/core';
 import {arrayMove} from '@dnd-kit/sortable';
+
+import {uniqueId} from 'sentry/utils/guid';
 
 export type Column<T> = {
   column: T;
   id: number;
+  uniqueId: string;
 };
 
 interface UseDragAndDropColumnsProps<T> {
   columns: T[];
-  defaultColumn: () => T;
   setColumns: (columns: T[], op: 'insert' | 'update' | 'delete' | 'reorder') => void;
-}
-
-function extractColumns<T>(editableColumns: Array<Column<T>>) {
-  return editableColumns.map(({column}) => column);
+  canReorder?: (oldIndex: number, newIndex: number) => boolean;
 }
 
 export function useDragNDropColumns<T>({
   columns,
-  defaultColumn,
   setColumns,
+  canReorder,
 }: UseDragAndDropColumnsProps<T>) {
-  const mappedColumns = useMemo(() => {
-    return columns.map((column, i) => ({id: i + 1, column}));
-  }, [columns]);
+  const uniqueIdsRef = useRef<string[]>([]);
 
-  const [editableColumns, setEditableColumns] = useState<Array<Column<T>>>(mappedColumns);
+  uniqueIdsRef.current.length = Math.min(uniqueIdsRef.current.length, columns.length);
+  while (uniqueIdsRef.current.length < columns.length) {
+    uniqueIdsRef.current.push(uniqueId());
+  }
 
-  useEffect(() => {
-    setEditableColumns(prevEditableColumns => {
-      // Only update if there's a change between columns and editableColumns
-      if (
-        JSON.stringify(prevEditableColumns.map(c => c.column)) !== JSON.stringify(columns)
-      ) {
-        return mappedColumns;
-      }
-      return prevEditableColumns;
-    });
-  }, [columns, mappedColumns]);
+  const editableColumns = columns.map((column, i) => ({
+    id: i + 1,
+    uniqueId: uniqueIdsRef.current[i]!,
+    column,
+  }));
 
-  const [nextId, setNextId] = useState(editableColumns.length + 1);
-
-  function insertColumn(column?: T) {
-    setEditableColumns(oldEditableColumns => {
-      const newEditableColumns = oldEditableColumns.slice();
-      newEditableColumns.push({id: nextId, column: column ?? defaultColumn()});
-
-      setNextId(nextId + 1); // make sure to increment the id for the next time
-
-      setColumns(extractColumns(newEditableColumns), 'insert');
-
-      return newEditableColumns;
-    });
+  function insertColumn(column: T) {
+    uniqueIdsRef.current = [...uniqueIdsRef.current, uniqueId()];
+    setColumns([...columns, column], 'insert');
   }
 
   function updateColumnAtIndex(i: number, column: T) {
-    setEditableColumns(oldEditableColumns => {
-      const newEditableColumns = [...oldEditableColumns];
-      newEditableColumns[i]!.column = column;
-
-      setColumns(extractColumns(newEditableColumns), 'update');
-
-      return newEditableColumns;
-    });
+    setColumns(
+      columns.map((col: T, j: number) => (i === j ? column : col)),
+      'update'
+    );
   }
 
   function deleteColumnAtIndex(i: number) {
-    setEditableColumns(oldEditableColumns => {
-      const newEditableColumns =
-        oldEditableColumns.length === 1
-          ? [{id: 1, column: defaultColumn()}]
-          : [...oldEditableColumns.slice(0, i), ...oldEditableColumns.slice(i + 1)];
-
-      setColumns(extractColumns(newEditableColumns), 'delete');
-
-      return newEditableColumns;
-    });
+    uniqueIdsRef.current = uniqueIdsRef.current.filter((_, j) => i !== j);
+    setColumns(
+      columns.filter((_: T, j: number) => i !== j),
+      'delete'
+    );
   }
 
   function onDragEnd(event: DragEndEvent) {
@@ -85,14 +60,11 @@ export function useDragNDropColumns<T>({
     if (active.id !== over?.id) {
       const oldIndex = editableColumns.findIndex(({id}) => id === active.id);
       const newIndex = editableColumns.findIndex(({id}) => id === over?.id);
-
-      setEditableColumns(oldEditableColumns => {
-        const newEditableColumns = arrayMove(oldEditableColumns, oldIndex, newIndex);
-
-        setColumns(extractColumns(newEditableColumns), 'reorder');
-
-        return newEditableColumns;
-      });
+      if (oldIndex < 0 || newIndex < 0 || canReorder?.(oldIndex, newIndex) === false) {
+        return;
+      }
+      uniqueIdsRef.current = arrayMove(uniqueIdsRef.current, oldIndex, newIndex);
+      setColumns(arrayMove(columns, oldIndex, newIndex), 'reorder');
     }
   }
 

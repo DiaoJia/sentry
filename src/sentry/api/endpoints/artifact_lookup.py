@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from typing import NotRequired, TypedDict
 
 from django.db.models.query import QuerySet
@@ -14,7 +13,7 @@ from symbolic.exceptions import SymbolicError
 from sentry import ratelimits
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectReleasePermission
 from sentry.api.endpoints.debug_files import has_download_permission
 from sentry.api.serializers import serialize
@@ -23,12 +22,14 @@ from sentry.debug_files.artifact_bundles import (
     MAX_BUNDLES_QUERY,
     query_artifact_bundles_containing_file,
 )
+from sentry.debug_files.release_files import maybe_renew_releasefiles, renew_releasefiles_by_id
 from sentry.lang.native.sources import get_internal_artifact_lookup_source_url
 from sentry.models.artifactbundle import NULL_STRING, ArtifactBundle
 from sentry.models.distribution import Distribution
 from sentry.models.project import Project
 from sentry.models.release import Release
 from sentry.models.releasefile import ReleaseFile
+from sentry.models.releases.release_project import ReleaseProject
 from sentry.utils import metrics
 
 logger = logging.getLogger("sentry.api")
@@ -48,7 +49,7 @@ class _Artifact(TypedDict):
     headers: NotRequired[dict[str, object]]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ProjectArtifactLookupEndpoint(ProjectEndpoint):
     owner = ApiOwner.OWNERS_INGEST
     publish_status = {
@@ -91,13 +92,21 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
             )
             metrics.incr("sourcemaps.download.artifact_bundle")
         elif ty == "release_file":
-            # NOTE: `ReleaseFile` does have a `project_id`, but that seems to
-            # be always empty, so using the `organization_id` instead.
             file_m = (
-                ReleaseFile.objects.filter(id=ty_id, organization_id=project.organization.id)
+                ReleaseFile.objects.filter(
+                    id=ty_id,
+                    organization_id=project.organization.id,
+                )
                 .select_related("file")
                 .first()
             )
+            if (
+                file_m is not None
+                and not ReleaseProject.objects.filter(
+                    project=project, release_id=file_m.release_id
+                ).exists()
+            ):
+                file_m = None
             metrics.incr("sourcemaps.download.release_file")
 
         if file_m is None:
@@ -160,14 +169,19 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
 
         # If no `ArtifactBundle`s were found matching the file, we fall back to
         # looking up the file using the legacy `ReleaseFile` infrastructure.
-        individual_files: Iterable[ReleaseFile] = []
+        individual_files: list[ReleaseFile] = []
         if not artifact_bundles:
             release, dist = try_resolve_release_dist(project, release_name, dist_name)
             if release:
                 metrics.incr("sourcemaps.lookup.release_file")
-                for releasefile_id in get_legacy_release_bundles(release, dist):
+                releasefile_ids = list(get_legacy_release_bundles(release, dist))
+                for releasefile_id in releasefile_ids:
                     all_bundles[f"release_file/{releasefile_id}"] = "release-old"
-                individual_files = get_legacy_releasefile_by_file_url(release, dist, url)
+                individual_files = list(get_legacy_releasefile_by_file_url(release, dist, url))
+
+                maybe_renew_releasefiles(individual_files)
+                if releasefile_ids:
+                    renew_releasefiles_by_id(releasefile_ids)
 
         # Then: Construct our response
         url_constructor = UrlConstructor(request, project)
@@ -247,15 +261,16 @@ def get_legacy_release_bundles(release: Release, dist: Distribution | None) -> s
             artifact_count=0,
             # similarly the special `type` is also used for release archives.
             file__type=RELEASE_BUNDLE_TYPE,
-        ).values_list("id", flat=True)
-        # TODO: this `order_by` might be incredibly slow
-        # we want to have a hard limit on the returned bundles here. and we would
-        # want to pick the most recently uploaded ones. that should mostly be
-        # relevant for customers that upload multiple bundles, or are uploading
-        # newer files for existing releases. In that case the symbolication is
-        # already degraded, so meh...
-        # .order_by("-file__timestamp")
-        [:MAX_BUNDLES_QUERY]
+        ).values_list("id", flat=True)[
+            # TODO: this `order_by` might be incredibly slow
+            # we want to have a hard limit on the returned bundles here. and we would
+            # want to pick the most recently uploaded ones. that should mostly be
+            # relevant for customers that upload multiple bundles, or are uploading
+            # newer files for existing releases. In that case the symbolication is
+            # already degraded, so meh...
+            # .order_by("-file__timestamp")
+            :MAX_BUNDLES_QUERY
+        ]
     )
 
 

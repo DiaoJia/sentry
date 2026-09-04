@@ -12,15 +12,15 @@ from sentry.testutils.cases import TestCase
 
 
 class NewIssueCountThresholdCheckTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.project1 = self.create_project(name="foo", organization=self.organization)
         self.release1 = Release.objects.create(version="v1", organization=self.organization)
 
-    def test_success(self):
+    def test_success(self) -> None:
         now = timezone.now()
         mock_threshold: EnrichedThreshold = {
             "id": "1",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -30,12 +30,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
             "metric_value": None,
-            "id": "1",
         }
         mock_new_issue_counts = {
             "1": 0,
@@ -44,11 +43,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
         assert is_healthy
         assert metric_value == 0
 
-    def test_multiple_thresholds(self):
+    def test_multiple_thresholds(self) -> None:
         now = timezone.now()
         threshold: EnrichedThreshold = {
             "id": "1",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -58,16 +57,15 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
             "metric_value": None,
-            "id": "1",
         }
         threshold2: EnrichedThreshold = {
             "id": "2",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -77,16 +75,15 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
             "metric_value": None,
-            "id": "2",
         }
         threshold3: EnrichedThreshold = {
             "id": "3",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -96,12 +93,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
             "metric_value": None,
-            "id": "3",
         }
         mock_new_issue_counts = {
             "1": 0,
@@ -120,11 +116,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
         assert not is_healthy
         assert metric_value == 100
 
-    def test_success_under(self):
+    def test_success_under(self) -> None:
         now = timezone.now()
         mock_threshold: EnrichedThreshold = {
             "id": "1",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -134,12 +130,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.UNDER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
             "metric_value": None,
-            "id": "1",
         }
         mock_new_issue_counts = {
             "1": 0,
@@ -148,11 +143,11 @@ class NewIssueCountThresholdCheckTest(TestCase):
         assert not is_healthy
         assert metric_value == 0
 
-    def test_no_new_issues(self):
+    def test_no_new_issues(self) -> None:
         now = timezone.now()
         mock_threshold: EnrichedThreshold = {
             "id": "1",
-            "date": now,
+            "date_added": now,
             "start": now - timedelta(minutes=1),
             "end": now,
             "environment": None,
@@ -162,7 +157,7 @@ class NewIssueCountThresholdCheckTest(TestCase):
             "project_id": self.project1.id,
             "project_slug": self.project1.slug,
             "release": self.release1.version,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 10,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method

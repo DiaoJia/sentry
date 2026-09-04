@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 from sentry import analytics
+from sentry.analytics.events.cron_monitor_broken_status_recovery import (
+    CronMonitorBrokenStatusRecovery,
+)
 from sentry.monitors.logic.incident_occurrence import (
     dispatch_incident_occurrence,
     resolve_incident_group,
@@ -55,10 +58,13 @@ def try_incident_threshold(
     if not failure_issue_threshold:
         failure_issue_threshold = 1
 
+    resolved_checkins: list[MonitorCheckIn] | None = None
+
     # check to see if we need to update the status
     if monitor_env.status in [MonitorStatus.OK, MonitorStatus.ACTIVE]:
         if failure_issue_threshold == 1:
             previous_checkins: list[SimpleCheckIn] = [SimpleCheckIn.from_checkin(failed_checkin)]
+            resolved_checkins = [failed_checkin]
         else:
             previous_checkins = [
                 SimpleCheckIn(**row)
@@ -93,6 +99,7 @@ def try_incident_threshold(
                 "monitor": monitor_env.monitor,
                 "starting_checkin_id": starting_checkin.id,
                 "starting_timestamp": starting_checkin.date_added,
+                "grouphash": monitor_env.build_occurrence_fingerprint(),
             },
         )
 
@@ -100,6 +107,7 @@ def try_incident_threshold(
         # If the monitor was already in an incident there are no previous
         # check-ins to pass long when creating the occurrence
         previous_checkins = [SimpleCheckIn.from_checkin(failed_checkin)]
+        resolved_checkins = [failed_checkin]
 
         # get the active incident from the monitor environment
         incident = monitor_env.active_incident
@@ -109,9 +117,13 @@ def try_incident_threshold(
 
     # Only create an occurrence if:
     # - We have an active incident and fingerprint
-    # - The monitor and env are not muted
-    if not monitor_env.monitor.is_muted and not monitor_env.is_muted and incident:
-        checkins = list(MonitorCheckIn.objects.filter(id__in=[c.id for c in previous_checkins]))
+    # - The environment is not muted
+    if not monitor_env.is_muted and incident:
+        checkins = (
+            resolved_checkins
+            if resolved_checkins is not None
+            else list(MonitorCheckIn.objects.filter(id__in=[c.id for c in previous_checkins]))
+        )
         for checkin in checkins:
             dispatch_incident_occurrence(checkin, checkins, incident, received, clock_tick)
 
@@ -158,11 +170,11 @@ def try_incident_resolution(ok_checkin: MonitorCheckIn) -> bool:
 
     incident = monitor_env.active_incident
     if incident:
-        resolve_incident_group(incident, ok_checkin.monitor.project_id)
         incident.update(
             resolving_checkin=ok_checkin,
             resolving_timestamp=ok_checkin.date_added,
         )
+        resolve_incident_group(incident, ok_checkin.monitor.project_id)
         logger.info(
             "monitors.logic.mark_ok.resolving_incident",
             extra={
@@ -180,11 +192,12 @@ def try_incident_resolution(ok_checkin: MonitorCheckIn) -> bool:
         ):
             if incident.monitorenvbrokendetection_set.exists():
                 analytics.record(
-                    "cron_monitor_broken_status.recovery",
-                    organization_id=monitor_env.monitor.organization_id,
-                    project_id=monitor_env.monitor.project_id,
-                    monitor_id=monitor_env.monitor.id,
-                    monitor_env_id=monitor_env.id,
+                    CronMonitorBrokenStatusRecovery(
+                        organization_id=monitor_env.monitor.organization_id,
+                        project_id=monitor_env.monitor.project_id,
+                        monitor_id=monitor_env.monitor.id,
+                        monitor_env_id=monitor_env.id,
+                    )
                 )
 
     return True

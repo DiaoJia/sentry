@@ -21,7 +21,8 @@ from django.utils import timezone as django_timezone
 from sentry import buffer, roles, tsdb
 from sentry.constants import ObjectStatus
 from sentry.exceptions import HashDiscarded
-from sentry.feedback.usecases.create_feedback import FeedbackCreationSource, create_feedback_issue
+from sentry.feedback.lib.utils import FeedbackCreationSource
+from sentry.feedback.usecases.ingest.create_feedback import create_feedback_issue
 from sentry.incidents.logic import create_alert_rule, create_alert_rule_trigger, create_incident
 from sentry.incidents.models.alert_rule import AlertRuleThresholdType
 from sentry.incidents.models.incident import IncidentType
@@ -78,7 +79,7 @@ LEVELS = itertools.cycle(["error", "error", "error", "fatal", "warning"])
 
 ENVIRONMENTS = itertools.cycle(["production", "production", "staging", "alpha", "beta", ""])
 
-MONITOR_NAMES = itertools.cycle(settings.CELERYBEAT_SCHEDULE.keys())
+MONITOR_NAMES = itertools.cycle(settings.TASKWORKER_SCHEDULES.keys())
 
 MONITOR_SCHEDULES = itertools.cycle(["* * * * *", "0 * * * *", "0 0 * * *"])
 
@@ -239,7 +240,7 @@ def create_sample_time_series(event, release=None):
             project=project, release=release, environment=environment, datetime=now
         )
 
-        grouprelease = GroupRelease.get_or_create(
+        GroupRelease.get_or_create(
             group=group, release=release, environment=environment, datetime=now
         )
 
@@ -276,17 +277,6 @@ def create_sample_time_series(event, release=None):
             int(count * 0.1),
         )
 
-        frequencies = [
-            (TSDBModel.frequent_issues_by_project, {project.id: {group.id: count}}),
-            (TSDBModel.frequent_environments_by_group, {group.id: {environment.id: count}}),
-        ]
-        if release:
-            frequencies.append(
-                (TSDBModel.frequent_releases_by_group, {group.id: {grouprelease.id: count}})
-            )
-
-        tsdb.backend.record_frequency_multi(frequencies, now)
-
         now = now - timedelta(seconds=1)
 
     for _ in range(24 * 30):
@@ -315,17 +305,6 @@ def create_sample_time_series(event, release=None):
             now,
             int(count * 0.1),
         )
-
-        frequencies = [
-            (TSDBModel.frequent_issues_by_project, {project.id: {group.id: count}}),
-            (TSDBModel.frequent_environments_by_group, {group.id: {environment.id: count}}),
-        ]
-        if release:
-            frequencies.append(
-                (TSDBModel.frequent_releases_by_group, {group.id: {grouprelease.id: count}})
-            )
-
-        tsdb.backend.record_frequency_multi(frequencies, now)
 
         now = now - timedelta(hours=1)
 
@@ -390,7 +369,7 @@ def create_member(
 
 
 def create_access_request(member: OrganizationMember, team: Team) -> None:
-    OrganizationAccessRequest.objects.create_or_update(member=member, team=team)
+    OrganizationAccessRequest.objects.get_or_create(member=member, team=team)
 
 
 def generate_projects(organization: Organization) -> Mapping[str, Any]:
@@ -533,7 +512,7 @@ def populate_release(
 
             CommitFileChange.objects.get_or_create(
                 organization_id=project.organization_id,
-                commit=commit,
+                commit_id=commit.id,
                 filename=file[0],
                 type=file[1],
             )
@@ -585,7 +564,7 @@ def populate_release(
             authors=[str(a.id) for a in authors],
         )
 
-    ReleaseProjectEnvironment.objects.create_or_update(
+    ReleaseProjectEnvironment.objects.get_or_create(
         project=project,
         environment=environment,
         release=release,
@@ -1312,7 +1291,7 @@ def create_mock_user_feedback(project, has_attachment=True):
     if release:
         event["release"] = release.version
 
-    create_feedback_issue(event, project.id, FeedbackCreationSource.NEW_FEEDBACK_ENVELOPE)
+    create_feedback_issue(event, project, FeedbackCreationSource.NEW_FEEDBACK_ENVELOPE)
 
     if has_attachment:
         create_mock_attachment(event["event_id"], project)

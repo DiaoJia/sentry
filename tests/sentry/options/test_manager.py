@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from functools import cached_property
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from sentry.options.manager import (
     FLAG_PRIORITIZE_DISK,
     FLAG_REQUIRED,
     FLAG_STOREONLY,
+    READ_HOOK_FALLBACK,
     NotWritableReason,
     OptionsManager,
     UnknownOption,
@@ -30,17 +32,17 @@ from sentry.utils.types import Int, String
 @all_silo_test
 class OptionsManagerTest(TestCase):
     @cached_property
-    def store(self):
+    def store(self) -> OptionsStore:
         c = LocMemCache("test", {})
         c.clear()
         return OptionsStore(cache=c)
 
     @cached_property
-    def manager(self):
+    def manager(self) -> OptionsManager:
         return OptionsManager(store=self.store)
 
     @pytest.fixture(autouse=True)
-    def register(self):
+    def register(self) -> Generator[None]:
         default_options = settings.SENTRY_DEFAULT_OPTIONS.copy()
         settings.SENTRY_DEFAULT_OPTIONS = {}
         self.store.flush_local_cache()
@@ -49,7 +51,7 @@ class OptionsManagerTest(TestCase):
         self.manager.unregister("foo")
         settings.SENTRY_DEFAULT_OPTIONS = default_options
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         assert self.manager.get("foo") == ""
 
         self.manager.delete("foo")
@@ -77,7 +79,7 @@ class OptionsManagerTest(TestCase):
 
         assert self.manager.get_last_update_channel("foo") is None
 
-    def test_register(self):
+    def test_register(self) -> None:
         with pytest.raises(UnknownOption):
             self.manager.get("does-not-exit")
 
@@ -122,7 +124,7 @@ class OptionsManagerTest(TestCase):
         with pytest.raises(ValueError):
             self.manager.register("bad_flags", flags=FLAG_REQUIRED | FLAG_AUTOMATOR_MODIFIABLE)
 
-    def test_coerce(self):
+    def test_coerce(self) -> None:
         self.manager.register("some-int", type=Int)
 
         self.manager.set("some-int", 0)
@@ -136,7 +138,7 @@ class OptionsManagerTest(TestCase):
         with pytest.raises(TypeError):
             self.manager.set("some-int", "0", coerce=False)
 
-    def test_legacy_key(self):
+    def test_legacy_key(self) -> None:
         """
         Allow sentry: prefixed keys without any registration
         """
@@ -147,14 +149,14 @@ class OptionsManagerTest(TestCase):
         assert self.manager.delete("sentry:foo")
         assert self.manager.get("sentry:foo") == ""
 
-    def test_types(self):
+    def test_types(self) -> None:
         self.manager.register("some-int", type=Int, default=0)
         with pytest.raises(TypeError):
             self.manager.set("some-int", "foo")
         self.manager.set("some-int", 1)
         assert self.manager.get("some-int") == 1
 
-    def test_default(self):
+    def test_default(self) -> None:
         self.manager.register("awesome", default="lol")
         assert settings.SENTRY_DEFAULT_OPTIONS["awesome"] == "lol"
         assert self.manager.get("awesome") == "lol"
@@ -176,14 +178,14 @@ class OptionsManagerTest(TestCase):
         with self.settings(SENTRY_OPTIONS={}, SENTRY_DEFAULT_OPTIONS={"some-default": "foo"}):
             assert self.manager.get("some-default") == "foo"
 
-    def test_flag_immutable(self):
+    def test_flag_immutable(self) -> None:
         self.manager.register("immutable", flags=FLAG_IMMUTABLE)
         with pytest.raises(AssertionError):
             self.manager.set("immutable", "thing")
         with pytest.raises(AssertionError):
             self.manager.delete("immutable")
 
-    def test_flag_nostore(self):
+    def test_flag_nostore(self) -> None:
         self.manager.register("nostore", flags=FLAG_NOSTORE)
         with pytest.raises(AssertionError):
             self.manager.set("nostore", "thing")
@@ -201,7 +203,7 @@ class OptionsManagerTest(TestCase):
         with pytest.raises(AssertionError):
             self.manager.delete("nostore")
 
-    def test_validate(self):
+    def test_validate(self) -> None:
         with pytest.raises(UnknownOption):
             self.manager.validate({"unknown": ""})
 
@@ -215,14 +217,14 @@ class OptionsManagerTest(TestCase):
         with pytest.raises(TypeError):
             self.manager.validate({"unknown": True})
 
-    def test_flag_storeonly(self):
+    def test_flag_storeonly(self) -> None:
         self.manager.register("storeonly", flags=FLAG_STOREONLY)
         assert self.manager.get("storeonly") == ""
 
         with self.settings(SENTRY_OPTIONS={"storeonly": "something-else!"}):
             assert self.manager.get("storeonly") == ""
 
-    def test_drifted(self):
+    def test_drifted(self) -> None:
         self.manager.register("option", flags=FLAG_AUTOMATOR_MODIFIABLE)
         # CLI should be able to update anything
         self.manager.set("option", "value", channel=UpdateChannel.CLI)
@@ -235,7 +237,7 @@ class OptionsManagerTest(TestCase):
         # By leaving the value as it is.
         self.manager.set("option", "value", channel=UpdateChannel.AUTOMATOR)
 
-    def test_flag_prioritize_disk(self):
+    def test_flag_prioritize_disk(self) -> None:
         self.manager.register("prioritize_disk", flags=FLAG_PRIORITIZE_DISK)
         assert self.manager.get("prioritize_disk") == ""
 
@@ -259,7 +261,7 @@ class OptionsManagerTest(TestCase):
         with self.settings(SENTRY_OPTIONS={"prioritize_disk": None}):
             assert self.manager.get("prioritize_disk") == "foo"
 
-    def test_flag_prioritize_disk_falsy(self):
+    def test_flag_prioritize_disk_falsy(self) -> None:
         self.manager.register(
             "prioritize_disk_falsy",
             default=1,
@@ -276,7 +278,7 @@ class OptionsManagerTest(TestCase):
             )
 
     @override_settings(SENTRY_OPTIONS_COMPLAIN_ON_ERRORS=False)
-    def test_db_unavailable(self):
+    def test_db_unavailable(self) -> None:
         with patch.object(self.store.model.objects, "get_queryset", side_effect=RuntimeError()):
             # we can't update options if the db is unavailable
             with pytest.raises(RuntimeError):
@@ -298,7 +300,7 @@ class OptionsManagerTest(TestCase):
                     self.store.flush_local_cache()
 
     @override_settings(SENTRY_OPTIONS_COMPLAIN_ON_ERRORS=False)
-    def test_db_and_cache_unavailable(self):
+    def test_db_and_cache_unavailable(self) -> None:
         self.store.cache.clear()
         self.manager.set("foo", "bar")
         self.store.flush_local_cache()
@@ -314,7 +316,7 @@ class OptionsManagerTest(TestCase):
                         self.store.flush_local_cache()
 
     @override_settings(SENTRY_OPTIONS_COMPLAIN_ON_ERRORS=False)
-    def test_cache_unavailable(self):
+    def test_cache_unavailable(self) -> None:
         self.manager.set("foo", "bar")
         self.store.flush_local_cache()
 
@@ -344,17 +346,17 @@ class OptionsManagerTest(TestCase):
                 assert self.manager.get("foo") == "baz"
                 self.store.flush_local_cache()
 
-    def test_unregister(self):
+    def test_unregister(self) -> None:
         with pytest.raises(UnknownOption):
             self.manager.unregister("does-not-exist")
 
-    def test_all(self):
+    def test_all(self) -> None:
         self.manager.register("bar")
 
         keys = list(self.manager.all())
         assert {k.name for k in keys} == {"foo", "bar"}
 
-    def test_filter(self):
+    def test_filter(self) -> None:
         self.manager.register("nostore", flags=FLAG_NOSTORE)
         self.manager.register("required", flags=FLAG_REQUIRED)
         self.manager.register("nostorerequired", flags=FLAG_NOSTORE | FLAG_REQUIRED)
@@ -373,7 +375,7 @@ class OptionsManagerTest(TestCase):
         keys = list(self.manager.filter(flag=FLAG_REQUIRED))
         assert {k.name for k in keys} == {"required", "nostorerequired"}
 
-    def test_isset(self):
+    def test_isset(self) -> None:
         self.manager.register("basic")
         assert self.manager.isset("basic") is False
 
@@ -393,10 +395,81 @@ class OptionsManagerTest(TestCase):
         with self.settings(SENTRY_OPTIONS={"nostore": "awesome"}):
             assert self.manager.isset("nostore") is True
 
-    def test_flag_checking(self):
+    def test_flag_checking(self) -> None:
         self.manager.register("option", flags=FLAG_NOSTORE)
 
         opt = self.manager.lookup_key("option")
         assert opt.has_any_flag({FLAG_NOSTORE})
         assert opt.has_any_flag({FLAG_NOSTORE, FLAG_REQUIRED})
         assert not opt.has_any_flag({FLAG_REQUIRED})
+
+    @patch("sentry.utils.metrics.timer")
+    def test_get_metric_source_store(self, mock_timer) -> None:
+        self.manager.set("foo", "bar")
+        self.store.flush_local_cache()
+        self.manager.get("foo")
+
+        mock_timer.assert_called()
+        call_args = mock_timer.call_args
+        assert call_args[0][0] == "options.store.get"
+        assert "region" in call_args[1]["tags"]
+
+        ctx = mock_timer.return_value.__enter__.return_value
+        ctx.__setitem__.assert_any_call("source", "store")
+
+    @patch("sentry.utils.metrics.timer")
+    def test_get_metric_source_disk(self, mock_timer) -> None:
+        self.manager.register("disk_opt", flags=FLAG_PRIORITIZE_DISK)
+        with self.settings(SENTRY_OPTIONS={"disk_opt": "val"}):
+            self.manager.get("disk_opt")
+
+        ctx = mock_timer.return_value.__enter__.return_value
+        ctx.__setitem__.assert_any_call("source", "disk")
+
+    @patch("sentry.utils.metrics.timer")
+    def test_get_metric_source_default(self, mock_timer) -> None:
+        self.manager.delete("foo")
+        self.store.flush_local_cache()
+        self.manager.get("foo")
+
+        ctx = mock_timer.return_value.__enter__.return_value
+        ctx.__setitem__.assert_any_call("source", "default")
+
+    def test_read_hook_serves_get_and_isset(self) -> None:
+        # A value that lives only in the hook is served by get(), and isset() must
+        # agree — the option has a value, just from the new source.
+        self.manager.register("hooked", flags=FLAG_AUTOMATOR_MODIFIABLE)
+        self.manager.set_read_hook(
+            lambda key, opt: "served" if key == "hooked" else READ_HOOK_FALLBACK
+        )
+        try:
+            assert self.manager.get("hooked") == "served"
+            assert self.manager.isset("hooked") is True
+        finally:
+            self.manager.set_read_hook(None)
+            self.manager.unregister("hooked")
+
+    def test_read_hook_fallback_uses_legacy(self) -> None:
+        self.manager.set_read_hook(lambda key, opt: READ_HOOK_FALLBACK)
+        try:
+            # isset() before get(): get() would repopulate the cache and make
+            # isset() report True regardless (see its docstring).
+            assert self.manager.isset("foo") is False
+            assert self.manager.get("foo") == ""
+        finally:
+            self.manager.set_read_hook(None)
+
+    def test_read_hook_does_not_corrupt_can_update_drift(self) -> None:
+        # Writability/drift must be judged against the stored value, never a hook
+        # override. A CLI-set value re-asserted by the automator is allowed; if
+        # drift read the (different) hook value instead, it would falsely DRIFT.
+        self.manager.register("hooked", type=String, flags=FLAG_AUTOMATOR_MODIFIABLE)
+        self.manager.set("hooked", "stored", channel=UpdateChannel.CLI)
+        self.manager.set_read_hook(
+            lambda key, opt: "hook-value" if key == "hooked" else READ_HOOK_FALLBACK
+        )
+        try:
+            assert self.manager.can_update("hooked", "stored", UpdateChannel.AUTOMATOR) is None
+        finally:
+            self.manager.set_read_hook(None)
+            self.manager.unregister("hooked")

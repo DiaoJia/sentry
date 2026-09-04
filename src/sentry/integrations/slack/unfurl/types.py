@@ -5,10 +5,10 @@ from collections.abc import Callable, Mapping
 from re import Pattern
 from typing import Any, NamedTuple, Optional, Protocol
 
-from django.http.request import HttpRequest
-
 from sentry.integrations.models.integration import Integration
+from sentry.integrations.services.integration import RpcIntegration
 from sentry.users.models.user import User
+from sentry.users.services.user import RpcUser
 
 UnfurledUrl = Mapping[Any, Any]
 ArgsMapper = Callable[[str, Mapping[str, Optional[str]]], Mapping[str, Any]]
@@ -18,6 +18,8 @@ class LinkType(enum.Enum):
     ISSUES = "issues"
     METRIC_ALERT = "metric_alert"
     DISCOVER = "discover"
+    EXPLORE = "explore"
+    DASHBOARDS = "dashboards"
 
 
 class UnfurlableUrl(NamedTuple):
@@ -28,10 +30,9 @@ class UnfurlableUrl(NamedTuple):
 class HandlerCallable(Protocol):
     def __call__(
         self,
-        request: HttpRequest,
-        integration: Integration,
+        integration: Integration | RpcIntegration,
         links: list[UnfurlableUrl],
-        user: User | None = None,
+        user: User | RpcUser | None = None,
     ) -> UnfurledUrl: ...
 
 

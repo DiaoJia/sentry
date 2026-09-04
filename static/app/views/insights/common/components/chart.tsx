@@ -2,14 +2,11 @@ import type {RefObject} from 'react';
 import {createContext, useContext, useEffect, useMemo, useReducer, useRef} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import type {LegendComponentOption, LineSeriesOption} from 'echarts';
 import * as echarts from 'echarts/core';
 import type {
-  MarkLineOption,
   TooltipFormatterCallback,
   TopLevelFormatterParams,
   XAXisOption,
-  YAXisOption,
 } from 'echarts/types/dist/shared';
 import max from 'lodash/max';
 import min from 'lodash/min';
@@ -17,41 +14,31 @@ import min from 'lodash/min';
 import type {AreaChartProps} from 'sentry/components/charts/areaChart';
 import {AreaChart} from 'sentry/components/charts/areaChart';
 import {BarChart} from 'sentry/components/charts/barChart';
-import BaseChart from 'sentry/components/charts/baseChart';
+import {BaseChart} from 'sentry/components/charts/baseChart';
 import ChartZoom, {type ZoomRenderProps} from 'sentry/components/charts/chartZoom';
 import type {FormatterOptions} from 'sentry/components/charts/components/tooltip';
 import {getFormatter} from 'sentry/components/charts/components/tooltip';
-import ErrorPanel from 'sentry/components/charts/errorPanel';
+import {ErrorPanel} from 'sentry/components/charts/errorPanel';
 import ReleaseSeries from 'sentry/components/charts/releaseSeries';
-import LineSeries from 'sentry/components/charts/series/lineSeries';
-import ScatterSeries from 'sentry/components/charts/series/scatterSeries';
-import TransitionChart from 'sentry/components/charts/transitionChart';
-import TransparentLoadingMask from 'sentry/components/charts/transparentLoadingMask';
+import {lineSeries} from 'sentry/components/charts/series/lineSeries';
+import {TransitionChart} from 'sentry/components/charts/transitionChart';
+import {TransparentLoadingMask} from 'sentry/components/charts/transparentLoadingMask';
 import {isChartHovered} from 'sentry/components/charts/utils';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {
   createIngestionSeries,
   getIngestionDelayBucketCount,
 } from 'sentry/components/metrics/chart/chart';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {IconWarning} from 'sentry/icons';
-import type {
-  EChartClickHandler,
-  EChartDataZoomHandler,
-  EChartEventHandler,
-  EChartHighlightHandler,
-  EChartMouseOutHandler,
-  EChartMouseOverHandler,
-  ReactEchartsRef,
-  Series,
-} from 'sentry/types/echarts';
+import type {ReactEchartsRef, Series} from 'sentry/types/echarts';
 import {
   axisLabelFormatter,
   getDurationUnit,
   tooltipFormatter,
 } from 'sentry/utils/discover/charts';
-import type {AggregationOutputType, RateUnit} from 'sentry/utils/discover/fields';
+import type {AggregationOutputType} from 'sentry/utils/discover/fields';
 import {aggregateOutputType} from 'sentry/utils/discover/fields';
-import usePageFilters from 'sentry/utils/usePageFilters';
 
 const STARFISH_CHART_GROUP = 'starfish_chart_group';
 
@@ -61,10 +48,11 @@ export enum ChartType {
   BAR = 0,
   LINE = 1,
   AREA = 2,
+  HEATMAP = 3,
 }
 
 export function isChartType(value: any): value is ChartType {
-  return typeof value === 'number' && Object.values(ChartType).includes(value as any);
+  return typeof value === 'number' && Object.values(ChartType).includes(value);
 }
 
 interface ChartRenderingProps {
@@ -80,72 +68,34 @@ type Props = {
   type: ChartType;
   aggregateOutputFormat?: AggregationOutputType;
   chartColors?: string[] | readonly string[];
-  chartGroup?: string;
   dataMax?: number;
-  definedAxisTicks?: number;
   disableXAxis?: boolean;
-  durationUnit?: number;
   error?: Error | null;
   grid?: AreaChartProps['grid'];
   height?: number;
-  hideYAxis?: boolean;
   hideYAxisSplitLine?: boolean;
-  legendFormatter?: (name: string) => string;
-  legendOptions?: LegendComponentOption;
-  log?: boolean;
-  markLine?: MarkLineOption;
-  onClick?: EChartClickHandler;
-  onDataZoom?: EChartDataZoomHandler;
-  onHighlight?: EChartHighlightHandler;
-  onLegendSelectChanged?: EChartEventHandler<{
-    name: string;
-    selected: Record<string, boolean>;
-    type: 'legendselectchanged';
-  }>;
-  onMouseOut?: EChartMouseOutHandler;
-  onMouseOver?: EChartMouseOverHandler;
-  previousData?: Series[];
-  rateUnit?: RateUnit;
   ref?: RefObject<ReactEchartsRef>;
-  scatterPlot?: Series[];
   showLegend?: boolean;
   stacked?: boolean;
-  throughput?: Array<{count: number; interval: string}>;
   tooltipFormatterOptions?: FormatterOptions;
 };
 
-function Chart({
+export function Chart({
   data,
   dataMax,
-  previousData,
   loading,
   height: chartHeight,
   grid,
   disableXAxis,
-  definedAxisTicks,
-  durationUnit,
-  rateUnit,
   chartColors,
   type,
   stacked,
-  log,
   hideYAxisSplitLine,
   showLegend,
-  scatterPlot,
-  throughput,
   aggregateOutputFormat,
-  onClick,
-  onMouseOver,
-  onMouseOut,
-  onHighlight,
   ref,
-  chartGroup,
   tooltipFormatterOptions = {},
   error,
-  onLegendSelectChanged,
-  onDataZoom,
-  legendOptions,
-  legendFormatter,
 }: Props) {
   const theme = useTheme();
   const pageFilters = usePageFilters();
@@ -162,7 +112,7 @@ function Chart({
 
   const echartsInstance = chartRef?.current?.getEchartsInstance?.();
   if (echartsInstance && !echartsInstance.group) {
-    echartsInstance.group = chartGroup ?? STARFISH_CHART_GROUP;
+    echartsInstance.group = STARFISH_CHART_GROUP;
   }
 
   const colors = chartColors ?? theme.chart.getColorPalette(4);
@@ -176,47 +126,14 @@ function Chart({
 
   if (!dataMax) {
     dataMax = durationOnly
-      ? computeAxisMax(
-          [...data, ...(scatterPlot?.[0]?.data?.length ? scatterPlot : [])],
-          stacked
-        )
+      ? computeAxisMax(data, stacked)
       : percentOnly
-        ? computeMax([...data, ...(scatterPlot?.[0]?.data?.length ? scatterPlot : [])])
+        ? computeMax(data)
         : undefined;
     // Fix an issue where max == 1 for duration charts would look funky cause we round
     if (dataMax === 1 && durationOnly) {
       dataMax += 1;
     }
-  }
-
-  let transformedThroughput: LineSeriesOption[] | undefined = undefined;
-  const additionalAxis: YAXisOption[] = [];
-
-  if (throughput && throughput.length > 1) {
-    transformedThroughput = [
-      LineSeries({
-        name: 'Throughput',
-        data: throughput.map(({interval, count}) => [interval, count]),
-        yAxisIndex: 1,
-        lineStyle: {type: 'dashed', width: 1, opacity: 0.5},
-        animation: false,
-        animationThreshold: 1,
-        animationDuration: 0,
-      }),
-    ];
-    additionalAxis.push({
-      minInterval: durationUnit ?? getDurationUnit(data),
-      splitNumber: definedAxisTicks,
-      max: dataMax,
-      type: 'value',
-      axisLabel: {
-        color: theme.chartLabel,
-        formatter(value: number) {
-          return axisLabelFormatter(value, 'number', true);
-        },
-      },
-      splitLine: hideYAxisSplitLine ? {show: false} : undefined,
-    });
   }
 
   let series: Series[] = data.map((values, index) => ({
@@ -267,31 +184,28 @@ function Chart({
           ],
         ] as PairOfSeries;
       },
-      [[], []] as PairOfSeries
+      [[], []]
     );
   }
 
   const yAxes = [
     {
-      minInterval: durationUnit ?? getDurationUnit(data),
-      splitNumber: definedAxisTicks,
+      minInterval: getDurationUnit(data),
       max: dataMax,
-      type: log ? 'log' : 'value',
+      type: 'value',
       axisLabel: {
-        color: theme.chartLabel,
+        color: theme.tokens.content.secondary,
         formatter(value: number) {
           return axisLabelFormatter(
             value,
             aggregateOutputFormat ?? aggregateOutputType(data[0]!.seriesName),
             true,
-            durationUnit ?? getDurationUnit(data),
-            rateUnit
+            getDurationUnit(data)
           );
         },
       },
       splitLine: hideYAxisSplitLine ? {show: false} : undefined,
     },
-    ...additionalAxis,
   ];
 
   const xAxis: XAXisOption = disableXAxis
@@ -351,8 +265,6 @@ function Chart({
         top: 0,
         right: 10,
         truncate: true,
-        formatter: legendFormatter,
-        ...legendOptions,
       }
     : undefined;
 
@@ -393,7 +305,7 @@ function Chart({
     if (error) {
       return (
         <ErrorPanel height={`${height}px`} data-test-id="chart-error-panel">
-          <IconWarning color="gray300" size="lg" />
+          <IconWarning variant="muted" size="lg" />
         </ErrorPanel>
       );
     }
@@ -404,21 +316,15 @@ function Chart({
           {...zoomRenderProps}
           ref={chartRef}
           height={height}
-          previousPeriod={previousData}
-          additionalSeries={transformedThroughput}
           xAxis={xAxis}
           yAxes={areaChartProps.yAxes}
           tooltip={areaChartProps.tooltip}
           colors={colors}
           grid={grid}
           legend={legend}
-          onClick={onClick}
-          onMouseOut={onMouseOut}
-          onMouseOver={onMouseOver}
-          onHighlight={onHighlight}
           series={[
             ...series.map(({seriesName, data: seriesData, ...options}) =>
-              LineSeries({
+              lineSeries({
                 ...options,
                 name: seriesName,
                 data: seriesData?.map(({value, name}) => [name, value]),
@@ -427,16 +333,8 @@ function Chart({
                 animationDuration: 0,
               })
             ),
-            ...(scatterPlot ?? []).map(({seriesName, data: seriesData, ...options}) =>
-              ScatterSeries({
-                ...options,
-                name: seriesName,
-                data: seriesData?.map(({value, name}) => [name, value]),
-                animation: false,
-              })
-            ),
             ...incompleteSeries.map(({seriesName, data: seriesData, ...options}) =>
-              LineSeries({
+              lineSeries({
                 ...options,
                 name: seriesName,
                 data: seriesData?.map(({value, name}) => [name, value]),
@@ -446,7 +344,7 @@ function Chart({
               })
             ),
             ...(releaseSeries ?? []).map(({seriesName, data: seriesData, ...options}) =>
-              LineSeries({
+              lineSeries({
                 ...options,
                 name: seriesName,
                 data: seriesData?.map(({value, name}) => [name, value]),
@@ -468,18 +366,16 @@ function Chart({
           series={series}
           xAxis={xAxis}
           yAxis={{
-            minInterval: durationUnit ?? getDurationUnit(data),
-            splitNumber: definedAxisTicks,
+            minInterval: getDurationUnit(data),
             max: dataMax,
             axisLabel: {
-              color: theme.chartLabel,
+              color: theme.tokens.content.secondary,
               formatter(value: number) {
                 return axisLabelFormatter(
                   value,
                   aggregateOutputFormat ?? aggregateOutputType(data[0]!.seriesName),
                   true,
-                  durationUnit ?? getDurationUnit(data),
-                  rateUnit
+                  getDurationUnit(data)
                 );
               },
             },
@@ -496,7 +392,6 @@ function Chart({
           colors={colors}
           grid={grid}
           legend={legend}
-          onClick={onClick}
         />
       );
     }
@@ -507,14 +402,10 @@ function Chart({
         height={height}
         {...zoomRenderProps}
         series={[...series, ...incompleteSeries, ...(releaseSeries ?? [])]}
-        previousPeriod={previousData}
-        additionalSeries={transformedThroughput}
         xAxis={xAxis}
         stacked={stacked}
         colors={colors}
-        onClick={onClick}
         {...areaChartProps}
-        onLegendSelectChanged={onLegendSelectChanged}
       />
     );
   }
@@ -523,7 +414,7 @@ function Chart({
     if (error) {
       return (
         <ErrorPanel height={`${height}px`} data-test-id="chart-error-panel">
-          <IconWarning color="gray300" size="lg" />
+          <IconWarning variant="muted" size="lg" />
         </ErrorPanel>
       );
     }
@@ -536,14 +427,7 @@ function Chart({
 
     // overlay additional series data such as releases and issues on top of the original insights chart
     return (
-      <ChartZoom
-        saveOnZoom
-        period={period}
-        start={start}
-        end={end}
-        utc={utc}
-        onDataZoom={onDataZoom}
-      >
+      <ChartZoom saveOnZoom period={period} start={start} end={end} utc={utc}>
         {zoomRenderProps =>
           renderingContext?.isFullscreen ? (
             <ReleaseSeries
@@ -579,8 +463,6 @@ function Chart({
   );
 }
 
-export default Chart;
-
 function computeMax(data: Series[]) {
   const valuesDict = data.map(value => value.data.map(point => point.value));
 
@@ -588,12 +470,12 @@ function computeMax(data: Series[]) {
 }
 
 // adapted from https://stackoverflow.com/questions/11397239/rounding-up-for-a-graph-maximum
-export function computeAxisMax(data: Series[], stacked?: boolean) {
+function computeAxisMax(data: Series[], stacked?: boolean) {
   // assumes min is 0
   let maxValue = 0;
   if (data.length > 1 && stacked) {
     for (const serie of data) {
-      maxValue += max(serie.data.map(point => point.value)) as number;
+      maxValue += max(serie.data.map(point => point.value))!;
     }
   } else {
     maxValue = computeMax(data);
@@ -604,7 +486,7 @@ export function computeAxisMax(data: Series[], stacked?: boolean) {
   }
 
   const power = Math.log10(maxValue);
-  const magnitude = min([max([10 ** (power - Math.floor(power)), 0]), 10]) as number;
+  const magnitude = min([max([10 ** (power - Math.floor(power)), 0]), 10]);
 
   let scale: number;
   if (magnitude <= 2.5) {
@@ -612,9 +494,9 @@ export function computeAxisMax(data: Series[], stacked?: boolean) {
   } else if (magnitude <= 5) {
     scale = 0.5;
   } else if (magnitude <= 7.5) {
-    scale = 1.0;
+    scale = 1;
   } else {
-    scale = 2.0;
+    scale = 2;
   }
 
   const step = 10 ** Math.floor(power) * scale;

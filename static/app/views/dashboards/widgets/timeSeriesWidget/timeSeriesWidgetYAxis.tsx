@@ -1,6 +1,8 @@
 import type {YAXisComponentOption} from 'echarts';
 import merge from 'lodash/merge';
 
+import type {AxisRange} from 'sentry/views/dashboards/utils/axisRange';
+
 import {Y_AXIS_INTEGER_TOLERANCE} from './settings';
 
 type TimeSeriesWidgetYAxisProps = YAXisComponentOption;
@@ -8,7 +10,7 @@ type TimeSeriesWidgetYAxisProps = YAXisComponentOption;
 export function TimeSeriesWidgetYAxis(
   props: TimeSeriesWidgetYAxisProps,
   yAxisFieldType: string,
-  yAxisRange: 'auto' | 'dataMin'
+  yAxisRange: AxisRange
 ): YAXisComponentOption {
   return merge(
     {
@@ -25,7 +27,10 @@ export function TimeSeriesWidgetYAxis(
           show: false,
         },
       },
-      min: yAxisRange === 'auto' ? null : 'dataMin',
+      // "Zooms" the Y-axis to start at the minimum (approximate) of the data
+      // range. Better than using `min: "dataMin"` because `scale` ensure that
+      // the first tick is on a round value, which prevents bad axis margins.
+      scale: yAxisRange !== 'auto',
       // @ts-expect-error ECharts types are wrong here. Returning `undefined` from the `max` function is 100% allowed and is listed in the documentation. See https://github.com/apache/echarts/pull/12215/
       max: value => {
         // Handle a very specific edge case with percentage formatting.

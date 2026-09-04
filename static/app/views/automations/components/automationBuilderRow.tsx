@@ -1,54 +1,87 @@
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
+
 import {RowLine} from 'sentry/components/workflowEngine/form/automationBuilderRowLine';
 import {IconDelete} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 interface RowProps {
   children: React.ReactNode;
   onDelete: () => void;
+  errorMessage?: string;
+  hasError?: boolean;
+  hideDeleteButton?: boolean;
+  warningMessages?: string[];
 }
 
-export default function AutomationBuilderRow({onDelete, children}: RowProps) {
+export function AutomationBuilderRow({
+  onDelete,
+  children,
+  hasError,
+  errorMessage,
+  hideDeleteButton,
+  warningMessages = [],
+}: RowProps) {
   return (
-    <RowContainer>
-      <RowLine>{children}</RowLine>
-      <DeleteButton
-        aria-label={t('Delete Condition')}
-        size="sm"
-        icon={<IconDelete />}
-        borderless
-        onClick={onDelete}
-        className={'delete-condition'}
-      />
-    </RowContainer>
+    <Stack gap="xs">
+      <RowContainer incompatible={hasError}>
+        <RowLine>{children}</RowLine>
+        {!hideDeleteButton && (
+          <DeleteButton
+            aria-label={t('Delete row')}
+            size="sm"
+            icon={<IconDelete />}
+            variant="transparent"
+            onClick={onDelete}
+            className="delete-row"
+          />
+        )}
+      </RowContainer>
+      {hasError && errorMessage && <Alert variant="danger">{errorMessage}</Alert>}
+      {warningMessages.length > 0 && (
+        <Alert
+          variant="warning"
+          expand={
+            <ul style={{margin: 0}}>
+              {warningMessages?.map(message => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          }
+        >
+          {t('This action is incompatible with the current configuration.')}
+        </Alert>
+      )}
+    </Stack>
   );
 }
 
 const RowContainer = styled('div')<{incompatible?: boolean}>`
   display: flex;
-  background-color: ${p => p.theme.backgroundSecondary};
-  border-radius: ${p => p.theme.borderRadius};
-  border: 1px ${p => p.theme.innerBorder} solid;
-  border-color: ${p => (p.incompatible ? p.theme.red200 : 'none')};
+  background-color: ${p => p.theme.tokens.background.secondary};
+  border-radius: ${p => p.theme.radius.md};
+  border: 1px ${p => p.theme.tokens.border.secondary} solid;
+  border-color: ${p => (p.incompatible ? p.theme.tokens.border.danger.vibrant : 'none')};
   position: relative;
-  padding: ${space(0.75)} ${space(1.5)};
+  padding: ${p => p.theme.space.sm} ${p => p.theme.space.lg};
   min-height: 46px;
   align-items: center;
 
-  .delete-condition {
-    opacity: 0;
-  }
-  :hover .delete-condition {
-    opacity: 1;
+  /* Only hide delete button when hover is supported */
+  @media (hover: hover) {
+    &:not(:hover):not(:focus-within) {
+      .delete-row {
+        ${p => p.theme.visuallyHidden}
+      }
+    }
   }
 `;
 
 const DeleteButton = styled(Button)`
   position: absolute;
-  top: ${space(0.75)};
-  right: ${space(0.75)};
-  opacity: 0;
+  top: ${p => p.theme.space.sm};
+  right: ${p => p.theme.space.sm};
 `;

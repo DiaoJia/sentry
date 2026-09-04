@@ -1,21 +1,20 @@
-import {type Dispatch, Fragment, type SetStateAction, useState} from 'react';
-import styled from '@emotion/styled';
+import {Fragment} from 'react';
+import {skipToken, useMutation, useQuery} from '@tanstack/react-query';
+import {z} from 'zod';
+
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {defaultFormOptions, useScrapsForm, useStore} from '@sentry/scraps/form';
+import {Container, Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import SelectField from 'sentry/components/forms/fields/selectField';
-import Form from 'sentry/components/forms/form';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {IconCheckmark, IconNot} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {
   CodeOwner,
   CodeownersFile,
@@ -24,14 +23,11 @@ import type {
 } from 'sentry/types/integrations';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {getIntegrationIcon} from 'sentry/utils/integrationUtil';
-import {
-  fetchMutation,
-  useApiQuery,
-  useMutation,
-  type UseMutationResult,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
 type Props = {
   organization: Organization;
@@ -39,13 +35,16 @@ type Props = {
   onSave?: (data: CodeOwner) => void;
 } & ModalRenderProps;
 
-type TCodeownersPayload = {codeMappingId: string | null; raw: string};
-type TCodeownersData = CodeOwner;
-type TCodeownersError = RequestError;
-type TCodeownersVariables = [TCodeownersPayload];
-type TCodeownersContext = unknown;
+const schema = z.object({
+  codeMappingId: z
+    .string()
+    .nullable()
+    .refine(v => v !== null, t('Code mapping is required')),
+});
 
-export default function AddCodeOwnerModal({
+type FormValues = z.input<typeof schema>;
+
+export function AddCodeOwnerModal({
   organization,
   Header,
   Body,
@@ -58,55 +57,85 @@ export default function AddCodeOwnerModal({
     data: codeMappings,
     isPending: isCodeMappingsPending,
     isError: isCodeMappingsError,
-  } = useApiQuery<RepositoryProjectPathConfig[]>(
-    [
-      `/organizations/${organization.slug}/code-mappings/`,
-      {query: {project: project.id}},
-    ],
-    {staleTime: Infinity}
+  } = useQuery(
+    apiOptions.as<RepositoryProjectPathConfig[]>()(
+      '/organizations/$organizationIdOrSlug/code-mappings/',
+      {
+        path: {organizationIdOrSlug: organization.slug},
+        query: {project: project.id},
+        staleTime: Infinity,
+      }
+    )
   );
 
-  const {
-    data: integrations,
-    isPending: isIntegrationsPending,
-    isError: isIntegrationsError,
-  } = useApiQuery<Integration[]>(
-    [
-      `/organizations/${organization.slug}/integrations/`,
-      {query: {features: ['codeowners']}},
-    ],
-    {staleTime: Infinity}
+  if (isCodeMappingsPending) {
+    return <LoadingIndicator />;
+  }
+  if (isCodeMappingsError) {
+    return <LoadingError />;
+  }
+
+  if (!codeMappings.length) {
+    return (
+      <Fragment>
+        <Header closeButton>{t('Add Code Owner File')}</Header>
+        <Body>
+          <LinkCodeOwners organization={organization} />
+        </Body>
+      </Fragment>
+    );
+  }
+
+  return (
+    <ApplyCodeMappings
+      Header={Header}
+      Body={Body}
+      Footer={Footer}
+      closeModal={closeModal}
+      codeMappings={codeMappings}
+      organization={organization}
+      project={project}
+      onSave={onSave}
+    />
   );
+}
 
-  const [codeMappingId, setCodeMappingId] = useState<string | null>(null);
+function ApplyCodeMappings({
+  Header,
+  Body,
+  Footer,
+  closeModal,
+  codeMappings,
+  organization,
+  project,
+  onSave,
+}: {
+  Body: ModalRenderProps['Body'];
+  Footer: ModalRenderProps['Footer'];
+  Header: ModalRenderProps['Header'];
+  closeModal: ModalRenderProps['closeModal'];
+  codeMappings: RepositoryProjectPathConfig[];
+  onSave: ((data: CodeOwner) => void) | undefined;
+  organization: Organization;
+  project: Project;
+}) {
+  const defaultValues: FormValues = {codeMappingId: null};
 
-  const {data: codeownersFile} = useApiQuery<CodeownersFile>(
-    [`/organizations/${organization.slug}/code-mappings/${codeMappingId}/codeowners/`],
-    {staleTime: Infinity, enabled: Boolean(codeMappingId)}
-  );
-
-  const mutation = useMutation<
-    TCodeownersData,
-    TCodeownersError,
-    TCodeownersVariables,
-    TCodeownersContext
-  >({
-    mutationFn: ([payload]: TCodeownersVariables) => {
-      return fetchMutation([
-        'POST',
-        `/projects/${organization.slug}/${project.slug}/codeowners/`,
-        {},
-        payload,
-      ]);
-    },
-    onSuccess: d => {
-      const codeMapping = codeMappings?.find(
-        mapping => mapping.id === codeMappingId?.toString()
-      );
-      onSave?.({...d, codeMapping});
-      closeModal();
-    },
+  const mutation = useMutation({
+    mutationFn: (payload: {codeMappingId: string; raw: string}) =>
+      fetchMutation<CodeOwner>({
+        method: 'POST',
+        url: getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/codeowners/', {
+          path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
+        }),
+        options: {},
+        data: payload,
+      }),
     onError: err => {
+      if (!(err instanceof RequestError)) {
+        addErrorMessage(t('Something went wrong'));
+        return;
+      }
       if (err.responseJSON && !('raw' in err.responseJSON)) {
         addErrorMessage(
           Object.values(err.responseJSON ?? {})
@@ -115,168 +144,197 @@ export default function AddCodeOwnerModal({
         );
       }
     },
-    gcTime: 0,
   });
 
-  const addFile = () => {
-    if (codeownersFile) {
-      mutation.mutate([{codeMappingId, raw: codeownersFile.raw}]);
-    }
-  };
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues,
+    validators: {onDynamic: schema},
+    onSubmit: ({value}) => {
+      if (!value.codeMappingId || !codeownersFile) {
+        return;
+      }
+      return mutation
+        .mutateAsync({codeMappingId: value.codeMappingId, raw: codeownersFile.raw})
+        .then(data => {
+          const codeMapping = codeMappings.find(cm => cm.id === value.codeMappingId);
+          onSave?.({...data, codeMapping});
+          closeModal();
+        })
+        .catch(() => {});
+    },
+  });
 
-  if (isCodeMappingsPending || isIntegrationsPending) {
-    return <LoadingIndicator />;
-  }
-  if (isCodeMappingsError || isIntegrationsError) {
-    return <LoadingError />;
-  }
+  const codeMappingId = useStore(form.store, state => state.values.codeMappingId);
+  const {data: codeownersFile} = useCodeownersFile(organization, codeMappingId);
 
   return (
-    <Fragment>
+    <form.AppForm form={form}>
       <Header closeButton>{t('Add Code Owner File')}</Header>
       <Body>
-        {codeMappings.length ? (
-          <ApplyCodeMappings
+        <Stack gap="xl">
+          <form.AppField name="codeMappingId">
+            {field => (
+              <field.Layout.Stack label={t('Apply an existing code mapping')} required>
+                <field.Select
+                  value={field.state.value}
+                  onChange={field.handleChange}
+                  options={codeMappings.map(cm => ({
+                    value: cm.id,
+                    label: `Repo Name: ${cm.repoName}, Stack Trace Root: ${cm.stackRoot}, Source Code Root: ${cm.sourceRoot}`,
+                  }))}
+                />
+              </field.Layout.Stack>
+            )}
+          </form.AppField>
+
+          <CodeownersFileStatus
             codeMappingId={codeMappingId}
             codeMappings={codeMappings}
             codeownersFile={codeownersFile}
-            mutation={mutation}
             organization={organization}
-            setCodeMappingId={setCodeMappingId}
+            mutationError={mutation.error instanceof RequestError ? mutation.error : null}
+            mutationIsError={mutation.isError}
           />
-        ) : (
-          <LinkCodeOwners integrations={integrations} organization={organization} />
-        )}
+        </Stack>
       </Body>
       <Footer>
-        <Button
-          disabled={codeownersFile ? false : true}
-          aria-label={t('Add File')}
-          priority="primary"
-          onClick={addFile}
-        >
-          {t('Add File')}
-        </Button>
+        <form.SubmitButton disabled={!codeownersFile}>{t('Add File')}</form.SubmitButton>
       </Footer>
-    </Fragment>
+    </form.AppForm>
   );
 }
 
-function ApplyCodeMappings({
+function useCodeownersFile(organization: Organization, codeMappingId: string | null) {
+  return useQuery(
+    apiOptions.as<CodeownersFile>()(
+      '/organizations/$organizationIdOrSlug/code-mappings/$configId/codeowners/',
+      {
+        path: codeMappingId
+          ? {organizationIdOrSlug: organization.slug, configId: codeMappingId}
+          : skipToken,
+        staleTime: Infinity,
+      }
+    )
+  );
+}
+
+function CodeownersFileStatus({
   codeMappingId,
   codeMappings,
   codeownersFile,
-  mutation,
   organization,
-  setCodeMappingId,
+  mutationError,
+  mutationIsError,
 }: {
   codeMappingId: string | null;
   codeMappings: RepositoryProjectPathConfig[];
   codeownersFile: CodeownersFile | undefined;
-  mutation: UseMutationResult<CodeOwner, RequestError, TCodeownersVariables, unknown>;
+  mutationError: RequestError | null;
+  mutationIsError: boolean;
   organization: Organization;
-  setCodeMappingId: Dispatch<SetStateAction<string | null>>;
 }) {
-  const baseUrl = `/settings/${organization.slug}/integrations/`;
-  return (
-    <Form apiMethod="POST" apiEndpoint="/code-mappings/" hideFooter initialData={{}}>
-      <StyledSelectField
-        name="codeMappingId"
-        label={t('Apply an existing code mapping')}
-        options={codeMappings.map((cm: RepositoryProjectPathConfig) => ({
-          value: cm.id,
-          label: `Repo Name: ${cm.repoName}, Stack Trace Root: ${cm.stackRoot}, Source Code Root: ${cm.sourceRoot}`,
-        }))}
-        onChange={setCodeMappingId}
-        required
-        inline={false}
-        flexibleControlStateSize
-        stacked
-      />
+  const rawError = mutationError?.responseJSON?.raw;
+  const firstRawError =
+    Array.isArray(rawError) && typeof rawError[0] === 'string' ? rawError[0] : undefined;
 
-      <FileResult>
+  return (
+    <Fragment>
+      <Container border="primary" radius="md" padding="lg">
         {codeownersFile ? (
           <SourceFile codeownersFile={codeownersFile} />
         ) : (
           <NoSourceFile />
         )}
-        {mutation.isError && mutation.error.responseJSON?.raw ? (
-          <ErrorMessage
-            baseUrl={baseUrl}
-            codeMappingId={codeMappingId}
-            codeMappings={codeMappings}
-            errorJSON={mutation.error.responseJSON as {raw?: string}}
-          />
-        ) : null}
-      </FileResult>
-    </Form>
+      </Container>
+      {mutationIsError && firstRawError ? (
+        <ErrorMessage
+          baseUrl={`/settings/${organization.slug}/integrations/`}
+          codeMappingId={codeMappingId}
+          codeMappings={codeMappings}
+          rawError={firstRawError}
+        />
+      ) : null}
+    </Fragment>
   );
 }
 
-function LinkCodeOwners({
-  integrations,
-  organization,
-}: {
-  integrations: Integration[];
-  organization: Organization;
-}) {
+function LinkCodeOwners({organization}: {organization: Organization}) {
   const baseUrl = `/settings/${organization.slug}/integrations/`;
+
+  const {
+    data: integrations,
+    isPending,
+    isError,
+  } = useQuery(
+    apiOptions.as<Integration[]>()('/organizations/$organizationIdOrSlug/integrations/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {features: ['codeowners']},
+      staleTime: Infinity,
+    })
+  );
+
+  if (isPending) {
+    return <LoadingIndicator />;
+  }
+  if (isError) {
+    return <LoadingError />;
+  }
+
   if (integrations.length) {
     return (
       <Fragment>
-        <div>
+        <Text as="p">
           {t(
             "Configure code mapping to add your CODEOWNERS file. Select the integration you'd like to use for mapping:"
           )}
-        </div>
-        <IntegrationsList>
+        </Text>
+        <Stack gap="md" align="center" paddingTop="xl">
           {integrations.map(integration => (
             <LinkButton
               key={integration.id}
               to={`${baseUrl}${integration.provider.key}/${integration.id}/?tab=codeMappings&referrer=add-codeowners`}
+              icon={getIntegrationIcon(integration.provider.key)}
             >
-              {getIntegrationIcon(integration.provider.key)}
-              <IntegrationName>{integration.name}</IntegrationName>
+              {integration.name}
             </LinkButton>
           ))}
-        </IntegrationsList>
+        </Stack>
       </Fragment>
     );
   }
   return (
     <Fragment>
-      <div>{t('Install a GitHub or GitLab integration to use this feature.')}</div>
-      <Container style={{paddingTop: space(2)}}>
-        <LinkButton priority="primary" size="sm" to={baseUrl}>
-          Setup Integration
+      <Text as="p">
+        {t('Install a GitHub or GitLab integration to use this feature.')}
+      </Text>
+      <Flex justify="center" paddingTop="xl">
+        <LinkButton variant="primary" size="sm" to={baseUrl}>
+          {t('Setup Integration')}
         </LinkButton>
-      </Container>
+      </Flex>
     </Fragment>
   );
 }
 
 function SourceFile({codeownersFile}: {codeownersFile: CodeownersFile}) {
   return (
-    <Panel>
-      <SourceFileBody>
-        <IconCheckmark size="md" isCircled color="green200" />
-        {codeownersFile.filepath}
-        <LinkButton size="sm" href={codeownersFile.html_url} external>
-          {t('Preview File')}
-        </LinkButton>
-      </SourceFileBody>
-    </Panel>
+    <Grid columns="auto 1fr auto" align="center" gap="md">
+      <IconCheckmark size="md" variant="success" />
+      <Text>{codeownersFile.filepath}</Text>
+      <LinkButton size="sm" href={codeownersFile.html_url} external>
+        {t('Preview File')}
+      </LinkButton>
+    </Grid>
   );
 }
 
 function NoSourceFile() {
   return (
-    <Panel>
-      <NoSourceFileBody>
-        <IconNot size="md" color="red200" />
-        {t('No codeowner file found.')}
-      </NoSourceFileBody>
-    </Panel>
+    <Grid columns="auto 1fr" align="center" gap="md">
+      <IconNot size="md" variant="danger" />
+      <Text>{t('No codeowner file found.')}</Text>
+    </Grid>
   );
 }
 
@@ -284,21 +342,25 @@ function ErrorMessage({
   baseUrl,
   codeMappingId,
   codeMappings,
-  errorJSON,
+  rawError,
 }: {
   baseUrl: string;
   codeMappingId: string | null;
   codeMappings: RepositoryProjectPathConfig[];
-  errorJSON: {raw?: string} | null;
+  rawError: string;
 }) {
   const codeMapping = codeMappings.find(mapping => mapping.id === codeMappingId);
-  const errActors = errorJSON?.raw?.[0]!.split('\n').map((el, i) => <p key={i}>{el}</p>);
+  const errActors = rawError.split('\n').map((el, i) => (
+    <Text as="p" key={i}>
+      {el}
+    </Text>
+  ));
   return (
     <Alert.Container>
-      <Alert type="error" showIcon>
+      <Alert variant="danger">
         {errActors}
         {codeMapping && (
-          <p>
+          <Text as="p">
             {tct(
               'Configure [userMappingsLink:User Mappings] or [teamMappingsLink:Team Mappings] for any missing associations.',
               {
@@ -314,49 +376,13 @@ function ErrorMessage({
                 ),
               }
             )}
-          </p>
+          </Text>
         )}
         {tct(
           '[addAndSkip:Add and Skip Missing Associations] will add your codeowner file and skip any rules that having missing associations. You can add associations later for any skipped rules.',
-          {addAndSkip: <strong>Add and Skip Missing Associations</strong>}
+          {addAndSkip: <strong />}
         )}
       </Alert>
     </Alert.Container>
   );
 }
-
-const StyledSelectField = styled(SelectField)`
-  border-bottom: None;
-  padding-right: 16px;
-`;
-const FileResult = styled('div')`
-  width: inherit;
-`;
-const NoSourceFileBody = styled(PanelBody)`
-  display: grid;
-  padding: 12px;
-  grid-template-columns: 30px 1fr;
-  align-items: center;
-`;
-const SourceFileBody = styled(PanelBody)`
-  display: grid;
-  padding: 12px;
-  grid-template-columns: 30px 1fr 100px;
-  align-items: center;
-`;
-
-const IntegrationsList = styled('div')`
-  display: grid;
-  gap: ${space(1)};
-  justify-items: center;
-  margin-top: ${space(2)};
-`;
-
-const IntegrationName = styled('p')`
-  padding-left: 10px;
-`;
-
-const Container = styled('div')`
-  display: flex;
-  justify-content: center;
-`;

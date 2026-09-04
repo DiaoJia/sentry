@@ -1,18 +1,17 @@
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Callable, Sequence
+from datetime import timedelta
 from enum import Enum
 from types import ModuleType
 from typing import TypedDict, Union, cast
 
-import sentry_sdk
 from rest_framework.exceptions import ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import OrganizationEventsV2EndpointBase
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases import OrganizationEventsEndpointBase
 from sentry.models.organization import Organization
 from sentry.search.events import fields
 from sentry.search.events.types import SnubaParams
@@ -21,6 +20,7 @@ from sentry.snuba.metrics.extraction import to_standard_metrics_query
 from sentry.snuba.referrer import Referrer
 from sentry.utils import metrics
 from sentry.utils.snuba import SnubaTSResult
+from sentry.utils.tracing import set_span_data, start_span
 
 
 class CountResult(TypedDict):
@@ -51,8 +51,8 @@ class StatsQualityEstimation(Enum):
     )
 
 
-@region_silo_endpoint
-class OrganizationOnDemandMetricsEstimationStatsEndpoint(OrganizationEventsV2EndpointBase):
+@cell_silo_endpoint
+class OrganizationOnDemandMetricsEstimationStatsEndpoint(OrganizationEventsEndpointBase):
     """Gets the estimated volume of an organization's metric events."""
 
     publish_status = {
@@ -66,8 +66,8 @@ class OrganizationOnDemandMetricsEstimationStatsEndpoint(OrganizationEventsV2End
         if measurement is None:
             return Response({"detail": "missing required parameter yAxis"}, status=400)
 
-        with sentry_sdk.start_span(op="discover.metrics.endpoint", name="get_full_metrics") as span:
-            span.set_data("organization", organization)
+        with start_span(op="discover.metrics.endpoint", name="get_full_metrics") as span:
+            set_span_data(span, "organization", organization)
 
             try:
                 # the discover stats
@@ -152,7 +152,9 @@ def estimate_stats_quality(stats: list[MetricVolumeRow]) -> StatsQualityEstimati
         return StatsQualityEstimation.NO_INDEXED_DATA
 
 
-def get_stats_generator(use_discover: bool, remove_on_demand: bool):
+def get_stats_generator(
+    use_discover: bool, remove_on_demand: bool
+) -> Callable[[Sequence[str], str, SnubaParams, int, bool, timedelta | None], SnubaTSResult]:
     """
     Returns a get_stats function that can fetch from either metrics or discover and
         with or without on_demand metrics.
@@ -164,7 +166,7 @@ def get_stats_generator(use_discover: bool, remove_on_demand: bool):
         snuba_params: SnubaParams,
         rollup: int,
         zerofill_results: bool,  # not used but required by get_event_stats_data
-        comparison_delta: datetime | None,  # not used but required by get_event_stats_data
+        comparison_delta: timedelta | None,  # not used but required by get_event_stats_data
     ) -> SnubaTSResult:
         # use discover or metrics_performance depending on the dataset
         if use_discover:

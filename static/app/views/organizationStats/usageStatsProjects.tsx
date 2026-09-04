@@ -3,24 +3,28 @@ import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 import type {LocationDescriptorObject} from 'history';
 
+import {Flex} from '@sentry/scraps/layout';
+import {Pagination} from '@sentry/scraps/pagination';
+
 import type {DateTimeObject} from 'sentry/components/charts/utils';
 import {getSeriesApiInterval} from 'sentry/components/charts/utils';
-import type {Alignments, Directions} from 'sentry/components/gridEditable/sortLink';
-import SortLink from 'sentry/components/gridEditable/sortLink';
-import Pagination from 'sentry/components/pagination';
-import SearchBar from 'sentry/components/searchBar';
+import {ALL_ACCESS_PROJECTS} from 'sentry/components/pageFilters/constants';
+import {SearchBar} from 'sentry/components/searchBar';
+import {
+  type ColumnAlign,
+  SortableHeaderCell,
+  type SortDirection,
+} from 'sentry/components/tables/sortableHeaderCell';
 import {DATA_CATEGORY_INFO, DEFAULT_STATS_PERIOD} from 'sentry/constants';
-import {ALL_ACCESS_PROJECTS} from 'sentry/constants/pageFilters';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DataCategoryInfo} from 'sentry/types/core';
-import {Outcome} from 'sentry/types/core';
+import {DataCategoryExact, Outcome} from 'sentry/types/core';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {hasDynamicSamplingCustomFeature} from 'sentry/utils/dynamicSampling/features';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import {droppedProfileChunkMultiplier} from 'sentry/views/organizationStats/mapSeriesToChart';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 
 import type {UsageSeries} from './types';
 import type {TableStat} from './usageTable';
@@ -29,7 +33,6 @@ import {getOffsetFromCursor, getPaginationPageLink} from './utils';
 
 type Props = {
   dataCategory: DataCategoryInfo;
-  dataCategoryName: string;
   dataDatetime: DateTimeObject;
   getNextLocations: (project: Project) => Record<string, LocationDescriptorObject>;
   handleChangeState: (
@@ -86,23 +89,14 @@ export function UsageStatsProjects({
           };
 
     const groupBy = ['outcome', 'project'];
-    const category: string[] = [dataCategory.apiName];
+    const category: string[] = [dataCategory.name];
 
     if (
       hasDynamicSamplingCustomFeature(organization) &&
-      dataCategory.apiName === 'span'
+      dataCategory.name === DataCategoryExact.SPAN
     ) {
       groupBy.push('category');
-      category.push('span_indexed');
-    }
-    if (
-      dataCategory.apiName === 'profile_duration' ||
-      dataCategory.apiName === 'profile_duration_ui'
-    ) {
-      groupBy.push('category');
-      category.push(
-        dataCategory.apiName === 'profile_duration' ? 'profile_chunk' : 'profile_chunk_ui'
-      );
+      category.push(DataCategoryExact.SPAN_INDEXED);
     }
 
     // We do not need more granularity in the data so interval is '1d'
@@ -124,7 +118,9 @@ export function UsageStatsProjects({
     isPending: loading,
   } = useApiQuery<UsageSeries>(
     [
-      `/organizations/${organization.slug}/stats_v2/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/stats_v2/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         // We do not need more granularity in the data so interval is '1d'
         query: endpointQuery,
@@ -146,7 +142,7 @@ export function UsageStatsProjects({
       };
     }
 
-    let key: string = parentTableSort;
+    let key = parentTableSort;
     let direction = -1;
 
     if (parentTableSort.charAt(0) === '-') {
@@ -195,9 +191,8 @@ export function UsageStatsProjects({
         nextDirection = -1; // Default PROJECT to ascending
       }
 
-      // The header uses SortLink, which takes a LocationDescriptor and pushes
-      // that to the router. As such, we do not need to update the router in
-      // handleChangeState
+      // The header cell takes a LocationDescriptor and pushes that to the
+      // router, so handleChangeState does not need to update it
       return handleChangeState(
         {sort: `${nextDirection > 0 ? '-' : ''}${nextKey}`},
         {willUpdateRouter: false}
@@ -278,9 +273,6 @@ export function UsageStatsProjects({
         const {outcome, category, project: projectId} = group.by;
         // Backend enum is singlar. Frontend enum is plural.
 
-        const multiplier = droppedProfileChunkMultiplier(category, outcome);
-        const value = group.totals['sum(quantity)']! * multiplier;
-
         if (category === 'span_indexed' && outcome !== Outcome.ACCEPTED) {
           // we need `span_indexed` data for `accepted_stored` only
           return;
@@ -295,11 +287,11 @@ export function UsageStatsProjects({
         }
 
         if (outcome !== Outcome.CLIENT_DISCARD && category !== 'span_indexed') {
-          stats[projectId!]!.total += value;
+          stats[projectId!]!.total += group.totals['sum(quantity)']!;
         }
 
         if (category === 'span_indexed' && outcome === Outcome.ACCEPTED) {
-          stats[projectId!]!.accepted_stored += value;
+          stats[projectId!]!.accepted_stored += group.totals['sum(quantity)']!;
           return;
         }
 
@@ -308,7 +300,7 @@ export function UsageStatsProjects({
           outcome === Outcome.FILTERED ||
           outcome === Outcome.INVALID
         ) {
-          stats[projectId!]![outcome] += value;
+          stats[projectId!]![outcome] += group.totals['sum(quantity)']!;
         }
 
         if (
@@ -316,7 +308,7 @@ export function UsageStatsProjects({
           outcome === Outcome.CARDINALITY_LIMITED ||
           outcome === Outcome.ABUSE
         ) {
-          stats[projectId!]![SortBy.RATE_LIMITED] += value;
+          stats[projectId!]![SortBy.RATE_LIMITED] += group.totals['sum(quantity)']!;
         }
       });
 
@@ -380,7 +372,7 @@ export function UsageStatsProjects({
     ({showStoredOutcome}: {showStoredOutcome: boolean}) => {
       const {key, direction} = tableSort;
 
-      const getArrowDirection = (linkKey: SortBy): Directions => {
+      const getArrowDirection = (linkKey: SortBy): SortDirection | undefined => {
         if (linkKey !== key) {
           return undefined;
         }
@@ -437,13 +429,13 @@ export function UsageStatsProjects({
 
           return (
             <Cell key={h.key}>
-              <SortLink
-                canSort
-                title={h.title}
-                align={h.align as Alignments}
+              <SortableHeaderCell
+                align={h.align as ColumnAlign}
                 direction={h.direction}
-                generateSortLink={h.onClick}
-              />
+                to={h.onClick()}
+              >
+                {h.title}
+              </SortableHeaderCell>
             </Cell>
           );
         })
@@ -455,7 +447,7 @@ export function UsageStatsProjects({
   const tableData = useMemo(() => {
     const showStoredOutcome =
       hasDynamicSamplingCustomFeature(organization) &&
-      dataCategory.apiName === 'span' &&
+      dataCategory.name === DataCategoryExact.SPAN &&
       seriesData.hasStoredOutcome;
 
     return {
@@ -485,14 +477,13 @@ export function UsageStatsProjects({
   return (
     <Fragment>
       {isSingleProject && (
-        <PanelHeading>
+        <Flex align="center" marginBottom="xl">
           <Title>{t('All Projects')}</Title>
-        </PanelHeading>
+        </Flex>
       )}
       {!isSingleProject && (
         <Container>
           <SearchBar
-            defaultQuery=""
             query={tableQuery}
             placeholder={t('Filter your projects')}
             aria-label={t('Filter projects')}
@@ -518,20 +509,14 @@ export function UsageStatsProjects({
 }
 
 const Container = styled('div')`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 const Title = styled('div')`
-  font-weight: ${p => p.theme.fontWeightBold};
-  font-size: ${p => p.theme.fontSize.lg};
-  color: ${p => p.theme.gray400};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  font-size: ${p => p.theme.font.size.lg};
+  color: ${p => p.theme.colors.gray500};
   display: flex;
   flex: 1;
-  align-items: center;
-`;
-
-const PanelHeading = styled('div')`
-  display: flex;
-  margin-bottom: ${space(2)};
   align-items: center;
 `;

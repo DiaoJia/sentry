@@ -23,7 +23,7 @@ ArgumentDict = Mapping[str, Any]
 OptionValue = Any
 
 IDEMPOTENCY_KEY_LENGTH = 48
-REGION_NAME_LENGTH = 48
+CELL_NAME_LENGTH = 48
 
 DEFAULT_DATE = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
 
@@ -180,7 +180,7 @@ class DelegatedByOpenTransaction(Generic[ServiceInterface]):
 
 
 def silo_mode_delegation(
-    mapping: Mapping[SiloMode, Callable[[], ServiceInterface]]
+    mapping: Mapping[SiloMode, Callable[[], ServiceInterface]],
 ) -> ServiceInterface:
     """
     Simply creates a DelegatedBySiloMode from a mapping object, but casts it as a ServiceInterface matching
@@ -193,7 +193,7 @@ def silo_mode_delegation(
 
 
 def get_delegated_constructors(
-    mapping: Mapping[SiloMode, Callable[[], ServiceInterface]]
+    mapping: Mapping[SiloMode, Callable[[], ServiceInterface]],
 ) -> Mapping[SiloMode, Callable[[], ServiceInterface]]:
     """
     Creates a new constructor mapping by replacing the monolith constructor with a DelegatedByOpenTransaction
@@ -209,7 +209,7 @@ def get_delegated_constructors(
             DelegatedByOpenTransaction(
                 {
                     User: mapping[SiloMode.CONTROL],
-                    Organization: mapping[SiloMode.REGION],
+                    Organization: mapping[SiloMode.CELL],
                 },
                 mapping[SiloMode.MONOLITH],
             ),

@@ -7,22 +7,21 @@ from django.utils import timezone
 
 from sentry.backup.scopes import RelocationScope
 from sentry.constants import ObjectStatus
-from sentry.db.models import BoundedPositiveIntegerField, FlexibleForeignKey, region_silo_model
+from sentry.db.models import BoundedPositiveIntegerField, FlexibleForeignKey, Model, cell_silo_model
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
-from sentry.hybridcloud.outbox.base import ReplicatedRegionModel
-from sentry.hybridcloud.outbox.category import OutboxCategory
-from sentry.hybridcloud.services.replica import control_replica_service
-from sentry.integrations.types import ExternalProviders
+from sentry.integrations.types import (
+    ExternalActorSource,
+    ExternalProviders,
+    IntegrationProviderSlug,
+)
 from sentry.notifications.services import notifications_service
 
 logger = logging.getLogger(__name__)
 
 
-@region_silo_model
-class ExternalActor(ReplicatedRegionModel):
+@cell_silo_model
+class ExternalActor(Model):
     __relocation_scope__ = RelocationScope.Excluded
-
-    category = OutboxCategory.EXTERNAL_ACTOR_UPDATE
 
     date_updated = models.DateTimeField(default=timezone.now)
     date_added = models.DateTimeField(default=timezone.now, null=True)
@@ -34,21 +33,25 @@ class ExternalActor(ReplicatedRegionModel):
     provider = BoundedPositiveIntegerField(
         choices=(
             (ExternalProviders.EMAIL, "email"),
-            (ExternalProviders.SLACK, "slack"),
-            (ExternalProviders.MSTEAMS, "msteams"),
-            (ExternalProviders.PAGERDUTY, "pagerduty"),
-            (ExternalProviders.GITHUB, "github"),
-            (ExternalProviders.GITHUB_ENTERPRISE, "github_enterprise"),
-            (ExternalProviders.GITLAB, "gitlab"),
-            (ExternalProviders.JIRA_SERVER, "jira_server"),
+            (ExternalProviders.SLACK, IntegrationProviderSlug.SLACK.value),
+            (ExternalProviders.MSTEAMS, IntegrationProviderSlug.MSTEAMS.value),
+            (ExternalProviders.PAGERDUTY, IntegrationProviderSlug.PAGERDUTY.value),
+            (ExternalProviders.GITHUB, IntegrationProviderSlug.GITHUB.value),
+            (ExternalProviders.GITHUB_ENTERPRISE, IntegrationProviderSlug.GITHUB_ENTERPRISE.value),
+            (ExternalProviders.GITLAB, IntegrationProviderSlug.GITLAB.value),
+            (ExternalProviders.JIRA_SERVER, IntegrationProviderSlug.JIRA_SERVER.value),
+            (ExternalProviders.PERFORCE, IntegrationProviderSlug.PERFORCE.value),
             # TODO: do migration to delete this from database
             (ExternalProviders.CUSTOM, "custom_scm"),
         ),
     )
     # The display name i.e. username, team name, channel name.
+    # if provider__in = [GITHUB, GITHUB_ENTERPRISE, GITLAB, CUSTOM], external_name starts with "@"
     external_name = models.TextField()
     # The unique identifier i.e user ID, channel ID.
     external_id = models.TextField(null=True)
+    # Data source used to create the ExternalActor row. None if manually created via the UI / API.
+    source = BoundedPositiveIntegerField(choices=ExternalActorSource.as_choices(), null=True)
 
     class Meta:
         app_label = "sentry"
@@ -82,13 +85,6 @@ class ExternalActor(ReplicatedRegionModel):
                 )
 
         return super().delete(*args, **kwargs)
-
-    def handle_async_replication(self, shard_identifier: int) -> None:
-        from sentry.notifications.services.serial import serialize_external_actor
-
-        control_replica_service.upsert_external_actor_replica(
-            external_actor=serialize_external_actor(self)
-        )
 
 
 def process_resource_change(instance: ExternalActor, **kwargs):

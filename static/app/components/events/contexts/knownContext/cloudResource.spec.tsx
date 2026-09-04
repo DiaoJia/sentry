@@ -2,7 +2,7 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import type {CloudResourceContext} from 'sentry/components/events/contexts/knownContext/cloudResource';
 import {getCloudResourceContextData} from 'sentry/components/events/contexts/knownContext/cloudResource';
 
@@ -20,7 +20,7 @@ const MOCK_CLOUD_RESOURCE: CloudResourceContext = {
 };
 
 const MOCK_REDACTION = {
-  ['host.id']: {
+  'host.id': {
     '': {
       chunks: [
         {
@@ -36,8 +36,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('CloudResourceContext', function () {
-  it('returns formatted data correctly', function () {
+describe('CloudResourceContext', () => {
+  it('returns formatted data correctly', () => {
     expect(getCloudResourceContextData({data: MOCK_CLOUD_RESOURCE})).toEqual([
       {
         key: 'cloud.provider',
@@ -71,7 +71,7 @@ describe('CloudResourceContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {cloud_resource: MOCK_REDACTION}},
     });
@@ -79,9 +79,9 @@ describe('CloudResourceContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'cloud_resource'}
-        alias={'cloud_resource'}
-        value={{...MOCK_CLOUD_RESOURCE, ['host.id']: ''}}
+        type="cloud_resource"
+        alias="cloud_resource"
+        value={{...MOCK_CLOUD_RESOURCE, 'host.id': ''}}
       />
     );
 

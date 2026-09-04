@@ -3,8 +3,6 @@ from __future__ import annotations
 import enum
 import logging
 
-from sentry.incidents.endpoints.serializers.alert_rule import AlertRuleSerializerResponse
-from sentry.incidents.endpoints.serializers.incident import DetailedIncidentSerializerResponse
 from sentry.incidents.typings.metric_detector import (
     AlertContext,
     MetricIssueContext,
@@ -13,6 +11,7 @@ from sentry.incidents.typings.metric_detector import (
 )
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.integration import RpcIntegration, integration_service
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.models.organization import Organization
 
 from .client import MsTeamsClient, MsTeamsPreInstallClient, get_token_data
@@ -60,18 +59,7 @@ def get_user_conversation_id(integration: Integration | RpcIntegration, user_id:
     return conversation_id
 
 
-def get_channel_id(organization: Organization, integration_id: int, name: str) -> str | None:
-    integrations = integration_service.get_integrations(
-        providers=["msteams"],
-        organization_id=organization.id,
-        integration_ids=[integration_id],
-    )
-    if not integrations:
-        return None
-
-    assert len(integrations) == 1, "Found multiple msteams integrations for org!"
-    integration = integrations[0]
-
+def find_channel_id(integration: Integration | RpcIntegration, name: str) -> str | None:
     team_id = integration.external_id
     client = MsTeamsClient(integration)
 
@@ -104,14 +92,27 @@ def get_channel_id(organization: Organization, integration_id: int, name: str) -
     return None
 
 
+def get_channel_id(organization: Organization, integration_id: int, name: str) -> str | None:
+    integrations = integration_service.get_integrations(
+        providers=[IntegrationProviderSlug.MSTEAMS.value],
+        organization_id=organization.id,
+        integration_ids=[integration_id],
+    )
+    if not integrations:
+        return None
+
+    assert len(integrations) == 1, "Found multiple msteams integrations for org!"
+    integration = integrations[0]
+
+    return find_channel_id(integration, name)
+
+
 def send_incident_alert_notification(
     organization: Organization,
     alert_context: AlertContext,
     notification_context: NotificationContext,
     metric_issue_context: MetricIssueContext,
     open_period_context: OpenPeriodContext,
-    alert_rule_serialized_response: AlertRuleSerializerResponse | None,
-    incident_serialized_response: DetailedIncidentSerializerResponse | None,
     notification_uuid: str | None = None,
 ) -> bool:
     from .card_builder.incident_attachment import build_incident_attachment

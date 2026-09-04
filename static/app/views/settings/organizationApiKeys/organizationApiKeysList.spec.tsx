@@ -8,10 +8,10 @@ import {
   userEvent,
 } from 'sentry-test/reactTestingLibrary';
 
-import OrganizationApiKeysList from 'sentry/views/settings/organizationApiKeys/organizationApiKeysList';
+import {OrganizationApiKeysList} from 'sentry/views/settings/organizationApiKeys/organizationApiKeysList';
 
-describe('OrganizationApiKeysList', function () {
-  it('opens a modal when trying to delete a key', async function () {
+describe('OrganizationApiKeysList', () => {
+  it('opens a modal when trying to delete a key', async () => {
     render(
       <OrganizationApiKeysList
         organization={OrganizationFixture()}

@@ -6,6 +6,9 @@ from rest_framework.response import Response
 from rest_framework.serializers import ValidationError
 
 from sentry import analytics, features
+from sentry.analytics.events.sentry_app_schema_validation_error import (
+    SentryAppSchemaValidationError,
+)
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.base import control_silo_endpoint
@@ -23,6 +26,7 @@ from sentry.sentry_apps.api.serializers.sentry_app import (
 )
 from sentry.sentry_apps.logic import SentryAppCreator
 from sentry.sentry_apps.models.sentry_app import SentryApp
+from sentry.sentry_apps.utils.webhooks import has_error_events
 from sentry.users.models.user import User
 from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.service import user_service
@@ -88,12 +92,13 @@ class SentryAppsEndpoint(SentryAppsBaseEndpoint):
             "schema": request.data.get("schema", {}),
             "overview": request.data.get("overview"),
             "allowedOrigins": request.data.get("allowedOrigins", []),
+            "webhookHeaders": request.data.get("webhookHeaders", []),
             "popularity": (
                 request.data.get("popularity") if is_active_superuser(request) else None
             ),
         }
 
-        if self._has_hook_events(request) and not features.has(
+        if has_error_events(request.data.get("events")) and not features.has(
             "organizations:integrations-event-hooks", organization, actor=request.user
         ):
             return Response(
@@ -105,17 +110,19 @@ class SentryAppsEndpoint(SentryAppsBaseEndpoint):
                 status=403,
             )
 
-        serializer = SentryAppParser(data=data, access=request.access)
+        serializer = SentryAppParser(data=data, access=request.access, context={"request": request})
 
         if serializer.is_valid():
+            validated_data = serializer.validated_data
+
             if data.get("isInternal"):
                 data["verifyInstall"] = False
                 data["author"] = data["author"] or organization.name
 
             try:
-                assert isinstance(
-                    request.user, (User, RpcUser)
-                ), "User must be authenticated to create a Sentry App"
+                assert isinstance(request.user, (User, RpcUser)), (
+                    "User must be authenticated to create a Sentry App"
+                )
                 sentry_app = SentryAppCreator(
                     name=data["name"],
                     author=data["author"],
@@ -130,6 +137,7 @@ class SentryAppsEndpoint(SentryAppsBaseEndpoint):
                     schema=data["schema"],
                     overview=data["overview"],
                     allowed_origins=data["allowedOrigins"],
+                    webhook_headers=validated_data.get("webhookHeaders", []),
                     popularity=data["popularity"],
                 ).run(user=request.user, request=request, skip_default_auth_token=True)
                 # We want to stop creating the default auth token for new apps and installations through the API
@@ -156,7 +164,15 @@ class SentryAppsEndpoint(SentryAppsBaseEndpoint):
                     "error_message": error_message,
                 }
                 logger.info(name, extra=log_info)
-                analytics.record(name, **log_info)
+                analytics.record(
+                    SentryAppSchemaValidationError(
+                        schema=orjson.dumps(data["schema"]).decode(),
+                        user_id=request.user.id,
+                        sentry_app_name=data["name"],
+                        organization_id=organization.id,
+                        error_message=error_message,
+                    )
+                )
         return Response(serializer.errors, status=400)
 
     def _filter_queryset_for_user(self, queryset: BaseQuerySet[SentryApp, SentryApp], user_id: int):
@@ -167,9 +183,3 @@ class SentryAppsEndpoint(SentryAppsBaseEndpoint):
                 owner_ids.append(o.id)
 
         return queryset.filter(owner_id__in=owner_ids)
-
-    def _has_hook_events(self, request: Request):
-        if not request.data.get("events"):
-            return False
-
-        return "error" in request.data["events"]

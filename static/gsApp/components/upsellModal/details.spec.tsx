@@ -2,20 +2,20 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {BillingConfigFixture} from 'getsentry-test/fixtures/billingConfig';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
+import {PlanTier} from 'getsentry-test/planTier';
 import {act, render, screen} from 'sentry-test/reactTestingLibrary';
 
-import Details from 'getsentry/components/upsellModal/details';
-import {PlanTier} from 'getsentry/types';
+import {Details} from 'getsentry/components/upsellModal/details';
 
-describe('Upsell Modal Details', function () {
+describe('Upsell Modal Details', () => {
   const organization = OrganizationFixture({access: ['org:billing']});
   const subscription = SubscriptionFixture({organization, plan: 'am1_f'});
   const billingConfig = BillingConfigFixture(PlanTier.AM2);
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
-      url: `/subscriptions/${organization.slug}/`,
+      url: `/customers/${organization.slug}/`,
       method: 'GET',
       body: subscription,
     });
@@ -26,12 +26,11 @@ describe('Upsell Modal Details', function () {
     });
   });
 
-  it('renders', async function () {
+  it('renders', async () => {
     const sub = SubscriptionFixture({
       organization,
       plan: 'am1_f',
       canTrial: true,
-      isTrial: false,
       isFree: true,
     });
 
@@ -51,12 +50,12 @@ describe('Upsell Modal Details', function () {
     expect(screen.getByRole('button', {name: 'Upgrade now'})).toBeInTheDocument();
   });
 
-  it('renders team features with subscription trial plan', async function () {
+  it('renders team features with subscription trial plan', async () => {
     const sub = SubscriptionFixture({
       organization,
       plan: 'am1_t',
       canTrial: false,
-      isTrial: true,
+      trialPlan: 'am1_t',
       isFree: false,
     });
 
@@ -78,12 +77,11 @@ describe('Upsell Modal Details', function () {
     expect(screen.getByTestId('event-volume')).toHaveAttribute('aria-selected');
   });
 
-  it('renders team features with free plan', async function () {
+  it('renders team features with free plan', async () => {
     const sub = SubscriptionFixture({
       organization,
       plan: 'am1_f',
       canTrial: true,
-      isTrial: false,
       isFree: true,
     });
 
@@ -105,12 +103,11 @@ describe('Upsell Modal Details', function () {
     expect(screen.getByTestId('event-volume')).toHaveAttribute('aria-selected');
   });
 
-  it('renders business features with paid plan', async function () {
+  it('renders business features with paid plan', async () => {
     const sub = SubscriptionFixture({
       organization,
       plan: 'am1_team',
       canTrial: true,
-      isTrial: false,
       isFree: false,
     });
 
@@ -129,12 +126,11 @@ describe('Upsell Modal Details', function () {
     expect(screen.getByTestId('sso')).toHaveAttribute('aria-selected');
   });
 
-  it('shows performance features when on a old mm2 plan', async function () {
+  it('shows performance features when on a old mm2 plan', async () => {
     const sub = SubscriptionFixture({
       organization,
       plan: 'mm2_a_100k',
       canTrial: true,
-      isTrial: false,
       isFree: false,
     });
 
@@ -149,17 +145,15 @@ describe('Upsell Modal Details', function () {
     expect(await screen.findByText('Features Include')).toBeInTheDocument();
 
     // Check that the source feature is highlighted.
-    expect(screen.queryByTestId('global-views')).not.toBeInTheDocument();
     expect(screen.getByTestId('tracing')).toHaveAttribute('aria-selected');
   });
 
-  it('cycles the list on a timer when no section is clicked', async function () {
+  it('cycles the list on a timer when no section is clicked', async () => {
     jest.useFakeTimers();
     const sub = SubscriptionFixture({
       organization,
       plan: 'mm2_a_100k',
       canTrial: true,
-      isTrial: false,
       isFree: false,
     });
 
@@ -188,5 +182,27 @@ describe('Upsell Modal Details', function () {
 
     // Tracing should now not be highlighted.
     expect(tracing).not.toHaveAttribute('aria-selected');
+  });
+
+  it('displays "Unlimited Custom Dashboards" feature name', async () => {
+    const sub = SubscriptionFixture({
+      organization,
+      plan: 'am3_f',
+      canTrial: true,
+      isFree: true,
+    });
+
+    render(
+      <Details
+        source="custom-dashboards"
+        subscription={sub}
+        organization={organization}
+        onCloseModal={jest.fn()}
+      />
+    );
+
+    expect(await screen.findByText('Features Include')).toBeInTheDocument();
+    expect(screen.getByText('Unlimited Custom Dashboards')).toBeInTheDocument();
+    expect(screen.getByTestId('custom-dashboards')).toHaveAttribute('aria-selected');
   });
 });

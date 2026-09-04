@@ -10,9 +10,10 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint
 from sentry.api.utils import handle_query_errors
+from sentry.models.organization import Organization
 from sentry.sdk_updates import SdkIndexState, SdkSetupState, get_sdk_index, get_suggested_updates
 from sentry.search.events.types import SnubaParams
 from sentry.snuba import discover
@@ -80,7 +81,7 @@ def serialize(data, projects):
     return [update for update in updates_list if len(update["suggestions"]) > 0]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationSdkUpdatesEndpoint(OrganizationEndpoint):
     owner = ApiOwner.TELEMETRY_EXPERIENCE
 
@@ -88,12 +89,14 @@ class OrganizationSdkUpdatesEndpoint(OrganizationEndpoint):
         "GET": ApiPublishStatus.PRIVATE,
     }
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         projects = self.get_projects(request, organization)
 
         len_projects = len(projects)
         sentry_sdk.set_tag("query.num_projects", len_projects)
+        sentry_sdk.set_attribute("query.num_projects", len_projects)
         sentry_sdk.set_tag("query.num_projects.grouped", format_grouped_length(len_projects))
+        sentry_sdk.set_attribute("query.num_projects.grouped", format_grouped_length(len_projects))
 
         if len(projects) == 0:
             return Response([])
@@ -121,14 +124,14 @@ class OrganizationSdkUpdatesEndpoint(OrganizationEndpoint):
         return Response(serialize(result["data"], projects))
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationSdksEndpoint(OrganizationEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
     owner = ApiOwner.TELEMETRY_EXPERIENCE
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         try:
             sdks = get_sdk_index()
         except Exception as e:

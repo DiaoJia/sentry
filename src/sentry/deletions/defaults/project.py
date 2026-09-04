@@ -18,6 +18,10 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
         from sentry.integrations.models.repository_project_path_config import (
             RepositoryProjectPathConfig,
         )
+        from sentry.investigations.models import (
+            InvestigationBlockExecutionProject,
+            InvestigationProject,
+        )
         from sentry.models.activity import Activity
         from sentry.models.artifactbundle import ProjectArtifactBundle
         from sentry.models.debugfile import ProguardArtifactRelease, ProjectDebugFile
@@ -36,6 +40,7 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
         from sentry.models.projectbookmark import ProjectBookmark
         from sentry.models.projectcodeowners import ProjectCodeOwners
         from sentry.models.projectkey import ProjectKey
+        from sentry.models.projectrepository import ProjectRepository
         from sentry.models.projectteam import ProjectTeam
         from sentry.models.promptsactivity import PromptsActivity
         from sentry.models.release_threshold import ReleaseThreshold
@@ -43,11 +48,15 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
         from sentry.models.releases.release_project import ReleaseProject
         from sentry.models.transaction_threshold import ProjectTransactionThreshold
         from sentry.models.userreport import UserReport
+        from sentry.models.weeklyreportprojectexclusion import WeeklyReportProjectExclusion
         from sentry.monitors.models import Monitor
         from sentry.replays.models import ReplayRecordingSegment
+        from sentry.seer.models.project_repository import (
+            SeerProjectRepository,
+            SeerProjectRepositoryBranchOverride,
+        )
         from sentry.sentry_apps.models.servicehook import ServiceHook, ServiceHookProject
         from sentry.snuba.models import QuerySubscription
-        from sentry.uptime.models import ProjectUptimeSubscription
         from sentry.workflow_engine.models import Detector
 
         relations: list[BaseRelation] = [
@@ -57,9 +66,6 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
 
         # in bulk
         for m1 in (
-            # GroupOpenPeriod should be deleted before Activity
-            GroupOpenPeriod,
-            Activity,
             AlertRuleProjects,
             EnvironmentProject,
             GroupAssignee,
@@ -72,13 +78,13 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
             GroupSubscription,
             ProjectBookmark,
             ProjectKey,
+            WeeklyReportProjectExclusion,
             ReleaseThreshold,
             ProjectTeam,
             PromptsActivity,
             # order matters, ProjectCodeOwners to be deleted before RepositoryProjectPathConfig
             ProjectCodeOwners,
             ReplayRecordingSegment,
-            RepositoryProjectPathConfig,
             ServiceHookProject,
             ServiceHook,
             UserReport,
@@ -90,11 +96,44 @@ class ProjectDeletionTask(ModelDeletionTask[Project]):
             ProguardArtifactRelease,
             DiscoverSavedQueryProject,
             IncidentProject,
-            ProjectUptimeSubscription,
+            InvestigationProject,
+            InvestigationBlockExecutionProject,
         ):
             relations.append(ModelRelation(m1, {"project_id": instance.id}, BulkModelDeletionTask))
 
+        # These models join through ProjectRepository rather than having a direct project FK.
+        # Order matters: branch overrides → SPR → RPPC → ProjectRepository.
+        # BulkModelDeletionTask does raw SQL DELETE which bypasses Django
+        # CASCADE, so children must be deleted before parents.
+        relations.append(
+            ModelRelation(
+                SeerProjectRepositoryBranchOverride,
+                {"seer_project_repository__project_repository__project_id": instance.id},
+                BulkModelDeletionTask,
+            )
+        )
+        relations.append(
+            ModelRelation(
+                SeerProjectRepository,
+                {"project_repository__project_id": instance.id},
+                BulkModelDeletionTask,
+            )
+        )
+        relations.append(
+            ModelRelation(
+                RepositoryProjectPathConfig,
+                {"project_repository__project_id": instance.id},
+                BulkModelDeletionTask,
+            )
+        )
+        relations.append(
+            ModelRelation(ProjectRepository, {"project_id": instance.id}, BulkModelDeletionTask)
+        )
+
         for m2 in (
+            # GroupOpenPeriod should be deleted before Activity
+            GroupOpenPeriod,
+            Activity,
             Monitor,
             Group,
             QuerySubscription,

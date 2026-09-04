@@ -2,75 +2,61 @@ import type {Theme} from '@emotion/react';
 import {useTheme} from '@emotion/react';
 import startCase from 'lodash/startCase';
 
-import MiniBarChart from 'sentry/components/charts/miniBarChart';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import LoadingError from 'sentry/components/loadingError';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import Placeholder from 'sentry/components/placeholder';
+import {MiniBarChart} from 'sentry/components/charts/miniBarChart';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {Placeholder} from 'sentry/components/placeholder';
 import {t} from 'sentry/locale';
+import {Outcome} from 'sentry/types/core';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {getReasonGroupName} from 'sentry/views/organizationStats/getReasonGroupName';
 import type {UsageSeries} from 'sentry/views/organizationStats/types';
 
 type Props = {
   project: Project;
 };
 
-const known_categories = [
-  'browser-extensions',
-  'cors',
-  'error-message',
-  'discarded-hash',
-  'invalid-csp',
-  'ip-address',
-  'legacy-browsers',
-  'localhost',
-  'release-version',
-  'web-crawlers',
-  'filtered-transaction',
-  'crash-report-limit',
-  'react-hydration-errors',
-  'chunk-load-error',
-];
-
-function makeStatOPColors(fallbackColor: string, theme: Theme): Record<string, string> {
-  const result: Record<string, string> = {};
-  const colors = theme.chart.getColorPalette(known_categories.length);
-
-  known_categories.forEach((category, index) => {
-    const color = colors?.[index % colors.length] ?? fallbackColor;
-    if (color) {
-      result[category] = color;
-    }
-  });
-
-  return result;
-}
-
 function formatData(rawData: UsageSeries | undefined, theme: Theme) {
   if (!rawData?.groups?.length) {
     return [];
   }
 
-  const fallbackColor = theme.gray200;
-  const statOpsColors = makeStatOPColors(fallbackColor, theme);
+  // A custom inbound filter reports under a reason of its own, and drops data in
+  // every category it applies to. This chart shows what each kind of filter dropped,
+  // so all the groups that share a name are summed into one series.
+  const valuesByName = new Map<string, number[]>();
 
-  const formattedData = rawData.groups.map(group => {
-    const reason = String(group.by.reason!);
-    return {
-      seriesName: startCase(reason),
-      color: statOpsColors[reason] ?? fallbackColor,
-      data: rawData.intervals.map((interval, index) => ({
-        name: interval,
-        value: group.series['sum(quantity)']![index]!,
-      })),
-    };
-  });
+  for (const group of rawData.groups) {
+    const name = getReasonGroupName(Outcome.FILTERED, String(group.by.reason ?? ''));
+    const values = group.series['sum(quantity)'] ?? [];
+    const summed = valuesByName.get(name);
 
-  return formattedData;
+    if (summed) {
+      values.forEach((value, i) => {
+        summed[i] = (summed[i] ?? 0) + value;
+      });
+    } else {
+      valuesByName.set(name, [...values]);
+    }
+  }
+
+  const fallbackColor = theme.colors.gray200;
+  const statOpsColors = theme.chart.getColorPalette(valuesByName.size);
+
+  return Array.from(valuesByName, ([name, values], index) => ({
+    seriesName: startCase(name),
+    color: statOpsColors[index] ?? fallbackColor,
+    data: rawData.intervals.map((interval, i) => ({
+      name: interval,
+      value: values[i] ?? 0,
+    })),
+  }));
 }
 
 export function ProjectFiltersChart({project}: Props) {
@@ -79,11 +65,22 @@ export function ProjectFiltersChart({project}: Props) {
 
   const {data, isError, isPending, refetch} = useApiQuery<UsageSeries>(
     [
-      `/organizations/${organization.slug}/stats_v2/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/stats_v2/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           project: project.id,
-          category: ['transaction', 'default', 'security', 'error'],
+          // A custom inbound filter drops logs and trace metrics as well, so those
+          // categories count towards what the filters below dropped.
+          category: [
+            'transaction',
+            'default',
+            'security',
+            'error',
+            'log_item',
+            'trace_metric',
+          ],
           outcome: 'filtered',
           field: 'sum(quantity)',
           groupBy: 'reason',
@@ -122,12 +119,9 @@ export function ProjectFiltersChart({project}: Props) {
           />
         )}
         {hasLoaded && blankStats && (
-          <EmptyMessage
-            title={t('Nothing filtered in the last 30 days.')}
-            description={t(
-              'Issues filtered as a result of your settings below will be shown here.'
-            )}
-          />
+          <EmptyMessage title={t('Nothing filtered in the last 30 days.')}>
+            {t('Issues filtered as a result of your settings below will be shown here.')}
+          </EmptyMessage>
         )}
       </PanelBody>
     </Panel>

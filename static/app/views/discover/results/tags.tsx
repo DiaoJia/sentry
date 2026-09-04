@@ -3,27 +3,26 @@ import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 import type {Location, LocationDescriptor} from 'history';
 
+import {Button} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
+
 import type {Tag, TagSegment} from 'sentry/actionCreators/events';
 import {fetchTagFacets} from 'sentry/actionCreators/events';
 import type {Client} from 'sentry/api';
-import ErrorPanel from 'sentry/components/charts/errorPanel';
+import {ErrorPanel} from 'sentry/components/charts/errorPanel';
 import {SectionHeading} from 'sentry/components/charts/styles';
-import {Button} from 'sentry/components/core/button';
 import {deviceNameMapper} from 'sentry/components/deviceName';
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
 import {TagFacetsList} from 'sentry/components/group/tagFacets';
-import TagFacetsDistributionMeter from 'sentry/components/group/tagFacets/tagFacetsDistributionMeter';
-import Placeholder from 'sentry/components/placeholder';
+import {TagFacetsDistributionMeter} from 'sentry/components/group/tagFacets/tagFacetsDistributionMeter';
+import {Placeholder} from 'sentry/components/placeholder';
 import {IconWarning} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {isAPIPayloadSimilar} from 'sentry/utils/discover/eventView';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
-import type {UseApiQueryResult} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import withApi from 'sentry/utils/withApi';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import {withApi} from 'sentry/utils/withApi';
 
 type Props = {
   api: Client;
@@ -33,8 +32,6 @@ type Props = {
   organization: Organization;
   totalValues: null | number;
   confirmedQuery?: boolean;
-  onTagValueClick?: (title: string, value: TagSegment) => void;
-  tagsQueryResults?: UseApiQueryResult<Tag[], RequestError>;
 };
 
 type State = {
@@ -90,29 +87,6 @@ class Tags extends Component<Props, State> {
       this.setState({hasLoaded: false, tags: []});
     }
 
-    // If we have tagsQueryResults, we can use that instead of fetching new data on mount.
-    if (!appendTags && this.props.tagsQueryResults) {
-      const pageLinks =
-        this.props.tagsQueryResults?.getResponseHeader?.('Link') ?? undefined;
-      let hasMore = false;
-      let cursor: string | undefined;
-      if (pageLinks) {
-        const paginationObject = parseLinkHeader(pageLinks);
-        hasMore = paginationObject?.next?.results ?? false;
-        cursor = paginationObject.next?.cursor;
-      }
-
-      this.setState({
-        tags: this.props.tagsQueryResults.data || [],
-        loading: this.props.tagsQueryResults.isPending,
-        hasLoaded: !this.props.tagsQueryResults.isPending,
-        hasMore,
-        nextCursor: cursor,
-        error: this.props.tagsQueryResults.error?.message || '',
-      });
-      return;
-    }
-
     // Fetch should be forced after mounting as confirmedQuery isn't guaranteed
     // since this component can mount/unmount via show/hide tags separate from
     // data being loaded for the rest of the page.
@@ -140,7 +114,7 @@ class Tags extends Component<Props, State> {
         tags = [...this.state.tags, ...tags];
       }
       this.setState({loading: false, hasLoaded: true, tags, hasMore, nextCursor: cursor});
-    } catch (err) {
+    } catch (err: any) {
       if (
         err.status !== 400 &&
         err.responseJSON?.detail !==
@@ -153,7 +127,7 @@ class Tags extends Component<Props, State> {
   };
 
   renderTag(tag: Tag, index: number) {
-    const {generateUrl, onTagValueClick, totalValues} = this.props;
+    const {generateUrl, totalValues} = this.props;
 
     const segments: TagSegment[] = tag.topValues.map(segment => {
       return {
@@ -175,7 +149,6 @@ class Tags extends Component<Props, State> {
           segments={segments}
           totalValues={Number(maxTotalValues)}
           expandByDefault={index === 0}
-          onTagValueClick={onTagValueClick}
         />
       </li>
     );
@@ -202,7 +175,7 @@ class Tags extends Component<Props, State> {
     if (error) {
       return (
         <ErrorPanel height="132px">
-          <IconWarning color="gray300" size="lg" />
+          <IconWarning variant="muted" size="lg" />
         </ErrorPanel>
       );
     }
@@ -218,10 +191,10 @@ class Tags extends Component<Props, State> {
             (loading ? (
               this.renderPlaceholders()
             ) : (
-              <ButtonWrapper>
+              <Stack align="center">
                 <Button
                   size="xs"
-                  priority="primary"
+                  variant="primary"
                   disabled={loading}
                   aria-label={t('Show More')}
                   onClick={() => {
@@ -230,7 +203,7 @@ class Tags extends Component<Props, State> {
                 >
                   {t('Show More')}
                 </Button>
-              </ButtonWrapper>
+              </Stack>
             ))}
         </Fragment>
       );
@@ -262,26 +235,20 @@ const StyledEmptyStateWarning = styled(EmptyStateWarning)`
 `;
 
 const StyledPlaceholder = styled(Placeholder)`
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
   height: 16px;
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 `;
 
 const StyledPlaceholderTitle = styled(Placeholder)`
   width: 100px;
   height: 12px;
-  margin-bottom: ${space(0.5)};
+  margin-bottom: ${p => p.theme.space.xs};
 `;
 
 const StyledTagFacetList = styled(TagFacetsList)`
   margin-bottom: 0;
   width: 100%;
-`;
-
-const ButtonWrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
 `;
 
 export {Tags};

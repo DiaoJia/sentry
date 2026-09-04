@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Collection
 from typing import Any
 
 import pytest
@@ -10,17 +11,18 @@ from django.test import override_settings
 from django.urls import get_resolver
 
 from sentry import options
+from sentry.auth.staff import Staff
 from sentry.models.authidentity import AuthIdentity
 from sentry.models.authprovider import AuthProvider
 from sentry.models.organization import Organization
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.organizations.services.organization import organization_service
 from sentry.silo.base import SiloMode
+from sentry.testutils.cell import get_test_env_directory
 from sentry.testutils.factories import Factories
 from sentry.testutils.helpers.features import Feature
 from sentry.testutils.helpers.options import override_options
 from sentry.testutils.pytest.fixtures import django_db_all
-from sentry.testutils.region import get_test_env_directory
 from sentry.testutils.requests import (
     RequestFactory,
     make_request,
@@ -31,10 +33,10 @@ from sentry.testutils.requests import (
 from sentry.testutils.silo import (
     assume_test_silo_mode_of,
     control_silo_test,
-    create_test_regions,
+    create_test_cells,
     no_silo_test,
 )
-from sentry.types import region
+from sentry.types import cell
 from sentry.web.client_config import get_client_config
 
 
@@ -62,15 +64,31 @@ def none_request() -> None:
     return None
 
 
+def create_test_localities(
+    cells: tuple[cell.Cell, ...], single_tenants: Collection[str] = ()
+) -> tuple[cell.Locality, ...]:
+    return tuple(
+        cell.Locality(
+            name=c.name,
+            cells=frozenset([c.name]),
+            new_org_cell=c.name,
+            visible=c.name not in single_tenants,
+        )
+        for c in cells
+    )
+
+
+multiregion_cells = create_test_cells("us", "eu", "acme")
 multiregion_client_config_test = control_silo_test(
-    regions=create_test_regions("us", "eu", "acme", single_tenants=["acme"]),
+    cells=multiregion_cells,
+    localities=create_test_localities(multiregion_cells, single_tenants={"acme"}),
     include_monolith_run=True,
 )
 
 
 @no_silo_test
 @django_db_all
-def test_client_config_default():
+def test_client_config_default() -> None:
     cfg = get_client_config()
     assert cfg["sentryMode"] == "SELF_HOSTED"
 
@@ -88,7 +106,7 @@ def test_client_config_default():
     ],
 )
 @django_db_all(transaction=True)
-def test_client_config_in_silo_modes(request_factory: RequestFactory):
+def test_client_config_in_silo_modes(request_factory: RequestFactory) -> None:
     request_ret = request_factory()
     if request_ret is not None:
         request, _ = request_ret
@@ -99,9 +117,10 @@ def test_client_config_in_silo_modes(request_factory: RequestFactory):
 
     def normalize(value: dict[str, Any]):
         # Removing the region lists as it varies based on silo mode.
-        # See Region.to_url()
-        value.pop("regions")
-        value.pop("memberRegions")
+        # See Locality.to_url()
+        value.pop("localities")
+        value.pop("signupLocalities")
+        value.pop("cells")
         value["links"].pop("regionUrl")
 
     normalize(base_line)
@@ -117,7 +136,7 @@ def test_client_config_in_silo_modes(request_factory: RequestFactory):
 
 @no_silo_test
 @django_db_all(transaction=True)
-def test_client_config_deleted_user():
+def test_client_config_deleted_user() -> None:
     request, user = make_user_request_from_org()
     request.user = user
 
@@ -130,7 +149,7 @@ def test_client_config_deleted_user():
 
 @no_silo_test
 @django_db_all
-def test_client_config_features():
+def test_client_config_features() -> None:
     request, user = make_user_request_from_org()
     request.user = user
     result = get_client_config(request)
@@ -141,7 +160,12 @@ def test_client_config_features():
 
     with (
         override_options({"auth.allow-registration": True}),
-        Feature({"auth:register": True, "system:multi-region": True}),
+        Feature(
+            {
+                "auth:register": True,
+                "system:multi-region": True,
+            }
+        ),
     ):
         result = get_client_config(request)
 
@@ -152,173 +176,209 @@ def test_client_config_features():
 
 @no_silo_test
 @django_db_all
-def test_client_config_default_region_data():
+def test_client_config_default_locality_data() -> None:
     request, user = make_user_request_from_org()
     request.user = user
     result = get_client_config(request)
 
-    assert len(result["regions"]) == 1
-    regions = result["regions"]
-    assert regions[0]["name"] == settings.SENTRY_MONOLITH_REGION
-    assert regions[0]["url"] == options.get("system.url-prefix")
+    assert len(result["localities"]) == 1
+    localities = result["localities"]
+    assert localities[0]["name"] == settings.SENTRY_FALLBACK_CELL
+    assert localities[0]["url"] == options.get("system.url-prefix")
+    assert len(result["signupLocalities"]) == 1
+    assert result["signupLocalities"] == [settings.SENTRY_FALLBACK_CELL]
 
-    assert len(result["memberRegions"]) == 1
-    regions = result["memberRegions"]
-    assert regions[0]["name"] == settings.SENTRY_MONOLITH_REGION
-    assert regions[0]["url"] == options.get("system.url-prefix")
+    assert len(result["cells"]) == 0, "No staff session"
 
 
 @no_silo_test
 @django_db_all
-def test_client_config_empty_region_data():
-    region_directory = region.load_from_config([])
+def test_client_config_empty_region_data() -> None:
+    region_directory = cell.load_from_config([], [])
 
     # Usually, we would want to use other testutils functions rather than calling
     # `swap_state` directly. We make an exception here in order to test the default
     # region data that `load_from_config` fills in.
-    with get_test_env_directory().swap_state(tuple(region_directory.regions)):
+    with get_test_env_directory().swap_state(tuple(region_directory.cells)):
         request, user = make_user_request_from_org()
         request.user = user
         result = get_client_config(request)
 
-    assert len(result["regions"]) == 1
-    regions = result["regions"]
-    assert regions[0]["name"] == settings.SENTRY_MONOLITH_REGION
-    assert regions[0]["url"] == options.get("system.url-prefix")
+    assert len(result["cells"]) == 0, "no staff session"
+    assert len(result["localities"]) == 1
+    assert len(result["signupLocalities"]) == 1
+
+    localities = result["localities"]
+    assert localities[0]["name"] == settings.SENTRY_FALLBACK_CELL
+    assert localities[0]["url"] == options.get("system.url-prefix")
+    assert result["signupLocalities"][0] == localities[0]["name"]
 
 
 @multiregion_client_config_test
 @django_db_all
-def test_client_config_with_region_data():
+def test_client_config_with_region_data() -> None:
     request, user = make_user_request_from_org()
     request.user = user
     result = get_client_config(request)
 
-    assert len(result["regions"]) == 2
-    regions = result["regions"]
-    assert {r["name"] for r in regions} == {"eu", "us"}
+    assert len(result["cells"]) == 0, "no staff session"
+    assert len(result["localities"]) == 2
+    localities = result["localities"]
+    assert {r["name"] for r in localities} == {"eu", "us"}
 
-    assert len(result["memberRegions"]) == 1
 
-
-hidden_regions = [
-    region.Region(
+hidden_cells = [
+    cell.Cell(
         name="us",
         snowflake_id=1,
         address="https//us.testserver",
-        category=region.RegionCategory.MULTI_TENANT,
     ),
-    region.Region(
+    cell.Cell(
         name="eu",
         snowflake_id=5,
         address="https//eu.testserver",
         visible=False,
-        category=region.RegionCategory.MULTI_TENANT,
     ),
 ]
 
 
-@control_silo_test(regions=hidden_regions, include_monolith_run=True)
+@control_silo_test(cells=hidden_cells, include_monolith_run=True)
 @django_db_all
-def test_client_config_with_hidden_region_data():
+def test_client_config_with_hidden_region_data() -> None:
     request, user = make_user_request_from_org()
     request.user = user
     result = get_client_config(request)
 
-    assert len(result["regions"]) == 1
-    regions = result["regions"]
-    assert {r["name"] for r in regions} == {"us"}
-    assert len(result["memberRegions"]) == 1
+    assert len(result["localities"]) == 1
+    localities = result["localities"]
+    assert {r["name"] for r in localities} == {"us"}
 
 
-@multiregion_client_config_test
+@control_silo_test(cells=hidden_cells)
 @django_db_all
-def test_client_config_with_multiple_membership():
+def test_client_config_with_hidden_cell_membership() -> None:
     request, user = make_user_request_from_org()
-    request.user = user
 
-    # multiple us memberships and eu too
-    Factories.create_organization(slug="us-co", owner=user)
-    Factories.create_organization(slug="eu-co", owner=user)
-    mapping = OrganizationMapping.objects.get(slug="eu-co")
-    mapping.update(region_name="eu")
+    Factories.create_organization(slug="acme-co", owner=user, cell="eu")
+    request.user = user
 
     result = get_client_config(request)
 
-    # Single-tenant doesn't show up unless you have membership
-    assert len(result["regions"]) == 2
-    regions = result["regions"]
-    assert {r["name"] for r in regions} == {"eu", "us"}
+    # Localities (customer facing) don't include hidden cells/localities
+    assert len(result["localities"]) == 1
+    localities = result["localities"]
+    assert [r["name"] for r in localities] == ["us"]
 
-    assert len(result["memberRegions"]) == 2
-    regions = result["memberRegions"]
-    assert {r["name"] for r in regions} == {"eu", "us"}
+    # signup localities don't include hidden items;
+    assert result["signupLocalities"] == ["us"]
+
+    # Cell list is hidden for regular users.
+    assert len(result["cells"]) == 0
 
 
-@multiregion_client_config_test
+@control_silo_test(cells=create_test_cells("us", "ja", "eu"))
 @django_db_all
-def test_client_config_with_single_tenant_membership():
+def test_client_config_with_staff_session_fills_cells_and_cells_are_sorted() -> None:
     request, user = make_user_request_from_org()
+    user.is_staff = True
     request.user = user
 
-    Factories.create_organization(slug="acme-co", owner=user)
-    mapping = OrganizationMapping.objects.get(slug="acme-co")
-    mapping.update(region_name="acme")
+    # Simulate an active staff session
+    staff = Staff(request)
+    staff.set_logged_in(user)
+    request.staff = staff
 
     result = get_client_config(request)
 
-    assert len(result["regions"]) == 3
-    regions = result["regions"]
-    assert {r["name"] for r in regions} == {"eu", "us", "acme"}
+    assert len(result["localities"]) == 3
+    localities = result["localities"]
+    # default historical cell (us) is first
+    assert [r["name"] for r in localities] == ["us", "eu", "ja"]
 
-    assert len(result["memberRegions"]) == 2
-    regions = result["memberRegions"]
-    assert {r["name"] for r in regions} == {"us", "acme"}
+    assert len(result["cells"]) == 3
+    cells = result["cells"]
+    # historical cell (us) is first, then other cells alphabetical
+    assert [r["name"] for r in cells] == ["us", "eu", "ja"]
+    assert [r["locality_url"] for r in cells] == [
+        "http://us.testserver",
+        "http://eu.testserver",
+        "http://ja.testserver",
+    ]
+
+
+@control_silo_test(cells=hidden_cells)
+@django_db_all
+def test_client_config_with_staff_session_includes_hidden_cells() -> None:
+    request, user = make_user_request_from_org()
+    user.is_staff = True
+    request.user = user
+
+    # Simulate an active staff session
+    staff = Staff(request)
+    staff.set_logged_in(user)
+    request.staff = staff
+
+    result = get_client_config(request)
+
+    # Localities (customer facing) don't include hidden cells/localities
+    assert len(result["localities"]) == 1
+    localities = result["localities"]
+    assert [r["name"] for r in localities] == ["us"]
+
+    # Cells list includes hidden items last
+    assert len(result["cells"]) == 2
+    cells = result["cells"]
+    assert [r["name"] for r in cells] == ["us", "eu"]
 
 
 @multiregion_client_config_test
 @django_db_all
-def test_client_config_links_regionurl():
+def test_client_config_links_regionurl() -> None:
     request, user = make_user_request_from_org()
     request.user = user
 
-    with override_settings(SILO_MODE=SiloMode.REGION, SENTRY_REGION="us"):
+    with override_settings(SILO_MODE=SiloMode.CELL, SENTRY_LOCAL_CELL="us"):
         result = get_client_config(request)
         assert result["links"]
         assert result["links"]["regionUrl"] == "http://us.testserver"
 
-    with override_settings(SILO_MODE=SiloMode.CONTROL, SENTRY_REGION=None):
+    with override_settings(SILO_MODE=SiloMode.CONTROL, SENTRY_LOCAL_CELL=None):
         result = get_client_config(request)
         assert result["links"]
         assert result["links"]["regionUrl"] == "http://us.testserver"
 
-    with override_settings(SILO_MODE=SiloMode.MONOLITH, SENTRY_REGION="eu"):
+    with override_settings(SILO_MODE=SiloMode.MONOLITH, SENTRY_LOCAL_CELL="eu"):
         result = get_client_config(request)
         assert result["links"]
         assert result["links"]["regionUrl"] == "http://eu.testserver"
 
 
+display_order_cells = create_test_cells("us", "eu", "acme", "de", "apac")
+
+
 @control_silo_test(
-    regions=create_test_regions("us", "eu", "acme", "de", "apac", single_tenants=["acme"]),
+    cells=display_order_cells,
+    localities=create_test_localities(display_order_cells, single_tenants={"acme"}),
     include_monolith_run=True,
 )
 @django_db_all
-def test_client_config_region_display_order():
+def test_client_config_region_display_order() -> None:
     request, user = make_user_request_from_org()
     request.user = user
 
     Factories.create_organization(slug="acme-co", owner=user)
     mapping = OrganizationMapping.objects.get(slug="acme-co")
-    mapping.update(region_name="acme")
+    mapping.update(cell_name="acme")
 
     result = get_client_config(request)
-    region_names = [region["name"] for region in result["regions"]]
-    assert region_names == ["us", "apac", "de", "eu", "acme"]
+    locality_names = [locality["name"] for locality in result["localities"]]
+    # single-tenants are not in the public list.
+    assert locality_names == ["us", "apac", "de", "eu"]
 
 
 @multiregion_client_config_test
 @django_db_all
-def test_client_config_links_with_priority_org():
+def test_client_config_links_with_priority_org() -> None:
     request, user = make_user_request_from_org()
     request.user = user
 
@@ -332,13 +392,13 @@ def test_client_config_links_with_priority_org():
     # we want the org context to have priority over the active org
     assert request.session["activeorg"] != org.slug
 
-    with override_settings(SILO_MODE=SiloMode.REGION, SENTRY_REGION="us"):
+    with override_settings(SILO_MODE=SiloMode.CELL, SENTRY_LOCAL_CELL="us"):
         result = get_client_config(request, org_context)
         assert result["links"]
         assert result["links"]["regionUrl"] == "http://us.testserver"
         assert result["links"]["organizationUrl"] == f"http://{org.slug}.testserver"
 
-    with override_settings(SILO_MODE=SiloMode.CONTROL, SENTRY_REGION=None):
+    with override_settings(SILO_MODE=SiloMode.CONTROL, SENTRY_LOCAL_CELL=None):
         result = get_client_config(request, org_context)
         assert result["links"]
         assert result["links"]["regionUrl"] == "http://us.testserver"
@@ -346,7 +406,7 @@ def test_client_config_links_with_priority_org():
 
 
 @django_db_all
-def test_project_key_default():
+def test_project_key_default() -> None:
     organization = Factories.create_organization(name="test-org")
     project = Factories.create_project(organization=organization)
     project_key = Factories.create_project_key(project)
@@ -358,7 +418,7 @@ def test_project_key_default():
 
 @no_silo_test
 @django_db_all
-def test_client_config_no_preload_data_if_accept_invitation_view():
+def test_client_config_no_preload_data_if_accept_invitation_view() -> None:
     request, user = make_user_request_from_org()
     request.user = user
 

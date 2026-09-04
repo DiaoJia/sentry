@@ -1,44 +1,53 @@
-import {useCallback} from 'react';
 import styled from '@emotion/styled';
 import type {Variants} from 'framer-motion';
 import {motion} from 'framer-motion';
 
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Link from 'sentry/components/links/link';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Container, Flex, Grid, type GridProps} from '@sentry/scraps/layout';
+import {Link, type LinkProps} from '@sentry/scraps/link';
+
+import {CreateSampleEventButton} from 'sentry/components/onboarding/createSampleEventButton';
+import {useOnboardingSidebar} from 'sentry/components/onboarding/useOnboardingSidebar';
 import {IconCheckmark} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import pulsingIndicatorStyles from 'sentry/styles/pulsingIndicator';
-import {space} from 'sentry/styles/space';
+import {pulsingIndicatorStyles} from 'sentry/styles/pulsingIndicator';
 import type {Group} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import testableTransition from 'sentry/utils/testableTransition';
-import CreateSampleEventButton from 'sentry/views/onboarding/createSampleEventButton';
-import {useOnboardingSidebar} from 'sentry/views/onboarding/useOnboardingSidebar';
+import {useExperiment} from 'sentry/utils/useExperiment';
 
-import GenericFooter from './genericFooter';
+import {GridFooter} from './genericFooter';
 
 interface FirstEventFooterProps {
   isLast: boolean;
   onClickSetupLater: () => void;
   organization: Organization;
   project: Project;
+  leading?: React.ReactNode;
 }
 
-export default function FirstEventFooter({
+export function FirstEventFooter({
   organization,
   project,
   onClickSetupLater,
   isLast,
+  leading,
 }: FirstEventFooterProps) {
   const {activateSidebar} = useOnboardingSidebar();
+  const {inExperiment: hasScmOnboarding} = useExperiment({
+    feature: 'onboarding-scm-experiment',
+    reportExposure: false,
+  });
 
   const {data: issues} = useApiQuery<Group[]>(
-    [`/projects/${organization.slug}/${project.slug}/issues/`],
+    [
+      getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/issues/', {
+        path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
+      }),
+    ],
     {
       staleTime: Infinity,
       enabled: !!project.firstEvent,
@@ -52,106 +61,108 @@ export default function FirstEventFooter({
 
   const source = 'targeted_onboarding_first_event_footer';
 
-  const getSecondaryCta = useCallback(() => {
-    // if hasn't sent first event, allow skiping.
-    // if last, no secondary cta
-    if (!project?.firstEvent && !isLast) {
-      return <Button onClick={onClickSetupLater}>{t('Next Platform')}</Button>;
-    }
-    return null;
-  }, [project?.firstEvent, isLast, onClickSetupLater]);
-
-  const getPrimaryCta = useCallback(() => {
-    // if hasn't sent first event, allow creation of sample error
-    if (!project?.firstEvent) {
-      return (
-        <CreateSampleEventButton
-          project={project}
-          source="targeted-onboarding"
-          priority="primary"
-        >
-          {t('View Sample Error')}
-        </CreateSampleEventButton>
-      );
-    }
-    return (
-      <LinkButton
-        onClick={() =>
-          trackAnalytics('growth.onboarding_take_to_error', {
-            organization: project.organization,
-            platform: project.platform,
-          })
-        }
-        to={`/organizations/${organization.slug}/issues/${
-          firstIssue && 'id' in firstIssue ? `${firstIssue.id}/` : ''
-        }?referrer=onboarding-first-event-footer`}
-        priority="primary"
-      >
-        {t('Take me to my error')}
-      </LinkButton>
-    );
-  }, [project, organization.slug, firstIssue]);
-
   return (
     <GridFooter>
-      <SkipOnboardingLink
-        onClick={() => {
-          trackAnalytics('growth.onboarding_clicked_skip', {
-            organization,
-            source,
-          });
-          activateSidebar({
-            userClicked: false,
-            source: 'targeted_onboarding_first_event_footer_skip',
-          });
-        }}
-        to={`/organizations/${organization.slug}/issues/?referrer=onboarding-first-event-footer-skip`}
-      >
-        {t('Skip Onboarding')}
-      </SkipOnboardingLink>
-      <StatusWrapper
-        initial="initial"
-        animate="animate"
-        exit="exit"
-        variants={{
-          initial: {opacity: 0, y: -10},
-          animate: {
-            opacity: 1,
-            y: 0,
-            transition: testableTransition({
-              when: 'beforeChildren',
-              staggerChildren: 0.35,
-            }),
-          },
-          exit: {opacity: 0, y: 10},
-        }}
-      >
-        {project?.firstEvent ? (
-          <IconCheckmark isCircled color="green400" />
-        ) : (
-          <WaitingIndicator
-            variants={indicatorAnimation}
-            transition={testableTransition()}
-          />
-        )}
-        <AnimatedText
-          errorReceived={!!project?.firstEvent}
-          variants={indicatorAnimation}
-          transition={testableTransition()}
+      {hasScmOnboarding ? (
+        <LeadingSlot>{leading}</LeadingSlot>
+      ) : (
+        <SkipOnboardingLink
+          onClick={() => {
+            trackAnalytics('growth.onboarding_clicked_skip', {
+              organization,
+              source,
+            });
+            activateSidebar({
+              userClicked: false,
+              source: 'targeted_onboarding_first_event_footer_skip',
+            });
+          }}
+          to={`/organizations/${organization.slug}/issues/?referrer=onboarding-first-event-footer-skip`}
         >
-          {project?.firstEvent ? t('Error Received') : t('Waiting for error')}
-        </AnimatedText>
-      </StatusWrapper>
-      <OnboardingButtonBar gap={2}>
-        {getSecondaryCta()}
-        {getPrimaryCta()}
+          {t('Skip Onboarding')}
+        </SkipOnboardingLink>
+      )}
+      <Flex align="center" justify="center" display={{zero: 'none', xl: 'flex'}}>
+        {flexProps => (
+          <motion.div
+            {...flexProps}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            variants={{
+              initial: {opacity: 0, y: -10},
+              animate: {
+                opacity: 1,
+                y: 0,
+                transition: {
+                  when: 'beforeChildren',
+                  staggerChildren: 0.35,
+                },
+              },
+              exit: {opacity: 0, y: 10},
+            }}
+          >
+            {project.firstEvent ? (
+              <IconCheckmark variant="success" />
+            ) : (
+              <WaitingIndicator variants={indicatorAnimation} />
+            )}
+            <AnimatedText
+              errorReceived={!!project.firstEvent}
+              variants={indicatorAnimation}
+            >
+              {project.firstEvent ? t('Error Received') : t('Waiting for error')}
+            </AnimatedText>
+          </motion.div>
+        )}
+      </Flex>
+      <OnboardingButtonBar>
+        {/* if hasn't sent first event, allow skipping. if last, no secondary cta */}
+        {!project.firstEvent && !isLast ? (
+          <Button onClick={onClickSetupLater}>{t('Next Platform')}</Button>
+        ) : null}
+        {/* if hasn't sent first event, allow creation of sample error */}
+        {project.firstEvent ? (
+          <LinkButton
+            onClick={() => {
+              if (hasScmOnboarding) {
+                trackAnalytics('onboarding.scm_take_to_error_clicked', {
+                  organization,
+                  platform: project.platform,
+                });
+              } else {
+                trackAnalytics('growth.onboarding_take_to_error', {
+                  organization,
+                  platform: project.platform,
+                });
+              }
+            }}
+            to={`/organizations/${organization.slug}/issues/${
+              firstIssue && 'id' in firstIssue ? `${firstIssue.id}/` : ''
+            }?referrer=onboarding-first-event-footer`}
+            variant="primary"
+          >
+            {t('Take me to my error')}
+          </LinkButton>
+        ) : (
+          <CreateSampleEventButton
+            project={project}
+            source="targeted-onboarding"
+            variant="primary"
+            hasScmOnboarding={hasScmOnboarding}
+          >
+            {t('View Sample Error')}
+          </CreateSampleEventButton>
+        )}
       </OnboardingButtonBar>
     </GridFooter>
   );
 }
 
-const OnboardingButtonBar = styled(ButtonBar)`
-  margin: ${space(2)} ${space(4)};
+const OnboardingButtonBar = styled((props: GridProps) => (
+  <Grid flow="column" align="center" gap="xl" {...props} />
+))`
+  margin: ${p => p.theme.space.xl} ${p => p.theme.space['3xl']};
   justify-self: end;
   margin-left: auto;
 `;
@@ -159,8 +170,10 @@ const OnboardingButtonBar = styled(ButtonBar)`
 const AnimatedText = styled(motion.div, {
   shouldForwardProp: prop => prop !== 'errorReceived',
 })<{errorReceived: boolean}>`
-  margin-left: ${space(1)};
-  color: ${p => (p.errorReceived ? p.theme.successText : p.theme.pink400)};
+  margin-left: ${p => p.theme.space.md};
+  font-size: ${p => p.theme.font.size.md};
+  color: ${p =>
+    p.errorReceived ? p.theme.tokens.content.success : p.theme.colors.pink500};
 `;
 
 const indicatorAnimation: Variants = {
@@ -171,34 +184,23 @@ const indicatorAnimation: Variants = {
 
 const WaitingIndicator = styled(motion.div)`
   ${pulsingIndicatorStyles};
-  background-color: ${p => p.theme.pink300};
+  background-color: ${p => p.theme.colors.pink400};
 `;
 
-const StatusWrapper = styled(motion.div)`
+const LeadingSlot = styled('div')`
   display: flex;
   align-items: center;
-  font-size: ${p => p.theme.fontSize.md};
-  justify-content: center;
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    display: none;
-  }
+  margin: auto ${p => p.theme.space['3xl']};
 `;
 
-const SkipOnboardingLink = styled(Link)`
-  margin: auto ${space(4)};
-  white-space: nowrap;
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    display: none;
-  }
-`;
-
-const GridFooter = styled(GenericFooter)`
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    display: flex;
-    flex-direction: row;
-    justify-content: end;
-  }
-`;
+function SkipOnboardingLink(props: LinkProps) {
+  return (
+    <Container
+      display={{zero: 'none', xl: 'block'}}
+      margin="auto 3xl"
+      whiteSpace="nowrap"
+    >
+      {containerProps => <Link {...containerProps} {...props} />}
+    </Container>
+  );
+}

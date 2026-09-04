@@ -1,11 +1,12 @@
 import type {GridComponentOption} from 'echarts';
 import merge from 'lodash/merge';
+
 /**
  * Drawing grid in rectangular coordinates
  *
  * e.g. alignment of your chart?
  */
-export default function Grid(props: GridComponentOption = {}): GridComponentOption {
+export function Grid(props: GridComponentOption = {}): GridComponentOption {
   return merge(
     {
       top: 20,

@@ -1,25 +1,39 @@
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
+from sentry.models.project import Project
+from sentry.sentry_apps.services.legacy_webhook.service import is_legacy_webhook_enabled
 from sentry.workflow_engine.models.action import Action
-from sentry.workflow_engine.typings.notification_action import issue_alert_action_translator_mapping
+from sentry.workflow_engine.typings.notification_action import (
+    NotifyEventActionTranslator,
+    issue_alert_action_translator_mapping,
+)
 
 logger = logging.getLogger(__name__)
 
 
+class NotificationActionData(TypedDict):
+    type: str
+    data: dict[str, Any]
+    integration_id: int | None
+    config: dict[str, str | int | None]
+
+
 def translate_rule_data_actions_to_notification_actions(
-    actions: list[dict[str, Any]], skip_failures: bool
-) -> list[Action]:
+    actions: list[dict[str, Any]], skip_failures: bool, project: Project | None = None
+) -> list[NotificationActionData]:
     """
     Builds notification actions from action field in Rule's data blob.
     Will only create actions that are valid, and log any errors.
 
     :param actions: list of action data (Rule.data.actions)
     :param skip_failures: if True, invalid actions will be skipped instead of raising exceptions
+    :param project: the project the rule belongs to; used to gate the legacy NotifyEventAction
+        dual-write on whether the project has the legacy webhook enabled
     :return: list of notification actions (Action)
     """
 
-    notification_actions: list[Action] = []
+    notification_actions: list[NotificationActionData] = []
 
     for action in actions:
         # Fetch the registry ID
@@ -51,6 +65,13 @@ def translate_rule_data_actions_to_notification_actions(
                 f"Action translator not found for action with registry ID: {registry_id}, uuid: {action.get('uuid')}"
             ) from e
 
+        # NotifyEventAction delivers legacy webhooks; skip it unless the project has them enabled so
+        # we don't persist a dead action.
+        if isinstance(translator, NotifyEventActionTranslator) and not (
+            project is not None and is_legacy_webhook_enabled(project)
+        ):
+            continue
+
         # Check if the action is well-formed
         if not translator.is_valid():
             logger.error(
@@ -68,14 +89,14 @@ def translate_rule_data_actions_to_notification_actions(
             )
 
         try:
-            notification_action = Action(
-                type=translator.action_type,
-                data=translator.get_sanitized_data(),
-                integration_id=translator.integration_id,
-                config=translator.action_config,
-            )
+            notification_action_data: NotificationActionData = {
+                "type": translator.action_type,
+                "data": translator.get_sanitized_data(),
+                "integration_id": translator.integration_id,
+                "config": translator.action_config,
+            }
 
-            notification_actions.append(notification_action)
+            notification_actions.append(notification_action_data)
         except Exception as e:
             if not skip_failures:
                 raise
@@ -88,7 +109,7 @@ def translate_rule_data_actions_to_notification_actions(
 
 
 def build_notification_actions_from_rule_data_actions(
-    actions: list[dict[str, Any]], is_dry_run: bool = False
+    actions: list[dict[str, Any]], is_dry_run: bool = False, project: Project | None = None
 ) -> list[Action]:
     """
     Builds notification actions from action field in Rule's data blob.
@@ -100,12 +121,15 @@ def build_notification_actions_from_rule_data_actions(
 
     :param actions: list of action data (Rule.data.actions)
     :param is_dry_run: run in dry-run mode
+    :param project: the project the rule belongs to; used to gate the legacy NotifyEventAction
+        dual-write on whether the project has the legacy webhook enabled
     :return: list of notification actions (Action)
     """
 
-    notification_actions = translate_rule_data_actions_to_notification_actions(
-        actions, skip_failures=not is_dry_run
+    notification_actions_data = translate_rule_data_actions_to_notification_actions(
+        actions, skip_failures=not is_dry_run, project=project
     )
+    notification_actions = [Action(**action_data) for action_data in notification_actions_data]
 
     # Create the actions if not a dry run
     if not is_dry_run:

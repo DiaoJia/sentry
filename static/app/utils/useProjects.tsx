@@ -2,13 +2,14 @@ import {useEffect, useRef, useState} from 'react';
 import uniqBy from 'lodash/uniqBy';
 
 import type {Client} from 'sentry/api';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
 import type {AvatarProject, Project} from 'sentry/types/project';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 type ProjectPlaceholder = AvatarProject;
 
@@ -127,10 +128,15 @@ async function fetchProjects(
 
   let hasMore: null | boolean = false;
   let nextCursor: null | string = null;
-  const [data, , resp] = await api.requestPromise(`/organizations/${orgId}/projects/`, {
-    includeAllArgs: true,
-    query,
-  });
+  const [data, , resp] = await api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/projects/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
+    {
+      includeAllArgs: true,
+      query,
+    }
+  );
 
   const pageLinks = resp?.getResponseHeader('Link');
   if (pageLinks) {
@@ -152,7 +158,7 @@ async function fetchProjects(
  * NOTE: Currently ALL projects are always loaded, but this hook is designed
  * for future-compat in a world where we do _not_ load all projects.
  */
-function useProjects({limit, slugs, orgId: propOrgId}: Options = {}) {
+export function useProjects({limit, slugs, orgId: propOrgId}: Options = {}) {
   const api = useApi();
 
   const organization = useOrganization({allowNull: true});
@@ -222,7 +228,7 @@ function useProjects({limit, slugs, orgId: propOrgId}: Options = {}) {
         ...prev,
         fetching: false,
         initiallyLoaded: !store.loading,
-        fetchError: err,
+        fetchError: err as RequestError,
       }));
     }
   }
@@ -269,7 +275,7 @@ function useProjects({limit, slugs, orgId: propOrgId}: Options = {}) {
     } catch (err) {
       console.error(err); // eslint-disable-line no-console
 
-      setState(prev => ({...prev, fetching: false, fetchError: err}));
+      setState(prev => ({...prev, fetching: false, fetchError: err as RequestError}));
     }
   }
 
@@ -319,5 +325,3 @@ function useProjects({limit, slugs, orgId: propOrgId}: Options = {}) {
 
   return result;
 }
-
-export default useProjects;

@@ -1,23 +1,23 @@
 import {Fragment} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
 import {BarChart} from 'sentry/components/charts/barChart';
 import type {DateTimeObject} from 'sentry/components/charts/utils';
-import CollapsePanel, {COLLAPSE_COUNT} from 'sentry/components/collapsePanel';
-import LoadingError from 'sentry/components/loadingError';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import Placeholder from 'sentry/components/placeholder';
+import {COLLAPSE_COUNT, CollapsePanel} from 'sentry/components/collapsePanel';
+import {LoadingError} from 'sentry/components/loadingError';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {Placeholder} from 'sentry/components/placeholder';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconArrow} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {formatPercentage} from 'sentry/utils/number/formatPercentage';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import type {ColorOrAlias} from 'sentry/utils/theme';
 
-import {ProjectBadge, ProjectBadgeContainer} from './styles';
+import {ProjectBadge, ProjectBadgeContainer, TeamInsightsTable} from './styles';
 import {
   barAxisLabel,
   convertDayValueObjectToSeries,
@@ -45,6 +45,7 @@ export function TeamUnresolvedIssues({
   utc,
   environment,
 }: TeamUnresolvedIssuesProps) {
+  const theme = useTheme();
   const {
     data: periodIssues = {},
     isPending,
@@ -52,7 +53,9 @@ export function TeamUnresolvedIssues({
     refetch,
   } = useApiQuery<ProjectReleaseCount>(
     [
-      `/teams/${organization.slug}/${teamSlug}/all-unresolved-issues/`,
+      getApiUrl('/teams/$organizationIdOrSlug/$teamIdOrSlug/all-unresolved-issues/', {
+        path: {organizationIdOrSlug: organization.slug, teamIdOrSlug: teamSlug},
+      }),
       {
         query: {
           ...normalizeDateTimeParams({start, end, period, utc}),
@@ -105,7 +108,7 @@ export function TeamUnresolvedIssues({
     )
   );
   // Total by day for all projects
-  const totalByDay = allData.reduce(
+  const totalByDay = allData.reduce<Record<string, number>>(
     (acc, [bucket, unresolved]) => {
       if (acc[bucket] === undefined) {
         acc[bucket] = 0;
@@ -113,7 +116,7 @@ export function TeamUnresolvedIssues({
       acc[bucket] += unresolved;
       return acc;
     },
-    {} as Record<string, number>
+    {}
   );
 
   const seriesData = sortSeriesByDay(convertDayValueObjectToSeries(totalByDay));
@@ -148,62 +151,78 @@ export function TeamUnresolvedIssues({
       <CollapsePanel items={groupedProjects.length}>
         {({isExpanded, showMoreButton}) => (
           <Fragment>
-            <StyledPanelTable
-              isEmpty={projects.length === 0}
-              isLoading={isPending}
-              headers={[
-                t('Project'),
-                <RightAligned key="last">
-                  {tct('Last [period] Average', {period})}
-                </RightAligned>,
-                <RightAligned key="curr">{t('Today')}</RightAligned>,
-                <RightAligned key="diff">{t('Change')}</RightAligned>,
-              ]}
+            <StyledSimpleTable
+              header={
+                <SimpleTable.HeaderRow>
+                  <SimpleTable.HeaderCell>{t('Project')}</SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell>
+                    <RightAligned>{tct('Last [period] Average', {period})}</RightAligned>
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell>
+                    <RightAligned>{t('Today')}</RightAligned>
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell>
+                    <RightAligned>{t('Change')}</RightAligned>
+                  </SimpleTable.HeaderCell>
+                </SimpleTable.HeaderRow>
+              }
             >
-              {groupedProjects.map(({project}, idx) => {
-                const totals = projectTotals[project.id] ?? {
-                  percentChange: 0,
-                  periodAvg: undefined,
-                  projectId: undefined,
-                  today: undefined,
-                };
+              {isPending && <SimpleTable.Loading />}
+              {!isPending && projects.length === 0 && (
+                <SimpleTable.Empty>
+                  {t('There are no items to display')}
+                </SimpleTable.Empty>
+              )}
+              {!isPending &&
+                groupedProjects.map(({project}, idx) => {
+                  const totals = projectTotals[project.id] ?? {
+                    percentChange: 0,
+                    periodAvg: undefined,
+                    projectId: undefined,
+                    today: undefined,
+                  };
 
-                if (idx >= COLLAPSE_COUNT && !isExpanded) {
-                  return null;
-                }
+                  if (idx >= COLLAPSE_COUNT && !isExpanded) {
+                    return null;
+                  }
 
-                return (
-                  <Fragment key={project.id}>
-                    <ProjectBadgeContainer>
-                      <ProjectBadge avatarSize={18} project={project} />
-                    </ProjectBadgeContainer>
-
-                    <ScoreWrapper>{totals.periodAvg}</ScoreWrapper>
-                    <ScoreWrapper>{totals.today}</ScoreWrapper>
-                    <ScoreWrapper>
-                      <SubText
-                        color={
-                          totals.percentChange === 0
-                            ? 'subText'
-                            : totals.percentChange > 0
-                              ? 'errorText'
-                              : 'successText'
-                        }
-                      >
-                        {formatPercentage(
-                          Number.isNaN(totals.percentChange) ? 0 : totals.percentChange,
-                          0
-                        )}
-                        <PaddedIconArrow
-                          direction={totals.percentChange > 0 ? 'up' : 'down'}
-                          size="xs"
-                        />
-                      </SubText>
-                    </ScoreWrapper>
-                  </Fragment>
-                );
-              })}
-            </StyledPanelTable>
+                  return (
+                    <SimpleTable.Row key={project.id}>
+                      <SimpleTable.RowCell>
+                        <ProjectBadgeContainer>
+                          <ProjectBadge avatarSize={18} project={project} />
+                        </ProjectBadgeContainer>
+                      </SimpleTable.RowCell>
+                      <SimpleTable.RowCell justify="end">
+                        {totals.periodAvg}
+                      </SimpleTable.RowCell>
+                      <SimpleTable.RowCell justify="end">
+                        {totals.today}
+                      </SimpleTable.RowCell>
+                      <SimpleTable.RowCell justify="end">
+                        <SubText
+                          color={
+                            totals.percentChange === 0
+                              ? theme.tokens.content.secondary
+                              : totals.percentChange > 0
+                                ? theme.tokens.content.danger
+                                : theme.tokens.content.success
+                          }
+                        >
+                          {formatPercentage(
+                            Number.isNaN(totals.percentChange) ? 0 : totals.percentChange,
+                            0
+                          )}
+                          <PaddedIconArrow
+                            direction={totals.percentChange > 0 ? 'up' : 'down'}
+                            size="xs"
+                          />
+                        </SubText>
+                      </SimpleTable.RowCell>
+                    </SimpleTable.Row>
+                  );
+                })}
+            </StyledSimpleTable>
             {!isPending && showMoreButton}
           </Fragment>
         )}
@@ -213,38 +232,22 @@ export function TeamUnresolvedIssues({
 }
 
 const ChartWrapper = styled('div')`
-  padding: ${space(2)} ${space(2)} 0 ${space(2)};
-  border-bottom: 1px solid ${p => p.theme.border};
+  padding: ${p => p.theme.space.xl} ${p => p.theme.space.xl} 0 ${p => p.theme.space.xl};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
 `;
 
-const StyledPanelTable = styled(PanelTable)`
+const StyledSimpleTable = styled(TeamInsightsTable)`
   grid-template-columns: 1fr 0.2fr 0.2fr 0.2fr;
-  white-space: nowrap;
-  margin-bottom: 0;
-  border: 0;
-  font-size: ${p => p.theme.fontSize.md};
-  box-shadow: unset;
-
-  & > div {
-    padding: ${space(1)} ${space(2)};
-  }
 `;
 
 const RightAligned = styled('span')`
   text-align: right;
 `;
 
-const ScoreWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  text-align: right;
-`;
-
 const PaddedIconArrow = styled(IconArrow)`
-  margin: 0 ${space(0.5)};
+  margin: 0 ${p => p.theme.space.xs};
 `;
 
-const SubText = styled('div')<{color: ColorOrAlias}>`
-  color: ${p => p.theme[p.color]};
+const SubText = styled('div')<{color: string}>`
+  color: ${p => p.color};
 `;

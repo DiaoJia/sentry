@@ -3,14 +3,10 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {BillingConfigFixture} from 'getsentry-test/fixtures/billingConfig';
 import {PlanDetailsLookupFixture} from 'getsentry-test/fixtures/planDetailsLookup';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
-import {makeTestQueryClient} from 'sentry-test/queryClient';
-import {renderHook, waitFor} from 'sentry-test/reactTestingLibrary';
+import {PlanTier} from 'getsentry-test/planTier';
+import {renderHookWithProviders, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import {QueryClientProvider} from 'sentry/utils/queryClient';
-
-import {PlanTier} from 'getsentry/types';
-
-import useUpgradeNowParams from './useUpgradeNowParams';
+import {useUpgradeNowParams} from './useUpgradeNowParams';
 
 const teamPlan = PlanDetailsLookupFixture('am2_team');
 const mockAM2BillingConfig = BillingConfigFixture(PlanTier.AM2);
@@ -30,16 +26,11 @@ describe('useUpgradeNowParams', () => {
       body: mockAM2BillingConfig,
     });
 
-    const {result} = renderHook(useUpgradeNowParams, {
+    const {result} = renderHookWithProviders(useUpgradeNowParams, {
       initialProps: {
         organization,
         subscription,
       },
-      wrapper: ({children}) => (
-        <QueryClientProvider client={makeTestQueryClient()}>
-          {children}
-        </QueryClientProvider>
-      ),
     });
 
     expect(billingConfigRequest).toHaveBeenCalledTimes(1);
@@ -61,6 +52,13 @@ describe('useUpgradeNowParams', () => {
           reservedUptime: 1,
           reservedProfileDuration: 0,
           reservedProfileDurationUI: 0,
+          reservedLogBytes: 5,
+          reservedSpans: undefined,
+          reservedSeerAutofix: 0,
+          reservedSeerScanner: 0,
+          reservedSeerUsers: 0,
+          reservedSizeAnalyses: 100,
+          reservedTraceMetricBytes: undefined,
         },
       })
     );

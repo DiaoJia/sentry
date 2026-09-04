@@ -1,10 +1,11 @@
 import {useCallback, useRef} from 'react';
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
+import {Button} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+
 import {IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {useRefChildrenVisibility} from 'sentry/utils/useRefChildrenVisibility';
 
 interface CarouselProps {
@@ -23,7 +24,7 @@ interface CarouselProps {
   visibleRatio?: number;
 }
 
-function Carousel({children, visibleRatio = 0.8}: CarouselProps) {
+export function Carousel({children, visibleRatio = 0.8}: CarouselProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const {visibility, childrenEls} = useRefChildrenVisibility({
     children,
@@ -55,7 +56,7 @@ function Carousel({children, visibleRatio = 0.8}: CarouselProps) {
   );
 
   return (
-    <CarouselContainer>
+    <Container margin="2xs" position="relative">
       <CarouselItems ref={scrollContainerRef}>{children}</CarouselItems>
       {!isAtStart && (
         <StyledArrowButton
@@ -73,17 +74,9 @@ function Carousel({children, visibleRatio = 0.8}: CarouselProps) {
           icon={<IconArrow direction="right" />}
         />
       )}
-    </CarouselContainer>
+    </Container>
   );
 }
-
-const CarouselContainer = styled('div')`
-  position: relative;
-  /* We provide some margin to make room for the scroll bar. It is applied on
-   * the top and bottom for consistency.
-   */
-  margin: ${space(0.25)};
-`;
 
 const CarouselItems = styled('div')`
   display: flex;
@@ -92,21 +85,19 @@ const CarouselItems = styled('div')`
   /* We provide some margin to make room for the scroll bar. It is applied on
    * the top and bottom for consistency.
    */
-  padding: ${space(1.5)} 0;
+  padding: ${p => p.theme.space.lg} 0;
 `;
 
 const StyledArrowButton = styled(Button)<{direction: string}>`
   position: absolute;
-  ${p => (p.direction === 'left' ? `left: 0;` : `right: 0;`)}
+  ${p => (p.direction === 'left' ? 'left: 0;' : 'right: 0;')}
   top: 0;
   bottom: 0;
   height: 36px;
   width: 36px;
   border-radius: 50%;
-  border: 1px solid ${p => p.theme.border};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
   padding: 0;
   margin: auto;
-  background-color: ${p => p.theme.background};
+  background-color: ${p => p.theme.tokens.background.primary};
 `;
-
-export default Carousel;

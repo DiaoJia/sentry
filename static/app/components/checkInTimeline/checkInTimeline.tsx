@@ -1,8 +1,9 @@
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {DateTime} from 'sentry/components/dateTime';
+import {Container} from '@sentry/scraps/layout';
+import type {TooltipProps} from '@sentry/scraps/tooltip';
+
 import {tn} from 'sentry/locale';
 
 import {getAggregateStatus} from './utils/getAggregateStatus';
@@ -24,14 +25,15 @@ interface CheckInTimelineConfig<Status extends string> {
   /**
    * Configures the styling of the tooltip labels
    */
-  statusStyle: Record<Status, TickStyle>;
+  statusStyle: TickStyle<Status>;
   timeWindowConfig: TimeWindowConfig;
   className?: string;
   style?: React.CSSProperties;
 }
 
-interface CheckInTimelineProps<Status extends string>
-  extends CheckInTimelineConfig<Status> {
+interface CheckInTimelineProps<
+  Status extends string,
+> extends CheckInTimelineConfig<Status> {
   /**
    * Represents each check-in tick as bucketed check-in data.
    */
@@ -42,15 +44,12 @@ interface CheckInTimelineProps<Status extends string>
    * Defaults to 'check-ins'
    */
   makeUnit?: (count: number) => React.ReactNode;
-}
 
-function getBucketedCheckInsPosition(
-  timestamp: number,
-  timelineStart: Date,
-  msPerPixel: number
-) {
-  const elapsedSinceStart = new Date(timestamp).getTime() - timelineStart.getTime();
-  return elapsedSinceStart / msPerPixel;
+  /**
+   * Extra props to pass to the Tooltip component,
+   * Title is determined by the CheckInTooltip component
+   */
+  tooltipProps?: Omit<TooltipProps, 'title' | 'skipWrapper'>;
 }
 
 export function CheckInTimeline<Status extends string>({
@@ -62,6 +61,7 @@ export function CheckInTimeline<Status extends string>({
   className,
   style,
   makeUnit = count => tn('check-in', 'check-ins', count),
+  tooltipProps,
 }: CheckInTimelineProps<Status>) {
   const jobTicks = mergeBuckets(
     statusPrecedent,
@@ -70,7 +70,15 @@ export function CheckInTimeline<Status extends string>({
   );
 
   return (
-    <TimelineContainer role="figure" className={className} style={style}>
+    <Container
+      width="100%"
+      height="14px"
+      overflow="hidden"
+      position="relative"
+      role="figure"
+      className={className}
+      style={style}
+    >
       {jobTicks.map(jobTick => {
         const {left, startTs, width, stats, isStarting, isEnding} = jobTick;
 
@@ -85,6 +93,7 @@ export function CheckInTimeline<Status extends string>({
             skipWrapper
             key={startTs}
             makeUnit={makeUnit}
+            {...tooltipProps}
           >
             <JobTick
               style={{left, width}}
@@ -96,63 +105,9 @@ export function CheckInTimeline<Status extends string>({
           </CheckInTooltip>
         );
       })}
-    </TimelineContainer>
+    </Container>
   );
 }
-
-interface MockCheckInTimelineProps<Status extends string>
-  extends CheckInTimelineConfig<Status> {
-  mockTimestamps: Date[];
-  /**
-   * The status to use for each mocked tick
-   */
-  status: Status;
-}
-
-export function MockCheckInTimeline<Status extends string>({
-  mockTimestamps,
-  timeWindowConfig,
-  status,
-  statusStyle,
-}: MockCheckInTimelineProps<Status>) {
-  const {start, end} = timeWindowConfig;
-  const elapsedMs = end.getTime() - start.getTime();
-  const msPerPixel = elapsedMs / timeWindowConfig.timelineWidth;
-
-  return (
-    <TimelineContainer>
-      {mockTimestamps.map(ts => {
-        const timestampMs = ts.getTime();
-        const left = getBucketedCheckInsPosition(timestampMs, start, msPerPixel);
-
-        return (
-          <Tooltip
-            key={left}
-            title={
-              <DateTime date={timestampMs} format={timeWindowConfig.dateLabelFormat} />
-            }
-            skipWrapper
-          >
-            <JobTick
-              style={{left}}
-              css={theme => getTickStyle(statusStyle, status, theme)}
-              roundedLeft
-              roundedRight
-              data-test-id="monitor-checkin-tick"
-            />
-          </Tooltip>
-        );
-      })}
-    </TimelineContainer>
-  );
-}
-
-const TimelineContainer = styled('div')`
-  position: relative;
-  height: 14px;
-  width: 100%;
-  overflow: hidden;
-`;
 
 const JobTick = styled('div')<{
   roundedLeft: boolean;
@@ -161,14 +116,13 @@ const JobTick = styled('div')<{
   position: absolute;
   width: 4px;
   height: 14px;
-  opacity: 0.7;
 
   ${p =>
     p.roundedLeft &&
     css`
       border-top-left-radius: 2px;
       border-bottom-left-radius: 2px;
-    `};
+    `}
   ${p =>
     p.roundedRight &&
     css`
@@ -179,10 +133,10 @@ const JobTick = styled('div')<{
     !p.roundedLeft &&
     css`
       border-left-width: 0;
-    `};
+    `}
   ${p =>
     !p.roundedRight &&
     css`
       border-right-width: 0;
-    `};
+    `}
 `;

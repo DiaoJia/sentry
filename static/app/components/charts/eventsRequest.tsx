@@ -5,7 +5,7 @@ import omitBy from 'lodash/omitBy';
 import {doEventsRequest} from 'sentry/actionCreators/events';
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import LoadingPanel from 'sentry/components/charts/loadingPanel';
+import {LoadingPanel} from 'sentry/components/charts/loadingPanel';
 import {
   canIncludePreviousPeriod,
   getPreviousSeriesName,
@@ -20,12 +20,11 @@ import type {
   MultiSeriesEventsStats,
   OrganizationSummary,
 } from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {DURATION_UNITS, SIZE_UNITS} from 'sentry/utils/discover/fieldRenderers';
-import type {AggregationOutputType} from 'sentry/utils/discover/fields';
+import type {AggregationOutputType, DataUnit} from 'sentry/utils/discover/fields';
 import {getAggregateAlias, stripEquationPrefix} from 'sentry/utils/discover/fields';
 import type {DiscoverDatasets} from 'sentry/utils/discover/types';
-import type {QueryBatching} from 'sentry/utils/performance/contexts/genericQueryBatcher';
 import type {SamplingMode} from 'sentry/views/explore/hooks/useProgressiveQuery';
 
 type TimeSeriesData = {
@@ -39,6 +38,7 @@ type TimeSeriesData = {
   // timeseries data
   timeseriesData?: Series[];
   timeseriesResultsTypes?: Record<string, AggregationOutputType>;
+  timeseriesResultsUnits?: Record<string, DataUnit>;
   timeseriesTotals?: {count: number};
   yAxis?: string | string[];
 };
@@ -152,6 +152,10 @@ type EventsRequestPartialProps = {
    */
   expired?: boolean;
   /**
+   * The extrapolation mode to apply to the EAP
+   */
+  extrapolationMode?: string;
+  /**
    * List of fields to group with when doing a topEvents request.
    */
   field?: string[];
@@ -184,10 +188,6 @@ type EventsRequestPartialProps = {
    * List of project ids to query
    */
   project?: readonly number[];
-  /**
-   * A container for query batching data and functions.
-   */
-  queryBatching?: QueryBatching;
   /**
    * Extra query parameters to be added.
    */
@@ -223,10 +223,6 @@ type EventsRequestPartialProps = {
    */
   useOnDemandMetrics?: boolean;
   /**
-   * Whether or not to zerofill results
-   */
-  withoutZerofill?: boolean;
-  /**
    * The yAxis being plotted. If multiple yAxis are requested,
    * the child render function will be called with `results`
    */
@@ -234,15 +230,13 @@ type EventsRequestPartialProps = {
 };
 
 interface EventsRequestPropsWithTimeAggregation
-  extends DefaultProps,
-    EventsRequestPartialProps {
+  extends DefaultProps, EventsRequestPartialProps {
   includeTimeAggregation: true;
   timeAggregationSeriesName: string;
 }
 
 interface EventsRequestPropsWithoutTimeAggregation
-  extends DefaultProps,
-    EventsRequestPartialProps {
+  extends DefaultProps, EventsRequestPartialProps {
   includeTimeAggregation?: false;
   timeAggregationSeriesName?: undefined;
 }
@@ -264,13 +258,12 @@ const propNamesToIgnore = [
   'children',
   'organization',
   'loading',
-  'queryBatching',
   'generatePathname',
 ];
 const omitIgnoredProps = (props: EventsRequestProps) =>
   omitBy(props, (_value, key) => propNamesToIgnore.includes(key));
 
-class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState> {
+export class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState> {
   static defaultProps: DefaultProps = {
     period: undefined,
     start: null,
@@ -338,7 +331,7 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
       try {
         api.clear();
         timeseriesData = await doEventsRequest<false>(api, props);
-      } catch (resp) {
+      } catch (resp: any) {
         if (resp?.responseJSON?.detail) {
           errorMessage = resp.responseJSON.detail;
         } else {
@@ -524,7 +517,7 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
       // Convert the timeseries data into a multi-series result set.
       // As the server will have replied with a map like:
       // {[titleString: string]: EventsStats}
-      let timeframe: {end: number; start: number} | undefined = undefined;
+      let timeframe: {end: number; start: number} | undefined;
       const seriesAdditionalInfo: Record<string, AdditionalSeriesInfo> = {};
       const sortedTimeseriesData = Object.keys(timeseriesData)
         .map(
@@ -532,7 +525,7 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
             seriesName: string,
             index: number
           ): [number, Series, Series | null, AdditionalSeriesInfo] => {
-            const seriesData: EventsStats = timeseriesData[seriesName]!;
+            const seriesData = timeseriesData[seriesName]!;
             const processedData = this.processData(
               seriesData,
               index,
@@ -556,21 +549,27 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
         )
         .sort((a, b) => a[0] - b[0]);
       const timeseriesResultsTypes: Record<string, AggregationOutputType> = {};
+      const timeseriesResultsUnits: Record<string, DataUnit> = {};
       Object.keys(timeseriesData).forEach(key => {
-        const fieldsMeta = timeseriesData[key]!.meta?.fields[getAggregateAlias(key)];
+        const alias = getAggregateAlias(key);
+        const fieldsMeta =
+          timeseriesData[key]!.meta?.fields?.[key] ??
+          timeseriesData[key]!.meta?.fields?.[alias];
         if (fieldsMeta) {
           timeseriesResultsTypes[key] = fieldsMeta;
+        }
+        const unitsMeta = timeseriesData[key]!.meta?.units?.[alias];
+        if (unitsMeta) {
+          timeseriesResultsUnits[key] = unitsMeta as DataUnit;
         }
       });
       const results: Series[] = sortedTimeseriesData.map(item => {
         return item[1];
       });
-      const previousTimeseriesData: Series[] | undefined = sortedTimeseriesData.some(
-        item => item[2] === null
-      )
+      const previousTimeseriesData = sortedTimeseriesData.some(item => item[2] === null)
         ? undefined
         : sortedTimeseriesData.map(item => {
-            return item[2] as Series;
+            return item[2]!;
           });
 
       return children({
@@ -583,6 +582,7 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
         previousTimeseriesData,
         seriesAdditionalInfo,
         timeseriesResultsTypes,
+        timeseriesResultsUnits,
         // sometimes we want to reference props that were given to EventsRequest
         ...props,
       });
@@ -590,10 +590,19 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
     if (timeseriesData) {
       const yAxisKey = yAxis && (typeof yAxis === 'string' ? yAxis : yAxis[0]);
       const yAxisFieldType =
-        yAxisKey && timeseriesData.meta?.fields[getAggregateAlias(yAxisKey)];
+        yAxisKey &&
+        (timeseriesData.meta?.fields[getAggregateAlias(yAxisKey)] ||
+          timeseriesData.meta?.fields[yAxisKey]);
       const timeseriesResultsTypes = yAxisFieldType
         ? {[yAxisKey]: yAxisFieldType}
         : undefined;
+      const yAxisAlias = yAxisKey && getAggregateAlias(yAxisKey);
+      const yAxisUnit =
+        yAxisAlias &&
+        (timeseriesData.meta?.units?.[yAxisAlias] ??
+          timeseriesData.meta?.units?.[yAxisKey]);
+      const timeseriesResultsUnits =
+        yAxisKey && yAxisUnit ? {[yAxisKey]: yAxisUnit as DataUnit} : undefined;
       const {
         data: transformedTimeseriesData,
         comparisonData: transformedComparisonTimeseriesData,
@@ -635,6 +644,7 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
         timeAggregatedData,
         timeframe,
         timeseriesResultsTypes,
+        timeseriesResultsUnits,
         // sometimes we want to reference props that were given to EventsRequest
         ...props,
       });
@@ -648,19 +658,19 @@ class EventsRequest extends PureComponent<EventsRequestProps, EventsRequestState
     });
   }
 }
-export default EventsRequest;
 
 /**
  * Transforms query response into timeseries data to be used in a chart
  */
-export function transformTimeseriesData(
+function transformTimeseriesData(
   data: EventsStatsData,
   meta: EventsStats['meta'],
   seriesName?: string
 ): Series[] {
   let scale = 1;
   if (seriesName) {
-    const unit = meta?.units?.[getAggregateAlias(seriesName)];
+    const unit =
+      meta?.units?.[seriesName] ?? meta?.units?.[getAggregateAlias(seriesName)];
     // Scale series values to milliseconds or bytes depending on units from meta
     scale =
       ((unit &&
@@ -682,7 +692,7 @@ export function transformTimeseriesData(
 /**
  * Transforms comparisonCount in query response into timeseries data to be used in a comparison chart for change alerts
  */
-export function transformComparisonTimeseriesData(data: EventsStatsData): Series[] {
+function transformComparisonTimeseriesData(data: EventsStatsData): Series[] {
   return [
     {
       seriesName: 'comparisonCount()',

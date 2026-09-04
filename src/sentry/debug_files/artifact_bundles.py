@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from datetime import datetime, timedelta
 
 import sentry_sdk
@@ -8,7 +7,7 @@ from django.conf import settings
 from django.db import router
 from django.db.models import Count, Exists, OuterRef
 from django.utils import timezone
-from rediscluster import RedisCluster
+from sentry_redis_tools.clients import RedisCluster
 
 from sentry import options
 from sentry.models.artifactbundle import (
@@ -24,6 +23,7 @@ from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.utils import metrics, redis
 from sentry.utils.db import atomic_transaction
+from sentry.utils.tracing import trace
 
 # The number of Artifact Bundles that we return in case of incomplete indexes.
 MAX_BUNDLES_QUERY = 5
@@ -32,8 +32,6 @@ MAX_BUNDLES_QUERY = 5
 # A value of 3 means that the third upload will trigger indexing and backfill.
 INDEXING_THRESHOLD = 3
 
-# Number of days that determine whether an artifact bundle is ready for being renewed.
-AVAILABLE_FOR_RENEWAL_DAYS = 30
 
 # We want to keep the bundle as being indexed for 600 seconds = 10 minutes. We might need to revise this number and
 # optimize it based on the time taken to perform the indexing (on average).
@@ -44,11 +42,7 @@ INDEXING_CACHE_TIMEOUT = 600
 
 def get_redis_cluster_for_artifact_bundles() -> RedisCluster:
     cluster_key = settings.SENTRY_ARTIFACT_BUNDLES_INDEXING_REDIS_CLUSTER
-    return redis.redis_clusters.get(cluster_key)  # type: ignore[return-value]
-
-
-def get_refresh_key() -> str:
-    return "artifact_bundles_in_use"
+    return redis.redis_clusters.get(cluster_key)
 
 
 def _generate_artifact_bundle_indexing_state_cache_key(
@@ -120,7 +114,7 @@ def backfill_artifact_bundle_db_indexing(organization_id: int, release: str, dis
     index_artifact_bundles_for_release(organization_id, [(ab, None) for ab in artifact_bundles])
 
 
-@sentry_sdk.tracing.trace
+@trace
 def index_urls_in_bundle(
     organization_id: int,
     artifact_bundle: ArtifactBundle,
@@ -185,58 +179,13 @@ def index_urls_in_bundle(
 # ===== Renewal of Artifact Bundles =====
 
 
-@sentry_sdk.tracing.trace
-def maybe_renew_artifact_bundles_from_processing(project_id: int, used_download_ids: list[str]):
-    # Note: This random rollout is reversed because it is an early return
-    if random.random() >= options.get("symbolicator.sourcemaps-bundle-index-refresh-sample-rate"):
-        return
-
-    artifact_bundle_ids = []
-    for download_id in used_download_ids:
-        # the `download_id` is in a `artifact_bundle/$ID` format
-        split = download_id.split("/")
-        if len(split) < 2:
-            continue
-        ty, ty_id, *_rest = split
-        if ty != "artifact_bundle":
-            continue
-        artifact_bundle_ids.append(ty_id)
-
-    redis_client = get_redis_cluster_for_artifact_bundles()
-
-    redis_client.sadd(get_refresh_key(), *artifact_bundle_ids)
-
-
-@sentry_sdk.tracing.trace
-def refresh_artifact_bundles_in_use():
-    LOOP_TIMES = 100
-    IDS_PER_LOOP = 50
-
-    redis_client = get_redis_cluster_for_artifact_bundles()
-
-    now = timezone.now()
-    threshold_date = now - timedelta(days=AVAILABLE_FOR_RENEWAL_DAYS)
-
-    for _ in range(LOOP_TIMES):
-        artifact_bundle_ids = redis_client.spop(get_refresh_key(), IDS_PER_LOOP)
-        used_artifact_bundles = {
-            id: date_added
-            for id, date_added in ArtifactBundle.objects.filter(
-                id__in=artifact_bundle_ids, date_added__lte=threshold_date
-            ).values_list("id", "date_added")
-        }
-
-        maybe_renew_artifact_bundles(used_artifact_bundles)
-
-        if len(artifact_bundle_ids) < IDS_PER_LOOP:
-            break
-
-
 def maybe_renew_artifact_bundles(used_artifact_bundles: dict[int, datetime]):
     # We take a snapshot in time that MUST be consistent across all updates.
     now = timezone.now()
     # We compute the threshold used to determine whether we want to renew the specific bundle.
-    threshold_date = now - timedelta(days=AVAILABLE_FOR_RENEWAL_DAYS)
+    threshold_date = now - timedelta(
+        days=options.get("system.debug-files-renewal-age-threshold-days")
+    )
 
     for artifact_bundle_id, date_added in used_artifact_bundles.items():
         # We perform the condition check also before running the query, in order to reduce the amount of queries to the database.
@@ -247,7 +196,7 @@ def maybe_renew_artifact_bundles(used_artifact_bundles: dict[int, datetime]):
             renew_artifact_bundle(artifact_bundle_id, threshold_date, now)
 
 
-@sentry_sdk.tracing.trace
+@trace
 def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now: datetime):
     metrics.incr("artifact_bundle_renewal.need_renewal")
     # We want to use a transaction, in order to keep the `date_added` consistent across multiple tables.
@@ -289,7 +238,7 @@ def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now
 
 
 def _maybe_renew_and_return_bundles(
-    bundles: dict[int, tuple[datetime, str]]
+    bundles: dict[int, tuple[datetime, str]],
 ) -> list[tuple[int, str]]:
     maybe_renew_artifact_bundles(
         {id: date_added for id, (date_added, _resolved) in bundles.items()}
@@ -343,7 +292,7 @@ def query_artifact_bundles_containing_file(
         # TODO: spawn an async task to backfill non-indexed bundles
         # lets do this in a different PR though :-)
         # ^ we would want to use a Redis SET to not spawn a ton of duplicated
-        # celery tasks here.
+        # tasks here.
 
     # We keep track of all the discovered artifact bundles, by the various means of lookup.
     # We are intentionally overwriting the `resolved` flag, as we want to rank these from
@@ -400,9 +349,11 @@ def get_bundles_indexing_state(
         "releaseartifactbundle__dist_name": dist_name,
     }
     if isinstance(org_or_project, Project):
+        filter["organization_id"] = org_or_project.organization_id
         filter["releaseartifactbundle__organization_id"] = org_or_project.organization.id
         filter["projectartifactbundle__project_id"] = org_or_project.id
     else:
+        filter["organization_id"] = org_or_project.id
         filter["releaseartifactbundle__organization_id"] = org_or_project.id
 
     query = (

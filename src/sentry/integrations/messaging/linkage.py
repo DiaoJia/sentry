@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+import sentry_sdk
 from django.contrib.auth.models import AnonymousUser
 from django.core.signing import BadSignature, SignatureExpired
 from django.db import IntegrityError
@@ -12,7 +13,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from rest_framework.request import Request
 
-from sentry import analytics, features
+from sentry import analytics
 from sentry.api.helpers.teams import is_team_admin
 from sentry.constants import ObjectStatus
 from sentry.identity.services.identity import identity_service
@@ -20,7 +21,12 @@ from sentry.integrations.messaging.spec import MessagingIntegrationSpec
 from sentry.integrations.models.external_actor import ExternalActor
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.integration import RpcIntegration, integration_service
-from sentry.integrations.types import ExternalProviderEnum, ExternalProviders
+from sentry.integrations.types import (
+    ExternalActorSource,
+    ExternalProviderEnum,
+    ExternalProviders,
+    IntegrationProviderSlug,
+)
 from sentry.integrations.utils.identities import get_identity_or_404
 from sentry.models.organizationmember import OrganizationMember
 from sentry.models.team import Team
@@ -37,7 +43,7 @@ from sentry.users.services.user.serial import serialize_generic_user
 from sentry.utils import metrics
 from sentry.utils.signing import unsign
 from sentry.web.client_config import get_client_config
-from sentry.web.frontend.base import BaseView, control_silo_view, region_silo_view
+from sentry.web.frontend.base import BaseView, cell_silo_view, control_silo_view
 from sentry.web.helpers import render_to_response
 
 logger = logging.getLogger("sentry.integrations.messaging.linkage")
@@ -82,22 +88,14 @@ class LinkageView(BaseView, ABC):
         metrics.incr(event, tags=(tags or {}), sample_rate=1.0)
         return event
 
-    @property
-    def analytics_operation_key(self) -> str | None:
-        """Operation description to use in analytics. Return None to skip."""
+    def get_analytics_event(
+        self, provider: str, actor_id: int, actor_type: str
+    ) -> analytics.Event | None:
         return None
 
     def record_analytic(self, actor_id: int) -> None:
-        if self.analytics_operation_key is None:
-            # This preserves legacy differences between messaging integrations,
-            # in that some record analytics and some don't.
-            # TODO: Make consistent across all messaging integrations.
-            return
-
-        event = ".".join(("integrations", self.provider_slug, self.analytics_operation_key))
-        analytics.record(
-            event, provider=self.provider_slug, actor_id=actor_id, actor_type=ActorType.USER
-        )
+        if event := self.get_analytics_event(self.provider_slug, actor_id, ActorType.USER):
+            analytics.record(event)
 
     @staticmethod
     def render_error_page(request: HttpRequest, status: int, body_text: str) -> HttpResponse:
@@ -157,7 +155,7 @@ class IdentityLinkageView(LinkageView, ABC):
                     self.provider, request.user, integration_id=integration_id
                 )
         except Http404:
-            logger.exception("get_identity_error", extra={"integration_id": integration_id})
+            logger.warning("get_identity_error", extra={"integration_id": integration_id})
             self.capture_metric("failure.get_identity")
             return self.render_error_page(
                 request,
@@ -199,7 +197,7 @@ class IdentityLinkageView(LinkageView, ABC):
             external_id: str = params_dict[self.external_id_parameter]
         except KeyError as e:
             event = self.capture_metric("failure.post.missing_params", tags={"error": str(e)})
-            logger.exception(event)
+            logger.warning(event)
             return self.render_error_page(
                 request,
                 status=400,
@@ -287,7 +285,7 @@ class LinkIdentityView(IdentityLinkageView, ABC):
             Identity.objects.link_identity(user=request.user, idp=idp, external_id=external_id)
         except IntegrityError:
             event = self.capture_metric("failure.integrity_error")
-            logger.exception(event)
+            logger.warning(event)
             raise Http404
 
 
@@ -326,12 +324,12 @@ class UnlinkIdentityView(IdentityLinkageView, ABC):
             identities.delete()
         except IntegrityError:
             tag = f"{self.provider_slug}.unlink.integrity-error"
-            logger.exception(tag)
+            logger.warning(tag)
             raise Http404
         return None
 
 
-@region_silo_view
+@cell_silo_view
 class TeamLinkageView(LinkageView, ABC):
     _ALLOWED_ROLES = frozenset(["admin", "manager", "owner"])
 
@@ -395,10 +393,12 @@ class LinkTeamView(TeamLinkageView, ABC):
     def execute(
         self, request: HttpRequest, integration: RpcIntegration, params: Mapping[str, Any]
     ) -> HttpResponseBase:
+        from sentry.integrations.slack.analytics import SlackIntegrationIdentityLinked
         from sentry.integrations.slack.views.link_team import (
             SUCCESS_LINKED_MESSAGE,
             SUCCESS_LINKED_TITLE,
             SelectTeamForm,
+            build_team_linked_message,
         )
 
         user = serialize_generic_user(request.user)
@@ -460,7 +460,8 @@ class LinkTeamView(TeamLinkageView, ABC):
         logger_params["team_id"] = team.id
 
         idp = identity_service.get_provider(
-            provider_type="slack", provider_ext_id=integration.external_id
+            provider_type=IntegrationProviderSlug.SLACK.value,
+            provider_ext_id=integration.external_id,
         )
         logger_params["provider_ext_id"] = integration.external_id
         if idp is None:
@@ -488,37 +489,32 @@ class LinkTeamView(TeamLinkageView, ABC):
             defaults=dict(
                 external_name=channel_name,
                 external_id=channel_id,
+                source=ExternalActorSource.MANUAL.value,
             ),
         )
 
-        analytics.record(
-            "integrations.identity_linked",
-            provider=self.provider_slug,
-            actor_id=team.id,
-            actor_type="team",
-        )
+        try:
+            analytics.record(
+                SlackIntegrationIdentityLinked(
+                    provider=self.provider_slug,
+                    actor_id=team.id,
+                    actor_type="team",
+                )
+            )
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
 
         if not created:
             self.capture_metric("failure.team_already_linked")
             return self.notify_team_already_linked(request, channel_id, integration, team)
 
-        has_team_workflow = features.has(
-            "organizations:team-workflow-notifications", team.organization
+        notifications_service.enable_all_settings_for_provider(
+            external_provider=self.external_provider_enum,
+            team_id=team.id,
+            types=[NotificationSettingEnum.ISSUE_ALERTS],
         )
-        # Turn on notifications for all of a team's projects.
-        # TODO(jangjodi): Remove this once the flag is removed
-        if not has_team_workflow:
-            notifications_service.enable_all_settings_for_provider(
-                external_provider=self.external_provider_enum,
-                team_id=team.id,
-                types=[NotificationSettingEnum.ISSUE_ALERTS],
-            )
 
-        message = SUCCESS_LINKED_MESSAGE.format(
-            slug=team.slug,
-            workflow_addon=" and workflow" if has_team_workflow else "",
-            channel_name=channel_name,
-        )
+        message = build_team_linked_message(team=team, channel_id=channel_id)
         self.notify_on_success(channel_id, integration, message)
 
         self.capture_metric("success")
@@ -528,7 +524,11 @@ class LinkTeamView(TeamLinkageView, ABC):
             request=request,
             context={
                 "heading_text": SUCCESS_LINKED_TITLE,
-                "body_text": message,
+                # Web confirmation page stays plain text; Slack markup is only for chat.
+                "body_text": SUCCESS_LINKED_MESSAGE.format(
+                    team=team.slug,
+                    channel=channel_name,
+                ),
                 "channel_id": channel_id,
                 "team_id": integration.external_id,
             },

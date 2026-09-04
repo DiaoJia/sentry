@@ -1,13 +1,13 @@
-import {useEffect, useMemo} from 'react';
+import {useEffect, useRef} from 'react';
 
 import {useReplayPlayerState} from 'sentry/utils/replays/playback/providers/replayPlayerStateContext';
-import useRAF from 'sentry/utils/useRAF';
+import {useRAF} from 'sentry/utils/useRAF';
 
 interface Props {
   callback?: (props: {timeMs: number}) => void;
 }
 
-export default function useReplayCurrentTime(props: Props) {
+export function useReplayCurrentTime(props: Props) {
   const {callback} = props || {};
 
   const {isFinished, playerState, replayers} = useReplayPlayerState();
@@ -36,11 +36,12 @@ export default function useReplayCurrentTime(props: Props) {
     }
   }, [callback, replayer, state?.value, state?.context.timeOffset, isFinished]);
 
-  return useMemo(
-    () => ({
-      timeMs: () => replayers.at(0)?.getCurrentTime(),
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+  const replayersRef = useRef(replayers);
+  replayersRef.current = replayers;
+
+  const returnRef = useRef({
+    timeMs: () => replayersRef.current.at(0)?.getCurrentTime(),
+  });
+
+  return returnRef.current;
 }

@@ -1,20 +1,20 @@
 import * as qs from 'query-string';
 
-import type {Result} from 'sentry/components/core/select/async';
+import {hasEveryAccess} from 'sentry/components/acl/access';
 import {
   IconAsana,
   IconBitbucket,
-  IconCodecov,
   IconGeneric,
   IconGithub,
   IconGitlab,
   IconJira,
+  IconPerforce,
   IconSentry,
   IconVsts,
 } from 'sentry/icons';
+import type {SVGIconProps} from 'sentry/icons/svgIcon';
 import {t} from 'sentry/locale';
-import HookStore from 'sentry/stores/hookStore';
-import type {Hooks} from 'sentry/types/hooks';
+import {getOverride} from 'sentry/overrideRegistry';
 import type {
   AppOrProviderOrPlugin,
   CodeOwner,
@@ -24,16 +24,17 @@ import type {
   Integration,
   IntegrationFeature,
   IntegrationInstallationStatus,
+  IntegrationProvider,
   IntegrationType,
-  PluginWithProjectList,
   SentryApp,
   SentryAppInstallation,
 } from 'sentry/types/integrations';
+import type {Organization} from 'sentry/types/organization';
+import type {Overrides} from 'sentry/types/overrides';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
 import {capitalize} from 'sentry/utils/string/capitalize';
 import {POPULARITY_WEIGHT} from 'sentry/views/settings/organizationIntegrations/constants';
-
-import type {IconSize} from './theme';
 
 /**
  * TODO: remove alias once all usages are updated
@@ -62,20 +63,24 @@ const generateIntegrationFeatures = (p: any) =>
     gatedFeatureGroups: [],
   });
 
-const defaultFeatureGateComponents: ReturnType<Hooks['integrations:feature-gates']> = {
-  IntegrationFeatures: generateIntegrationFeatures,
-  FeatureList: generateFeaturesList,
-};
+const defaultFeatureGateComponents: ReturnType<Overrides['integrations:feature-gates']> =
+  {
+    IntegrationFeatures: generateIntegrationFeatures,
+    FeatureList: generateFeaturesList,
+  };
 
 export const getIntegrationFeatureGate = () => {
   const defaultHook = () => defaultFeatureGateComponents;
-  const featureHook = HookStore.get('integrations:feature-gates')[0] || defaultHook;
+  const featureHook = getOverride('integrations:feature-gates') || defaultHook;
   return featureHook();
 };
 
 export const getSentryAppInstallStatus = (install: SentryAppInstallation | undefined) => {
-  if (install) {
+  if (install && install.status !== 'pending_deletion') {
     return capitalize(install.status) as IntegrationInstallationStatus;
+  }
+  if (install?.status === 'pending_deletion') {
+    return 'Pending Deletion';
   }
   return 'Not Installed';
 };
@@ -114,9 +119,6 @@ export const getCategoriesForIntegration = (
       ? [integration.status]
       : getCategories(integration.featureData);
   }
-  if (isPlugin(integration)) {
-    return getCategories(integration.featureDescriptions);
-  }
   if (isDocIntegration(integration)) {
     return getCategories(integration.features ?? []);
   }
@@ -129,22 +131,25 @@ export function isSentryApp(
   return !!(integration as SentryApp).uuid;
 }
 
-export function isPlugin(
-  integration: AppOrProviderOrPlugin
-): integration is PluginWithProjectList {
-  return integration.hasOwnProperty('shortName');
-}
-
 export function isDocIntegration(
   integration: AppOrProviderOrPlugin
 ): integration is DocIntegration {
-  return integration.hasOwnProperty('isDraft');
+  return Object.hasOwn(integration, 'isDraft');
+}
+
+/**
+ * True when the provider exposes the `commits` feature gate, which is the
+ * canonical marker for source-code-management integrations (GitHub, GitLab,
+ * Bitbucket, Azure DevOps, and their enterprise/server variants).
+ */
+export function isScmProvider(provider: IntegrationProvider): boolean {
+  return provider.metadata.features.some(f => f.featureGate.includes('commits'));
 }
 
 export function isExternalActorMapping(
   mapping: ExternalActorMappingOrSuggestion
 ): mapping is ExternalActorMapping {
-  return mapping.hasOwnProperty('id');
+  return Object.hasOwn(mapping, 'id');
 }
 
 export const getIntegrationType = (
@@ -153,9 +158,6 @@ export const getIntegrationType = (
   if (isSentryApp(integration)) {
     return 'sentry_app';
   }
-  if (isPlugin(integration)) {
-    return 'plugin';
-  }
   if (isDocIntegration(integration)) {
     return 'document';
   }
@@ -163,7 +165,7 @@ export const getIntegrationType = (
 };
 
 export const convertIntegrationTypeToSnakeCase = (
-  type: 'plugin' | 'firstParty' | 'sentryApp' | 'docIntegration'
+  type: 'firstParty' | 'sentryApp' | 'docIntegration'
 ) => {
   switch (type) {
     case 'firstParty':
@@ -182,13 +184,13 @@ export const safeGetQsParam = (param: string) => {
     const query = qs.parse(window.location.search) || {};
     return query[param];
   } catch {
-    return undefined;
+    return;
   }
 };
 
 export const getIntegrationIcon = (
   integrationType?: string,
-  iconSize: IconSize = 'md'
+  iconSize: SVGIconProps['size'] = 'md'
 ) => {
   switch (integrationType) {
     case 'asana':
@@ -203,10 +205,10 @@ export const getIntegrationIcon = (
     case 'jira':
     case 'jira_server':
       return <IconJira size={iconSize} />;
+    case 'perforce':
+      return <IconPerforce size={iconSize} />;
     case 'vsts':
       return <IconVsts size={iconSize} />;
-    case 'codecov':
-      return <IconCodecov size={iconSize} />;
     default:
       return <IconGeneric size={iconSize} />;
   }
@@ -225,12 +227,13 @@ export const getIntegrationDisplayName = (integrationType?: string) => {
     case 'github_enterprise':
       return 'GitHub Enterprise';
     case 'jira':
-    case 'jira_server':
       return 'Jira';
+    case 'jira_server':
+      return 'Jira Server';
+    case 'perforce':
+      return 'Perforce';
     case 'vsts':
-      return 'VSTS';
-    case 'codecov':
-      return 'Codeov';
+      return 'Azure DevOps';
     default:
       return '';
   }
@@ -269,30 +272,60 @@ export const getIntegrationSourceUrl = (
 
 export function getCodeOwnerIcon(
   provider: CodeOwner['provider'],
-  iconSize: IconSize = 'md'
+  iconSize: SVGIconProps['size'] = 'md'
 ) {
   switch (provider ?? '') {
     case 'github':
       return <IconGithub size={iconSize} />;
     case 'gitlab':
       return <IconGitlab size={iconSize} />;
+    case 'perforce':
+      return <IconPerforce size={iconSize} />;
     default:
       return <IconSentry size={iconSize} />;
   }
 }
-const isSlackIntegrationUpToDate = (integrations: Integration[]): boolean => {
-  return integrations.every(
-    integration =>
-      integration.provider.key !== 'slack' || integration.scopes?.includes('commands')
-  );
-};
+/**
+ * Whether a single integration installation is running an outdated app and
+ * should surface an "Update Now" prompt. Checked per-workspace so that, e.g.,
+ * an outdated Slack workspace doesn't flag a sibling workspace that is current.
+ */
+export const integrationRequiresUpgrade = (integration: Integration): boolean =>
+  integration.outOfDate === true;
+
+export const canManageIntegrations = (organization: Organization): boolean =>
+  isActiveSuperuser() || hasEveryAccess(['org:integrations'], {organization});
+
+export function getIntegrationNoun(slug: string): string {
+  switch (slug) {
+    case 'github':
+      return t('GitHub App installation');
+    case 'slack':
+      return t('workspace');
+    default:
+      return t('installation');
+  }
+}
 
 export const getAlertText = (integrations?: Integration[]): string | undefined => {
-  return isSlackIntegrationUpToDate(integrations || [])
-    ? undefined
-    : t(
-        'Update to the latest version of our Slack app to get access to personal and team notifications.'
+  const outdated = (integrations || []).find(integrationRequiresUpgrade);
+
+  if (!outdated) {
+    return undefined;
+  }
+
+  switch (outdated.provider.key) {
+    case 'github':
+      return t(
+        'Update to the latest version of our GitHub App to get access to the latest features.'
       );
+    case 'slack':
+      return t(
+        'Chat, ask questions, and debug with Sentry in the new Slack app. Please reinstall the Slack app on your workspace to get started.'
+      );
+    default:
+      return undefined;
+  }
 };
 
 /**
@@ -311,11 +344,6 @@ export const getExternalActorEndpointDetails = (
     apiEndpoint: isValidMapping ? `${baseEndpoint}${mapping.id}/` : baseEndpoint,
   };
 };
-
-export const sentryNameToOption = ({id, name}: any): Result => ({
-  value: id,
-  label: name,
-});
 
 export function getIntegrationStatus(integration: Integration) {
   // there are multiple status fields for an integration we consider
@@ -343,7 +371,7 @@ export function getProviderIntegrationStatus(integrations: Integration[]) {
 }
 
 /**
- * Returns 0 if uninstalled, 1 if pending, 2 if installed
+ * Returns 0 if uninstalled, 1 if pending, 2 if installed, 3 if disabled
  */
 function getInstallValue({
   integration,
@@ -354,10 +382,6 @@ function getInstallValue({
   integrationInstalls: Integration[];
   sentryAppInstalls: SentryAppInstallation[];
 }) {
-  if (isPlugin(integration)) {
-    return integration.projectList.length > 0 ? 2 : 0;
-  }
-
   if (isSentryApp(integration)) {
     const install = sentryAppInstalls.find(sa => sa.app.slug === integration.slug);
     if (install) {
@@ -370,7 +394,15 @@ function getInstallValue({
     return 0;
   }
 
-  return integrationInstalls.some(i => i.provider.key === integration.key) ? 2 : 0;
+  const providerInstalls = integrationInstalls.filter(
+    i => i.provider.key === integration.key
+  );
+  // Providers with any disabled config sort above all installed integrations (3 > 2)
+  // so they stay at the top when the reinstall banner is shown.
+  if (providerInstalls.some(i => getIntegrationStatus(i) === 'disabled')) {
+    return 3;
+  }
+  return providerInstalls.length > 0 ? 2 : 0;
 }
 
 function getPopularityWeight(integration: AppOrProviderOrPlugin) {

@@ -8,18 +8,20 @@ from django.utils import timezone
 
 from sentry.backup.scopes import RelocationScope
 from sentry.constants import ObjectStatus
-from sentry.db.models import FlexibleForeignKey, JSONField, Model, region_silo_model, sane_repr
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base import BaseManager
-from sentry.eventstore.models import GroupEvent
+from sentry.services.eventstore.models import GroupEvent
 
 if TYPE_CHECKING:
+    from sentry.integrations.models.integration import Integration
     from sentry.integrations.services.integration import RpcIntegration
 
 
 class ExternalIssueManager(BaseManager["ExternalIssue"]):
     def get_for_integration(
-        self, integration: RpcIntegration, external_issue_key: str | None = None
+        self, integration: Integration | RpcIntegration, external_issue_key: str | None = None
     ) -> QuerySet[ExternalIssue]:
         from sentry.integrations.services.integration import integration_service
 
@@ -56,7 +58,7 @@ class ExternalIssueManager(BaseManager["ExternalIssue"]):
         return self.get_linked_issues(event, integration).exists()
 
 
-@region_silo_model
+@cell_silo_model
 class ExternalIssue(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -69,7 +71,13 @@ class ExternalIssue(Model):
     date_added = models.DateTimeField(default=timezone.now)
     title = models.TextField(null=True)
     description = models.TextField(null=True)
-    metadata = JSONField(null=True)
+    metadata = LegacyTextJSONField(default=dict, null=True)
+    # Newest provider-side timestamp inbound status sync has processed for this issue, on
+    # the provider's own clock, so a webhook that lands out of order can be dropped instead
+    # of writing an old status over a newer one. Fed by GitHub's `issue.updated_at`,
+    # GitLab's `object_attributes.updated_at`, VSTS's `System.ChangedDate` and Jira's
+    # `issue.fields.updated`.
+    provider_status_updated_at = models.DateTimeField(null=True)
 
     objects: ClassVar[ExternalIssueManager] = ExternalIssueManager()
 

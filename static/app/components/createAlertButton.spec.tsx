@@ -3,12 +3,12 @@ import {ProjectFixture} from 'sentry-fixture/project';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import CreateAlertButton, {
+import {
+  CreateAlertButton,
   CreateAlertFromViewButton,
 } from 'sentry/components/createAlertButton';
-import GuideStore from 'sentry/stores/guideStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import EventView from 'sentry/utils/discover/eventView';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {EventView} from 'sentry/utils/discover/eventView';
 import {DEFAULT_EVENT_VIEW} from 'sentry/views/discover/results/data';
 
 const onClickMock = jest.fn();
@@ -38,7 +38,7 @@ describe('CreateAlertFromViewButton', () => {
         onClick={onClickMock}
       />
     );
-    await userEvent.click(screen.getByRole('button', {name: 'Create Alert'}));
+    await userEvent.click(screen.getByRole('button', {name: 'Create Monitor'}));
     expect(onClickMock).toHaveBeenCalledTimes(1);
   });
 
@@ -70,7 +70,7 @@ describe('CreateAlertFromViewButton', () => {
       }
     );
 
-    expect(screen.getByRole('button', {name: 'Create Alert'})).toHaveAttribute(
+    expect(screen.getByRole('button', {name: 'Create Monitor'})).toHaveAttribute(
       'aria-disabled',
       'true'
     );
@@ -100,7 +100,7 @@ describe('CreateAlertFromViewButton', () => {
       }
     );
 
-    expect(screen.getByRole('button', {name: 'Create Alert'})).toBeEnabled();
+    expect(screen.getByRole('button', {name: 'Create Monitor'})).toBeEnabled();
   });
 
   it('enables the button for team-admin', () => {
@@ -139,75 +139,35 @@ describe('CreateAlertFromViewButton', () => {
       }
     );
 
-    expect(screen.getByRole('button', {name: 'Create Alert'})).toBeEnabled();
+    expect(screen.getByRole('button', {name: 'Create Monitor'})).toBeEnabled();
   });
 
-  it('shows a guide for org-member', () => {
-    const noAccessOrg = {
-      ...organization,
-      access: [],
-    };
-
-    render(
-      <CreateAlertButton
-        aria-label="Create Alert"
-        organization={noAccessOrg}
-        showPermissionGuide
-      />,
-      {
-        organization: noAccessOrg,
-      }
-    );
-
-    expect(GuideStore.state.anchors).toEqual(new Set(['alerts_write_member']));
-  });
-
-  it('shows a guide for org-owner/manager', () => {
-    const adminAccessOrg = OrganizationFixture({
-      ...organization,
-      access: ['org:write'],
-    });
-
-    render(
-      <CreateAlertButton
-        aria-label="Create Alert"
-        organization={adminAccessOrg}
-        showPermissionGuide
-      />,
-      {
-        organization: adminAccessOrg,
-      }
-    );
-
-    expect(GuideStore.state.anchors).toEqual(new Set(['alerts_write_owner']));
-  });
-
-  it('redirects to alert wizard with no project', async () => {
+  it('redirects to monitor creation with no project', async () => {
     const {router} = render(
-      <CreateAlertButton aria-label="Create Alert" organization={organization} />,
+      <CreateAlertButton aria-label="Create Monitor" organization={organization} />,
       {
         organization,
         initialRouterConfig: {
           location: {
-            pathname: '/organizations/org-slug/alerts/wizard/',
+            pathname: '/organizations/org-slug/issues/alerts/wizard/',
           },
-          route: `/organizations/:orgId/alerts/wizard/`,
+          route: '/organizations/:orgId/issues/alerts/wizard/',
         },
       }
     );
     await userEvent.click(screen.getByRole('button'));
     expect(router.location).toEqual(
       expect.objectContaining({
-        pathname: `/organizations/org-slug/alerts/wizard/`,
+        pathname: '/organizations/org-slug/monitors/new/',
         query: {},
       })
     );
   });
 
-  it('redirects to alert wizard with a project', () => {
+  it('redirects to monitor creation with a project', () => {
     render(
       <CreateAlertButton
-        aria-label="Create Alert"
+        aria-label="Create Monitor"
         organization={organization}
         projectSlug="proj-slug"
       />,
@@ -218,7 +178,7 @@ describe('CreateAlertFromViewButton', () => {
 
     expect(screen.getByRole('button')).toHaveAttribute(
       'href',
-      '/organizations/org-slug/alerts/wizard/?project=proj-slug'
+      '/organizations/org-slug/monitors/new/?project=proj-slug'
     );
   });
 
@@ -242,10 +202,11 @@ describe('CreateAlertFromViewButton', () => {
     await userEvent.click(screen.getByRole('button'));
     expect(router.location).toEqual(
       expect.objectContaining({
-        pathname: `/organizations/org-slug/alerts/new/metric/`,
+        pathname: '/organizations/org-slug/monitors/new/settings',
         query: expect.objectContaining({
+          detectorType: 'metric_issue',
           query: 'event.type:error ',
-          project: 'project-slug',
+          project: '2',
         }),
       })
     );

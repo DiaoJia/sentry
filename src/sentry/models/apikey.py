@@ -16,7 +16,7 @@ from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignK
 from sentry.db.models.manager.base import BaseManager
 from sentry.hybridcloud.outbox.base import ReplicatedControlModel
 from sentry.hybridcloud.outbox.category import OutboxCategory
-from sentry.hybridcloud.services.replica import region_replica_service
+from sentry.hybridcloud.services.replica import cell_replica_service
 from sentry.models.apiscopes import HasApiScopes
 
 if TYPE_CHECKING:
@@ -54,25 +54,25 @@ class ApiKey(ReplicatedControlModel, HasApiScopes):
 
     __repr__ = sane_repr("organization_id", "key")
 
-    def handle_async_replication(self, region_name: str, shard_identifier: int) -> None:
+    def handle_async_replication(self, cell_name: str, shard_identifier: int) -> None:
         from sentry.auth.services.auth.serial import serialize_api_key
 
-        region_replica_service.upsert_replicated_api_key(
-            api_key=serialize_api_key(self), region_name=region_name
+        cell_replica_service.upsert_replicated_api_key(
+            api_key=serialize_api_key(self), cell_name=cell_name
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"api_key_id={self.id}, status={self.status}"
 
     @classmethod
-    def generate_api_key(cls):
+    def generate_api_key(cls) -> str:
         return secrets.token_hex(nbytes=16)
 
     @property
-    def is_active(self):
+    def is_active(self) -> bool:
         return self.status == ApiKeyStatus.ACTIVE
 
-    def save(self, *args, **kwargs):
+    def save(self, *args: Any, **kwargs: Any) -> None:
         if not self.key:
             self.key = ApiKey.generate_api_key()
         super().save(*args, **kwargs)
@@ -82,7 +82,7 @@ class ApiKey(ReplicatedControlModel, HasApiScopes):
             return []
         return list(filter(bool, self.allowed_origins.split("\n")))
 
-    def get_audit_log_data(self):
+    def get_audit_log_data(self) -> dict[str, Any]:
         return {
             "label": self.label,
             "key": self.key,

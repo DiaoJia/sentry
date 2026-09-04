@@ -5,7 +5,9 @@ import {
 } from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
 import {t} from 'sentry/locale';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
 type KeyTransaction = {
   project_id: string;
@@ -26,7 +28,9 @@ export async function fetchTeamKeyTransactions(
   teams: string[],
   projects?: string[]
 ): Promise<TeamKeyTransaction[]> {
-  const url = `/organizations/${orgSlug}/key-transactions-list/`;
+  const url = getApiUrl('/organizations/$organizationIdOrSlug/key-transactions-list/', {
+    path: {organizationIdOrSlug: orgSlug},
+  });
 
   const datas: TeamKeyTransactions[] = [];
   let cursor: string | undefined = undefined;
@@ -58,7 +62,7 @@ export async function fetchTeamKeyTransactions(
       } else {
         hasMore = false;
       }
-    } catch (err) {
+    } catch (err: any) {
       addErrorMessage(
         err.responseJSON?.detail ?? t('Error fetching team key transactions')
       );
@@ -80,11 +84,13 @@ export function toggleKeyTransaction(
   addLoadingMessage(t('Saving changes\u2026'));
 
   const promise: Promise<undefined> = api.requestPromise(
-    `/organizations/${orgId}/key-transactions/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/key-transactions/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
     {
       method: isKeyTransaction ? 'DELETE' : 'POST',
       query: {
-        project: projects.map(id => String(id)),
+        project: projects.map(String),
       },
       data: {
         transaction: transactionName,
@@ -96,13 +102,17 @@ export function toggleKeyTransaction(
   promise.then(clearIndicators);
 
   promise.catch(response => {
-    const responseJSON = response?.responseJSON;
-    const errorDetails = responseJSON?.detail ?? responseJSON?.non_field_errors;
+    if (response instanceof RequestError) {
+      const responseJSON = response?.responseJSON;
+      const errorDetails = responseJSON?.detail ?? responseJSON?.non_field_errors;
 
-    if (Array.isArray(errorDetails) && errorDetails.length && errorDetails[0]) {
-      addErrorMessage(errorDetails[0]);
-    } else {
-      addErrorMessage(errorDetails ?? t('Unable to update key transaction'));
+      if (Array.isArray(errorDetails) && errorDetails.length && errorDetails[0]) {
+        addErrorMessage(errorDetails[0]);
+      } else if (typeof errorDetails === 'string') {
+        addErrorMessage(errorDetails);
+      } else {
+        addErrorMessage(t('Unable to update key transaction'));
+      }
     }
   });
 

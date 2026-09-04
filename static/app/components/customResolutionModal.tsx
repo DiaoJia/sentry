@@ -1,73 +1,149 @@
-import {Fragment, useState} from 'react';
-import {css} from '@emotion/react';
+import {Fragment, useMemo, useState} from 'react';
+import styled from '@emotion/styled';
+import {useDebouncedValue} from '@tanstack/react-pacer';
+import {skipToken, useQuery} from '@tanstack/react-query';
+
+import {Button} from '@sentry/scraps/button';
+import {CompactSelect, type SelectOption} from '@sentry/scraps/compactSelect';
+import {Flex, Container} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
 
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import SelectAsyncField, {
-  type SelectAsyncFieldProps,
-} from 'sentry/components/deprecatedforms/selectAsyncField';
-import TimeSince from 'sentry/components/timeSince';
-import Version from 'sentry/components/version';
+import {TimeSince} from 'sentry/components/timeSince';
+import {Version} from 'sentry/components/version';
+import {DEFAULT_DEBOUNCE_DURATION} from 'sentry/constants';
+import {IconOpen} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import configStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
-import type {Organization} from 'sentry/types/organization';
+import {ConfigStore} from 'sentry/stores/configStore';
+import type {Project} from 'sentry/types/project';
 import type {Release} from 'sentry/types/release';
-import {isVersionInfoSemver} from 'sentry/views/releases/utils';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {isVersionInfoSemver} from 'sentry/views/explore/releases/utils';
+import {makeReleasesPathname} from 'sentry/views/explore/releases/utils/pathnames';
+
+function canLookupExactRelease(version: string): boolean {
+  return version.length > 0 && !/^\.\.?$/.test(version);
+}
+
+function makeReleaseOption(
+  release: Release,
+  currentUserEmail: string | undefined
+): SelectOption<string> {
+  const isAuthor = release.authors?.some(
+    author => author.email && author.email === currentUserEmail
+  );
+  const isSemver = release.versionInfo
+    ? isVersionInfoSemver(release.versionInfo.version)
+    : false;
+
+  return {
+    value: release.version,
+    label: (
+      <span>
+        {release.versionInfo?.package && (
+          <Fragment>{release.versionInfo.package}@</Fragment>
+        )}
+        <Version version={release.version} anchor={false} />{' '}
+        {isSemver ? t('(semver)') : t('(non-semver)')}
+      </span>
+    ),
+    textValue: release.version,
+    details: (
+      <span>
+        {t('Created')} <TimeSince date={release.dateCreated} />
+        {isAuthor ? <Fragment> — {t('You committed')}</Fragment> : null}
+      </span>
+    ),
+  };
+}
+
+function getUniqueReleases(releases: Array<Release | null | undefined>): Release[] {
+  const seen = new Set<string>();
+
+  return releases.filter((release): release is Release => {
+    if (!release || seen.has(release.version)) {
+      return false;
+    }
+
+    seen.add(release.version);
+    return true;
+  });
+}
 
 interface CustomResolutionModalProps extends ModalRenderProps {
   onSelected: (change: {inRelease: string}) => void;
-  organization: Organization;
-  projectSlug?: string;
+  project: Project | undefined;
 }
 
-function CustomResolutionModal(props: CustomResolutionModalProps) {
-  const [version, setVersion] = useState('');
-  const currentUser = configStore.get('user');
+export function CustomResolutionModal(props: CustomResolutionModalProps) {
+  const organization = useOrganization();
+  const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch] = useDebouncedValue(searchQuery, {
+    wait: DEFAULT_DEBOUNCE_DURATION,
+  });
+  const currentUser = ConfigStore.get('user');
+  const [selectionError, setSelectionError] = useState<string | null>(null);
 
-  const onChange = (selection: string | number | boolean) => {
-    setVersion(selection as string);
-  };
+  const {data: releases = [], isFetching} = useQuery({
+    ...apiOptions.as<Release[]>()('/organizations/$organizationIdOrSlug/releases/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {project: props.project?.id, query: debouncedSearch},
+      staleTime: 60_000,
+    }),
+    retry: false,
+  });
 
-  const onAsyncFieldResults: SelectAsyncFieldProps['onResults'] = (
-    results: Release[]
-  ) => {
-    return results.map(release => {
-      const isAuthor = release.authors.some(
-        author => author.email && author.email === currentUser?.email
-      );
-      return {
-        value: release.version,
-        label: (
-          <Fragment>
-            <Version version={release.version} anchor={false} />{' '}
-            {isVersionInfoSemver(release.versionInfo.version)
-              ? t('(semver)')
-              : t('(non-semver)')}
-          </Fragment>
-        ),
-        textValue: release.versionInfo.description ?? release.version,
-        details: (
-          <span>
-            {t('Created')} <TimeSince date={release.dateCreated} />
-            {isAuthor ? <Fragment> — {t('You committed')}</Fragment> : null}
-          </span>
-        ),
-        release,
-      };
-    });
-  };
+  const exactSearch = debouncedSearch.trim();
+  const shouldLookupExact = canLookupExactRelease(exactSearch);
 
-  const url = props.projectSlug
-    ? `/projects/${props.organization.slug}/${props.projectSlug}/releases/`
-    : `/organizations/${props.organization.slug}/releases/`;
+  // Attempt to find the exact release, the list is capped at the most recent 100 releases
+  const {data: exactRelease} = useQuery({
+    ...apiOptions.as<Release | Release[]>()(
+      '/organizations/$organizationIdOrSlug/releases/$version/',
+      {
+        path: shouldLookupExact
+          ? {
+              organizationIdOrSlug: organization.slug,
+              version: exactSearch,
+            }
+          : skipToken,
+        staleTime: 30_000,
+      }
+    ),
+    retry: false,
+    // Guard against intermediaries normalizing the detail URL to the releases collection.
+    select: response => (Array.isArray(response.json) ? null : response.json),
+  });
+
+  const visibleReleases = useMemo(
+    () =>
+      getUniqueReleases(
+        exactSearch ? [exactRelease, ...releases] : [selectedRelease, ...releases]
+      ),
+    [exactRelease, exactSearch, releases, selectedRelease]
+  );
+
+  const options = useMemo(
+    (): Array<SelectOption<string>> =>
+      visibleReleases.map(release => makeReleaseOption(release, currentUser?.email)),
+    [currentUser?.email, visibleReleases]
+  );
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    props.onSelected({inRelease: version});
+    if (!selectedRelease) {
+      setSelectionError(t('Please select a release.'));
+      return;
+    }
+
+    setSearchQuery('');
+    setSelectionError(null);
+    props.onSelected({inRelease: selectedRelease.version});
     props.closeModal();
   };
-
   const {Header, Body, Footer} = props;
 
   return (
@@ -76,34 +152,90 @@ function CustomResolutionModal(props: CustomResolutionModalProps) {
         <h4>{t('Resolved In')}</h4>
       </Header>
       <Body>
-        <SelectAsyncField
-          label={t('Version')}
+        <StyledCompactSelect
           id="version"
-          name="version"
-          onChange={onChange}
-          placeholder={t('e.g. 1.0.4')}
-          url={url}
-          onResults={onAsyncFieldResults}
-          onQuery={(query: any) => ({
-            query,
-          })}
+          clearable
+          search={{
+            placeholder: t('Search versions'),
+            filter: false,
+            onChange: setSearchQuery,
+          }}
+          options={options}
+          value={selectedRelease?.version ?? ''}
+          loading={isFetching}
+          emptyMessage={isFetching ? t('Loading releases\u2026') : t('No releases found')}
+          onChange={option => {
+            const selectedVersion = option?.value ? String(option.value) : '';
+            const release =
+              visibleReleases.find(item => item.version === selectedVersion) ?? null;
+
+            setSelectedRelease(release);
+            setSelectionError(null);
+            setSearchQuery('');
+          }}
+          menuTitle={t('Version')}
+          menuWidth={548}
+          trigger={triggerProps => (
+            <OverlayTrigger.Button
+              {...triggerProps}
+              prefix={t('Version')}
+              aria-label={t('Version')}
+            >
+              {selectedRelease
+                ? triggerProps.children
+                : isFetching
+                  ? t('Loading\u2026')
+                  : t('Select a version')}
+            </OverlayTrigger.Button>
+          )}
+          onClose={() => setSearchQuery('')}
         />
+        {selectionError ? <ErrorText role="alert">{selectionError}</ErrorText> : null}
+        <Container marginTop="md">
+          {selectedRelease ? (
+            // Open release in new tab to avoid closing the modal
+            <ExternalLink
+              href={`${makeReleasesPathname({
+                organization,
+                path: `/${encodeURIComponent(selectedRelease.version)}/`,
+              })}${props.project ? `?project=${props.project.id}` : ''}`}
+            >
+              <Flex align="center" gap="xs">
+                {t('View release')} <IconOpen size="xs" />
+              </Flex>
+            </ExternalLink>
+          ) : (
+            // Placeholder to maintain layout when no version is selected
+            <Container
+              as="span"
+              display="inline-block"
+              minHeight="1.2em"
+              aria-hidden="true"
+            />
+          )}
+        </Container>
       </Body>
       <Footer>
-        <Button
-          css={css`
-            margin-right: ${space(1.5)};
-          `}
-          onClick={props.closeModal}
-        >
-          {t('Cancel')}
-        </Button>
-        <Button type="submit" priority="primary">
-          {t('Resolve')}
-        </Button>
+        <Flex gap="sm" align="center" justify="end">
+          <Button onClick={props.closeModal}>{t('Cancel')}</Button>
+          <Button type="submit" variant="primary">
+            {t('Resolve')}
+          </Button>
+        </Flex>
       </Footer>
     </form>
   );
 }
 
-export default CustomResolutionModal;
+const StyledCompactSelect = styled(CompactSelect)`
+  width: 100%;
+
+  > button {
+    width: 100%;
+  }
+`;
+
+const ErrorText = styled('div')`
+  color: ${p => p.theme.tokens.content.danger};
+  margin-top: ${p => p.theme.space.sm};
+`;

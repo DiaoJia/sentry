@@ -1,50 +1,55 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouteComponentPropsFixture} from 'sentry-fixture/routeComponentPropsFixture';
 
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
 import OrganizationJoinRequest from 'sentry/views/organizationJoinRequest';
 
 jest.mock('sentry/utils/analytics', () => ({
   trackAdhocEvent: jest.fn(),
+  trackAnalytics: jest.fn(),
 }));
 
 jest.mock('sentry/actionCreators/indicator');
 
-describe('OrganizationJoinRequest', function () {
+describe('OrganizationJoinRequest', () => {
   const org = OrganizationFixture({slug: 'test-org'});
   const endpoint = `/organizations/${org.slug}/join-request/`;
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders', function () {
-    render(
-      <OrganizationJoinRequest
-        {...RouteComponentPropsFixture()}
-        params={{orgId: org.slug}}
-      />
-    );
+  it('renders', () => {
+    render(<OrganizationJoinRequest />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/join-request/${org.slug}/`,
+        },
+        route: '/join-request/:orgId/',
+      },
+    });
 
     expect(screen.getByRole('heading', {name: 'Request to Join'})).toBeInTheDocument();
     expect(screen.getByRole('textbox', {name: 'Email Address'})).toBeInTheDocument();
     expect(screen.getByRole('button', {name: 'Request to Join'})).toBeInTheDocument();
   });
 
-  it('submits', async function () {
+  it('submits', async () => {
     const postMock = MockApiClient.addMockResponse({
       url: endpoint,
       method: 'POST',
     });
 
-    render(
-      <OrganizationJoinRequest
-        {...RouteComponentPropsFixture()}
-        params={{orgId: org.slug}}
-      />
-    );
+    render(<OrganizationJoinRequest />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/join-request/${org.slug}/`,
+        },
+        route: '/join-request/:orgId/',
+      },
+    });
 
     await userEvent.type(
       screen.getByRole('textbox', {name: 'Email Address'}),
@@ -62,19 +67,47 @@ describe('OrganizationJoinRequest', function () {
     ).not.toBeInTheDocument();
   });
 
-  it('errors', async function () {
+  it('shows validation error for invalid email', async () => {
+    const postMock = MockApiClient.addMockResponse({
+      url: endpoint,
+      method: 'POST',
+    });
+
+    render(<OrganizationJoinRequest />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/join-request/${org.slug}/`,
+        },
+        route: '/join-request/:orgId/',
+      },
+    });
+
+    await userEvent.type(
+      screen.getByRole('textbox', {name: 'Email Address'}),
+      'not-an-email{enter}'
+    );
+
+    expect(
+      await screen.findByText('Please enter a valid email address')
+    ).toBeInTheDocument();
+    expect(postMock).not.toHaveBeenCalled();
+  });
+
+  it('errors', async () => {
     const postMock = MockApiClient.addMockResponse({
       url: endpoint,
       method: 'POST',
       statusCode: 400,
     });
 
-    render(
-      <OrganizationJoinRequest
-        {...RouteComponentPropsFixture()}
-        params={{orgId: org.slug}}
-      />
-    );
+    render(<OrganizationJoinRequest />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/join-request/${org.slug}/`,
+        },
+        route: '/join-request/:orgId/',
+      },
+    });
 
     await userEvent.type(
       screen.getByRole('textbox', {name: 'Email Address'}),
@@ -89,15 +122,19 @@ describe('OrganizationJoinRequest', function () {
     expect(screen.getByRole('heading', {name: 'Request to Join'})).toBeInTheDocument();
   });
 
-  it('cancels', async function () {
-    render(
-      <OrganizationJoinRequest
-        {...RouteComponentPropsFixture()}
-        params={{orgId: org.slug}}
-      />
-    );
+  it('cancels', async () => {
+    render(<OrganizationJoinRequest />, {
+      initialRouterConfig: {
+        location: {
+          pathname: `/join-request/${org.slug}/`,
+        },
+        route: '/join-request/:orgId/',
+      },
+    });
 
     await userEvent.click(screen.getByRole('button', {name: 'Cancel'}));
-    expect(window.location.assign).toHaveBeenCalledWith(`/auth/login/${org.slug}/`);
+    expect(testableWindowLocation.assign).toHaveBeenCalledWith(
+      `/auth/login/${org.slug}/`
+    );
   });
 });

@@ -9,9 +9,9 @@ import {
 import {SentryAppInstallationFixture} from 'sentry-fixture/sentryAppInstallation';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 
-import SentryAppExternalIssueForm from 'sentry/components/group/sentryAppExternalIssueForm';
+import {SentryAppExternalIssueForm} from 'sentry/components/group/sentryAppExternalIssueForm';
 import {addQueryParamsToExistingUrl} from 'sentry/utils/queryString';
 
 describe('SentryAppExternalIssueForm', () => {
@@ -24,7 +24,7 @@ describe('SentryAppExternalIssueForm', () => {
   const sentryApp = SentryAppFixture();
   const sentryAppInstallation = SentryAppInstallationFixture();
   const submitUrl = `/sentry-app-installations/${sentryAppInstallation.uuid}/external-issue-actions/`;
-  let externalIssueRequest!: jest.Mock<any, any>;
+  let externalIssueRequest!: jest.Mock;
 
   beforeEach(() => {
     externalIssueRequest = MockApiClient.addMockResponse({
@@ -33,7 +33,7 @@ describe('SentryAppExternalIssueForm', () => {
       body: {},
     });
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/external-issues/`,
+      url: '/organizations/org-slug/issues/1/external-issues/',
       body: [],
     });
   });
@@ -56,8 +56,9 @@ describe('SentryAppExternalIssueForm', () => {
         />
       );
 
-      // renders each required_fields field
+      // renders each required_fields field (once the mount-time cascade resolves)
       expect(component.schema.create.required_fields).toHaveLength(3);
+      await screen.findByRole('textbox', {name: 'Title'});
       for (const field of component.schema.create.required_fields) {
         expect(screen.getByRole('textbox', {name: field.label})).toBeInTheDocument();
       }
@@ -95,7 +96,7 @@ describe('SentryAppExternalIssueForm', () => {
       );
     });
 
-    it('renders prepopulated defaults', () => {
+    it('renders prepopulated defaults', async () => {
       render(
         <SentryAppExternalIssueForm
           event={EventFixture()}
@@ -107,12 +108,35 @@ describe('SentryAppExternalIssueForm', () => {
           action="create"
         />
       );
-      expect(screen.getByRole('textbox', {name: 'Title'})).toHaveValue(`${group.title}`);
+      expect(await screen.findByRole('textbox', {name: 'Title'})).toHaveValue(
+        group.title
+      );
 
       const url = addQueryParamsToExistingUrl(group.permalink, {
         referrer: sentryApp.name,
       });
       expect(screen.getByRole('textbox', {name: 'Description'})).toHaveValue(
+        `Sentry Issue: [${group.shortId}](${url})`
+      );
+    });
+
+    it('renders without an event', async () => {
+      render(
+        <SentryAppExternalIssueForm
+          event={undefined}
+          onSubmitSuccess={jest.fn()}
+          group={group}
+          sentryAppInstallation={sentryAppInstallation}
+          appName={sentryApp.name}
+          config={component.schema.create}
+          action="create"
+        />
+      );
+
+      const url = addQueryParamsToExistingUrl(group.permalink, {
+        referrer: sentryApp.name,
+      });
+      expect(await screen.findByRole('textbox', {name: 'Description'})).toHaveValue(
         `Sentry Issue: [${group.shortId}](${url})`
       );
     });
@@ -170,12 +194,12 @@ describe('SentryAppExternalIssueForm Async Field', () => {
   beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/external-issues/`,
+      url: '/organizations/org-slug/issues/1/external-issues/',
       body: [],
     });
   });
 
-  it('renders each required_fields field', async function () {
+  it('renders each required_fields field', async () => {
     const mockGetOptions = MockApiClient.addMockResponse({
       method: 'GET',
       url: '/sentry-app-installations/d950595e-cba2-46f6-8a94-b79e42806f98/external-requests/',
@@ -221,7 +245,7 @@ describe('SentryAppExternalIssueForm Dependent fields', () => {
   beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/issues/1/external-issues/`,
+      url: '/organizations/org-slug/issues/1/external-issues/',
       body: [],
     });
   });
@@ -269,7 +293,7 @@ describe('SentryAppExternalIssueForm Dependent fields', () => {
       />
     );
 
-    await userEvent.type(screen.getByRole('textbox', {name: 'Project'}), 'p');
+    await userEvent.type(await screen.findByRole('textbox', {name: 'Project'}), 'p');
 
     expect(await screen.findByText('project A')).toBeInTheDocument();
     expect(screen.getByText('project B')).toBeInTheDocument();

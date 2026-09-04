@@ -60,6 +60,7 @@ class SentryAppWebhookFailureReason(StrEnum):
     EVENT_NOT_IN_SERVCEHOOK = "event_not_in_servicehook"
     MISSING_ISSUE_OCCURRENCE = "missing_issue_occurrence"
     MISSING_USER = "missing_user"
+    MULTIPLE_INSTALLATIONS = "multiple_installations"
 
 
 class SentryAppWebhookHaltReason(StrEnum):
@@ -68,12 +69,21 @@ class SentryAppWebhookHaltReason(StrEnum):
     GOT_CLIENT_ERROR = "got_client_error"
     INTEGRATOR_ERROR = "integrator_error"
     MISSING_INSTALLATION = "missing_installation"
+    RESTRICTED_IP = "restricted_ip"
+    CONNECTION_RESET = "connection_reset"
+    HARD_TIMEOUT = "hard_timeout"
+    CIRCUIT_BROKEN = "circuit_broken"
+    EMAIL_FAILED = "email_failed"
+    APP_DISABLED = "app_disabled"
+    INNER_TIMEOUT = "inner_timeout"
+    MISSING_GROUP = "missing_group"
 
 
 class SentryAppExternalRequestFailureReason(StrEnum):
     """Reasons why sentry app external request processes can fail"""
 
     MISSING_URL = "missing_url"
+    INVALID_URI = "invalid_uri"
     UNEXPECTED_ERROR = "unexpected_error"
     INVALID_EVENT = "invalid_event"
 
@@ -83,53 +93,3 @@ class SentryAppExternalRequestHaltReason(StrEnum):
 
     MISSING_FIELDS = "missing_fields"
     BAD_RESPONSE = "bad_response"
-
-
-class SentryAppEventType(StrEnum):
-    """Events/features that Sentry Apps can do"""
-
-    # event webhooks
-    ERROR_CREATED = "error.created"
-    ISSUE_CREATED = "issue.created"
-
-    # issue alert webhooks
-    EVENT_ALERT_TRIGGERED = "event_alert.triggered"
-
-    # external request webhooks
-    EXTERNAL_ISSUE_CREATED = "external_issue.created"
-    EXTERNAL_ISSUE_LINKED = "external_issue.linked"
-    SELECT_OPTIONS_REQUESTED = "select_options.requested"
-    ALERT_RULE_ACTION_REQUESTED = "alert_rule_action.requested"
-
-    # metric alert webhooks
-    METRIC_ALERT_OPEN = "metric_alert.open"
-    METRIC_ALERT_RESOLVED = "metric_alert.resolved"
-    METRIC_ALERT_CRITICAL = "metric_alert.critical"
-    METRIC_ALERT_WARNING = "metric_alert.warning"
-
-    # comment webhooks
-    COMMENT_CREATED = "comment.created"
-    COMMENT_UPDATED = "comment.updated"
-    COMMENT_DELETED = "comment.deleted"
-
-    # installation webhooks
-    INSTALLATION_CREATED = "installation.created"
-    INSTALLATION_DELETED = "installation.deleted"
-
-    # workflow notification
-    ISSUE_IGNORED = "issue.ignored"
-    ISSUE_ARCHIVED = "issue.archived"
-    ISSUE_UNRESOLVED = "issue.unresolved"
-    ISSUE_RESOLVED = "issue.resolved"
-    ISSUE_ASSIGNED = "issue.assigned"
-
-    # authorizations
-    GRANT_EXCHANGER = "grant_exchanger"
-    REFRESHER = "refresher"
-
-    # management
-    APP_CREATE = "app_create"
-    APP_UPDATE = "app_update"
-    REQUESTS = "requests"
-    PUBLISH = "publish"
-    WEBHOOK_UPDATE = "webhook_update"

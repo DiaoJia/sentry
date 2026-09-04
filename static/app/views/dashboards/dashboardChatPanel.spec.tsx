@@ -1,0 +1,90 @@
+import {OrganizationFixture} from 'sentry-fixture/organization';
+
+import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+
+import type {Block} from 'sentry/views/seerExplorer/types';
+
+import {DashboardChatPanel} from './dashboardChatPanel';
+
+describe('DashboardChatPanel', () => {
+  it('renders textarea input', () => {
+    render(<DashboardChatPanel blocks={[]} onSend={jest.fn()} isUpdating={false} />, {
+      organization: OrganizationFixture(),
+    });
+
+    expect(
+      screen.getByPlaceholderText('Ask Seer to modify this dashboard...')
+    ).toBeInTheDocument();
+  });
+
+  it('shows conversation toggle and history', async () => {
+    const timestamp = new Date().toISOString();
+    const blocks: Block[] = [
+      {
+        id: '1',
+        message: {content: 'Hello', role: 'user'},
+        timestamp,
+      },
+      {
+        id: '2',
+        message: {content: 'Hi there', role: 'assistant'},
+        timestamp,
+      },
+    ];
+
+    render(<DashboardChatPanel blocks={blocks} onSend={jest.fn()} isUpdating={false} />, {
+      organization: OrganizationFixture(),
+    });
+
+    expect(screen.getByText(/Conversation.*\(2\)/)).toBeInTheDocument();
+
+    expect(screen.getByText(/Hello/)).toBeInTheDocument();
+    expect(screen.getByText(/Hi there/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText(/Conversation.*\(2\)/));
+
+    expect(screen.queryByText(/Hello/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Hi there/)).not.toBeInTheDocument();
+  });
+
+  it('hides prepended system instructions behind a disclosure', async () => {
+    const timestamp = new Date().toISOString();
+    const blocks: Block[] = [
+      {
+        id: '1',
+        message: {
+          content:
+            'You are generating a Sentry dashboard. Follow these rules strictly:\n\nUser Query:\nShow me error rates by project\n',
+          role: 'user',
+        },
+        timestamp,
+      },
+    ];
+
+    render(<DashboardChatPanel blocks={blocks} onSend={jest.fn()} isUpdating={false} />, {
+      organization: OrganizationFixture(),
+    });
+
+    // Only the user's query is visible; instructions are collapsed (hidden)
+    expect(screen.getByText('Show me error rates by project')).toBeInTheDocument();
+    expect(screen.getByText(/You are generating a Sentry dashboard/)).not.toBeVisible();
+
+    // Expanding the disclosure reveals the instructions
+    await userEvent.click(screen.getByRole('button', {name: 'System instructions'}));
+
+    expect(screen.getByText(/You are generating a Sentry dashboard/)).toBeVisible();
+  });
+
+  it('calls onSend when submitting a message via Enter', async () => {
+    const onSend = jest.fn();
+    render(<DashboardChatPanel blocks={[]} onSend={onSend} isUpdating={false} />, {
+      organization: OrganizationFixture(),
+    });
+
+    const textarea = screen.getByPlaceholderText('Ask Seer to modify this dashboard...');
+    await userEvent.click(textarea);
+    await userEvent.type(textarea, 'Add a chart for errors{Enter}');
+
+    expect(onSend).toHaveBeenCalledWith('Add a chart for errors');
+  });
+});

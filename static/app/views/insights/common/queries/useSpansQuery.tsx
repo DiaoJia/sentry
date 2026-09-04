@@ -1,29 +1,29 @@
+import {keepPreviousData as keepPreviousDataFn} from '@tanstack/react-query';
 import moment from 'moment-timezone';
 
-import {defined} from 'sentry/utils';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import type {CaseInsensitive} from 'sentry/components/searchQueryBuilder/hooks';
+import {defined} from 'sentry/utils/defined';
 import type {TableData} from 'sentry/utils/discover/discoverQuery';
 import {useDiscoverQuery} from 'sentry/utils/discover/discoverQuery';
-import type {EventsMetaType, MetaType} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventsMetaType, EventView, MetaType} from 'sentry/utils/discover/eventView';
 import {encodeSort} from 'sentry/utils/discover/eventView';
 import type {DiscoverQueryProps} from 'sentry/utils/discover/genericDiscoverQuery';
 import {useGenericDiscoverQuery} from 'sentry/utils/discover/genericDiscoverQuery';
 import {DiscoverDatasets} from 'sentry/utils/discover/types';
 import {intervalToMilliseconds} from 'sentry/utils/duration/intervalToMilliseconds';
-import {keepPreviousData as keepPreviousDataFn} from 'sentry/utils/queryClient';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import type {
+  RPCQueryExtras,
   SamplingMode,
-  SpansRPCQueryExtras,
 } from 'sentry/views/explore/hooks/useProgressiveQuery';
+import type {ExtrapolationMode} from 'sentry/views/insights/common/queries/types';
 import {
   getRetryDelay,
   shouldRetryHandler,
 } from 'sentry/views/insights/common/utils/retryHandlers';
 import {TrackResponse} from 'sentry/views/insights/common/utils/trackResponse';
-
 const DATE_FORMAT = 'YYYY-MM-DDTHH:mm:ssZ';
 
 const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
@@ -37,9 +37,11 @@ type SpansQueryProps<T = any[]> = {
   enabled?: boolean;
   eventView?: EventView;
   initialData?: T;
+  keepPreviousData?: boolean;
   limit?: number;
-  queryExtras?: SpansRPCQueryExtras;
+  queryExtras?: RPCQueryExtras;
   referrer?: string;
+  staleTime?: number;
   trackResponseAnalytics?: boolean;
 };
 
@@ -75,6 +77,7 @@ export function useSpansQueryWithoutPageFilters<T = any[]>({
 function useSpansQueryBase<T>({
   eventView,
   initialData,
+  keepPreviousData,
   limit,
   enabled,
   referrer,
@@ -83,6 +86,7 @@ function useSpansQueryBase<T>({
   trackResponseAnalytics,
   queryExtras,
   withPageFilters,
+  staleTime,
 }: SpansQueryProps<T> & {withPageFilters: boolean}) {
   if (!eventView) {
     throw new Error(
@@ -103,12 +107,19 @@ function useSpansQueryBase<T>({
   const response = queryFunction<T>({
     eventView: newEventView,
     initialData,
+    keepPreviousData,
     limit,
     enabled,
     referrer,
     cursor,
     allowAggregateConditions,
+    caseInsensitive: queryExtras?.caseInsensitive,
     samplingMode: queryExtras?.samplingMode,
+    disableAggregateExtrapolation: queryExtras?.disableAggregateExtrapolation,
+    logQuery: queryExtras?.logQuery,
+    metricQuery: queryExtras?.metricQuery,
+    spanQuery: queryExtras?.spanQuery,
+    staleTime,
   });
 
   if (trackResponseAnalytics) {
@@ -120,12 +131,17 @@ function useSpansQueryBase<T>({
 
 type WrappedDiscoverTimeseriesQueryProps = {
   eventView: EventView;
+  caseInsensitive?: CaseInsensitive;
   cursor?: string;
   enabled?: boolean;
   initialData?: any;
+  logQuery?: string[];
+  metricQuery?: string[];
   overriddenRoute?: string;
   referrer?: string;
   samplingMode?: SamplingMode;
+  spanQuery?: string[];
+  staleTime?: number;
 };
 
 function useWrappedDiscoverTimeseriesQueryBase<T>({
@@ -136,6 +152,11 @@ function useWrappedDiscoverTimeseriesQueryBase<T>({
   cursor,
   overriddenRoute,
   samplingMode,
+  caseInsensitive,
+  logQuery,
+  metricQuery,
+  spanQuery,
+  staleTime,
 }: WrappedDiscoverTimeseriesQueryProps) {
   const location = useLocation();
   const organization = useOrganization();
@@ -170,9 +191,13 @@ function useWrappedDiscoverTimeseriesQueryBase<T>({
       interval: eventView.interval,
       cursor,
       sampling:
-        eventView.dataset === DiscoverDatasets.SPANS_EAP_RPC && samplingMode
+        eventView.dataset === DiscoverDatasets.SPANS && samplingMode
           ? samplingMode
           : undefined,
+      caseInsensitive,
+      logQuery,
+      metricQuery,
+      spanQuery,
     }),
     options: {
       enabled,
@@ -180,11 +205,12 @@ function useWrappedDiscoverTimeseriesQueryBase<T>({
       retry: shouldRetryHandler,
       retryDelay: getRetryDelay,
       staleTime:
-        usesRelativeDateRange &&
+        staleTime ??
+        (usesRelativeDateRange &&
         defined(intervalInMilliseconds) &&
         intervalInMilliseconds !== 0
           ? intervalInMilliseconds
-          : Infinity,
+          : Infinity),
     },
     referrer,
   });
@@ -226,14 +252,22 @@ type WrappedDiscoverQueryProps<T> = {
   eventView: EventView;
   additionalQueryKey?: string[];
   allowAggregateConditions?: boolean;
+  caseInsensitive?: CaseInsensitive;
   cursor?: string;
+  disableAggregateExtrapolation?: string;
   enabled?: boolean;
+  extrapolationMode?: ExtrapolationMode;
   initialData?: T;
   keepPreviousData?: boolean;
   limit?: number;
+  logQuery?: string[];
+  metricQuery?: string[];
   noPagination?: boolean;
   referrer?: string;
+  refetchInterval?: number;
   samplingMode?: SamplingMode;
+  spanQuery?: string[];
+  staleTime?: number;
 };
 
 function useWrappedDiscoverQueryBase<T>({
@@ -246,18 +280,53 @@ function useWrappedDiscoverQueryBase<T>({
   cursor,
   noPagination,
   allowAggregateConditions,
+  disableAggregateExtrapolation,
   samplingMode,
   pageFiltersReady,
   additionalQueryKey,
+  refetchInterval,
+  caseInsensitive,
+  logQuery,
+  metricQuery,
+  spanQuery,
+  extrapolationMode,
+  staleTime,
 }: WrappedDiscoverQueryProps<T> & {
   pageFiltersReady: boolean;
 }) {
   const location = useLocation();
   const organization = useOrganization();
 
-  const queryExtras: Record<string, string> = {};
-  if (eventView.dataset === DiscoverDatasets.SPANS_EAP_RPC && samplingMode) {
-    queryExtras.sampling = samplingMode;
+  const queryExtras: Record<string, string | string[]> = {};
+  if (
+    [DiscoverDatasets.SPANS, DiscoverDatasets.TRACEMETRICS].includes(eventView.dataset!)
+  ) {
+    if (samplingMode) {
+      queryExtras.sampling = samplingMode;
+    }
+    if (extrapolationMode) {
+      queryExtras.extrapolationMode = extrapolationMode;
+    }
+
+    if (disableAggregateExtrapolation) {
+      queryExtras.disableAggregateExtrapolation = '1';
+    }
+  }
+
+  if (typeof caseInsensitive === 'boolean' && caseInsensitive) {
+    queryExtras.caseInsensitive = '1';
+  }
+
+  if (Array.isArray(logQuery) && logQuery.length > 0) {
+    queryExtras.logQuery = logQuery;
+  }
+
+  if (Array.isArray(metricQuery) && metricQuery.length > 0) {
+    queryExtras.metricQuery = metricQuery;
+  }
+
+  if (Array.isArray(spanQuery) && spanQuery.length > 0) {
+    queryExtras.spanQuery = spanQuery;
   }
 
   if (allowAggregateConditions !== undefined) {
@@ -276,8 +345,9 @@ function useWrappedDiscoverQueryBase<T>({
       refetchOnWindowFocus: false,
       retry: shouldRetryHandler,
       retryDelay: getRetryDelay,
-      staleTime: getStaleTimeForEventView(eventView),
+      staleTime: staleTime ?? getStaleTimeForEventView(eventView),
       additionalQueryKey,
+      refetchInterval,
       placeholderData: keepPreviousData ? keepPreviousDataFn : undefined,
     },
     queryExtras,
@@ -303,7 +373,7 @@ export function useWrappedDiscoverQuery<T>(props: WrappedDiscoverQueryProps<T>) 
   return useWrappedDiscoverQueryBase({...props, pageFiltersReady});
 }
 
-function useWrappedDiscoverQueryWithoutPageFilters<T>(
+export function useWrappedDiscoverQueryWithoutPageFilters<T>(
   props: WrappedDiscoverQueryProps<T>
 ) {
   return useWrappedDiscoverQueryBase({...props, pageFiltersReady: true});
@@ -316,7 +386,7 @@ function processDiscoverTimeseriesResult(
   eventView: EventView
 ) {
   if (!result) {
-    return undefined;
+    return;
   }
 
   if (!eventView.yAxis) {

@@ -1,0 +1,289 @@
+import logging
+from dataclasses import dataclass
+from typing import Any, Protocol, cast
+
+from sentry_protos.snuba.v1.downsampled_storage_pb2 import DownsampledStorageConfig
+from sentry_protos.snuba.v1.endpoint_trace_items_pb2 import (
+    ExportTraceItemsRequest,
+    ExportTraceItemsResponse,
+)
+from sentry_protos.snuba.v1.request_common_pb2 import PageToken, RequestMeta
+from sentry_protos.snuba.v1.trace_item_filter_pb2 import TraceItemFilter
+
+from sentry.api.utils import get_date_range_from_params
+from sentry.data_export.base import ExportError
+from sentry.data_export.utils import iter_export_trace_items_rows
+from sentry.data_export.writers import OutputMode
+from sentry.models.environment import Environment
+from sentry.models.organization import Organization
+from sentry.models.project import Project
+from sentry.search.eap.columns import ColumnDefinitions
+from sentry.search.eap.constants import SUPPORTED_TRACE_ITEM_TYPE_MAP
+from sentry.search.eap.ourlogs.definitions import OURLOG_DEFINITIONS
+from sentry.search.eap.resolver import SearchResolver
+from sentry.search.eap.spans.definitions import SPAN_DEFINITIONS
+from sentry.search.eap.trace_metrics.config import TraceMetricsSearchResolverConfig
+from sentry.search.eap.trace_metrics.definitions import TRACE_METRICS_DEFINITIONS
+from sentry.search.eap.types import (
+    EAPResponse,
+    FieldsACL,
+    SearchResolverConfig,
+    SupportedTraceItemType,
+)
+from sentry.search.events.types import SAMPLING_MODES, SnubaParams
+from sentry.snuba.ourlogs import OurLogs
+from sentry.snuba.referrer import Referrer
+from sentry.snuba.rpc_dataset_common import RPCBase, TableQuery
+from sentry.snuba.spans_rpc import Spans
+from sentry.snuba.trace_metrics import TraceMetrics
+from sentry.utils.snuba_rpc import export_logs_rpc
+from sentry.utils.tracing import set_span_data, start_span
+
+logger = logging.getLogger(__name__)
+
+
+def _spans_config(
+    *, use_aggregate_conditions: bool, disable_extrapolation: bool
+) -> SearchResolverConfig:
+    return SearchResolverConfig(
+        auto_fields=True,
+        use_aggregate_conditions=use_aggregate_conditions,
+        fields_acl=FieldsACL(functions={"time_spent_percentage"}),
+        disable_aggregate_extrapolation=disable_extrapolation,
+    )
+
+
+def _logs_config(
+    *, use_aggregate_conditions: bool, disable_extrapolation: bool
+) -> SearchResolverConfig:
+    # Logs have never forwarded disable_extrapolation; preserved as-is so extracting these
+    # builders stays behaviour-neutral.
+    return SearchResolverConfig(use_aggregate_conditions=use_aggregate_conditions)
+
+
+def _trace_metrics_config(
+    *, use_aggregate_conditions: bool, disable_extrapolation: bool
+) -> SearchResolverConfig:
+    return TraceMetricsSearchResolverConfig(
+        metric=None,
+        use_aggregate_conditions=use_aggregate_conditions,
+        auto_fields=True,
+        disable_aggregate_extrapolation=disable_extrapolation,
+    )
+
+
+class ConfigBuilder(Protocol):
+    def __call__(
+        self, *, use_aggregate_conditions: bool, disable_extrapolation: bool
+    ) -> SearchResolverConfig: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class TraceItemExportDataset:
+    scoped_dataset: type[RPCBase]
+    definitions: ColumnDefinitions
+    trace_item_type: SupportedTraceItemType
+    build_config: ConfigBuilder
+
+
+SUPPORTED_TRACE_ITEM_DATASETS = {
+    "spans": TraceItemExportDataset(
+        scoped_dataset=Spans,
+        definitions=SPAN_DEFINITIONS,
+        trace_item_type=SupportedTraceItemType.SPANS,
+        build_config=_spans_config,
+    ),
+    "logs": TraceItemExportDataset(
+        scoped_dataset=OurLogs,
+        definitions=OURLOG_DEFINITIONS,
+        trace_item_type=SupportedTraceItemType.LOGS,
+        build_config=_logs_config,
+    ),
+    "tracemetrics": TraceItemExportDataset(
+        scoped_dataset=TraceMetrics,
+        definitions=TRACE_METRICS_DEFINITIONS,
+        trace_item_type=SupportedTraceItemType.TRACEMETRICS,
+        build_config=_trace_metrics_config,
+    ),
+}
+
+
+class ExploreProcessor:
+    """
+    Processor for exports of discover data based on a provided query
+    """
+
+    def __init__(
+        self,
+        organization: Organization,
+        explore_query: dict[str, Any],
+        *,
+        output_mode: OutputMode = OutputMode.CSV,
+    ):
+        self.projects = self.get_projects(organization.id, explore_query)
+        self.environments = self.get_environments(organization.id, explore_query)
+        self.start, self.end = get_date_range_from_params(explore_query)
+        self.sampling_mode = self.get_sampling_mode(organization.id, explore_query)
+        self.snuba_params = SnubaParams(
+            organization=organization,
+            projects=self.projects,
+            start=self.start,
+            end=self.end,
+            sampling_mode=self.sampling_mode,
+            query_string=explore_query.get("query"),
+        )
+        if self.environments:
+            self.snuba_params.environments = self.environments
+
+        dataset: str = explore_query["dataset"]
+        export_dataset = SUPPORTED_TRACE_ITEM_DATASETS[dataset]
+        self.scoped_dataset = export_dataset.scoped_dataset
+        self._supported_trace_item_type = export_dataset.trace_item_type
+        self.trace_item_type = SUPPORTED_TRACE_ITEM_TYPE_MAP[self._supported_trace_item_type]
+
+        self.config = export_dataset.build_config(
+            use_aggregate_conditions=explore_query.get("allowAggregateConditions", "1") == "1",
+            disable_extrapolation=explore_query.get("disableAggregateExtrapolation", "0") == "1",
+        )
+
+        self.search_resolver = SearchResolver(
+            params=self.snuba_params,
+            config=self.config,
+            definitions=export_dataset.definitions,
+        )
+
+        equations = explore_query.get("equations", [])
+
+        self.header_fields = explore_query["field"] + equations
+
+        self.explore_query = explore_query
+
+    @staticmethod
+    def get_projects(organization_id: int, query: dict[str, Any]) -> list[Project]:
+        projects = list(
+            Project.objects.filter(id__in=query.get("project"), organization_id=organization_id)
+        )
+        if len(projects) == 0:
+            raise ExportError("Requested project does not exist")
+        return projects
+
+    @staticmethod
+    def get_environments(organization_id: int, query: dict[str, Any]) -> list[Environment]:
+        requested_environments = query.get("environment", [])
+        if not isinstance(requested_environments, list):
+            requested_environments = [requested_environments]
+
+        if not requested_environments:
+            return []
+
+        environments = list(
+            Environment.objects.filter(
+                organization_id=organization_id, name__in=requested_environments
+            )
+        )
+        environment_names = [e.name for e in environments]
+
+        if set(requested_environments) != set(environment_names):
+            raise ExportError("Requested environment does not exist")
+
+        return environments
+
+    @staticmethod
+    def get_sampling_mode(organization_id: int, query: dict[str, Any]) -> SAMPLING_MODES | None:
+        sampling_mode = query.get("sampling", None)
+        if sampling_mode is not None:
+            sampling_mode = cast(SAMPLING_MODES, sampling_mode.upper())
+        return sampling_mode
+
+    def run_query(self, offset: int, limit: int) -> list[dict[str, Any]]:
+        query: str = self.explore_query.get("query", "")
+        fields: list[str] = self.explore_query.get("field", [])
+        equations: list[str] = self.explore_query.get("equations", [])
+        eap_response: EAPResponse = self.scoped_dataset.run_table_query(
+            params=self.snuba_params,
+            query_string=query,
+            selected_columns=fields,
+            equations=equations,
+            offset=offset,
+            orderby=self.explore_query.get("sort"),
+            limit=limit,
+            referrer=Referrer.DATA_EXPORT_TASKS_EXPLORE,
+            config=self.config,
+            sampling_mode=self.snuba_params.sampling_mode,
+        )
+        return eap_response["data"]
+
+    def validate_export_query(self, export_request: TableQuery) -> None:
+        _ = self.scoped_dataset.get_table_rpc_request(export_request)
+
+
+class TraceItemFullExportProcessor(ExploreProcessor):
+    """Wide JSONL export: persists Snuba `EndpointExportTraceItems` page_token bytes between calls."""
+
+    def __init__(
+        self,
+        organization: Organization,
+        explore_query: dict[str, Any],
+        *,
+        output_mode: OutputMode = OutputMode.CSV,
+        page_token: bytes | None = None,
+    ):
+        super().__init__(organization, explore_query, output_mode=output_mode)
+        self.page_token = page_token
+        self._request_meta = self._create_export_rpc_meta()
+        self._trace_filter = self._create_trace_item_filter()
+
+    def _sync_page_token_from_snuba_response(self, http_resp: ExportTraceItemsResponse) -> None:
+        """Mirror Snuba's response page_token: continuation bytes or terminal (end_pagination)."""
+        if not http_resp.HasField("page_token"):
+            self.page_token = None
+            return
+        pt = http_resp.page_token
+        if pt.HasField("end_pagination") and pt.end_pagination:
+            self.page_token = None
+        else:
+            self.page_token = pt.SerializeToString()
+
+    def _create_export_rpc_meta(self) -> RequestMeta:
+        if self.snuba_params.organization_id is None:
+            raise ExportError("Organization ID must be provided")
+
+        return RequestMeta(
+            organization_id=self.snuba_params.organization_id,
+            project_ids=self.snuba_params.project_ids,
+            cogs_category="events_analytics_platform",
+            start_timestamp=self.snuba_params.rpc_start_date,
+            end_timestamp=self.snuba_params.rpc_end_date,
+            referrer=Referrer.DATA_EXPORT_TASKS_EXPLORE,
+            trace_item_type=self.trace_item_type,
+            downsampled_storage_config=DownsampledStorageConfig(
+                mode=DownsampledStorageConfig.MODE_HIGHEST_ACCURACY_FLEXTIME
+            ),
+        )
+
+    def _create_trace_item_filter(self) -> TraceItemFilter | None:
+        where, _, _ = self.search_resolver.resolve_query_with_columns(
+            querystring=self.explore_query.get("query", ""),
+            selected_columns=None,
+            equations=None,
+        )
+        return where
+
+    def run_query(self, _offset: int, limit: int) -> list[dict[str, Any]]:
+        request = ExportTraceItemsRequest(
+            meta=self._request_meta, limit=limit, filter=self._trace_filter
+        )
+        if self.page_token:
+            token = PageToken()
+            token.ParseFromString(self.page_token)
+            request.page_token.CopyFrom(token)
+        with start_span(op="snuba.rpc", name="ExportTraceItems") as span:
+            set_span_data(span, "dataset", self.explore_query["dataset"])
+            set_span_data(span, "limit", limit)
+            set_span_data(span, "has_page_token", self.page_token is not None)
+            http_resp = export_logs_rpc(request)
+            self._sync_page_token_from_snuba_response(http_resp)
+            set_span_data(span, "next_page_token", self.page_token is not None)
+
+        rows = list(iter_export_trace_items_rows(http_resp, self._supported_trace_item_type))
+        return rows or []

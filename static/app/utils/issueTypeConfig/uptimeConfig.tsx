@@ -2,7 +2,7 @@ import {t} from 'sentry/locale';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const uptimeConfig: IssueCategoryConfigMapping = {
+export const uptimeConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
@@ -17,13 +17,14 @@ const uptimeConfig: IssueCategoryConfigMapping = {
     header: {
       filterBar: {enabled: true, fixedEnvironment: true},
       graph: {enabled: true, type: 'uptime-checks'},
+      eventNavigation: {enabled: true},
       tagDistribution: {enabled: false},
       occurrenceSummary: {enabled: true, downtime: true},
     },
     detector: {
       enabled: true,
       title: t('Uptime Monitor'),
-      ctaText: t('View alert details'),
+      ctaText: t('View monitor details'),
     },
     customCopy: {
       eventUnits: t('Events'),
@@ -49,5 +50,3 @@ const uptimeConfig: IssueCategoryConfigMapping = {
     issueSummary: {enabled: false},
   },
 };
-
-export default uptimeConfig;

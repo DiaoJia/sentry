@@ -1,23 +1,25 @@
-import {Fragment} from 'react';
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+
 import {BarChart} from 'sentry/components/charts/barChart';
-import Count from 'sentry/components/count';
+import {Count} from 'sentry/components/count';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import Placeholder from 'sentry/components/placeholder';
-import TimeSince from 'sentry/components/timeSince';
+import {LoadingError} from 'sentry/components/loadingError';
+import {Placeholder} from 'sentry/components/placeholder';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Group} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {getTitle} from 'sentry/utils/events';
 import {useApiQuery} from 'sentry/utils/queryClient';
+
+import {TeamInsightsTable} from './styles';
 
 interface TeamIssuesAgeProps {
   organization: Organization;
@@ -50,7 +52,7 @@ const bucketLabels = {
   '> 1 year': t('> 1 year'),
 };
 
-function TeamIssuesAge({organization, teamSlug}: TeamIssuesAgeProps) {
+export function TeamIssuesAge({organization, teamSlug}: TeamIssuesAgeProps) {
   const {
     data: oldestIssues,
     isPending: isOldestIssuesLoading,
@@ -58,7 +60,9 @@ function TeamIssuesAge({organization, teamSlug}: TeamIssuesAgeProps) {
     refetch: refetchOldestIssues,
   } = useApiQuery<Group[]>(
     [
-      `/teams/${organization.slug}/${teamSlug}/issues/old/`,
+      getApiUrl('/teams/$organizationIdOrSlug/$teamIdOrSlug/issues/old/', {
+        path: {organizationIdOrSlug: organization.slug, teamIdOrSlug: teamSlug},
+      }),
       {
         query: {
           limit: 7,
@@ -74,7 +78,11 @@ function TeamIssuesAge({organization, teamSlug}: TeamIssuesAgeProps) {
     isError: isUnresolvedIssueAgeError,
     refetch: refetchUnresolvedIssueAge,
   } = useApiQuery<Record<string, number>>(
-    [`/teams/${organization.slug}/${teamSlug}/unresolved-issue-age/`],
+    [
+      getApiUrl('/teams/$organizationIdOrSlug/$teamIdOrSlug/unresolved-issue-age/', {
+        path: {organizationIdOrSlug: organization.slug, teamIdOrSlug: teamSlug},
+      }),
+    ],
     {staleTime: 5000}
   );
 
@@ -130,106 +138,106 @@ function TeamIssuesAge({organization, teamSlug}: TeamIssuesAgeProps) {
           />
         )}
       </ChartWrapper>
-      <StyledPanelTable
-        isEmpty={!oldestIssues || oldestIssues?.length === 0}
-        emptyMessage={t('No unresolved issues for this team’s projects')}
-        headers={[
-          t('Oldest Issues'),
-          <RightAligned key="events">{t('Events')}</RightAligned>,
-          <RightAligned key="users">{t('Users')}</RightAligned>,
-          <RightAligned key="age">
-            {t('Age')} <IconArrow direction="down" size="xs" color="gray300" />
-          </RightAligned>,
-        ]}
-        isLoading={isLoading}
+      <StyledSimpleTable
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Oldest Issues')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>
+              <Flex as="span" justify="end" align="center">
+                {t('Events')}
+              </Flex>
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>
+              <Flex as="span" justify="end" align="center">
+                {t('Users')}
+              </Flex>
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>
+              <Flex as="span" justify="end" align="center">
+                {t('Age')} <IconArrow direction="down" size="xs" variant="muted" />
+              </Flex>
+            </SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
-        {oldestIssues?.map(issue => {
-          const {title} = getTitle(issue);
+        {isLoading && <SimpleTable.Loading />}
+        {!isLoading && (!oldestIssues || oldestIssues.length === 0) && (
+          <SimpleTable.Empty>
+            {t('No unresolved issues for this team’s projects')}
+          </SimpleTable.Empty>
+        )}
+        {!isLoading &&
+          oldestIssues?.map(issue => {
+            const {title} = getTitle(issue);
 
-          return (
-            <Fragment key={issue.id}>
-              <ProjectTitleContainer>
-                <ShadowlessProjectBadge
-                  disableLink
-                  hideName
-                  avatarSize={18}
-                  project={issue.project}
-                />
-                <TitleOverflow>
-                  <Link
-                    to={{
-                      pathname: `/organizations/${organization.slug}/issues/${issue.id}/`,
-                    }}
-                  >
-                    {title}
-                  </Link>
-                </TitleOverflow>
-              </ProjectTitleContainer>
-              <RightAligned>
-                <Count value={issue.count} />
-              </RightAligned>
-              <RightAligned>
-                <Count value={issue.userCount} />
-              </RightAligned>
-              <RightAligned>
-                <TimeSince date={issue.firstSeen} />
-              </RightAligned>
-            </Fragment>
-          );
-        })}
-      </StyledPanelTable>
+            return (
+              <SimpleTable.Row key={issue.id}>
+                <SimpleTable.RowCell>
+                  <ProjectTitleContainer>
+                    <ShadowlessProjectBadge
+                      disableLink
+                      hideName
+                      avatarSize={18}
+                      project={issue.project}
+                    />
+                    <TitleOverflow>
+                      <Link
+                        to={{
+                          pathname: `/organizations/${organization.slug}/issues/${issue.id}/`,
+                        }}
+                      >
+                        {title}
+                      </Link>
+                    </TitleOverflow>
+                  </ProjectTitleContainer>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell justify="end">
+                  <Count value={issue.count} />
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell justify="end">
+                  <Count value={issue.userCount} />
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell justify="end">
+                  <TimeSince date={issue.firstSeen} />
+                </SimpleTable.RowCell>
+              </SimpleTable.Row>
+            );
+          })}
+      </StyledSimpleTable>
     </div>
   );
 }
 
-export default TeamIssuesAge;
-
 const ChartWrapper = styled('div')`
-  padding: ${space(2)} ${space(2)} 0 ${space(2)};
-  border-bottom: 1px solid ${p => p.theme.border};
+  padding: ${p => p.theme.space.xl} ${p => p.theme.space.xl} 0 ${p => p.theme.space.xl};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
 `;
 
-const StyledPanelTable = styled(PanelTable)`
+const StyledSimpleTable = styled(TeamInsightsTable)`
   grid-template-columns: 1fr 0.15fr 0.15fr 0.25fr;
-  white-space: nowrap;
-  margin-bottom: 0;
-  border: 0;
-  font-size: ${p => p.theme.fontSize.md};
-  box-shadow: unset;
-
-  > * {
-    padding: ${space(1)} ${space(2)};
-  }
-
-  ${p =>
-    p.isEmpty &&
-    css`
-      & > div:last-child {
-        padding: 48px ${space(2)};
-      }
-    `}
-`;
-
-const RightAligned = styled('span')`
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
 `;
 
 const ProjectTitleContainer = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: flex;
   align-items: center;
 `;
 
 const TitleOverflow = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const ShadowlessProjectBadge = styled(ProjectBadge)`
   display: inline-flex;
   align-items: center;
-  margin-right: ${space(1)};
+  margin-right: ${p => p.theme.space.md};
 
   * > img {
     box-shadow: none;

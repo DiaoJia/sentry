@@ -1,14 +1,16 @@
 from typing import Any
 
+from django.db import router, transaction
 from django.http import Http404
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import (
     OrganizationEndpoint,
     OrganizationIntegrationsLoosePermission,
@@ -18,7 +20,10 @@ from sentry.api.serializers import serialize
 from sentry.api.serializers.rest_framework.base import CamelSnakeModelSerializer
 from sentry.integrations.models.repository_project_path_config import RepositoryProjectPathConfig
 from sentry.integrations.services.integration import integration_service
+from sentry.integrations.types import IntegrationProviderSlug
+from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.models.projectrepository import ProjectRepository, ProjectRepositorySource
 from sentry.models.repository import Repository
 
 
@@ -41,7 +46,8 @@ class RepositoryProjectPathConfigSerializer(CamelSnakeModelSerializer):
     source_root = gen_path_regex_field()
     default_branch = serializers.RegexField(
         r"^(^(?![\/]))([\w\.\/-]+)(?<![\/])$",
-        required=True,
+        required=False,  # Validated in validate_default_branch based on integration type
+        allow_blank=True,  # Perforce allows empty streams
         error_messages={"invalid": _(BRANCH_NAME_ERROR_MESSAGE)},
     )
     instance: RepositoryProjectPathConfig | None
@@ -67,13 +73,15 @@ class RepositoryProjectPathConfigSerializer(CamelSnakeModelSerializer):
 
     def validate(self, attrs):
         query = RepositoryProjectPathConfig.objects.filter(
-            project_id=attrs.get("project_id"), stack_root=attrs.get("stack_root")
+            project_repository__project_id=attrs.get("project_id"),
+            stack_root=attrs.get("stack_root"),
+            source_root=attrs.get("source_root"),
         )
         if self.instance:
             query = query.exclude(id=self.instance.id)
         if query.exists():
             raise serializers.ValidationError(
-                "Code path config already exists with this project and stack trace root"
+                "Code path config already exists with this project, stack trace root, and source root"
             )
         return attrs
 
@@ -97,21 +105,57 @@ class RepositoryProjectPathConfigSerializer(CamelSnakeModelSerializer):
             raise serializers.ValidationError("Project does not exist")
         return project_id
 
-    def create(self, validated_data):
-        return RepositoryProjectPathConfig.objects.create(
-            organization_integration_id=self.org_integration.id,
-            organization_id=self.context["organization"].id,
-            integration_id=self.context["organization_integration"].integration_id,
-            **validated_data,
+    def validate_default_branch(self, default_branch):
+        # Get the integration to check if it's Perforce
+        integration = integration_service.get_integration(
+            integration_id=self.org_integration.integration_id,
+            using_replica=options.get("integration_service.get_integration.using_replica"),
         )
+
+        # For Perforce, allow empty branch (streams are part of depot path)
+        # For other integrations, branch is required
+        if (
+            not default_branch
+            and integration
+            and integration.provider != IntegrationProviderSlug.PERFORCE
+        ):
+            raise serializers.ValidationError("This field is required.")
+
+        return default_branch
+
+    def create(self, validated_data):
+        with transaction.atomic(using=router.db_for_write(RepositoryProjectPathConfig)):
+            project_repo, _ = ProjectRepository.objects.get_or_create_with_source(
+                project_id=validated_data.pop("project_id"),
+                repository_id=validated_data.pop("repository_id"),
+                source=ProjectRepositorySource.MANUAL,
+            )
+            return RepositoryProjectPathConfig.objects.create(
+                organization_integration_id=self.org_integration.id,
+                organization_id=self.context["organization"].id,
+                integration_id=self.context["organization_integration"].integration_id,
+                project_repository=project_repo,
+                **validated_data,
+            )
 
     def update(self, instance, validated_data):
         if "id" in validated_data:
             validated_data.pop("id")
         if self.instance:
-            for key, value in validated_data.items():
-                setattr(self.instance, key, value)
-            self.instance.save()
+            with transaction.atomic(using=router.db_for_write(RepositoryProjectPathConfig)):
+                project_repo, _ = ProjectRepository.objects.get_or_create_with_source(
+                    project_id=validated_data.pop(
+                        "project_id", self.instance.project_repository.project_id
+                    ),
+                    repository_id=validated_data.pop(
+                        "repository_id", self.instance.project_repository.repository_id
+                    ),
+                    source=ProjectRepositorySource.MANUAL,
+                )
+                self.instance.project_repository = project_repo
+                for key, value in validated_data.items():
+                    setattr(self.instance, key, value)
+                self.instance.save()
         return self.instance
 
 
@@ -132,7 +176,7 @@ class OrganizationIntegrationMixin:
             raise Http404
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationCodeMappingsEndpoint(OrganizationEndpoint, OrganizationIntegrationMixin):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -141,7 +185,7 @@ class OrganizationCodeMappingsEndpoint(OrganizationEndpoint, OrganizationIntegra
     }
     permission_classes = (OrganizationIntegrationsLoosePermission,)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         """
         Get the list of repository project path configs
 
@@ -156,16 +200,24 @@ class OrganizationCodeMappingsEndpoint(OrganizationEndpoint, OrganizationIntegra
 
         integration_id = request.GET.get("integrationId")
 
-        queryset = RepositoryProjectPathConfig.objects.all()
+        # When no explicit project IDs are in the request, include all projects the user can
+        # access so open team membership is respected. When explicit IDs are present, get_projects
+        # already uses has_project_access and validates the requested projects.
+        has_explicit_projects = bool(request.GET.getlist("project"))
+        projects = self.get_projects(
+            request, organization, include_all_accessible=not has_explicit_projects
+        )
+        queryset = RepositoryProjectPathConfig.objects.filter(
+            project_repository__project__in=projects
+        ).select_related(
+            "project_repository__project",
+            "project_repository__repository",
+        )
 
         if integration_id:
             # get_organization_integration will raise a 404 if no org_integration is found
             org_integration = self.get_organization_integration(organization, integration_id)
             queryset = queryset.filter(organization_integration_id=org_integration.id)
-        else:
-            # Filter by project
-            projects = self.get_projects(request, organization)
-            queryset = queryset.filter(project__in=projects)
 
         return self.paginate(
             request=request,
@@ -192,10 +244,10 @@ class OrganizationCodeMappingsEndpoint(OrganizationEndpoint, OrganizationIntegra
         integration_id = request.data.get("integrationId")
 
         if not integration_id:
-            return self.respond("Missing param: integration_id", status=status.HTTP_400_BAD_REQUEST)
+            return self.respond("Missing param: integrationId", status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            project = Project.objects.get(id=request.data.get("projectId"))
+            project = Project.objects.get(id=request.data["projectId"])
         except ValueError as exc:
             if "invalid literal for int() with base 10" in str(exc):
                 return self.respond(
@@ -204,7 +256,7 @@ class OrganizationCodeMappingsEndpoint(OrganizationEndpoint, OrganizationIntegra
                 )
             else:
                 raise
-        except Project.DoesNotExist:
+        except (Project.DoesNotExist, KeyError):
             return self.respond("Could not find project", status=status.HTTP_404_NOT_FOUND)
 
         if not request.access.has_project_access(project):

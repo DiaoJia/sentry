@@ -1,19 +1,22 @@
 import * as Sentry from '@sentry/react';
 import invariant from 'invariant';
 
-import {defined} from 'sentry/utils';
-import toArray from 'sentry/utils/array/toArray';
-import isValidDate from 'sentry/utils/date/isValidDate';
+import {toArray} from 'sentry/utils/array/toArray';
+import {parseEventTimestampMs} from 'sentry/utils/date/eventTimestampMs';
+import {isValidDate} from 'sentry/utils/date/isValidDate';
+import {defined} from 'sentry/utils/defined';
+import type {FeedbackEvent} from 'sentry/utils/feedback/types';
 import type {
   BreadcrumbFrame,
   ErrorFrame,
   RawReplayError,
 } from 'sentry/utils/replays/types';
-import type {HydratedReplayRecord} from 'sentry/views/replays/types';
+import type {HydratedReplayRecord} from 'sentry/views/explore/replays/types';
 
-export default function hydrateErrors(
+export function hydrateErrors(
   replayRecord: HydratedReplayRecord,
-  errors: RawReplayError[]
+  errors: RawReplayError[],
+  feedbackEvents?: FeedbackEvent[]
 ): {errorFrames: ErrorFrame[]; feedbackFrames: BreadcrumbFrame[]} {
   const startTimestampMs = replayRecord.started_at.getTime();
 
@@ -23,8 +26,8 @@ export default function hydrateErrors(
   errors.forEach((e: RawReplayError) => {
     try {
       // Feedback frame
-      if (e.title === 'User Feedback') {
-        const time = new Date(e.timestamp);
+      if (e.title.includes('User Feedback')) {
+        const time = parseEventTimestampMs(e.timestamp_ms);
         invariant(isValidDate(time), 'feedbackFrame.timestamp is invalid');
 
         feedbackFrames.push({
@@ -37,9 +40,12 @@ export default function hydrateErrors(
               (Array.isArray(e['error.type']) ? e['error.type'][0] : e['error.type']) ??
               '',
             labels: toArray(e['error.type']).filter(Boolean),
+            level: e.level,
             projectSlug: e['project.name'],
           },
-          message: e.title,
+          message:
+            feedbackEvents?.find(event => event.id === e.id)?.contexts.feedback
+              ?.message ?? e.title,
           offsetMs: Math.abs(time.getTime() - startTimestampMs),
           timestamp: time,
           timestampMs: time.getTime(),
@@ -48,7 +54,7 @@ export default function hydrateErrors(
         return;
       }
       // Error frame
-      const time = new Date(e.timestamp);
+      const time = parseEventTimestampMs(e.timestamp_ms);
       invariant(isValidDate(time), 'errorFrame.timestamp is invalid');
 
       errorFrames.push({
@@ -60,6 +66,7 @@ export default function hydrateErrors(
           label:
             (Array.isArray(e['error.type']) ? e['error.type'][0] : e['error.type']) ?? '',
           labels: toArray(e['error.type']).filter(defined),
+          level: e.level,
           projectSlug: e['project.name'],
         },
         message: e.title,

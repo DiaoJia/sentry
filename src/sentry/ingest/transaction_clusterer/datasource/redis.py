@@ -1,12 +1,11 @@
-""" Write transactions into redis sets """
+"""Write transactions into redis sets"""
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-import sentry_sdk
 from django.conf import settings
-from rediscluster import RedisCluster
+from sentry_redis_tools.clients import RedisCluster
 
 from sentry.ingest.transaction_clusterer import ClustererNamespace
 from sentry.ingest.transaction_clusterer.datasource import (
@@ -18,6 +17,7 @@ from sentry.models.project import Project
 from sentry.options.rollout import in_random_rollout
 from sentry.utils import redis
 from sentry.utils.safe import safe_execute
+from sentry.utils.tracing import start_span
 
 #: Maximum number of transaction names per project that we want
 #: to store in redis.
@@ -47,7 +47,7 @@ def _get_projects_key(namespace: ClustererNamespace) -> str:
 
 def get_redis_client() -> RedisCluster:
     cluster_key = settings.SENTRY_TRANSACTION_NAMES_REDIS_CLUSTER
-    return redis.redis_clusters.get(cluster_key)  # type: ignore[return-value]
+    return redis.redis_clusters.get(cluster_key)
 
 
 def _get_all_keys(namespace: ClustererNamespace) -> Iterator[str]:
@@ -83,7 +83,10 @@ def get_active_project_ids(namespace: ClustererNamespace) -> Iterator[int]:
 
 
 def _record_sample(namespace: ClustererNamespace, project: Project, sample: str) -> None:
-    with sentry_sdk.start_span(op=f"cluster.{namespace.value.name}.record_sample"):
+    with start_span(
+        op=f"cluster.{namespace.value.name}.record_sample",
+        name=f"cluster.{namespace.value.name}.record_sample",
+    ):
         client = get_redis_client()
         redis_key = _get_redis_key(namespace, project)
         created = add_to_set([redis_key], [sample, MAX_SET_SIZE, SET_TTL], client)
@@ -124,46 +127,35 @@ def record_transaction_name(project: Project, event_data: Mapping[str, Any], **k
 
 
 def _should_store_transaction_name(event_data: Mapping[str, Any]) -> str | None:
-    """Returns whether the given event must be stored as input for the
-    transaction clusterer."""
     transaction_name = event_data.get("transaction")
-    if not transaction_name:
-        return None
-
-    tags = event_data.get("tags") or {}
     transaction_info = event_data.get("transaction_info") or {}
     source = transaction_info.get("source")
 
-    # We also feed back transactions into the clustering algorithm
-    # that have already been sanitized, so we have a chance to discover
-    # more high cardinality segments after partial sanitation.
-    # For example, we may have sanitized `/orgs/*/projects/foo`,
-    # But the clusterer has yet to discover `/orgs/*/projects/*`.
-    #
-    # Disadvantage: the load on redis does not decrease over time.
-    #
+    if not transaction_name:
+        return None
     source_matches = source in (TRANSACTION_SOURCE_URL, TRANSACTION_SOURCE_SANITIZED) or (
         # Relay leaves source None if it expects it to be high cardinality, (otherwise it sets it to "unknown")
         # (see https://github.com/getsentry/relay/blob/2d07bef86415cc0ae8af01d16baecde10cdb23a6/relay-general/src/store/transactions/processor.rs#L369-L373).
         #
         # Our data shows that a majority of these `None` source transactions contain slashes, so treat them as URL transactions:
-        source is None
-        and "/" in transaction_name
+        source is None and "/" in transaction_name
     )
-
     if not source_matches:
         return None
-
-    if tags and HTTP_404_TAG in tags:
+    tags = event_data.get("tags") or []
+    if HTTP_404_TAG in tags:
         return None
-
     return transaction_name
 
 
 def _bump_rule_lifetime(project: Project, event_data: Mapping[str, Any]) -> None:
+    applied_rules = event_data.get("_meta", {}).get("transaction", {}).get("", {}).get("rem", [])
+    _bump_rule_lifetime_inner(project, applied_rules)
+
+
+def _bump_rule_lifetime_inner(project: Project, applied_rules: Sequence):
     from sentry.ingest.transaction_clusterer import rules as clusterer_rules
 
-    applied_rules = event_data.get("_meta", {}).get("transaction", {}).get("", {}).get("rem", {})
     if not applied_rules:
         return
 

@@ -1,13 +1,15 @@
 import logging
+from smtplib import SMTPDataError
 from typing import Any
 
+from taskbroker_client.retry import Retry
+
 from sentry.auth import access
+from sentry.issues.action_log import ActionSource, GroupActionActor, action_context_scope
 from sentry.models.group import Group
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import notifications_control_tasks, notifications_tasks
-from sentry.taskworker.retry import Retry
 from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.service import user_service
 from sentry.utils.email import send_messages
@@ -45,42 +47,48 @@ def process_inbound_email(mailfrom: str, group_id: int, payload: str) -> None:
 
     form = NewNoteForm({"text": payload})
     if form.is_valid():
-        form.save(group, user)
+        with action_context_scope(ActionSource.EMAIL, GroupActionActor.user(user.id)):
+            form.save(group, user)
+
+
+class TemporaryEmailError(Exception):
+    """
+    SMTPDataError with a 4xx code, and thus is temporary and retriable.
+    """
+
+    def __init__(self, code: int, msg: str | bytes) -> None:
+        self.smtp_code = code
+        self.smtp_error = msg
+        self.args = (code, msg)
+
+
+def _send_email(message: dict[str, Any]) -> None:
+    try:
+        send_messages([message_from_dict(message)])
+    except SMTPDataError as e:
+        # 4xx means temporary and retriable; See RFC 5321, §4.2.1
+        if 400 <= e.smtp_code < 500:
+            raise TemporaryEmailError(e.smtp_code, e.smtp_error)
+        raise
 
 
 @instrumented_task(
     name="sentry.tasks.email.send_email",
-    queue="email",
-    default_retry_delay=60 * 5,
-    max_retries=None,
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=notifications_tasks,
-        processing_deadline_duration=30,
-        retry=Retry(
-            delay=60 * 5,
-        ),
-    ),
+    namespace=notifications_tasks,
+    processing_deadline_duration=90,
+    retry=Retry(times=2, delay=60 * 5, on=(TemporaryEmailError,)),
+    silo_mode=SiloMode.CELL,
 )
 def send_email(message: dict[str, Any]) -> None:
-    django_message = message_from_dict(message)
-    send_messages([django_message])
+    _send_email(message)
 
 
 @instrumented_task(
     name="sentry.tasks.email.send_email_control",
-    queue="email.control",
-    default_retry_delay=60 * 5,
-    max_retries=None,
+    namespace=notifications_control_tasks,
+    processing_deadline_duration=90,
+    retry=Retry(times=2, delay=60 * 5, on=(TemporaryEmailError,)),
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(
-        namespace=notifications_control_tasks,
-        processing_deadline_duration=30,
-        retry=Retry(
-            delay=60 * 5,
-        ),
-    ),
 )
 def send_email_control(message: dict[str, Any]) -> None:
-    django_message = message_from_dict(message)
-    send_messages([django_message])
+    _send_email(message)

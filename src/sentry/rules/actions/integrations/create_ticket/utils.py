@@ -5,9 +5,7 @@ from collections.abc import Callable, Sequence
 
 from rest_framework.response import Response
 
-from sentry import features
 from sentry.constants import ObjectStatus
-from sentry.eventstore.models import GroupEvent
 from sentry.exceptions import InvalidIdentity
 from sentry.integrations.base import IntegrationInstallation
 from sentry.integrations.mixins.issues import IssueBasicIntegration
@@ -18,20 +16,27 @@ from sentry.integrations.project_management.metrics import (
 )
 from sentry.integrations.services.integration.model import RpcIntegration
 from sentry.integrations.services.integration.service import integration_service
+from sentry.issues.action_log.publish import publish_action
+from sentry.issues.action_log.types import SYSTEM_ACTOR, ActionSource, CreateExternalIssueAction
+from sentry.models.activity import Activity
 from sentry.models.grouplink import GroupLink
 from sentry.notifications.utils.links import create_link_to_workflow
+from sentry.services.eventstore.models import GroupEvent
 from sentry.shared_integrations.exceptions import (
     ApiUnauthorized,
+    IntegrationConfigurationError,
     IntegrationFormError,
-    IntegrationInstallationConfigurationError,
+    IntegrationProviderError,
+    IntegrationResourceNotFoundError,
 )
-from sentry.silo.base import region_silo_function
+from sentry.silo.base import cell_silo_function
+from sentry.types.activity import ActivityType
 from sentry.types.rules import RuleFuture
 
 logger = logging.getLogger("sentry.rules")
 
 
-@region_silo_function
+@cell_silo_function
 def create_link(
     integration: RpcIntegration,
     installation: IntegrationInstallation,
@@ -49,9 +54,9 @@ def create_link(
         - metadata: Optional Object. Can contain `display_name`.
     """
 
-    assert isinstance(
-        installation, IssueBasicIntegration
-    ), "Installation must be an IssueBasicIntegration to create a link"
+    assert isinstance(installation, IssueBasicIntegration), (
+        "Installation must be an IssueBasicIntegration to create a link"
+    )
     external_issue_key = installation.make_external_key(response)
 
     external_issue = ExternalIssue.objects.create(
@@ -70,6 +75,29 @@ def create_link(
         relationship=GroupLink.Relationship.references,
         data={"provider": integration.provider},
     )
+    issue_url = response.get("url") or installation.get_issue_url(external_issue.key)
+    Activity.objects.create_group_activity(
+        group=event.group,
+        type=ActivityType.CREATE_ISSUE,
+        data={
+            "title": external_issue.title,
+            "provider": installation.model.get_provider().name,
+            "location": issue_url,
+            "label": installation.get_issue_display_name(external_issue) or external_issue.key,
+            "new": True,
+        },
+    )
+    # This runs from a rule/workflow firing, so there is no request user to attribute.
+    publish_action(
+        CreateExternalIssueAction(
+            provider=integration.provider,
+            external_issue_key=external_issue.key,
+        ),
+        source=ActionSource.SYSTEM,
+        group_id=event.group.id,
+        project=event.group.project,
+        actor=SYSTEM_ACTOR,
+    )
 
 
 def build_description_workflow_engine_ui(
@@ -79,7 +107,7 @@ def build_description_workflow_engine_ui(
     generate_footer: Callable[[str], str],
 ) -> str:
     project = event.group.project
-    workflow_url = create_link_to_workflow(project.organization.id, str(workflow_id))
+    workflow_url = create_link_to_workflow(project.organization.slug, str(workflow_id))
 
     description: str = installation.get_group_description(event.group, event) + generate_footer(
         workflow_url
@@ -97,7 +125,9 @@ def build_description(
     Format the description of the ticket/work item
     """
     project = event.group.project
-    rule_url = f"/organizations/{project.organization.slug}/alerts/rules/{project.slug}/{rule_id}/"
+    rule_url = (
+        f"/organizations/{project.organization.slug}/issues/alerts/rules/{project.slug}/{rule_id}/"
+    )
 
     description: str = installation.get_group_description(event.group, event) + generate_footer(
         rule_url
@@ -117,11 +147,9 @@ def create_issue(event: GroupEvent, futures: Sequence[RuleFuture]) -> None:
         generate_footer = future.kwargs.get("generate_footer")
 
         # If we invoked this handler from the notification action, we need to replace the rule_id with the legacy_rule_id, so we link notifications correctly
-        action_id = None
-        if features.has("organizations:workflow-engine-trigger-actions", organization):
-            # In the Notification Action, we store the rule_id in the action_id field
-            action_id = rule_id
-            rule_id = data.get("legacy_rule_id")
+        # In the Notification Action, we store the rule_id in the action_id field
+        action_id = rule_id
+        rule_id = data.get("legacy_rule_id")
 
         integration = integration_service.get_integration(
             integration_id=integration_id,
@@ -135,13 +163,13 @@ def create_issue(event: GroupEvent, futures: Sequence[RuleFuture]) -> None:
 
         installation = integration.get_installation(organization.id)
 
-        assert isinstance(
-            installation, IssueBasicIntegration
-        ), "Installation must be an IssueBasicIntegration to create a ticket"
+        assert isinstance(installation, IssueBasicIntegration), (
+            "Installation must be an IssueBasicIntegration to create a ticket"
+        )
         data["title"] = installation.get_group_title(event.group, event)
-        if features.has("organizations:workflow-engine-ui-links", organization):
-            workflow_id = data.get("workflow_id")
-            assert workflow_id is not None
+
+        workflow_id = data.get("workflow_id")
+        if workflow_id is not None:
             data["description"] = build_description_workflow_engine_ui(
                 event, workflow_id, installation, generate_footer
             )
@@ -177,14 +205,17 @@ def create_issue(event: GroupEvent, futures: Sequence[RuleFuture]) -> None:
             try:
                 response = installation.create_issue(data)
             except (
-                IntegrationInstallationConfigurationError,
+                IntegrationConfigurationError,
                 IntegrationFormError,
                 InvalidIdentity,
                 ApiUnauthorized,
+                IntegrationResourceNotFoundError,
+                IntegrationProviderError,
             ) as e:
                 # Most of the time, these aren't explicit failures, they're
                 # some misconfiguration of an issue field - typically Jira.
                 lifecycle.record_halt(e)
                 raise
-
-        create_link(integration, installation, event, response)
+            # If we successfully created the issue, we want to create the link
+            else:
+                create_link(integration, installation, event, response)

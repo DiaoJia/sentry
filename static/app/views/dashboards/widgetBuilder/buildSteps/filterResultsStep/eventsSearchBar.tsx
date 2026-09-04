@@ -1,18 +1,18 @@
-import type {SearchBarProps} from 'sentry/components/events/searchBar';
 import type {PageFilters} from 'sentry/types/core';
-import {generateAggregateFields} from 'sentry/utils/discover/fields';
 import type {DiscoverDatasets} from 'sentry/utils/discover/types';
-import useCustomMeasurements from 'sentry/utils/useCustomMeasurements';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useCustomMeasurements} from 'sentry/utils/useCustomMeasurements';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {WidgetBuilderSearchBarProps} from 'sentry/views/dashboards/datasetConfig/base';
 import type {WidgetQuery} from 'sentry/views/dashboards/types';
 import {eventViewFromWidget, hasDatasetSelector} from 'sentry/views/dashboards/utils';
-import ResultsSearchQueryBuilder from 'sentry/views/discover/results/resultsSearchQueryBuilder';
+import {ResultsSearchQueryBuilder} from 'sentry/views/discover/results/resultsSearchQueryBuilder';
 
 interface Props {
-  onClose: SearchBarProps['onClose'];
+  onClose: WidgetBuilderSearchBarProps['onClose'];
   pageFilters: PageFilters;
   widgetQuery: WidgetQuery;
   dataset?: DiscoverDatasets;
+  disabled?: boolean;
   portalTarget?: HTMLElement | null;
 }
 
@@ -22,12 +22,13 @@ export function EventsSearchBar({
   widgetQuery,
   dataset,
   portalTarget,
+  disabled,
 }: Props) {
   const organization = useOrganization();
   const {customMeasurements} = useCustomMeasurements();
   const eventView = eventViewFromWidget('', widgetQuery, pageFilters);
   const fields = eventView.hasAggregateField()
-    ? generateAggregateFields(organization, eventView.fields)
+    ? eventView.getAggregateFields()
     : eventView.fields;
 
   return (
@@ -38,6 +39,7 @@ export function EventsSearchBar({
       onChange={(query, state) => {
         onClose?.(query, {validSearch: state.queryIsValid});
       }}
+      disabled={disabled}
       customMeasurements={customMeasurements}
       dataset={dataset}
       includeTransactions={hasDatasetSelector(organization) ? false : true}

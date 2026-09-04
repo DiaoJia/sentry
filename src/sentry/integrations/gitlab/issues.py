@@ -7,6 +7,7 @@ from typing import Any
 from django.urls import reverse
 
 from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
+from sentry.integrations.types import IntegrationIssueConfigField
 from sentry.models.group import Group
 from sentry.shared_integrations.exceptions import (
     ApiError,
@@ -16,6 +17,7 @@ from sentry.shared_integrations.exceptions import (
 )
 from sentry.silo.base import all_silo_function
 from sentry.users.models.user import User
+from sentry.users.services.user import RpcUser
 from sentry.utils.http import absolute_uri
 
 ISSUE_EXTERNAL_KEY_FORMAT = re.compile(r".+:(.+)#(.+)")
@@ -36,16 +38,20 @@ class GitlabIssuesSpec(SourceCodeIssueIntegration):
     def get_persisted_default_config_fields(self) -> Sequence[str]:
         return ["project"]
 
-    def get_projects_and_default(self, group: Group, params: Mapping[str, Any], **kwargs):
-        defaults = self.get_project_defaults(group.project_id)
+    def get_projects_and_default(self, group: Group | None, params: Mapping[str, Any], **kwargs):
+        if group:
+            defaults = self.get_project_defaults(group.project_id)
+        else:
+            defaults = {}
 
         # XXX: In GitLab repositories are called projects but get_repository_choices
         # expects the param to be called 'repo', so we need to rename it here.
         # Django QueryDicts are immutable, so we need to copy it first.
         params_mut = dict(params)
-        params_mut["repo"] = params.get("project") or defaults.get("project")
+        repo = params.get("project") or defaults.get("project")
+        params_mut["repo"] = str(repo) if repo is not None else None
 
-        default_project, project_choices = self.get_repository_choices(group, params_mut, **kwargs)
+        default_project, project_choices = self.get_repository_choices(group, params_mut)
         return default_project, project_choices
 
     def create_default_repo_choice(self, default_repo):
@@ -55,18 +61,18 @@ class GitlabIssuesSpec(SourceCodeIssueIntegration):
             project = client.get_project(default_repo)
         except (ApiError, ApiUnauthorized):
             return ("", "")
-        return (project["id"], project["name_with_namespace"])
+        return (str(project["id"]), project["name_with_namespace"])
 
     @all_silo_function
     def get_create_issue_config(
-        self, group: Group | None, user: User, **kwargs
-    ) -> list[dict[str, Any]]:
+        self, group: Group | None, user: User | RpcUser, **kwargs
+    ) -> list[IntegrationIssueConfigField]:
         kwargs["link_referrer"] = "gitlab_integration"
         fields = super().get_create_issue_config(group, user, **kwargs)
         params = kwargs.pop("params", {})
         default_project, project_choices = self.get_projects_and_default(group, params, **kwargs)
 
-        org = group.organization
+        org = self.organization
         autocomplete_url = reverse(
             "sentry-extensions-gitlab-search", args=[org.slug, self.model.id]
         )
@@ -173,7 +179,7 @@ class GitlabIssuesSpec(SourceCodeIssueIntegration):
                 ),
                 "type": "textarea",
                 "required": False,
-                "help": ("Leave blank if you don't want to " "add a comment to the GitLab issue."),
+                "help": ("Leave blank if you don't want to add a comment to the GitLab issue."),
             },
         ]
 

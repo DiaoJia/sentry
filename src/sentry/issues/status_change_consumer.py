@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import sentry_sdk
+from sentry_sdk.traces import StreamedSpan
 from sentry_sdk.tracing import NoOpSpan, Span, Transaction
 
 from sentry.integrations.tasks.kick_off_status_syncs import kick_off_status_syncs
+from sentry.issues.action_log import SYSTEM_ACTOR, ActionSource, action_context_scope
 from sentry.issues.escalating.escalating import manage_issue_states
 from sentry.issues.status_change_message import StatusChangeMessageData
-from sentry.models.activity import Activity
 from sentry.models.group import Group, GroupStatus
 from sentry.models.grouphash import GroupHash
 from sentry.models.groupinbox import (
@@ -24,7 +26,7 @@ from sentry.models.project import Project
 from sentry.types.activity import ActivityType
 from sentry.types.group import IGNORED_SUBSTATUS_CHOICES, GroupSubStatus
 from sentry.utils import metrics
-from sentry.utils.registry import Registry
+from sentry.utils.tracing import set_span_tag
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,9 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
             status=new_status,
             substatus=new_substatus,
             activity_type=activity_type,
+            activity_data=status_change.get("activity_data"),
+            detector_id=status_change.get("detector_id"),
+            update_date=status_change.get("update_date"),
         )
         remove_group_from_inbox(group, action=GroupInboxRemoveAction.RESOLVED)
         kick_off_status_syncs.apply_async(
@@ -90,6 +95,9 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
             status=new_status,
             substatus=new_substatus,
             activity_type=activity_type,
+            activity_data=status_change.get("activity_data"),
+            detector_id=status_change.get("detector_id"),
+            update_date=status_change.get("update_date"),
         )
         remove_group_from_inbox(group, action=GroupInboxRemoveAction.IGNORED)
         kick_off_status_syncs.apply_async(
@@ -99,7 +107,6 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
         # Update the group status, priority, and add the group to the inbox
         manage_issue_states(group=group, group_inbox_reason=GroupInboxReason.ESCALATING)
     elif new_status == GroupStatus.UNRESOLVED:
-        activity_type = None
         if new_substatus == GroupSubStatus.REGRESSED:
             activity_type = ActivityType.SET_REGRESSION
             group_inbox_reason = GroupInboxReason.REGRESSION
@@ -112,9 +119,9 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
             else:
                 activity_type = ActivityType.SET_UNRESOLVED
 
-        # We don't support setting the UNRESOLVED status with substatus NEW as it
-        # is automatically set on creation. All other issues should be set to ONGOING.
-        if activity_type is None:
+        else:
+            # We don't support setting the UNRESOLVED status with substatus NEW as it
+            # is automatically set on creation. All other issues should be set to ONGOING.
             logger.error(
                 "group.update_status.invalid_substatus",
                 extra={**log_extra},
@@ -127,6 +134,9 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
             substatus=new_substatus,
             activity_type=activity_type,
             from_substatus=group.substatus,
+            activity_data=status_change.get("activity_data"),
+            detector_id=status_change.get("detector_id"),
+            update_date=status_change.get("update_date"),
         )
         add_group_to_inbox(group, group_inbox_reason)
         kick_off_status_syncs.apply_async(
@@ -141,22 +151,6 @@ def update_status(group: Group, status_change: StatusChangeMessageData) -> None:
             f"Unsupported status: {status_change['new_status']} {status_change['new_substatus']}"
         )
 
-    if activity_type is not None:
-        """
-        If we have set created an activity, then we'll also notify any registered handlers
-        that the group status has changed.
-
-        This is used to trigger the `workflow_engine` processing status changes.
-        """
-        latest_activity = (
-            Activity.objects.filter(group_id=group.id, type=activity_type.value)
-            .order_by("-datetime")
-            .first()
-        )
-        if latest_activity is not None:
-            for handler in group_status_update_registry.registrations.values():
-                handler(group, status_change, latest_activity)
-
 
 def get_group_from_fingerprint(project_id: int, fingerprint: Sequence[str]) -> Group | None:
     results = bulk_get_groups_from_fingerprints([(project_id, fingerprint)])
@@ -164,7 +158,7 @@ def get_group_from_fingerprint(project_id: int, fingerprint: Sequence[str]) -> G
 
 
 def bulk_get_groups_from_fingerprints(
-    project_fingerprint_pairs: Iterable[tuple[int, Sequence[str]]]
+    project_fingerprint_pairs: Iterable[tuple[int, Sequence[str]]],
 ) -> dict[tuple[int, tuple[str, ...]], Group]:
     """
     Returns a map of (project, fingerprint) to the group.
@@ -222,6 +216,9 @@ def _get_status_change_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         "project_id": payload["project_id"],
         "new_status": payload["new_status"],
         "new_substatus": payload.get("new_substatus", None),
+        "detector_id": payload.get("detector_id", None),
+        "activity_data": payload.get("activity_data", None),
+        "update_date": payload.get("update_date", None),
     }
 
     process_occurrence_data(data)
@@ -229,7 +226,7 @@ def _get_status_change_kwargs(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def process_status_change_message(
-    message: Mapping[str, Any], txn: Transaction | NoOpSpan | Span
+    message: Mapping[str, Any], span: Transaction | NoOpSpan | Span | StreamedSpan
 ) -> Group | None:
     with metrics.timer("occurrence_consumer._process_message.status_change._get_kwargs"):
         kwargs = _get_status_change_kwargs(message)
@@ -240,15 +237,15 @@ def process_status_change_message(
         sample_rate=1.0,
         tags={"new_status": status_change_data["new_status"]},
     )
-    txn.set_tag("new_status", status_change_data["new_status"])
+    set_span_tag(span, "new_status", status_change_data["new_status"])
 
     project = Project.objects.get_from_cache(id=status_change_data["project_id"])
     organization = Organization.objects.get_from_cache(id=project.organization_id)
 
-    txn.set_tag("organization_id", organization.id)
-    txn.set_tag("organization_slug", organization.slug)
-    txn.set_tag("project_id", project.id)
-    txn.set_tag("project_slug", project.slug)
+    set_span_tag(span, "organization_id", organization.id)
+    set_span_tag(span, "organization_slug", organization.slug)
+    set_span_tag(span, "project_id", project.id)
+    set_span_tag(span, "project_slug", project.slug)
 
     with metrics.timer("occurrence_consumer._process_message.status_change.get_group"):
         fingerprint = status_change_data["fingerprint"]
@@ -267,16 +264,18 @@ def process_status_change_message(
                 sample_rate=1.0,
             )
             return None
-        txn.set_tag("group_id", group.id)
+        set_span_tag(span, "group_id", group.id)
 
-    with metrics.timer(
-        "occurrence_consumer._process_message.status_change.update_group_status",
-        tags={"occurrence_type": group.issue_type.type_id},
+    sentry_sdk.set_tag("group_type", group.issue_type.slug)
+    sentry_sdk.set_attribute("group_type", group.issue_type.slug)
+
+    with (
+        metrics.timer(
+            "occurrence_consumer._process_message.status_change.update_group_status",
+            tags={"occurrence_type": group.issue_type.type_id},
+        ),
+        action_context_scope(source=ActionSource.SYSTEM, actor=SYSTEM_ACTOR),
     ):
         update_status(group, status_change_data)
 
     return group
-
-
-GroupUpdateHandler = Callable[[Group, StatusChangeMessageData, Activity], None]
-group_status_update_registry = Registry[GroupUpdateHandler](enable_reverse_lookup=False)

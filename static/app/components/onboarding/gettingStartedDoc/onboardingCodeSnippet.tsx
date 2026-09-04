@@ -1,12 +1,23 @@
-import {Fragment, useCallback, useState} from 'react';
+import {Fragment, useCallback, useMemo, useState} from 'react';
 import {createPortal} from 'react-dom';
-import beautify from 'js-beautify';
 
-import {CodeSnippet} from 'sentry/components/codeSnippet';
+import {CodeBlock} from '@sentry/scraps/code';
+
 import {AuthTokenGenerator} from 'sentry/components/onboarding/gettingStartedDoc/authTokenGenerator';
+import {useRegisteredTabSelection} from 'sentry/components/onboarding/gettingStartedDoc/selectedCodeTabContext';
+import {PACKAGE_LOADING_PLACEHOLDER} from 'sentry/utils/gettingStartedDocs/getPackageVersion';
+import {useFormattedCode} from 'sentry/utils/useFormattedCode';
 
-interface OnboardingCodeSnippetProps
-  extends Omit<React.ComponentProps<typeof CodeSnippet>, 'onAfterHighlight'> {}
+interface OnboardingCodeSnippetProps extends Omit<
+  React.ComponentProps<typeof CodeBlock>,
+  'onAfterHighlight'
+> {}
+
+const JAVASCRIPT_FORMAT_OPTIONS = {
+  indent_size: 2,
+  e4x: true,
+  brace_style: 'preserve-inline',
+} as const;
 
 /**
  * Replaces tokens in a DOM element with a span element.
@@ -21,7 +32,7 @@ export function replaceTokensWithSpan(element: HTMLElement) {
   );
 
   return Array.from<HTMLSpanElement>(
-    element.querySelectorAll(`[data-token="___ORG_AUTH_TOKEN___"]`)
+    element.querySelectorAll('[data-token="___ORG_AUTH_TOKEN___"]')
   );
 }
 
@@ -39,24 +50,63 @@ export function OnboardingCodeSnippet({
     setAuthTokenNodes(replaceTokensWithSpan(element));
   }, []);
 
+  const partialLoading = useMemo(
+    () => children.includes(PACKAGE_LOADING_PLACEHOLDER),
+    [children]
+  );
+
+  const {formattedCode} = useFormattedCode({
+    code: children,
+    language: language === 'javascript' ? 'javascript' : null,
+    options: JAVASCRIPT_FORMAT_OPTIONS,
+  });
+
   return (
     <Fragment>
-      <CodeSnippet
+      <CodeBlock
         dark
         language={language}
+        hideCopyButton={partialLoading}
+        disableUserSelection={partialLoading}
         {...props}
         onAfterHighlight={handleAfterHighlight}
       >
-        {/* Trim whitespace from code snippets and beautify javascript code */}
-        {language === 'javascript'
-          ? beautify.js(children, {
-              indent_size: 2,
-              e4x: true,
-              brace_style: 'preserve-inline',
-            })
-          : children.trim()}
-      </CodeSnippet>
+        {formattedCode}
+      </CodeBlock>
       {authTokenNodes.map(node => createPortal(<AuthTokenGenerator />, node))}
     </Fragment>
+  );
+}
+
+export interface CodeSnippetTab {
+  code: string;
+  label: string;
+  language: string;
+  value: string;
+  filename?: string;
+}
+
+interface TabbedCodeSnippetProps {
+  /**
+   * An array of tabs to be displayed
+   */
+  tabs: CodeSnippetTab[];
+}
+
+export function TabbedCodeSnippet({tabs}: TabbedCodeSnippetProps) {
+  const [selectedTabValue, setSelectedTabValue] = useRegisteredTabSelection(tabs);
+  const resolvedTab = tabs.find(tab => tab.value === selectedTabValue) ?? tabs[0]!;
+  const {code, language, filename} = resolvedTab;
+
+  return (
+    <OnboardingCodeSnippet
+      language={language}
+      tabs={tabs}
+      selectedTab={selectedTabValue}
+      onTabClick={setSelectedTabValue}
+      filename={filename}
+    >
+      {code}
+    </OnboardingCodeSnippet>
   );
 }

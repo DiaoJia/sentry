@@ -1,12 +1,13 @@
-import {useCallback, useRef, useState} from 'react';
+import {useCallback, useLayoutEffect, useRef, useState} from 'react';
 import styled from '@emotion/styled';
+// eslint-disable-next-line no-restricted-imports
 import color from 'color';
 import {useReducedMotion} from 'framer-motion';
 
-import type {ButtonProps} from 'sentry/components/core/button';
-import {Button} from 'sentry/components/core/button';
+import type {ButtonProps} from '@sentry/scraps/button';
+import {Button} from '@sentry/scraps/button';
+
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 // Content may have margins which can't be measured by our refs, but will affect
 // the total content height. We add this to the max-height to ensure the animation
@@ -20,7 +21,7 @@ function isClipped(args: {clipFlex: number; clipHeight: number; height: number})
 function supportsResizeObserver(
   observerOrUndefined: unknown
 ): observerOrUndefined is ResizeObserver {
-  return typeof observerOrUndefined !== 'undefined';
+  return observerOrUndefined !== undefined;
 }
 
 /**
@@ -31,7 +32,7 @@ function supportsResizeObserver(
 function calculateAddedHeight({
   wrapperRef,
 }: {
-  wrapperRef: React.MutableRefObject<HTMLElement | null>;
+  wrapperRef: React.RefObject<HTMLElement | null>;
 }): number {
   if (wrapperRef.current === null) {
     return 0;
@@ -57,48 +58,7 @@ function clearMaxHeight(element: HTMLElement | null) {
   }
 }
 
-function onTransitionEnd(e: TransitionEvent) {
-  // This can fire for children transitions, so we need to make sure it's the
-  // reveal animation that has ended.
-  if (e.target === e.currentTarget && e.propertyName === 'max-height') {
-    const element = e.currentTarget as HTMLElement;
-    clearMaxHeight(element);
-    element.removeEventListener('transitionend', onTransitionEnd);
-  }
-}
-
-function revealAndDisconnectObserver({
-  contentRef,
-  observerRef,
-  revealRef,
-  wrapperRef,
-  clipHeight,
-  prefersReducedMotion,
-}: {
-  clipHeight: number;
-  contentRef: React.MutableRefObject<HTMLElement | null>;
-  observerRef: React.MutableRefObject<ResizeObserver | null>;
-  prefersReducedMotion: boolean;
-  revealRef: React.MutableRefObject<boolean>;
-  wrapperRef: React.MutableRefObject<HTMLElement | null>;
-}) {
-  if (!wrapperRef.current) {
-    return;
-  }
-
-  const revealedWrapperHeight =
-    (contentRef.current?.clientHeight || 9999) + calculateAddedHeight({wrapperRef});
-
-  // Only animate if the revealed height is greater than the clip height
-  if (revealedWrapperHeight > clipHeight && !prefersReducedMotion) {
-    wrapperRef.current.addEventListener('transitionend', onTransitionEnd);
-    wrapperRef.current.style.maxHeight = `${revealedWrapperHeight}px`;
-  } else {
-    clearMaxHeight(wrapperRef.current);
-  }
-
-  revealRef.current = true;
-
+function disconnectObserver(observerRef: React.RefObject<ResizeObserver | null>) {
   if (observerRef.current) {
     observerRef.current.disconnect();
     observerRef.current = null;
@@ -106,6 +66,7 @@ function revealAndDisconnectObserver({
 }
 
 const DEFAULT_BUTTON_TEXT = t('Show More');
+const DEFAULT_COLLAPSE_BUTTON_TEXT = t('Show Less');
 interface ClippedBoxProps {
   btnText?: string;
   /**
@@ -120,22 +81,25 @@ interface ClippedBoxProps {
   clipFade?: ({showMoreButton}: {showMoreButton: React.ReactNode}) => React.ReactNode;
   clipFlex?: number;
   clipHeight?: number;
+  /**
+   * Text for the collapse button when collapsible is true
+   */
+  collapseBtnText?: string;
+  /**
+   * When true, shows a "Show Less" button after expanding to allow collapsing back
+   */
+  collapsible?: boolean;
   defaultClipped?: boolean;
   /**
    * Triggered when user clicks on the show more button
    */
   onReveal?: () => void;
-  /**
-   * Its trigged when the component is mounted and its height available
-   */
-  onSetRenderedHeight?: (renderedHeight: number) => void;
-  renderedHeight?: number;
   title?: string;
 }
 
-function ClippedBox(props: ClippedBoxProps) {
-  const revealRef = useRef(false);
-  const mountedRef = useRef(false);
+export function ClippedBox(props: ClippedBoxProps) {
+  const revealTransitionPendingRef = useRef(false);
+  const hasMeasuredRef = useRef(false);
 
   const observerRef = useRef<ResizeObserver | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -144,135 +108,188 @@ function ClippedBox(props: ClippedBoxProps) {
   const prefersReducedMotion = useReducedMotion();
 
   const [clipped, setClipped] = useState(!!props.defaultClipped);
-
-  const onReveal = props.onReveal;
-  const onSetRenderHeight = props.onSetRenderedHeight;
+  const [revealed, setRevealed] = useState(false);
 
   const clipHeight = props.clipHeight || 200;
   const clipFlex = props.clipFlex || 28;
 
-  const handleReveal = useCallback(
-    (event: React.MouseEvent<HTMLElement>) => {
-      if (!wrapperRef.current) {
-        throw new Error('Cannot reveal clipped box without a wrapper ref');
+  const handleReveal = (event: React.MouseEvent<HTMLElement>) => {
+    const wrapper = wrapperRef.current;
+    const content = contentRef.current;
+
+    if (!wrapper) {
+      throw new Error('Cannot reveal clipped box without a wrapper ref');
+    }
+
+    event.stopPropagation();
+
+    const revealedWrapperHeight =
+      (content?.clientHeight || 9999) + calculateAddedHeight({wrapperRef});
+
+    // Only animate if the revealed height is greater than the clip height
+    if (revealedWrapperHeight > clipHeight && !prefersReducedMotion) {
+      revealTransitionPendingRef.current = true;
+      wrapper.style.maxHeight = `${revealedWrapperHeight}px`;
+    } else {
+      revealTransitionPendingRef.current = false;
+      clearMaxHeight(wrapper);
+    }
+
+    disconnectObserver(observerRef);
+
+    props.onReveal?.();
+    setRevealed(true);
+    setClipped(false);
+  };
+
+  const handleCollapse = (event: React.MouseEvent<HTMLElement>) => {
+    event.stopPropagation();
+
+    if (wrapperRef.current && contentRef.current) {
+      if (prefersReducedMotion) {
+        wrapperRef.current.style.maxHeight = `${clipHeight}px`;
+      } else {
+        const currentHeight =
+          contentRef.current.clientHeight + calculateAddedHeight({wrapperRef});
+        wrapperRef.current.style.maxHeight = `${currentHeight}px`;
+        void wrapperRef.current.offsetHeight;
+        wrapperRef.current.style.maxHeight = `${clipHeight}px`;
+      }
+    }
+    revealTransitionPendingRef.current = false;
+    setRevealed(false);
+    setClipped(true);
+  };
+
+  const onWrapperRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) {
+      return;
+    }
+
+    wrapperRef.current = node;
+
+    return () => {
+      if (wrapperRef.current === node) {
+        wrapperRef.current = null;
+      }
+    };
+  }, []);
+
+  const onContentRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) {
+      return;
+    }
+
+    contentRef.current = node;
+
+    return () => {
+      if (contentRef.current === node) {
+        contentRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleTransitionEnd = useCallback(
+    (event: React.TransitionEvent) => {
+      // This can fire for children transitions, so we need to make sure it's the
+      // reveal animation that has ended.
+      if (
+        event.target === event.currentTarget &&
+        event.propertyName === 'max-height' &&
+        revealed &&
+        !clipped
+      ) {
+        revealTransitionPendingRef.current = false;
+        clearMaxHeight(event.currentTarget as HTMLElement);
+      }
+    },
+    [clipped, revealed]
+  );
+
+  useLayoutEffect(() => {
+    const wrapper = wrapperRef.current;
+    const content = contentRef.current;
+
+    if (!wrapper) {
+      return;
+    }
+
+    // Activity can reattach refs while preserving state; keep the inline height
+    // reconciled with the preserved clipped/revealed state.
+    if (revealed || (!clipped && hasMeasuredRef.current)) {
+      if (!revealTransitionPendingRef.current) {
+        clearMaxHeight(wrapper);
+      }
+      return;
+    }
+
+    wrapper.style.maxHeight = `${clipHeight}px`;
+
+    if (!content) {
+      return;
+    }
+
+    const onResize = (entries: ResizeObserverEntry[]): void => {
+      const entry = entries[0];
+
+      if (!entry) {
+        return;
       }
 
-      event.stopPropagation();
+      const contentBox = entry.contentBoxSize?.[0];
+      const borderBox = entry.borderBoxSize?.[0];
+      const height = contentBox?.blockSize ?? borderBox?.blockSize ?? 0;
 
-      revealAndDisconnectObserver({
-        contentRef,
-        wrapperRef,
-        revealRef,
-        observerRef,
+      if (height === 0) {
+        return;
+      }
+
+      hasMeasuredRef.current = true;
+
+      const _clipped = isClipped({
+        clipFlex,
         clipHeight,
-        prefersReducedMotion: prefersReducedMotion ?? true,
+        height,
       });
-      if (typeof onReveal === 'function') {
-        onReveal();
+
+      if (!_clipped) {
+        clearMaxHeight(wrapper);
       }
 
-      setClipped(false);
-    },
-    [clipHeight, onReveal, prefersReducedMotion]
-  );
+      setClipped(_clipped);
+    };
 
-  const onWrapperRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      wrapperRef.current = node;
-      if (!wrapperRef.current) {
-        return;
-      }
+    if (supportsResizeObserver(window.ResizeObserver)) {
+      const observer = new ResizeObserver(onResize);
+      observerRef.current = observer;
+      observer.observe(content);
 
-      // Initialize the height to the clip height + clip flex
-      wrapperRef.current.style.maxHeight = `${clipHeight}px`;
-    },
-    [clipHeight]
-  );
-
-  const onContentRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      // If the component is revealed, we have nothing to do here
-      if (revealRef.current) {
-        return;
-      }
-
-      contentRef.current = node;
-      // Disconnect the current observer if it exists
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-        observerRef.current = null;
-      }
-
-      // If we have no node, we can't observe it
-      if (!contentRef.current) {
-        return;
-      }
-
-      const onResize = (entries: ResizeObserverEntry[]): void => {
-        const entry = entries[0];
-
-        if (!entry) {
-          return;
+      return () => {
+        observer.disconnect();
+        if (observerRef.current === observer) {
+          observerRef.current = null;
         }
-
-        const contentBox = entry.contentBoxSize?.[0];
-        const borderBox = entry.borderBoxSize?.[0];
-        const height = contentBox?.blockSize ?? borderBox?.blockSize ?? 0;
-
-        if (height === 0) {
-          return;
-        }
-
-        if (!mountedRef.current && typeof onSetRenderHeight === 'function') {
-          onSetRenderHeight(height);
-          mountedRef.current = true;
-        }
-
-        const _clipped = isClipped({
-          clipFlex,
-          clipHeight,
-          height,
-        });
-
-        if (!_clipped && contentRef.current) {
-          revealAndDisconnectObserver({
-            contentRef,
-            wrapperRef,
-            revealRef,
-            observerRef,
-            clipHeight,
-            prefersReducedMotion: prefersReducedMotion ?? true,
-          });
-        }
-
-        setClipped(_clipped);
       };
+    }
 
-      if (supportsResizeObserver(window.ResizeObserver)) {
-        observerRef.current = new ResizeObserver(onResize);
-        observerRef.current.observe(contentRef.current);
-        return;
-      }
-
-      // If resize observer is not supported, query for rect and call onResize
-      // with an entry that mimics the ResizeObserverEntry.
-      const rect: DOMRectReadOnly = contentRef.current.getBoundingClientRect();
-      const entry: ResizeObserverEntry = {
-        target: contentRef.current,
-        contentRect: rect,
-        contentBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
-        borderBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
-        devicePixelContentBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
-      };
-      onResize([entry]);
-    },
-    [clipFlex, clipHeight, onSetRenderHeight, prefersReducedMotion]
-  );
+    // If resize observer is not supported, query for rect and call onResize
+    // with an entry that mimics the ResizeObserverEntry.
+    const rect = content.getBoundingClientRect();
+    const entry: ResizeObserverEntry = {
+      target: content,
+      contentRect: rect,
+      contentBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
+      borderBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
+      devicePixelContentBoxSize: [{blockSize: rect.height, inlineSize: rect.width}],
+    };
+    onResize([entry]);
+    return;
+  }, [clipFlex, clipHeight, clipped, revealed]);
 
   const showMoreButton = (
     <Button
       size="xs"
-      priority="primary"
+      variant="primary"
       onClick={handleReveal}
       aria-label={props.btnText ?? DEFAULT_BUTTON_TEXT}
       {...props.buttonProps}
@@ -281,31 +298,48 @@ function ClippedBox(props: ClippedBoxProps) {
     </Button>
   );
 
+  const showLessButton = (
+    <Button
+      size="xs"
+      variant="secondary"
+      onClick={handleCollapse}
+      aria-label={props.collapseBtnText ?? DEFAULT_COLLAPSE_BUTTON_TEXT}
+      {...props.buttonProps}
+    >
+      {props.collapseBtnText ?? DEFAULT_COLLAPSE_BUTTON_TEXT}
+    </Button>
+  );
+
+  const showCollapseButton = props.collapsible && revealed && !clipped;
+
   return (
-    <Wrapper ref={onWrapperRef} className={props.className}>
+    <Wrapper
+      ref={onWrapperRef}
+      className={props.className}
+      onTransitionEnd={handleTransitionEnd}
+    >
       <div ref={onContentRef}>
         {props.title ? <Title>{props.title}</Title> : null}
         {props.children}
         {clipped
           ? (props.clipFade?.({showMoreButton}) ?? <ClipFade>{showMoreButton}</ClipFade>)
           : null}
+        {showCollapseButton ? <CollapseButton>{showLessButton}</CollapseButton> : null}
       </div>
     </Wrapper>
   );
 }
 
-export default ClippedBox;
-
 const Wrapper = styled('div')`
   position: relative;
-  padding: ${space(1.5)} 0;
+  padding: ${p => p.theme.space.lg} 0;
   overflow: hidden;
   will-change: max-height;
   transition: max-height 500ms ease-in-out;
 `;
 
 const Title = styled('h5')`
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;
 
 const ClipFade = styled('div')`
@@ -316,15 +350,20 @@ const ClipFade = styled('div')`
   padding: 40px 0 0;
   background-image: linear-gradient(
     180deg,
-    ${p => color(p.theme.background).alpha(0.15).string()},
-    ${p => p.theme.background}
+    ${p => color(p.theme.tokens.background.primary).alpha(0.15).string()},
+    ${p => p.theme.tokens.background.primary}
   );
   text-align: center;
-  border-bottom: ${space(1.5)} solid ${p => p.theme.background};
+  border-bottom: ${p => p.theme.space.lg} solid ${p => p.theme.tokens.background.primary};
   /* Let pointer-events pass through ClipFade to visible elements underneath it */
   pointer-events: none;
   /* Ensure pointer-events trigger event listeners on "Expand" button */
   > * {
     pointer-events: auto;
   }
+`;
+
+const CollapseButton = styled('div')`
+  text-align: center;
+  margin-bottom: ${p => p.theme.space.lg};
 `;

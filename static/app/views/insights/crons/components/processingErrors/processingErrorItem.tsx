@@ -1,9 +1,10 @@
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
 import {tct} from 'sentry/locale';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {
-  type ProcessingError,
   ProcessingErrorType,
+  type ProcessingError,
 } from 'sentry/views/insights/crons/types';
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
 }
 
 export function ProcessingErrorItem({error, checkinTooltip}: Props) {
+  const organization = useOrganization();
   switch (error.type) {
     case ProcessingErrorType.CHECKIN_ENVIRONMENT_MISMATCH:
       return tct(
@@ -56,9 +58,14 @@ export function ProcessingErrorItem({error, checkinTooltip}: Props) {
         {checkinTooltip}
       );
     case ProcessingErrorType.MONITOR_DISABLED_NO_QUOTA:
+      // TODO: this should really be a gsApp hook so we have subscription context, but
+      // for now we'll just default to "pay-as-you-go" since it's the modern term
       return tct(
-        'A [checkinTooltip:check-in] upsert was sent, but due to insufficient quota a new monitor could not be enabled. Increase your Crons on-demand budget in your [link: subscription settings], and then enable this monitor.',
-        {checkinTooltip, link: <Link to="/settings/billing/overview/" />}
+        'A [checkinTooltip:check-in] upsert was sent, but due to insufficient quota a new monitor could not be enabled. Increase your Crons pay-as-you-go budget in your [link: subscription settings], and then enable this monitor.',
+        {
+          checkinTooltip,
+          link: <Link to={`/settings/${organization.slug}/billing/overview/`} />,
+        }
       );
     case ProcessingErrorType.MONITOR_INVALID_CONFIG:
       return tct(
@@ -93,7 +100,7 @@ export function ProcessingErrorItem({error, checkinTooltip}: Props) {
         'A [checkinTooltip:check-in] was sent but dropped due to the monitor being disabled. Please increase your on-demand budget if needed in your [link:subscription settings]. Then, enable this monitor to resume processing check-ins.',
         {
           checkinTooltip,
-          link: <Link to="/settings/billing/overview/" />,
+          link: <Link to={`/settings/${organization.slug}/billing/overview/`} />,
         }
       );
     case ProcessingErrorType.MONITOR_ENVIRONMENT_LIMIT_EXCEEDED:
@@ -103,13 +110,13 @@ export function ProcessingErrorItem({error, checkinTooltip}: Props) {
       );
     case ProcessingErrorType.MONITOR_ENVIRONMENT_RATELIMITED:
       return tct(
-        'A sent [checkinTooltip:check-in] was dropped due to being rate limited. Reivew our rate limits for more information.',
+        'A sent [checkinTooltip:check-in] was dropped due to being rate limited. Review our rate limits for more information.',
         {checkinTooltip}
       );
     case ProcessingErrorType.ORGANIZATION_KILLSWITCH_ENABLED:
       return tct(
         'We have detected a problem with your organization and disabled check-in ingestion. Contact [link:support] for details.',
-        {link: <ExternalLink href="https://sentry.zendesk.com/hc/en-us/requests/new/" />}
+        {link: <ExternalLink href="https://www.sentry.help/" />}
       );
     default:
       return tct(

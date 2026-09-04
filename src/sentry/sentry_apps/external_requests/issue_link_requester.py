@@ -10,14 +10,22 @@ from requests import RequestException
 
 from sentry.http import safe_urlread
 from sentry.models.group import Group
-from sentry.sentry_apps.external_requests.utils import send_and_save_sentry_app_request, validate
+from sentry.sentry_apps.event_types import SentryAppEventType
+from sentry.sentry_apps.external_requests.utils import (
+    integrator_error_message,
+    send_and_save_sentry_app_request,
+    validate,
+    validate_outbound_url,
+)
 from sentry.sentry_apps.metrics import (
-    SentryAppEventType,
+    SentryAppExternalRequestFailureReason,
     SentryAppExternalRequestHaltReason,
     SentryAppInteractionEvent,
     SentryAppInteractionType,
 )
+from sentry.sentry_apps.models.sentry_app import SentryApp
 from sentry.sentry_apps.services.app import RpcSentryAppInstallation
+from sentry.sentry_apps.services.app.model import RpcSentryApp
 from sentry.sentry_apps.utils.errors import SentryAppIntegratorError
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
@@ -121,10 +129,16 @@ class IssueLinkRequester:
                 )
 
                 raise SentryAppIntegratorError(
-                    message=f"Issue occured while trying to contact {self.sentry_app.slug} to link issue",
+                    message=integrator_error_message(
+                        e.response,
+                        f"Issue occurred while trying to contact {self.sentry_app.slug} to link issue",
+                    ),
                     webhook_context={"error_type": BAD_RESPONSE_HALT_REASON, **extras},
-                    status_code=500,
+                    status_code=e.response.status_code if e.response is not None else 502,
                 )
+            except SentryAppIntegratorError as e:
+                lifecycle.record_halt(halt_reason=e, extra={**extras})
+                raise
 
             if not self._validate_response(response):
                 extras["response"] = response
@@ -142,8 +156,23 @@ class IssueLinkRequester:
             return response
 
     def _build_url(self) -> str:
+        if not self.sentry_app.webhook_url:
+            raise SentryAppIntegratorError(
+                message="Sentry app webhook_url is not configured",
+                webhook_context={
+                    "error_type": FAILURE_REASON_BASE.format(
+                        SentryAppExternalRequestFailureReason.MISSING_URL
+                    ),
+                    "sentry_app_slug": self.sentry_app.slug,
+                    "uri": self.uri,
+                },
+                status_code=500,
+            )
+
         urlparts = urlparse(self.sentry_app.webhook_url)
-        return f"{urlparts.scheme}://{urlparts.netloc}{self.uri}"
+        url = f"{urlparts.scheme}://{urlparts.netloc}{self.uri}"
+        validate_outbound_url(url, urlparts.netloc, self.uri)
+        return url
 
     def _validate_response(self, resp: dict[str, str]) -> bool:
         return validate(instance=resp, schema_type="issue_link")
@@ -158,7 +187,7 @@ class IssueLinkRequester:
         }
 
     @cached_property
-    def body(self):
+    def body(self) -> str:
         body: dict[str, Any] = {
             "fields": {},
             "issueId": self.group.id,
@@ -172,5 +201,5 @@ class IssueLinkRequester:
         return json.dumps(body)
 
     @cached_property
-    def sentry_app(self):
+    def sentry_app(self) -> SentryApp | RpcSentryApp:
         return self.install.sentry_app

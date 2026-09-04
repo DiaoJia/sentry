@@ -4,6 +4,7 @@ export enum ErrorType {
   UNKNOWN = 'unknown',
   INVALID_SELECTOR = 'invalid-selector',
   REGEX_PARSE = 'regex-parse',
+  ATTRIBUTE_INVALID = 'attribute-invalid',
 }
 
 type Error = {
@@ -17,8 +18,8 @@ type ResponseError = {
   responseJSON?: Record<ResponseFields, string[]>;
 };
 
-function handleError(error: ResponseError): Error {
-  const errorMessage = error.responseJSON?.relayPiiConfig[0];
+export function handleError(error: ResponseError): Error {
+  const errorMessage = error.responseJSON?.relayPiiConfig?.[0];
 
   if (!errorMessage) {
     return {
@@ -63,5 +64,3 @@ function handleError(error: ResponseError): Error {
     message: t('An unknown error occurred while saving data scrubbing rule'),
   };
 }
-
-export default handleError;

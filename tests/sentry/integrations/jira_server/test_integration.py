@@ -1,27 +1,28 @@
-from functools import cached_property
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import orjson
 import pytest
 import responses
-from django.db import router
 from django.urls import reverse
 
 from fixtures.integrations.jira.stub_client import StubJiraApiClient
 from fixtures.integrations.stub_service import StubService
 from sentry.integrations.jira_server.integration import JiraServerIntegration
+from sentry.integrations.mixins.issues import IntegrationSyncTargetNotFound
 from sentry.integrations.models.external_actor import ExternalActor
 from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.models.integration_external_project import IntegrationExternalProject
 from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.integrations.services.integration import integration_service
 from sentry.integrations.types import ExternalProviders
-from sentry.models.grouplink import GroupLink
-from sentry.models.groupmeta import GroupMeta
-from sentry.shared_integrations.exceptions import ApiError, ApiUnauthorized, IntegrationError
+from sentry.shared_integrations.exceptions import (
+    ApiError,
+    ApiUnauthorized,
+    IntegrationConfigurationError,
+    IntegrationError,
+)
 from sentry.silo.base import SiloMode
-from sentry.silo.safety import unguarded_write
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.factories import EventType
 from sentry.testutils.helpers.datetime import before_now
@@ -29,7 +30,6 @@ from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 from sentry.testutils.skips import requires_snuba
 from sentry.users.services.user.serial import serialize_rpc_user
 from sentry.utils.http import absolute_uri
-from sentry_plugins.jira.plugin import JiraPlugin
 
 from . import EXAMPLE_PRIVATE_KEY
 
@@ -44,7 +44,7 @@ def get_client():
 
 
 class JiraServerIntegrationBaseTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.min_ago = before_now(minutes=1).isoformat()
         (
@@ -85,7 +85,7 @@ class JiraServerIntegrationBaseTest(APITestCase):
 
 
 class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
-    def test_get_create_issue_config(self):
+    def test_get_create_issue_config(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -265,7 +265,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 },
             ]
 
-    def test_get_create_issue_config_with_persisted_reporter(self):
+    def test_get_create_issue_config_with_persisted_reporter(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -318,7 +318,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             "type": "select",
         }
 
-    def test_get_create_issue_config_with_ignored_fields(self):
+    def test_get_create_issue_config_with_ignored_fields(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -382,7 +382,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 "versions",
             ]
 
-    def test_get_create_issue_config_with_default_and_param(self):
+    def test_get_create_issue_config_with_default_and_param(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -418,7 +418,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 "updatesForm": True,
             }
 
-    def test_get_create_issue_config_with_default(self):
+    def test_get_create_issue_config_with_default(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -452,7 +452,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             }
 
     @responses.activate
-    def test_get_create_issue_config_with_default_project_issue_types_erroring(self):
+    def test_get_create_issue_config_with_default_project_issue_types_erroring(self) -> None:
         """Test that if you have a default project set that's returning an error when
         we try to get the issue types we try a second project
         """
@@ -492,7 +492,9 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
         assert fields[1]["type"] == "blank"
 
     @patch("sentry.integrations.jira_server.client.JiraServerClient.get_issue_fields")
-    def test_get_create_issue_config_with_default_project_deleted(self, mock_get_issue_fields):
+    def test_get_create_issue_config_with_default_project_deleted(
+        self, mock_get_issue_fields: MagicMock
+    ) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -537,7 +539,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 "updatesForm": True,
             }
 
-    def test_get_create_issue_config_with_label_default(self):
+    def test_get_create_issue_config_with_label_default(self) -> None:
         event = self.store_event(
             data={
                 "event_id": "a" * 32,
@@ -572,7 +574,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             }
 
     @responses.activate
-    def test_get_create_issue_config__no_projects(self):
+    def test_get_create_issue_config__no_projects(self) -> None:
         event = self.store_event(
             data={"message": "oh no", "timestamp": self.min_ago}, project_id=self.project.id
         )
@@ -588,7 +590,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             self.installation.get_create_issue_config(event.group, self.user)
 
     @responses.activate
-    def test_get_create_issue_config__no_issue_config(self):
+    def test_get_create_issue_config__no_issue_config(self) -> None:
         event = self.store_event(
             data={"message": "oh no", "timestamp": self.min_ago}, project_id=self.project.id
         )
@@ -619,7 +621,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
         with pytest.raises(IntegrationError):
             self.installation.get_create_issue_config(event.group, self.user)
 
-    def test_get_link_issue_config(self):
+    def test_get_link_issue_config(self) -> None:
         group = self.create_group()
 
         assert self.installation.get_link_issue_config(group) == [
@@ -640,7 +642,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             },
         ]
 
-    def test_create_issue_no_project(self):
+    def test_create_issue_no_project(self) -> None:
         with mock.patch.object(StubJiraApiClient, "get_issue_fields") as mock_get_issue_fields:
             mock_issue_fields = StubService.get_stub_data("jira", "issue_fields_response.json")
             mock_issue_fields["values"] = list(
@@ -661,6 +663,8 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                         "title": "example summary",
                         "description": "example bug report",
                         "key": "APP-123",
+                        # Jira's immutable id, kept so a project move can be followed.
+                        "metadata": {"provider_issue_id": "10305"},
                     }
                     mock_create_issue.assert_called_once_with(
                         {
@@ -671,7 +675,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                         }
                     )
 
-    def test_create_issue(self):
+    def test_create_issue(self) -> None:
         with mock.patch.object(StubJiraApiClient, "create_issue") as mock_create_issue:
             mock_create_issue.return_value = {"key": "APP-123"}
             with mock.patch.object(self.installation, "get_client", get_client):
@@ -686,6 +690,8 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                     "title": "example summary",
                     "description": "example bug report",
                     "key": "APP-123",
+                    # Jira's immutable id, kept so a project move can be followed.
+                    "metadata": {"provider_issue_id": "10305"},
                 }
                 mock_create_issue.assert_called_once_with(
                     {
@@ -697,7 +703,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 )
 
     @responses.activate
-    def test_create_issue_labels_and_option(self):
+    def test_create_issue_labels_and_option(self) -> None:
         responses.add(
             responses.GET,
             f"https://jira.example.org/rest/api/2/issue/createmeta/{DEFAULT_PROJECT_ID}/issuetypes/{DEFAULT_ISSUE_TYPE_ID}",
@@ -740,7 +746,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
         )
         assert result["key"] == "APP-123"
 
-    def test_outbound_issue_sync(self):
+    def test_outbound_issue_sync(self) -> None:
         integration, _ = self.create_provider_integration_for(
             organization=self.organization,
             user=self.user,
@@ -772,7 +778,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 mock_transition_issue.assert_called_with("SEN-5", "31")
 
     @responses.activate
-    def test_sync_assignee_outbound_case_insensitive(self):
+    def test_sync_assignee_outbound_case_insensitive(self) -> None:
         user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         issue_id = "APP-123"
         assign_issue_url = "https://jira.example.org/rest/api/2/issue/%s/assignee" % issue_id
@@ -798,7 +804,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
         assert assign_issue_response.request.body == b'{"name": "Alive Tofu"}'
 
     @responses.activate
-    def test_sync_assignee_outbound_no_emails_for_multiple_users(self):
+    def test_sync_assignee_outbound_no_emails_for_multiple_users(self) -> None:
         user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         issue_id = "APP-123"
         external_issue = ExternalIssue.objects.create(
@@ -819,15 +825,15 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             ],
         )
 
-        with pytest.raises(IntegrationError) as e:
+        with pytest.raises(IntegrationSyncTargetNotFound) as e:
             self.installation.sync_assignee_outbound(external_issue, user)
-        assert str(e.value) == "Failed to assign user to Jira Server issue"
+        assert str(e.value) == "No matching Jira Server user found"
 
         # No sync made as jira users don't have email addresses
         assert len(responses.calls) == 1
 
     @responses.activate
-    def test_sync_assignee_outbound_user_email_empty(self):
+    def test_sync_assignee_outbound_user_email_empty(self) -> None:
         user = serialize_rpc_user(self.create_user(email=""))
         issue_id = "APP-123"
         external_issue = ExternalIssue.objects.create(
@@ -857,8 +863,37 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
 
     @responses.activate
     @patch("sentry.integrations.jira_server.integration.JiraServerClient.assign_issue")
-    def test_sync_assignee_outbound_unauthorized(self, mock_assign_issue):
+    def test_sync_assignee_outbound_unauthorized(self, mock_assign_issue: MagicMock) -> None:
         mock_assign_issue.side_effect = ApiUnauthorized("Oops, unauthorized")
+        user = serialize_rpc_user(self.create_user(email="bob@example.com"))
+        issue_id = "APP-123"
+        external_issue = ExternalIssue.objects.create(
+            organization_id=self.organization.id,
+            integration_id=self.installation.model.id,
+            key=issue_id,
+        )
+        responses.add(
+            responses.GET,
+            "https://jira.example.org/rest/api/2/user/assignable/search",
+            json=[
+                {
+                    "accountId": "deadbeef123",
+                    "displayName": "Dead Beef",
+                    "emailAddress": "bob@example.com",
+                }
+            ],
+        )
+        with pytest.raises(IntegrationConfigurationError) as exc_info:
+            self.installation.sync_assignee_outbound(
+                external_issue=external_issue, user=user, assign=True
+            )
+
+        assert str(exc_info.value) == "Insufficient permissions to assign user to Jira Server issue"
+
+    @responses.activate
+    @patch("sentry.integrations.jira_server.integration.JiraServerClient.assign_issue")
+    def test_sync_assignee_outbound_api_error(self, mock_assign_issue: MagicMock) -> None:
+        mock_assign_issue.side_effect = ApiError("API Error occurred")
         user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         issue_id = "APP-123"
         external_issue = ExternalIssue.objects.create(
@@ -882,40 +917,13 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                 external_issue=external_issue, user=user, assign=True
             )
 
-        assert str(exc_info.value) == "Insufficient permissions to assign user to Jira Server issue"
-
-    @responses.activate
-    @patch("sentry.integrations.jira_server.integration.JiraServerClient.assign_issue")
-    def test_sync_assignee_outbound_api_error(self, mock_assign_issue):
-        mock_assign_issue.side_effect = ApiError("API Error occurred")
-        user = serialize_rpc_user(self.create_user(email="bob@example.com"))
-        issue_id = "APP-123"
-        external_issue = ExternalIssue.objects.create(
-            organization_id=self.organization.id,
-            integration_id=self.installation.model.id,
-            key=issue_id,
-        )
-        responses.add(
-            responses.GET,
-            "https://jira.example.org/rest/api/2/user/assignable/search",
-            json=[
-                {
-                    "accountId": "deadbeef123",
-                    "displayName": "Dead Beef",
-                    "username": "bob@example.com",
-                }
-            ],
-        )
-        with pytest.raises(IntegrationError) as exc_info:
-            self.installation.sync_assignee_outbound(
-                external_issue=external_issue, user=user, assign=True
-            )
-
         assert str(exc_info.value) == "Failed to assign user to Jira Server issue"
 
     @responses.activate
     @patch("sentry.integrations.jira_server.integration.JiraServerClient.search_users_for_issue")
-    def test_get_user_by_external_actor_multiple_actors(self, mock_search_users_for_issue):
+    def test_get_user_by_external_actor_multiple_actors(
+        self, mock_search_users_for_issue: MagicMock
+    ) -> None:
         rpc_user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         ExternalActor.objects.create(
             organization_id=self.organization.id,
@@ -947,7 +955,9 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
 
     @responses.activate
     @patch("sentry.integrations.jira_server.integration.JiraServerClient.search_users_for_issue")
-    def test_get_user_by_external_actor_no_actor(self, mock_search_users_for_issue):
+    def test_get_user_by_external_actor_no_actor(
+        self, mock_search_users_for_issue: MagicMock
+    ) -> None:
         rpc_user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         result = self.installation._get_matching_jira_server_user_by_external_actor(
             client=self.installation.get_client(),
@@ -968,7 +978,9 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
 
     @responses.activate
     @patch("sentry.integrations.jira_server.integration.JiraServerClient.search_users_for_issue")
-    def test_get_user_by_external_actor_no_matching_jira_user(self, mock_search_users_for_issue):
+    def test_get_user_by_external_actor_no_matching_jira_user(
+        self, mock_search_users_for_issue: MagicMock
+    ) -> None:
         rpc_user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         ExternalActor.objects.create(
             organization_id=self.organization.id,
@@ -992,7 +1004,9 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
 
     @responses.activate
     @patch("sentry.integrations.jira_server.integration.JiraServerClient.search_users_for_issue")
-    def test_get_user_by_external_actor_matching_user(self, mock_search_users_for_issue):
+    def test_get_user_by_external_actor_matching_user(
+        self, mock_search_users_for_issue: MagicMock
+    ) -> None:
         rpc_user = serialize_rpc_user(self.create_user(email="bob@example.com"))
         ExternalActor.objects.create(
             organization_id=self.organization.id,
@@ -1026,7 +1040,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
         assert result == mock_jira_user
         mock_search_users_for_issue.assert_called_once_with("APP-123", "JiraUser")
 
-    def test_get_config_data(self):
+    def test_get_config_data(self) -> None:
         integration = self.create_integration(
             organization=self.organization,
             provider="jira_server",
@@ -1061,7 +1075,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             "issues_ignored_fields": "",
         }
 
-    def test_get_config_data_issues_keys(self):
+    def test_get_config_data_issues_keys(self) -> None:
         integration, org_integration = self.create_provider_integration_for(
             organization=self.organization,
             user=self.user,
@@ -1084,7 +1098,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
             == "hello world, goodnight, moon"
         )
 
-    def test_create_comment(self):
+    def test_create_comment(self) -> None:
         group_note = mock.Mock()
         comment = "hello world\nThis is a comment.\n\n\n    Glad it's quoted"
         group_note.data = {"text": comment}
@@ -1096,7 +1110,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
                     == "Sentry Admin wrote:\n\n{quote}%s{quote}" % comment
                 )
 
-    def test_update_comment(self):
+    def test_update_comment(self) -> None:
         group_note = mock.Mock()
         comment = "hello world\nThis is a comment.\n\n\n    I've changed it"
         group_note.data = {"text": comment, "external_id": "123"}
@@ -1112,7 +1126,7 @@ class JiraServerRegionIntegrationTest(JiraServerIntegrationBaseTest):
 
 @control_silo_test
 class JiraServerControlIntegrationTest(JiraServerIntegrationBaseTest):
-    def test_update_organization_config_sync_keys(self):
+    def test_update_organization_config_sync_keys(self) -> None:
         integration = self.create_provider_integration(provider="jira_server", name="Example Jira")
         integration.add_organization(self.organization, self.user)
 
@@ -1224,7 +1238,7 @@ class JiraServerControlIntegrationTest(JiraServerIntegrationBaseTest):
             == 0
         )
 
-    def test_update_organization_config_issues_keys(self):
+    def test_update_organization_config_issues_keys(self) -> None:
         integration = self.create_provider_integration(provider="jira_server", name="Example Jira")
         integration.add_organization(self.organization, self.user)
 
@@ -1257,130 +1271,3 @@ class JiraServerControlIntegrationTest(JiraServerIntegrationBaseTest):
             "goodnight",
             "moon",
         ]
-
-
-class JiraMigrationIntegrationTest(APITestCase):
-    @cached_property
-    def integration(self):
-        integration = self.create_integration(
-            organization=self.organization,
-            external_id="jira_server:1",
-            provider="jira_server",
-            name="Jira Server",
-            metadata={
-                "oauth_client_id": "oauth-client-id",
-                "shared_secret": "a-super-secret-key-from-atlassian",
-                "base_url": "https://example.atlassian.net",
-                "domain_name": "example.atlassian.net",
-            },
-        )
-        return integration
-
-    def setUp(self):
-        super().setUp()
-        self.plugin = JiraPlugin()
-        self.plugin.set_option("enabled", True, self.project)
-        self.plugin.set_option("default_project", "SEN", self.project)
-        self.plugin.set_option("instance_url", "https://example.atlassian.net", self.project)
-        self.plugin.set_option("ignored_fields", "hellboy, meow", self.project)
-        installation = self.integration.get_installation(self.organization.id)
-        assert isinstance(installation, JiraServerIntegration)
-        self.installation = installation
-        self.login_as(self.user)
-
-    def test_migrate_plugin(self):
-        """Test that 2 projects with the Jira plugin enabled that each have an issue created
-        from the plugin are migrated along with the ignored fields
-        """
-        project2 = self.create_project(
-            name="hellbar", organization=self.organization, teams=[self.team]
-        )
-        plugin2 = JiraPlugin()
-        plugin2.set_option("enabled", True, project2)
-        plugin2.set_option("default_project", "BAR", project2)
-        plugin2.set_option("instance_url", "https://example.atlassian.net", project2)
-
-        group = self.create_group(message="Hello world", culprit="foo.bar")
-        plugin_issue = GroupMeta.objects.create(
-            key=f"{self.plugin.slug}:tid", group_id=group.id, value="SEN-1"
-        )
-        group2 = self.create_group(message="Hello world", culprit="foo.bar")
-        plugin2_issue = GroupMeta.objects.create(
-            key=f"{self.plugin.slug}:tid", group_id=group2.id, value="BAR-1"
-        )
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            with unguarded_write(router.db_for_write(OrganizationIntegration)):
-                org_integration.config.update({"issues_ignored_fields": ["reporter", "test"]})
-            org_integration.save()
-
-        with self.tasks():
-            self.installation.migrate_issues()
-
-        assert ExternalIssue.objects.filter(
-            organization_id=self.organization.id,
-            integration_id=self.integration.id,
-            key=plugin_issue.value,
-        ).exists()
-        assert ExternalIssue.objects.filter(
-            organization_id=self.organization.id,
-            integration_id=self.integration.id,
-            key=plugin2_issue.value,
-        ).exists()
-        assert not GroupMeta.objects.filter(
-            key=f"{self.plugin.slug}:tid", group_id=group.id, value="SEN-1"
-        ).exists()
-        assert not GroupMeta.objects.filter(
-            key=f"{self.plugin.slug}:tid", group_id=group.id, value="BAR-1"
-        ).exists()
-
-        with assume_test_silo_mode(SiloMode.CONTROL):
-            oi = OrganizationIntegration.objects.get(integration_id=self.integration.id)
-            assert len(oi.config["issues_ignored_fields"]) == 4
-
-        assert self.plugin.get_option("enabled", self.project) is False
-        assert plugin2.get_option("enabled", project2) is False
-
-    def test_instance_url_mismatch(self):
-        """Test that if the plugin's instance URL does not match the integration's base URL, we don't migrate the issues"""
-        self.plugin.set_option("instance_url", "https://hellboy.atlassian.net", self.project)
-        group = self.create_group(message="Hello world", culprit="foo.bar")
-        plugin_issue = GroupMeta.objects.create(
-            key=f"{self.plugin.slug}:tid", group_id=group.id, value="SEN-1"
-        )
-        with self.tasks():
-            self.installation.migrate_issues()
-
-        assert not ExternalIssue.objects.filter(
-            organization_id=self.organization.id,
-            integration_id=self.integration.id,
-            key=plugin_issue.value,
-        ).exists()
-        assert GroupMeta.objects.filter(
-            key=f"{self.plugin.slug}:tid", group_id=group.id, value="SEN-1"
-        ).exists()
-
-    def test_external_issue_already_exists(self):
-        """Test that if an issue already exists during migration, we continue with no issue"""
-
-        group = self.create_group(message="Hello world", culprit="foo.bar")
-        GroupMeta.objects.create(key=f"{self.plugin.slug}:tid", group_id=group.id, value="SEN-1")
-        group2 = self.create_group(message="Hello world", culprit="foo.bar")
-        GroupMeta.objects.create(key=f"{self.plugin.slug}:tid", group_id=group2.id, value="BAR-1")
-        integration_issue = ExternalIssue.objects.create(
-            organization_id=self.organization.id,
-            integration_id=self.integration.id,
-            key="BAR-1",
-        )
-        GroupLink.objects.create(
-            group_id=group2.id,
-            project_id=self.project.id,
-            linked_type=GroupLink.LinkedType.issue,
-            linked_id=integration_issue.id,
-            relationship=GroupLink.Relationship.references,
-        )
-
-        with self.tasks():
-            self.installation.migrate_issues()

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import datetime
 from typing import Any
 
 import sentry_sdk
 from django.contrib.auth.models import AnonymousUser
-from django.db.models import Q
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -14,19 +14,17 @@ from rest_framework.response import Response
 from sentry import features, search
 from sentry.api.event_search import AggregateFilter, SearchFilter
 from sentry.api.helpers.environments import get_environment
-from sentry.api.issue_search import convert_query_values, parse_search_query
 from sentry.api.serializers import serialize
 from sentry.constants import DEFAULT_SORT_OPTION
 from sentry.exceptions import InvalidSearchQuery
+from sentry.issues.issue_search import convert_query_values, parse_search_query
 from sentry.models.environment import Environment
 from sentry.models.group import Group, looks_like_short_id
-from sentry.models.groupsearchview import GroupSearchView
-from sentry.models.groupsearchviewstarred import GroupSearchViewStarred
 from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.models.release import Release
-from sentry.models.savedsearch import SavedSearch, Visibility
 from sentry.signals import advanced_search_feature_gated
+from sentry.snuba.referrer import Referrer
 from sentry.users.models.user import User
 from sentry.utils import metrics
 from sentry.utils.cursors import Cursor, CursorResult
@@ -45,8 +43,7 @@ advanced_search_features: Sequence[tuple[Callable[[SearchFilter], Any], str]] = 
     (lambda search_filter: search_filter.value.is_wildcard(), "wildcard search"),
 ]
 
-DEFAULT_QUERY = "is:unresolved issue.priority:[high, medium]"
-TAXONOMY_DEFAULT_QUERY = "is:unresolved"
+DEFAULT_QUERY = "is:unresolved"
 
 
 def parse_and_convert_issue_search_query(
@@ -67,6 +64,14 @@ def parse_and_convert_issue_search_query(
     return search_filters
 
 
+def get_search_referrer(request: Request) -> Referrer:
+    # Split UI (browser session) traffic from API/integration traffic so the two can be
+    # measured separately in Snuba.
+    if isinstance(request.successful_authenticator, SessionAuthentication):
+        return Referrer.SEARCH_GROUP_INDEX
+    return Referrer.SEARCH_GROUP_INDEX_API
+
+
 def build_query_params_from_request(
     request: Request,
     organization: Organization,
@@ -76,6 +81,7 @@ def build_query_params_from_request(
     query_kwargs: dict[str, Any] = {
         "projects": projects,
         "sort_by": request.GET.get("sort", DEFAULT_SORT_OPTION),
+        "referrer": get_search_referrer(request),
     }
 
     limit = request.GET.get("limit")
@@ -92,68 +98,24 @@ def build_query_params_from_request(
         except ValueError:
             raise ParseError(detail="Invalid cursor parameter.")
 
-    has_query = request.GET.get("query")
     query = request.GET.get("query", None)
     if query is None:
-        query = (
-            TAXONOMY_DEFAULT_QUERY
-            if features.has("organizations:issue-taxonomy", organization)
-            else DEFAULT_QUERY
-        )
+        query = DEFAULT_QUERY
 
     query = query.strip()
 
-    if request.GET.get("savedSearch") == "0" and request.user and not has_query:
-        if features.has(
-            "organizations:issue-stream-custom-views", organization, actor=request.user
-        ):
-            selected_view_id = request.GET.get("viewId")
-            if selected_view_id:
-                default_view = GroupSearchView.objects.filter(id=int(selected_view_id)).first()
-            else:
-                first_starred_view = GroupSearchViewStarred.objects.filter(
-                    organization=organization,
-                    user_id=request.user.id,
-                    position=0,
-                ).first()
-                default_view = first_starred_view.group_search_view if first_starred_view else None
-
-            if default_view:
-                query_kwargs["sort_by"] = default_view.query_sort
-                query = default_view.query
-        else:
-            saved_searches = (
-                SavedSearch.objects
-                # Do not include pinned or personal searches from other users in
-                # the same organization. DOES include the requesting users pinned
-                # search
-                .exclude(
-                    ~Q(owner_id=request.user.id),
-                    visibility__in=(Visibility.OWNER, Visibility.OWNER_PINNED),
-                )
-                .filter(
-                    Q(organization=organization) | Q(is_global=True),
-                )
-                .extra(order_by=["name"])
-            )
-            selected_search_id = request.GET.get("searchId", None)
-            if selected_search_id:
-                # saved search requested by the id
-                saved_search = saved_searches.filter(id=int(selected_search_id)).first()
-            else:
-                # pinned saved search
-                saved_search = saved_searches.filter(visibility=Visibility.OWNER_PINNED).first()
-
-            if saved_search:
-                query_kwargs["sort_by"] = saved_search.sort
-                query = saved_search.query
-
     sentry_sdk.set_tag("search.query", query)
-    sentry_sdk.set_tag("search.sort", query)
+    sentry_sdk.set_attribute("search.query", query)
+    sentry_sdk.set_tag("search.sort", query_kwargs["sort_by"])
+    sentry_sdk.set_attribute("search.sort", query_kwargs["sort_by"])
     if projects:
         sentry_sdk.set_tag("search.projects", len(projects) if len(projects) <= 5 else ">5")
+        sentry_sdk.set_attribute("search.projects", len(projects) if len(projects) <= 5 else ">5")
     if environments:
         sentry_sdk.set_tag(
+            "search.environments", len(environments) if len(environments) <= 5 else ">5"
+        )
+        sentry_sdk.set_attribute(
             "search.environments", len(environments) if len(environments) <= 5 else ">5"
         )
     if query:
@@ -193,17 +155,27 @@ def validate_search_filter_permissions(
                 )
 
 
-def get_by_short_id(
+def get_by_short_ids(
     organization_id: int,
     is_short_id_lookup: str,
     query: str,
-) -> Group | None:
-    if is_short_id_lookup == "1" and looks_like_short_id(query):
+    *,
+    project_ids: Collection[int] | None,
+) -> list[Group]:
+    # Match short id tokens anywhere in the query
+    if is_short_id_lookup != "1":
+        return []
+    groups: list[Group] = []
+    for token in set(query.split()):
+        if not looks_like_short_id(token):
+            continue
         try:
-            return Group.objects.by_qualified_short_id(organization_id, query)
+            groups.append(
+                Group.objects.by_qualified_short_id(organization_id, token, project_ids=project_ids)
+            )
         except Group.DoesNotExist:
-            pass
-    return None
+            continue
+    return groups
 
 
 def track_slo_response(name: str) -> Callable[[EndpointFunction], EndpointFunction]:
@@ -293,28 +265,6 @@ def prep_search(
     return result, query_kwargs
 
 
-def get_first_last_release(
-    request: Request,
-    group: Group,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    first_release_s = group.get_first_release()
-    if first_release_s is not None:
-        last_release_s = group.get_last_release()
-    else:
-        last_release_s = None
-
-    if first_release_s is not None and last_release_s is not None:
-        first_release, last_release = serialize_releases(
-            request, group, [first_release_s, last_release_s]
-        )
-        return first_release, last_release
-    elif first_release_s is not None:
-        (first_release,) = serialize_releases(request, group, [first_release_s])
-        return (first_release, None)
-    else:
-        return None, None
-
-
 def serialize_releases(request: Request, group: Group, versions: list[str]) -> list[dict[str, Any]]:
     releases = {
         release.version: release
@@ -333,3 +283,26 @@ def serialize_releases(request: Request, group: Group, versions: list[str]) -> l
         item if item is not None else {"version": version}
         for item, version in zip(serialized_releases, versions)
     ]
+
+
+def get_first_last_release(
+    request: Request,
+    group: Group,
+    environment_names: list[str] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    first_release_s = group.get_first_release(environment_names=environment_names)
+    if first_release_s is not None:
+        last_release_s = group.get_last_release(environment_names=environment_names)
+    else:
+        last_release_s = None
+
+    if first_release_s is not None and last_release_s is not None:
+        first_release, last_release = serialize_releases(
+            request, group, [first_release_s, last_release_s]
+        )
+        return first_release, last_release
+    elif first_release_s is not None:
+        (first_release,) = serialize_releases(request, group, [first_release_s])
+        return (first_release, None)
+    else:
+        return None, None

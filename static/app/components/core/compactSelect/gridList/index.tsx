@@ -5,23 +5,25 @@ import {mergeProps} from '@react-aria/utils';
 import type {ListState} from '@react-stately/list';
 import type {CollectionChildren} from '@react-types/shared';
 
-import {SelectContext} from 'sentry/components/core/compactSelect/control';
-import {SelectFilterContext} from 'sentry/components/core/compactSelect/list';
 import {
+  ControlContext,
   ListLabel,
   ListSeparator,
   ListWrap,
+  SelectFilterContext,
   SizeLimitMessage,
-} from 'sentry/components/core/compactSelect/styles';
-import type {SelectKey, SelectSection} from 'sentry/components/core/compactSelect/types';
-import {t} from 'sentry/locale';
-import type {FormSize} from 'sentry/utils/theme';
+  useVirtualizedItems,
+} from '@sentry/scraps/compactSelect';
+import type {ListItemBase} from '@sentry/scraps/compactSelect/types';
+import {Container} from '@sentry/scraps/layout';
+import {useTranslation} from '@sentry/scraps/translationContext';
 
-import {GridListOption} from './option';
+import {GridListOption, type GridListOptionProps} from './option';
 import {GridListSection} from './section';
 
-interface GridListProps
-  extends Omit<React.HTMLAttributes<HTMLUListElement>, 'children'>,
+interface GridListProps<T extends ListItemBase>
+  extends
+    Omit<React.HTMLAttributes<HTMLUListElement>, 'children'>,
     Omit<
       AriaGridListOptions<any>,
       | 'disabledKeys'
@@ -41,26 +43,21 @@ interface GridListProps
    * Object containing the selection state and focus position, needed for
    * `useGridList()`.
    */
-  listState: ListState<any>;
-  children?: CollectionChildren<any>;
+  listState: ListState<T>;
+  children?: CollectionChildren<T>;
   /**
    * Text label to be rendered as heading on top of grid list.
    */
   label?: React.ReactNode;
-  /**
-   * To be called when the user toggle-selects a whole section (applicable when sections
-   * have `showToggleAllButton` set to true.) Note: this will be called in addition to
-   * and before `onChange`.
-   */
-  onSectionToggle?: (
-    section: SelectSection<SelectKey>,
-    type: 'select' | 'unselect'
-  ) => void;
-  size?: FormSize;
+  size?: GridListOptionProps<ListItemBase>['size'];
   /**
    * Message to be displayed when some options are hidden due to `sizeLimit`.
    */
   sizeLimitMessage?: string;
+  /**
+   * If true, virtualization will be enabled for the list.
+   */
+  virtualized?: boolean;
 }
 
 /**
@@ -73,15 +70,16 @@ interface GridListProps
  * inside. Grid lists allow users to focus on those child elements (using the Arrow
  * Left/Right keys) and interact with them, which isn't possible with list boxes.
  */
-function GridList({
+function GridList<T extends ListItemBase>({
   listState,
   size = 'md',
   label,
-  onSectionToggle,
   sizeLimitMessage,
   keyDownHandler,
+  virtualized,
   ...props
-}: GridListProps) {
+}: GridListProps<T>) {
+  const {t} = useTranslation();
   const ref = useRef<HTMLUListElement>(null);
   const labelId = useId();
   const {gridProps} = useGridList(
@@ -98,7 +96,7 @@ function GridList({
     }
   };
 
-  const {overlayIsOpen, search} = useContext(SelectContext);
+  const {overlayIsOpen, searchable} = useContext(ControlContext);
   const hiddenOptions = useContext(SelectFilterContext);
   const listItems = useMemo(
     () =>
@@ -112,41 +110,64 @@ function GridList({
     [listState.collection, hiddenOptions]
   );
 
+  const virtualizer = useVirtualizedItems({
+    listItems,
+    virtualized,
+    size,
+  });
+
+  const mergedProps = mergeProps(gridProps, props);
+
   return (
     <Fragment>
       {listItems.length !== 0 && <ListSeparator role="separator" />}
       {listItems.length !== 0 && label && <ListLabel id={labelId}>{label}</ListLabel>}
-      <ListWrap {...mergeProps(gridProps, props)} onKeyDown={onKeyDown} ref={ref}>
-        {overlayIsOpen &&
-          listItems.map(item => {
-            if (item.type === 'section') {
-              return (
-                <GridListSection
-                  key={item.key}
-                  node={item}
-                  listState={listState}
-                  onToggle={onSectionToggle}
-                  size={size}
-                />
-              );
-            }
+      {overlayIsOpen && (
+        <Container ref={virtualizer.scrollElementRef} height="100%" overflowY="auto">
+          <Container {...virtualizer.wrapperProps}>
+            <ListWrap
+              {...mergedProps}
+              style={{...mergedProps.style, ...virtualizer.listWrapStyle}}
+              onKeyDown={onKeyDown}
+              ref={ref}
+            >
+              {virtualizer.items.map(row => {
+                const item = listItems[row.index];
+                if (!item) {
+                  return null;
+                }
+                if (item.type === 'section') {
+                  return (
+                    <GridListSection
+                      {...virtualizer.itemProps(row.index)}
+                      key={item.key}
+                      node={item}
+                      listState={listState}
+                      size={size}
+                    />
+                  );
+                }
 
-            return (
-              <GridListOption
-                key={item.key}
-                node={item}
-                listState={listState}
-                size={size}
-              />
-            );
-          })}
+                return (
+                  <GridListOption
+                    key={item.key}
+                    {...virtualizer.itemProps(row.index)}
+                    node={item}
+                    listState={listState}
+                    size={size}
+                  />
+                );
+              })}
 
-        {!search && hiddenOptions.size > 0 && (
-          <SizeLimitMessage>
-            {sizeLimitMessage ?? t('Use search to find more options…')}
-          </SizeLimitMessage>
-        )}
-      </ListWrap>
+              {!searchable && hiddenOptions.size > 0 && (
+                <SizeLimitMessage>
+                  {sizeLimitMessage ?? t('Use search to find more options…')}
+                </SizeLimitMessage>
+              )}
+            </ListWrap>
+          </Container>
+        </Container>
+      )}
     </Fragment>
   );
 }

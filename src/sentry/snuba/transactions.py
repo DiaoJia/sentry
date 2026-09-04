@@ -23,7 +23,6 @@ def query(
     orderby: list[str] | None = None,
     offset: int | None = None,
     limit: int = 50,
-    referrer: str | None = None,
     auto_fields: bool = False,
     auto_aggregations: bool = False,
     include_equation_fields: bool = False,
@@ -34,7 +33,6 @@ def query(
     transform_alias_to_input_format: bool = False,
     sample: float | None = None,
     has_metrics: bool = False,
-    use_metrics_layer: bool = False,
     skip_tag_resolution: bool = False,
     extra_columns: list[Column] | None = None,
     on_demand_metrics_enabled: bool = False,
@@ -42,7 +40,8 @@ def query(
     dataset: Dataset = Dataset.Discover,
     fallback_to_transactions: bool = False,
     query_source: QuerySource | None = None,
-    debug: bool = False,
+    *,
+    referrer: str,
 ) -> EventsResponse:
     return discover.query(
         selected_columns,
@@ -63,7 +62,6 @@ def query(
         transform_alias_to_input_format=transform_alias_to_input_format,
         sample=sample,
         has_metrics=has_metrics,
-        use_metrics_layer=use_metrics_layer,
         skip_tag_resolution=skip_tag_resolution,
         extra_columns=extra_columns,
         on_demand_metrics_enabled=on_demand_metrics_enabled,
@@ -71,7 +69,6 @@ def query(
         dataset=Dataset.Transactions,
         fallback_to_transactions=fallback_to_transactions,
         query_source=query_source,
-        debug=debug,
     )
 
 
@@ -80,18 +77,18 @@ def timeseries_query(
     query: str,
     snuba_params: SnubaParams,
     rollup: int,
-    referrer: str | None = None,
     zerofill_results: bool = True,
     comparison_delta: timedelta | None = None,
     functions_acl: list[str] | None = None,
-    allow_metric_aggregates=False,
-    has_metrics=False,
-    use_metrics_layer=False,
-    on_demand_metrics_enabled=False,
-    on_demand_metrics_type=None,
+    allow_metric_aggregates: bool = False,
+    has_metrics: bool = False,
+    on_demand_metrics_enabled: bool = False,
+    on_demand_metrics_type: MetricSpecType | None = None,
     query_source: QuerySource | None = None,
     fallback_to_transactions: bool = False,
     transform_alias_to_input_format: bool = False,
+    *,
+    referrer: str,
 ) -> SnubaTSResult:
     """
     High-level API for doing arbitrary user timeseries queries against events.
@@ -108,7 +105,6 @@ def timeseries_query(
         comparison_delta=comparison_delta,
         functions_acl=functions_acl,
         has_metrics=has_metrics,
-        use_metrics_layer=use_metrics_layer,
         on_demand_metrics_enabled=on_demand_metrics_enabled,
         on_demand_metrics_type=on_demand_metrics_type,
         dataset=Dataset.Transactions,
@@ -127,7 +123,6 @@ def top_events_timeseries(
     limit: int,
     organization: Organization,
     equations: list[str] | None = None,
-    referrer: str | None = None,
     top_events: EventsResponse | None = None,
     allow_empty: bool = True,
     zerofill_results: bool = True,
@@ -138,6 +133,8 @@ def top_events_timeseries(
     query_source: QuerySource | None = None,
     fallback_to_transactions: bool = False,
     transform_alias_to_input_format: bool = False,
+    *,
+    referrer: str,
 ) -> dict[str, SnubaTSResult] | SnubaTSResult:
     return discover.top_events_timeseries(
         timeseries_columns,

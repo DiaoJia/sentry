@@ -10,12 +10,11 @@ import {TeamFixture} from 'sentry-fixture/team';
 import {screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
 import {processInitQueue} from 'sentry/bootstrap/processInitQueue';
-import AlertStore from 'sentry/stores/alertStore';
-import IndicatorStore from 'sentry/stores/indicatorStore';
+import {IndicatorStore} from 'sentry/stores/indicatorStore';
 import {SentryInitRenderReactComponent} from 'sentry/types/system';
 
-describe('processInitQueue', function () {
-  describe('renderReact', function () {
+describe('processInitQueue', () => {
+  describe('renderReact', () => {
     it('renders password strength input', async () => {
       window.__onSentryInit = [
         {
@@ -60,24 +59,6 @@ describe('processInitQueue', function () {
       render(<div id="indicator-container" />);
       processInitQueue();
       expect(await screen.findByText('Indicator Alert')).toBeInTheDocument();
-    });
-    it('renders system alerts', async () => {
-      window.__onSentryInit = [
-        {
-          component: SentryInitRenderReactComponent.SYSTEM_ALERTS,
-          container: '#system-alerts-container',
-          name: 'renderReact',
-        },
-      ];
-
-      AlertStore.addAlert({
-        message: 'System Alert',
-        type: 'success',
-      });
-
-      render(<div id="system-alerts-container" />);
-      processInitQueue();
-      expect(await screen.findByText('System Alert')).toBeInTheDocument();
     });
     it('renders setup wizard', async () => {
       window.__onSentryInit = [
@@ -193,7 +174,7 @@ describe('processInitQueue', function () {
     });
   });
 
-  it('processes queued up items', function () {
+  it('processes queued up items', () => {
     const mock = jest.fn();
     const init = {
       name: 'onReady',
@@ -212,7 +193,7 @@ describe('processInitQueue', function () {
     expect(mock).toHaveBeenCalledTimes(2);
   });
 
-  it('is called after `processInitQueue` has already run', function () {
+  it('is called after `processInitQueue` has already run', () => {
     processInitQueue();
     const mock = jest.fn();
     const init = {

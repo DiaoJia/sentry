@@ -1,24 +1,22 @@
 import {Fragment, useEffect} from 'react';
 import styled from '@emotion/styled';
+import {useQueryClient} from '@tanstack/react-query';
 
-import {Alert} from 'sentry/components/core/alert';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
+import {Alert} from '@sentry/scraps/alert';
+
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {
   OrganizationIntegration,
   ServerlessFunction,
 } from 'sentry/types/integrations';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {
-  type ApiQueryKey,
-  setApiQueryData,
-  useApiQuery,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {IntegrationServerlessRow} from 'sentry/views/settings/organizationIntegrations/integrationServerlessRow';
 
 export function IntegrationServerlessFunctions({
@@ -29,7 +27,12 @@ export function IntegrationServerlessFunctions({
   const organization = useOrganization();
   const queryClient = useQueryClient();
   const queryKey: ApiQueryKey = [
-    `/organizations/${organization.slug}/integrations/${integration.id}/serverless-functions/`,
+    getApiUrl(
+      '/organizations/$organizationIdOrSlug/integrations/$integrationId/serverless-functions/',
+      {
+        path: {organizationIdOrSlug: organization.slug, integrationId: integration.id},
+      }
+    ),
   ];
   const {data: serverlessFunctions = [], isSuccess} = useApiQuery<ServerlessFunction[]>(
     queryKey,
@@ -51,7 +54,7 @@ export function IntegrationServerlessFunctions({
   return (
     <Fragment>
       <Alert.Container>
-        <Alert type="info">
+        <Alert variant="info" showIcon={false}>
           {t(
             'Manage your AWS Lambda functions below. Only Node and Python runtimes are currently supported.'
           )}
@@ -75,7 +78,7 @@ export function IntegrationServerlessFunctions({
                   queryKey,
                   existingServerlessFunctions => {
                     if (!existingServerlessFunctions) {
-                      return undefined;
+                      return;
                     }
                     const newServerlessFunctions = [...existingServerlessFunctions];
                     const updatedFunction = {
@@ -96,9 +99,9 @@ export function IntegrationServerlessFunctions({
 }
 
 const StyledPanelHeader = styled(PanelHeader)`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
   display: grid;
-  grid-column-gap: ${space(1)};
+  grid-column-gap: ${p => p.theme.space.md};
   align-items: center;
   grid-template-columns: 2fr 1fr 0.5fr;
   grid-template-areas: 'function-name layer-status enable-switch';

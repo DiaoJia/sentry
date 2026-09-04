@@ -1,19 +1,20 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
+import {ProjectFixture} from 'sentry-fixture/project';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import NoGroupsHandler from 'sentry/views/issueList/noGroupsHandler';
+import {NoGroupsHandler} from 'sentry/views/issueList/noGroupsHandler';
 
-describe('NoGroupsHandler', function () {
+describe('NoGroupsHandler', () => {
   const defaultProps = {
-    api: new MockApiClient(),
     query: '',
     organization: OrganizationFixture(),
     groupIds: [],
+    selectedProjectIds: [],
   };
 
-  it('displays default empty state when first event has been sent', async function () {
-    MockApiClient.addMockResponse({
+  it('displays default empty state when first event has been sent', async () => {
+    const projectsMock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/projects/',
       body: [],
     });
@@ -25,9 +26,10 @@ describe('NoGroupsHandler', function () {
     render(<NoGroupsHandler {...defaultProps} />);
 
     expect(await screen.findByText('No issues match your search')).toBeInTheDocument();
+    expect(projectsMock).not.toHaveBeenCalled();
   });
 
-  it('displays default empty state when an error occurs', async function () {
+  it('displays default empty state when an error occurs', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/projects/',
       statusCode: 500,
@@ -42,7 +44,26 @@ describe('NoGroupsHandler', function () {
     expect(await screen.findByText('No issues match your search')).toBeInTheDocument();
   });
 
-  it('displays waiting for events state when first event has not been sent', async function () {
+  it('displays waiting for events state when first event has not been sent', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/projects/',
+      body: [ProjectFixture()],
+    });
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/issues/',
+      body: [],
+    });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/sent-first-event/',
+      body: {sentFirstEvent: false},
+    });
+
+    render(<NoGroupsHandler {...defaultProps} />);
+
+    expect(await screen.findByText(/Waiting for events/i)).toBeInTheDocument();
+  });
+
+  it('displays waiting for events state when no projects exist yet', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/projects/',
       body: [],

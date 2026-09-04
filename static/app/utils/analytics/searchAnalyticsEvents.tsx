@@ -1,4 +1,4 @@
-import type {ShortcutType} from 'sentry/components/deprecatedSmartSearchBar/types';
+import type {ShortcutType} from 'sentry/components/searchBar/types';
 
 type SearchEventBase = {
   query: string;
@@ -25,6 +25,11 @@ export type SearchEventParameters = {
     search_type: string;
     visibility: string;
   };
+  'projectselector.apply': ProjectSelectorEvent & {
+    count: number;
+    multi: boolean;
+  };
+  'projectselector.cancel': ProjectSelectorEvent;
   'projectselector.clear': ProjectSelectorEvent;
   'projectselector.direct_selection': ProjectSelectorEvent;
   'projectselector.multi_button_clicked': ProjectSelectorEvent & {
@@ -51,6 +56,13 @@ export type SearchEventParameters = {
     item_kind: string;
     item_name: string;
     item_value_type: string;
+  };
+  'search.multi_value_selected': Omit<SearchEventBase, 'query'> & {
+    filter_key: string;
+    filter_operator: string;
+    filter_value_type: string;
+    selected: boolean;
+    selected_count: number;
   };
   'search.operator_autocompleted': SearchEventBase & {
     search_operator: string;
@@ -109,6 +121,7 @@ export const searchEventMap: Record<SearchEventKey, string | null> = {
   'search.searched_filter': 'Search: Performed search filter',
   'search.key_autocompleted': 'Search: Key Autocompleted',
   'search.key_manually_typed': 'Search: Key Manually Typed',
+  'search.multi_value_selected': 'Search: Multi-Select Value Toggled',
   'search.shortcut_used': 'Search: Shortcut Used',
   'search.docs_opened': 'Search: Docs Opened',
   'search.search_with_invalid': 'Search: Attempted Invalid Search',
@@ -125,6 +138,8 @@ export const searchEventMap: Record<SearchEventKey, string | null> = {
   'settings_search.query': 'settings_search Query',
   'command_palette.query': 'command_palette Query',
   'sidebar_help.query': 'sidebar_help Query',
+  'projectselector.apply': 'Project Selector: Applied',
+  'projectselector.cancel': 'Project Selector: Cancelled',
   'projectselector.direct_selection': 'Project Selector: Direct Selection',
   'projectselector.update': 'Project Selector: Update',
   'projectselector.clear': 'Project Selector: Clear',

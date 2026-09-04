@@ -1,6 +1,6 @@
-import {useCallback, useMemo} from 'react';
+import {useCallback} from 'react';
 import * as Sentry from '@sentry/react';
-import debounce from 'lodash/debounce';
+import {useAsyncDebouncedCallback} from '@tanstack/react-pacer';
 
 import {saveRecentSearch} from 'sentry/actionCreators/savedSearches';
 import type {Client} from 'sentry/api';
@@ -10,18 +10,19 @@ import {
   recentSearchTypeToLabel,
   tokenIsInvalid,
 } from 'sentry/components/searchQueryBuilder/utils';
-import {type ParseResult, Token} from 'sentry/components/searchSyntax/parser';
+import {Token, type ParseResult} from 'sentry/components/searchSyntax/parser';
 import {getKeyName} from 'sentry/components/searchSyntax/utils';
 import type {SavedSearchType} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 type UseHandleSearchProps = {
   parsedQuery: ParseResult | null;
   recentSearches: SavedSearchType | undefined;
   searchSource: string;
+  namespace?: string;
   onSearch?: (query: string, state: CallbackSearchState) => void;
 };
 
@@ -30,20 +31,22 @@ async function saveAsRecentSearch({
   query,
   api,
   organization,
+  namespace,
 }: {
   api: Client;
   organization: Organization;
   query: string;
   recentSearches: SavedSearchType | undefined;
+  namespace?: string;
 }) {
   // Only save recent search query if there is a type provided.
   // Do not save empty string queries (i.e. if they clear search)
-  if (typeof recentSearches === 'undefined' || !query) {
+  if (recentSearches === undefined || !query) {
     return;
   }
 
   try {
-    await saveRecentSearch(api, organization.slug, recentSearches, query);
+    await saveRecentSearch(api, organization.slug, recentSearches, query, namespace);
   } catch (err) {
     // Silently capture errors if it fails to save
     Sentry.captureException(err);
@@ -95,13 +98,16 @@ export function useHandleSearch({
   recentSearches,
   searchSource,
   onSearch,
+  namespace,
 }: UseHandleSearchProps) {
   const api = useApi();
   const organization = useOrganization();
-  const debouncedSaveAsRecentSearch = useMemo(
-    () => debounce(saveAsRecentSearch, 3000),
-    []
-  );
+  const debouncedSaveAsRecentSearch = useAsyncDebouncedCallback(saveAsRecentSearch, {
+    wait: 3000,
+    // Lodash allowed a pending recent search to save after unmounting.
+    // Flush instead of using Pacer's default cancellation to preserve that behavior.
+    onUnmount: debouncer => void debouncer.flush(),
+  });
 
   return useCallback(
     (query: string) => {
@@ -135,7 +141,13 @@ export function useHandleSearch({
         organization,
       });
 
-      debouncedSaveAsRecentSearch({api, organization, query, recentSearches});
+      debouncedSaveAsRecentSearch({
+        api,
+        organization,
+        query,
+        recentSearches,
+        namespace,
+      });
     },
     [
       api,
@@ -144,6 +156,7 @@ export function useHandleSearch({
       organization,
       parsedQuery,
       recentSearches,
+      namespace,
       searchSource,
     ]
   );

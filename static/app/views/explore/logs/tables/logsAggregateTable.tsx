@@ -1,138 +1,269 @@
+import {Fragment, useMemo} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import GridEditable, {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
-import SortLink from 'sentry/components/gridEditable/sortLink';
-import Pagination from 'sentry/components/pagination';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {COL_WIDTH_UNDEFINED, GridEditable} from 'sentry/components/tables/gridEditable';
+import {IconStack} from 'sentry/icons/iconStack';
 import {t} from 'sentry/locale';
+import {parseCursor} from 'sentry/utils/cursor';
+import {defined} from 'sentry/utils/defined';
+import type {TableDataRow} from 'sentry/utils/discover/discoverQuery';
 import {parseFunction, prettifyParsedFunction} from 'sentry/utils/discover/fields';
-import {prettifyTagKey} from 'sentry/utils/fields';
+import {FieldValueType, prettifyTagKey} from 'sentry/utils/fields';
+import {isRateLimitError} from 'sentry/utils/requestError/requestError';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {
-  LOGS_AGGREGATE_CURSOR_KEY,
-  useLogsAggregate,
-  useLogsAggregateSortBys,
-  useLogsGroupBy,
-  useSetLogsPageParams,
-} from 'sentry/views/explore/contexts/logs/logsPageParams';
-import {LOGS_AGGREGATE_SORT_BYS_KEY} from 'sentry/views/explore/contexts/logs/sortBys';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {CellAction, updateQuery} from 'sentry/views/discover/table/cellAction';
+import type {TableColumn} from 'sentry/views/discover/table/types';
+import {ALLOWED_CELL_ACTIONS} from 'sentry/views/explore/components/cellActions';
 import type {RendererExtra} from 'sentry/views/explore/logs/fieldRenderers';
 import {LogFieldRenderer} from 'sentry/views/explore/logs/fieldRenderers';
+import {getTargetWithReadableQueryParams} from 'sentry/views/explore/logs/logsQueryParams';
 import {getLogColors} from 'sentry/views/explore/logs/styles';
-import {useLogsAggregatesQuery} from 'sentry/views/explore/logs/useLogsQuery';
-import {SeverityLevel} from 'sentry/views/explore/logs/utils';
+import {addValidatedFieldTypesToLogsMeta} from 'sentry/views/explore/logs/tables/logsInfiniteTable';
+import {LogsRateLimitError} from 'sentry/views/explore/logs/tables/logsRateLimitError';
+import {OurLogKnownFieldKey} from 'sentry/views/explore/logs/types';
+import {type LogsAggregatesTableResult} from 'sentry/views/explore/logs/useLogsAggregatesTable';
+import {
+  getLogSeverityLevel,
+  viewLogsSamplesTarget,
+} from 'sentry/views/explore/logs/utils';
+import {
+  useQueryParamsAggregateSortBys,
+  useQueryParamsAggregateCursor,
+  useQueryParamsFields,
+  useQueryParamsGroupBys,
+  useQueryParamsSearch,
+  useQueryParamsSortBys,
+  useQueryParamsTopEventsLimit,
+  useQueryParamsVisualizes,
+  useSetQueryParamsAggregateCursor,
+  useSetQueryParamsSearch,
+} from 'sentry/views/explore/queryParams/context';
 
-export function LogsAggregateTable() {
-  const {data, pageLinks, isLoading, error} = useLogsAggregatesQuery({
-    limit: 50,
-  });
+export function LogsAggregateTable({
+  aggregatesTableResult,
+  validatedFieldTypes = {},
+}: {
+  aggregatesTableResult: LogsAggregatesTableResult;
+  validatedFieldTypes?: Partial<Record<string, FieldValueType>>;
+}) {
+  const {data, pageLinks, isLoading, error, refetch, eventView} = aggregatesTableResult;
+  const meta = useMemo(
+    () =>
+      addValidatedFieldTypesToLogsMeta({
+        meta: data?.meta,
+        validatedFieldTypes,
+      }),
+    [data?.meta, validatedFieldTypes]
+  );
 
-  const setLogsPageParams = useSetLogsPageParams();
-  const groupBy = useLogsGroupBy();
-  const aggregate = useLogsAggregate();
-  const aggregateSortBys = useLogsAggregateSortBys();
+  const columns = useMemo(() => {
+    return eventView
+      ?.getColumns(meta)
+      ?.reduce<Record<string, TableColumn<string>>>((acc, col) => {
+        acc[col.key] = col;
+        return acc;
+      }, {});
+  }, [eventView, meta]);
+
+  const groupBys = useQueryParamsGroupBys();
+  const visualizes = useQueryParamsVisualizes();
+  const setAggregateCursor = useSetQueryParamsAggregateCursor();
+  const aggregateSortBys = useQueryParamsAggregateSortBys();
+  const aggregateCursor = useQueryParamsAggregateCursor();
+  const topEventsLimit = useQueryParamsTopEventsLimit();
+  const search = useQueryParamsSearch();
+  const setSearch = useSetQueryParamsSearch();
+  const fields = useQueryParamsFields();
+  const sorts = useQueryParamsSortBys();
   const location = useLocation();
+  const navigate = useNavigate();
   const theme = useTheme();
   const organization = useOrganization();
+  const {projects} = useProjects();
+  const {selection} = usePageFilters();
 
-  const fields: string[] = [];
-  if (groupBy) {
-    fields.push(groupBy);
+  if (isRateLimitError(error)) {
+    return (
+      <Flex justify="center" align="center" padding="3xl" minHeight="200px">
+        <LogsRateLimitError onRetry={refetch} />
+      </Flex>
+    );
   }
-  fields.push(aggregate);
+
+  const allFields: string[] = [];
+  allFields.push(
+    ...groupBys.filter(Boolean),
+    ...visualizes.map(visualize => visualize.yAxis)
+  );
+
+  const numberOfRowsNeedingColor = Math.min(data?.data?.length ?? 0, topEventsLimit ?? 0);
+
+  const palette = theme.chart.getColorPalette(numberOfRowsNeedingColor - 1);
 
   return (
-    <TableContainer>
+    <Stack>
       <GridEditable
         aria-label={t('Aggregates')}
         isLoading={isLoading}
         error={error}
         data={data?.data ?? []}
-        columnOrder={fields.map(field => ({
+        columnOrder={allFields.map(field => ({
           key: field,
           name: field,
           width: COL_WIDTH_UNDEFINED,
         }))}
-        columnSortBy={[
-          {
-            key: fields[0]!,
-            order: 'desc',
-          },
-        ]}
         grid={{
-          renderHeadCell: (column, i) => {
-            const field = column.name;
-            let title: string;
-            const func = parseFunction(field);
-            if (func) {
-              title = prettifyParsedFunction(func);
-            } else {
-              title = prettifyTagKey(field);
-            }
+          getColumnSort: column => {
+            const func = parseFunction(column.name);
+            const direction =
+              aggregateSortBys?.[0]?.field === column.key
+                ? aggregateSortBys?.[0]?.kind
+                : undefined;
+            const nextSort = (() => {
+              switch (direction) {
+                case 'asc':
+                  return {
+                    field: visualizes[0]?.yAxis ?? allFields[0]!,
+                    kind: 'desc' as const,
+                  };
+                case 'desc':
+                  return {field: column.key, kind: 'asc' as const};
+                default:
+                  return {field: column.key, kind: 'desc' as const};
+              }
+            })();
 
-            return (
-              <SortLink
-                key={i}
-                align={func ? 'right' : 'left'}
-                canSort
-                direction={
-                  aggregateSortBys?.[0]?.field === column.key
-                    ? aggregateSortBys?.[0]?.kind
-                    : undefined
-                }
-                generateSortLink={() => ({
-                  ...location,
-                  query: {
-                    ...location.query,
-                    [LOGS_AGGREGATE_SORT_BYS_KEY]:
-                      aggregateSortBys?.[0]?.field === column.key
-                        ? aggregateSortBys?.[0]?.kind === 'asc'
-                          ? `-${column.key}`
-                          : column.key
-                        : `-${column.key}`,
-                    [LOGS_AGGREGATE_CURSOR_KEY]: undefined,
-                  },
-                })}
-                title={title}
-              />
-            );
+            return {
+              align: func ? 'right' : 'left',
+              direction,
+              to: getTargetWithReadableQueryParams(location, {
+                aggregateSortBys: [nextSort],
+              }),
+            };
+          },
+          renderHeadCell: column => {
+            const func = parseFunction(column.name);
+            return func ? prettifyParsedFunction(func) : prettifyTagKey(column.name);
           },
           renderBodyCell: (column, row) => {
-            const value =
-              typeof row[column.key] === 'undefined'
-                ? null
-                : (row[column.key] as string | number);
+            const value = row[column.key] === undefined ? null : row[column.key]!;
+            const level = getLogSeverityLevel(
+              typeof row?.[OurLogKnownFieldKey.SEVERITY_NUMBER] === 'number'
+                ? row?.[OurLogKnownFieldKey.SEVERITY_NUMBER]
+                : null,
+              typeof row?.[OurLogKnownFieldKey.SEVERITY] === 'string'
+                ? row?.[OurLogKnownFieldKey.SEVERITY]
+                : null
+            );
             const extra: RendererExtra = {
               attributes: row,
+              attributeTypes: meta.fields,
+              caseSensitiveHighlighting: false,
+              datetime: selection.datetime,
               highlightTerms: [],
-              logColors: getLogColors(SeverityLevel.DEFAULT, theme),
+              logColors: getLogColors(level, theme),
               location,
+              navigate,
               organization,
               theme,
+              unit: data?.meta?.units?.[column.key],
             };
-            return (
+
+            let rendered = (
               <LogFieldRenderer
                 key={column.key}
                 extra={extra}
+                meta={meta}
                 item={{
                   fieldKey: column.key,
                   value,
                 }}
               />
             );
+
+            const cellActionColumn = columns?.[column.key];
+            if (cellActionColumn) {
+              rendered = (
+                <CellAction
+                  column={cellActionColumn}
+                  dataRow={row as TableDataRow}
+                  handleCellAction={(actions, newValue) => {
+                    const newSearch = search.copy();
+                    updateQuery(newSearch, actions, cellActionColumn, newValue);
+                    setSearch(newSearch);
+                  }}
+                  allowActions={ALLOWED_CELL_ACTIONS}
+                >
+                  {rendered}
+                </CellAction>
+              );
+            }
+
+            return rendered;
+          },
+          prependColumnWidths: ['40px'],
+          renderPrependColumns: (isHeader, dataRow, rowIndex) => {
+            // rowIndex is only defined when `isHeader=false`
+            if (isHeader || !defined(rowIndex)) {
+              return [<span key="header-icon" />];
+            }
+
+            const target = viewLogsSamplesTarget({
+              location,
+              search,
+              fields: fields.slice(),
+              groupBys,
+              visualizes,
+              sorts: sorts.slice(),
+              row: dataRow || {},
+              projects,
+            });
+
+            return [
+              <Fragment key={`sample-${rowIndex}`}>
+                {topEventsLimit &&
+                  rowIndex < topEventsLimit &&
+                  !parseCursor(aggregateCursor)?.offset && (
+                    <TopResultsIndicator
+                      data-test-id="top-results-indicator"
+                      color={palette[rowIndex]!}
+                    />
+                  )}
+                <Tooltip title={t('View Samples')} containerDisplayMode="flex">
+                  <StyledLink to={target}>
+                    <IconStack />
+                  </StyledLink>
+                </Tooltip>
+              </Fragment>,
+            ];
           },
         }}
       />
-      <Pagination
-        pageLinks={pageLinks}
-        onCursor={cursor => setLogsPageParams({aggregateCursor: cursor})}
-      />
-    </TableContainer>
+      <Pagination pageLinks={pageLinks} onCursor={cursor => setAggregateCursor(cursor)} />
+    </Stack>
   );
 }
 
-const TableContainer = styled('div')`
+const TopResultsIndicator = styled('div')<{color: string}>`
+  position: absolute;
+  left: -1px;
+  width: 9px;
+  height: 16px;
+  border-radius: 0 3px 3px 0;
+
+  background-color: ${p => p.color};
+`;
+
+const StyledLink = styled(Link)`
   display: flex;
-  flex-direction: column;
 `;

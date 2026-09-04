@@ -9,13 +9,20 @@ from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 
 from fixtures.integrations.stub_service import StubService
+from sentry.integrations.jira.utils import handle_issue_moved
 from sentry.integrations.jira.webhooks.base import JiraTokenError, JiraWebhookBase
 from sentry.integrations.mixins.issues import IssueSyncIntegration
+from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.services.integration.serial import serialize_integration
+from sentry.integrations.types import EventLifecycleOutcome
 from sentry.integrations.utils.atlassian_connect import AtlassianConnectValidationError
+from sentry.integrations.utils.external_issue_key import PROVIDER_ISSUE_ID_KEY
 from sentry.organizations.services.organization.serial import serialize_rpc_organization
 from sentry.shared_integrations.exceptions import ApiError
+from sentry.testutils.asserts import assert_count_of_metric
 from sentry.testutils.cases import APITestCase, TestCase
+from sentry.testutils.helpers.features import with_feature
+from sentry.viewer_context import ActorType, get_viewer_context
 
 TOKEN = "JWT anexampletoken"
 
@@ -24,7 +31,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
     endpoint = "sentry-extensions-jira-issue-updated"
     method = "post"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         integration, _ = self.create_provider_integration_for(
             organization=self.organization,
@@ -42,7 +49,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
         self.integration = serialize_integration(integration=integration)
 
     @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
-    def test_simple_assign(self, mock_sync_group_assignee_inbound):
+    def test_simple_assign(self, mock_sync_group_assignee_inbound: MagicMock) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -56,7 +63,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
     @override_settings(JIRA_USE_EMAIL_SCOPE=True)
     @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
     @responses.activate
-    def test_assign_use_email_api(self, mock_sync_group_assignee_inbound):
+    def test_assign_use_email_api(self, mock_sync_group_assignee_inbound: MagicMock) -> None:
         responses.add(
             responses.GET,
             "https://example.atlassian.net/rest/api/3/user/email",
@@ -75,7 +82,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
 
     @override_settings(JIRA_USE_EMAIL_SCOPE=True)
     @responses.activate
-    def test_assign_use_email_api_error(self):
+    def test_assign_use_email_api_error(self) -> None:
         responses.add(
             responses.GET,
             "https://example.atlassian.net/rest/api/3/user/email",
@@ -94,7 +101,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
             assert "error_message" in response.data
 
     @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
-    def test_assign_missing_email(self, mock_sync_group_assignee_inbound):
+    def test_assign_missing_email(self, mock_sync_group_assignee_inbound: MagicMock) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -105,7 +112,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
             assert not mock_sync_group_assignee_inbound.called
 
     @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
-    def test_simple_deassign(self, mock_sync_group_assignee_inbound):
+    def test_simple_deassign(self, mock_sync_group_assignee_inbound: MagicMock) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -117,7 +124,9 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
             )
 
     @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
-    def test_simple_deassign_assignee_missing(self, mock_sync_group_assignee_inbound):
+    def test_simple_deassign_assignee_missing(
+        self, mock_sync_group_assignee_inbound: MagicMock
+    ) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -129,7 +138,7 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
             )
 
     @patch.object(IssueSyncIntegration, "sync_status_inbound")
-    def test_simple_status_sync_inbound(self, mock_sync_status_inbound):
+    def test_simple_status_sync_inbound(self, mock_sync_status_inbound: MagicMock) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -156,15 +165,48 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
                         "fieldId": "status",
                     },
                     "issue": {
-                        "fields": {"project": {"id": "10000", "key": "APP"}},
+                        "fields": {
+                            "project": {"id": "10000", "key": "APP"},
+                            "updated": "2023-01-01T00:00:00.000+0000",
+                        },
                         "key": "APP-123",
                     },
+                    "provider_event_time": "2023-01-01T00:00:00.000+0000",
                 },
             )
 
+    @override_settings(SENTRY_VIEWER_CONTEXT_ENABLED=True)
+    def test_status_sync_sets_viewer_context(self) -> None:
+        captured_contexts: list = []
+
+        def capture_viewer_context(*args, **kwargs):
+            captured_contexts.append(get_viewer_context())
+
+        with (
+            patch(
+                "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+                return_value=self.integration,
+            ),
+            patch.object(
+                IssueSyncIntegration,
+                "sync_status_inbound",
+                side_effect=capture_viewer_context,
+            ),
+        ):
+            data = StubService.get_stub_data("jira", "edit_issue_status_payload.json")
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.organization_id == self.organization.id
+        assert ctx.actor_type == ActorType.INTEGRATION
+
     @patch("sentry_sdk.set_tag")
     @patch("sentry.integrations.utils.scope.bind_organization_context")
-    def test_adds_context_data(self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock):
+    def test_adds_context_data(
+        self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock
+    ) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
@@ -175,13 +217,170 @@ class JiraIssueUpdatedWebhookTest(APITestCase):
             mock_set_tag.assert_any_call("integration_id", self.integration.id)
             mock_bind_org_context.assert_called_with(serialize_rpc_organization(self.organization))
 
-    def test_missing_changelog(self):
+    def test_missing_changelog(self) -> None:
         with patch(
             "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
             return_value=self.integration,
         ):
             data = StubService.get_stub_data("jira", "changelog_missing.json")
             self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+    def test_issue_moved_rekeys_external_issue(self) -> None:
+        group = self.create_group()
+        external_issue = self.create_integration_external_issue(
+            group=group, integration=self.integration, key="APP-123"
+        )
+
+        with patch(
+            "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+            return_value=self.integration,
+        ):
+            data = StubService.get_stub_data("jira", "moved_issue_payload.json")
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        external_issue.refresh_from_db()
+        assert external_issue.key == "PLATFORM-45"
+        assert external_issue.metadata[PROVIDER_ISSUE_ID_KEY] == "101"
+
+    @patch.object(IssueSyncIntegration, "sync_status_inbound")
+    def test_issue_moved_rekeys_before_status_sync(
+        self, mock_sync_status_inbound: MagicMock
+    ) -> None:
+        # A move that also transitions the issue arrives as a single webhook, and the
+        # status handler looks the issue up by its new key -- so the rename has to land
+        # first or the transition is dropped.
+        group = self.create_group()
+        external_issue = self.create_integration_external_issue(
+            group=group, integration=self.integration, key="APP-123"
+        )
+
+        keys_when_synced = []
+        mock_sync_status_inbound.side_effect = lambda *args, **kwargs: keys_when_synced.append(
+            ExternalIssue.objects.get(id=external_issue.id).key
+        )
+
+        data = StubService.get_stub_data("jira", "moved_issue_payload.json")
+        data["changelog"]["items"].append(
+            {
+                "field": "status",
+                "fieldtype": "jira",
+                "fieldId": "status",
+                "from": "10101",
+                "fromString": "In Progress",
+                "to": "10102",
+                "toString": "Done",
+            }
+        )
+
+        with patch(
+            "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+            return_value=self.integration,
+        ):
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        assert mock_sync_status_inbound.call_args.args[0] == "PLATFORM-45"
+        assert keys_when_synced == ["PLATFORM-45"]
+
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_issue_moved_opens_no_lifecycle_without_a_key_change(
+        self, mock_record_event: MagicMock
+    ) -> None:
+        # `issue.updated` fires on every Jira edit, so the rekey lifecycle must only open
+        # for the payloads that actually carry a key change.
+        handle_issue_moved(
+            self.integration, {"changelog": {"items": [{"field": "status"}]}, "issue": {}}
+        )
+
+        assert mock_record_event.mock_calls == []
+
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_issue_moved_records_lifecycle_success(self, mock_record_event: MagicMock) -> None:
+        handle_issue_moved(
+            self.integration, StubService.get_stub_data("jira", "moved_issue_payload.json")
+        )
+
+        assert_count_of_metric(mock_record_event, EventLifecycleOutcome.STARTED, 1)
+        assert_count_of_metric(mock_record_event, EventLifecycleOutcome.SUCCESS, 1)
+
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_issue_moved_halts_on_unusable_key_change(self, mock_record_event: MagicMock) -> None:
+        handle_issue_moved(
+            self.integration,
+            {
+                "changelog": {"items": [{"field": "Key", "fromString": None, "toString": None}]},
+                "issue": {"key": None},
+            },
+        )
+
+        assert_count_of_metric(mock_record_event, EventLifecycleOutcome.STARTED, 1)
+        assert_count_of_metric(mock_record_event, EventLifecycleOutcome.HALTED, 1)
+
+    def test_issue_not_moved_leaves_key_alone(self) -> None:
+        group = self.create_group()
+        external_issue = self.create_integration_external_issue(
+            group=group, integration=self.integration, key="APP-123"
+        )
+
+        with patch(
+            "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+            return_value=self.integration,
+        ):
+            data = StubService.get_stub_data("jira", "edit_issue_status_payload.json")
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        external_issue.refresh_from_db()
+        assert external_issue.key == "APP-123"
+
+    @with_feature("organizations:jira-issue-updated-payload-logging")
+    @patch("sentry.integrations.jira.webhooks.issue_updated.sentry_sdk.capture_exception")
+    @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
+    @patch("sentry.integrations.jira.webhooks.issue_updated.logger")
+    def test_payload_logging_failure_does_not_skip_handlers(
+        self,
+        mock_logger: MagicMock,
+        mock_sync_group_assignee_inbound: MagicMock,
+        mock_capture_exception: MagicMock,
+    ) -> None:
+        # The diagnostic payload-logging path can fail transiently (e.g. a
+        # broken `extra=` payload, or a flaky logging backend). Those failures
+        # must not prevent the real webhook handlers from running.
+        error = RuntimeError("simulated payload logging failure")
+
+        def raising_info(event_name: str, *args: object, **kwargs: object) -> None:
+            if event_name == "jira.issue-updated.payload":
+                raise error
+
+        mock_logger.info.side_effect = raising_info
+
+        with patch(
+            "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+            return_value=self.integration,
+        ):
+            data = StubService.get_stub_data("jira", "edit_issue_assignee_payload.json")
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        mock_sync_group_assignee_inbound.assert_called_with(
+            self.integration, "jess@sentry.io", "APP-123", assign=True
+        )
+        mock_capture_exception.assert_called_once_with(error)
+
+    @with_feature("organizations:jira-issue-updated-payload-logging")
+    @patch("sentry.integrations.jira.webhooks.issue_updated.logger")
+    @patch("sentry.integrations.jira.utils.api.sync_group_assignee_inbound")
+    def test_payload_logging_logs_when_feature_enabled(
+        self,
+        mock_sync_group_assignee_inbound: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        with patch(
+            "sentry.integrations.jira.webhooks.issue_updated.get_integration_from_jwt",
+            return_value=self.integration,
+        ):
+            data = StubService.get_stub_data("jira", "edit_issue_assignee_payload.json")
+            self.get_success_response(**data, extra_headers=dict(HTTP_AUTHORIZATION=TOKEN))
+
+        info_event_names = [call.args[0] for call in mock_logger.info.call_args_list]
+        assert "jira.issue-updated.payload" in info_event_names
 
 
 class MockErroringJiraEndpoint(JiraWebhookBase):
@@ -204,7 +403,7 @@ class MockErroringJiraEndpoint(JiraWebhookBase):
 
 class JiraWebhookBaseTest(TestCase):
     @patch("sentry.utils.sdk.capture_exception")
-    def test_bad_request_errors(self, mock_capture_exception: MagicMock):
+    def test_bad_request_errors(self, mock_capture_exception: MagicMock) -> None:
         for error_type in [AtlassianConnectValidationError, JiraTokenError]:
             mock_endpoint = MockErroringJiraEndpoint.as_view(error=error_type())
 
@@ -237,7 +436,9 @@ class JiraWebhookBaseTest(TestCase):
         assert mock_capture_exception.call_count == 0
 
     @patch("sentry.api.base.Endpoint.handle_exception_with_details", return_value=Response())
-    def test_APIError_host_and_path_added_as_tags(self, mock_super_handle_exception: MagicMock):
+    def test_APIError_host_and_path_added_as_tags(
+        self, mock_super_handle_exception: MagicMock
+    ) -> None:
         handler_error = ApiError("", url="http://maiseycharlie.jira.com/rest/api/3/dogs/tricks")
         mock_endpoint = MockErroringJiraEndpoint.as_view(error=handler_error)
 
@@ -255,7 +456,7 @@ class JiraWebhookBaseTest(TestCase):
         )
 
     @patch("sentry.api.base.Endpoint.handle_exception_with_details", return_value=Response())
-    def test_handles_xml_as_error_message(self, mock_super_handle_exception: MagicMock):
+    def test_handles_xml_as_error_message(self, mock_super_handle_exception: MagicMock) -> None:
         """Moves the XML to `handler_context` and replaces it with a human-friendly message"""
         xml_string = '<?xml version="1.0"?><status><code>500</code><message>PSQLException: too many connections</message></status>'
 
@@ -273,7 +474,7 @@ class JiraWebhookBaseTest(TestCase):
         assert mock_super_handle_exception.call_args.args[2]["xml_response"] == xml_string
 
     @patch("sentry.api.base.Endpoint.handle_exception_with_details", return_value=Response())
-    def test_handles_html_as_error_message(self, mock_super_handle_exception: MagicMock):
+    def test_handles_html_as_error_message(self, mock_super_handle_exception: MagicMock) -> None:
         """Moves the HTML to `handler_context` and replaces it with a human-friendly message"""
         html_strings = [
             # These aren't valid HTML (because they're cut off) but the `ApiError` constructor does
@@ -297,7 +498,7 @@ class JiraWebhookBaseTest(TestCase):
             assert mock_super_handle_exception.call_args.args[2]["html_response"] == html_string
 
     @patch("sentry.api.base.Endpoint.handle_exception_with_details", return_value=Response())
-    def test_replacement_error_messages(self, mock_super_handle_exception: MagicMock):
+    def test_replacement_error_messages(self, mock_super_handle_exception: MagicMock) -> None:
         replacement_messages_by_code = {
             429: "Rate limit hit when requesting /rest/api/3/dogs/tricks",
             401: "Unauthorized request to /rest/api/3/dogs/tricks",
@@ -350,4 +551,4 @@ class JiraWebhookBaseTest(TestCase):
 
             assert mock_super_handle_exception.call_args.args[1] == unknown_error
             assert str(unknown_error) == expected_error_message
-            assert mock_logger.error.call_args.args[0] == "Unclear JIRA exception"
+            assert mock_logger.warning.call_args.args[0] == "Unclear JIRA exception"

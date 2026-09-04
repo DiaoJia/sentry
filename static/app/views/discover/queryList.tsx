@@ -3,26 +3,28 @@ import styled from '@emotion/styled';
 import type {Location, Query} from 'history';
 import moment from 'moment-timezone';
 
-import {resetPageFilters} from 'sentry/actionCreators/pageFilters';
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+import {Pagination} from '@sentry/scraps/pagination';
+
 import type {Client} from 'sentry/api';
 import Feature from 'sentry/components/acl/feature';
-import {Button} from 'sentry/components/core/button';
 import type {MenuItemProps} from 'sentry/components/dropdownMenu';
 import {DropdownMenu} from 'sentry/components/dropdownMenu';
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
-import Pagination from 'sentry/components/pagination';
-import TimeSince from 'sentry/components/timeSince';
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import {resetPageFilters} from 'sentry/components/pageFilters/actions';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconEllipsis} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {InjectedRouter} from 'sentry/types/legacyReactRouter';
-import type {NewQuery, Organization, SavedQuery} from 'sentry/types/organization';
+import type {Organization, SavedQuery} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import EventView from 'sentry/utils/discover/eventView';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {SavedQueryDatasets} from 'sentry/utils/discover/types';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
 import {decodeList} from 'sentry/utils/queryString';
-import withApi from 'sentry/utils/withApi';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {withApi} from 'sentry/utils/withApi';
 import {DashboardWidgetSource} from 'sentry/views/dashboards/types';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
 
@@ -34,7 +36,7 @@ import {
   handleUpdateHomepageQuery,
 } from './savedQuery/utils';
 import MiniGraph from './miniGraph';
-import QueryCard from './querycard';
+import {QueryCard} from './querycard';
 import {
   getPrebuiltQueries,
   handleAddQueryToDashboard,
@@ -44,10 +46,11 @@ import {
 type Props = {
   api: Client;
   location: Location;
+  navigate: ReactRouter3Navigate;
   organization: Organization;
   pageLinks: string;
+  refetchSavedQueries: () => void;
   renderPrebuilt: boolean;
-  router: InjectedRouter;
   savedQueries: SavedQuery[];
   savedQuerySearchQuery: string;
 };
@@ -62,11 +65,13 @@ class QueryList extends Component<Props> {
   }
 
   handleDeleteQuery = (eventView: EventView) => {
-    const {api, organization, location, savedQueries} = this.props;
+    const {api, navigate, organization, location, savedQueries, refetchSavedQueries} =
+      this.props;
 
     handleDeleteQuery(api, organization, eventView).then(() => {
+      refetchSavedQueries();
       if (savedQueries.length === 1 && location.query.cursor) {
-        browserHistory.push({
+        navigate({
           pathname: location.pathname,
           query: {...location.query, cursor: undefined},
         });
@@ -75,13 +80,14 @@ class QueryList extends Component<Props> {
   };
 
   handleDuplicateQuery = (eventView: EventView, yAxis: string[]) => {
-    const {api, location, organization} = this.props;
+    const {api, navigate, location, organization, refetchSavedQueries} = this.props;
 
     eventView = eventView.clone();
     eventView.name = `${eventView.name} copy`;
 
     handleCreateQuery(api, organization, eventView, yAxis).then(() => {
-      browserHistory.push({
+      refetchSavedQueries();
+      navigate({
         pathname: location.pathname,
         query: {},
       });
@@ -100,7 +106,7 @@ class QueryList extends Component<Props> {
     }
     cards = cards.concat(this.renderSavedQueries());
 
-    if (cards.filter(x => x).length === 0) {
+    if (!cards.some(Boolean)) {
       return (
         <StyledEmptyStateWarning>
           <p>{t('No saved queries match that filter')}</p>
@@ -120,7 +126,7 @@ class QueryList extends Component<Props> {
             {...triggerProps}
             aria-label={t('Query actions')}
             size="xs"
-            borderless
+            variant="transparent"
             onClick={e => {
               e.stopPropagation();
               e.preventDefault();
@@ -138,7 +144,7 @@ class QueryList extends Component<Props> {
   }
 
   renderPrebuiltQueries() {
-    const {api, location, organization, savedQuerySearchQuery, router} = this.props;
+    const {api, location, organization, savedQuerySearchQuery} = this.props;
     const views = getPrebuiltQueries(organization);
 
     const hasSearchQuery =
@@ -146,7 +152,7 @@ class QueryList extends Component<Props> {
     const needleSearch = hasSearchQuery ? savedQuerySearchQuery.toLowerCase() : '';
 
     const list = views.map((view, index) => {
-      const newQuery = getSavedQueryWithDataset(view) as NewQuery;
+      const newQuery = getSavedQueryWithDataset(view)!;
       const eventView = EventView.fromNewQueryWithLocation(newQuery, location);
 
       // if a search is performed on the list of queries, we filter
@@ -171,7 +177,11 @@ class QueryList extends Component<Props> {
         hasDatasetSelector(organization) ? view.queryDataset : undefined
       );
 
-      const menuItems = [
+      const deprecateTransactionQuery =
+        organization.features.includes('discover-saved-queries-deprecation') &&
+        view.queryDataset === SavedQueryDatasets.TRANSACTIONS;
+
+      const menuItems: MenuItemProps[] = [
         {
           key: 'add-to-dashboard',
           label: t('Add to Dashboard'),
@@ -182,7 +192,6 @@ class QueryList extends Component<Props> {
               query: view,
               organization,
               yAxis: view?.yAxis,
-              router,
               widgetType: hasDatasetSelector(organization)
                 ? // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
                   SAVED_QUERY_DATASET_TO_WIDGET_TYPE[
@@ -191,6 +200,7 @@ class QueryList extends Component<Props> {
                 : undefined,
               source: DashboardWidgetSource.DISCOVERV2,
             }),
+          disabled: deprecateTransactionQuery,
         },
         {
           key: 'set-as-default',
@@ -243,14 +253,14 @@ class QueryList extends Component<Props> {
   }
 
   renderSavedQueries() {
-    const {api, savedQueries, location, organization, router} = this.props;
+    const {api, savedQueries, location, organization} = this.props;
 
     if (!savedQueries || !Array.isArray(savedQueries) || savedQueries.length === 0) {
       return [];
     }
 
     return savedQueries.map((query, index) => {
-      const savedQuery = getSavedQueryWithDataset(query) as SavedQuery;
+      const savedQuery = getSavedQueryWithDataset(query)!;
       const eventView = EventView.fromSavedQuery(savedQuery);
       const recentTimeline = t('Last ') + eventView.statsPeriod;
       const customTimeline =
@@ -261,6 +271,10 @@ class QueryList extends Component<Props> {
       const to = eventView.getResultsViewShortUrlTarget(organization);
       const dateStatus = <TimeSince date={savedQuery.dateUpdated} />;
       const referrer = `api.discover.${eventView.getDisplayMode()}-chart`;
+
+      const deprecateTransactionQuery =
+        organization.features.includes('discover-saved-queries-deprecation') &&
+        savedQuery.queryDataset === SavedQueryDatasets.TRANSACTIONS;
 
       const menuItems = (canAddToDashboard: boolean): MenuItemProps[] => [
         ...(canAddToDashboard
@@ -275,7 +289,6 @@ class QueryList extends Component<Props> {
                     query: savedQuery,
                     organization,
                     yAxis: savedQuery?.yAxis ?? eventView.yAxis,
-                    router,
                     widgetType: hasDatasetSelector(organization)
                       ? // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
                         SAVED_QUERY_DATASET_TO_WIDGET_TYPE[
@@ -284,6 +297,7 @@ class QueryList extends Component<Props> {
                       : undefined,
                     source: DashboardWidgetSource.DISCOVERV2,
                   }),
+                disabled: deprecateTransactionQuery,
               },
             ]
           : []),
@@ -304,6 +318,7 @@ class QueryList extends Component<Props> {
           label: t('Duplicate Query'),
           onAction: () =>
             this.handleDuplicateQuery(eventView, decodeList(savedQuery.yAxis)),
+          disabled: deprecateTransactionQuery,
         },
         {
           key: 'delete',
@@ -348,7 +363,16 @@ class QueryList extends Component<Props> {
     const {pageLinks} = this.props;
     return (
       <Fragment>
-        <QueryGrid>{this.renderQueries()}</QueryGrid>
+        <Grid
+          columns={{
+            zero: 'minmax(100px, 1fr)',
+            '3xl': 'repeat(2, minmax(100px, 1fr))',
+            '4xl': 'repeat(3, minmax(100px, 1fr))',
+          }}
+          gap="xl"
+        >
+          {this.renderQueries()}
+        </Grid>
         <PaginationRow
           pageLinks={pageLinks}
           onCursor={(cursor, path, query, direction) => {
@@ -361,7 +385,7 @@ class QueryList extends Component<Props> {
               delete newQuery.cursor;
             }
 
-            browserHistory.push({
+            this.props.navigate({
               pathname: path,
               query: newQuery,
             });
@@ -376,26 +400,17 @@ const PaginationRow = styled(Pagination)`
   margin-bottom: 20px;
 `;
 
-const QueryGrid = styled('div')`
-  display: grid;
-  grid-template-columns: minmax(100px, 1fr);
-  gap: ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: repeat(2, minmax(100px, 1fr));
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    grid-template-columns: repeat(3, minmax(100px, 1fr));
-  }
-`;
-
 const DropdownTrigger = styled(Button)`
-  transform: translateX(${space(1)});
+  transform: translateX(${p => p.theme.space.md});
 `;
 
 const StyledEmptyStateWarning = styled(EmptyStateWarning)`
   grid-column: 1 / 4;
 `;
 
-export default withApi(QueryList);
+function QueryListWithNavigate(props: Omit<Props, 'navigate'>) {
+  const navigate = useNavigate();
+  return <QueryList {...props} navigate={navigate} />;
+}
+
+export default withApi(QueryListWithNavigate);

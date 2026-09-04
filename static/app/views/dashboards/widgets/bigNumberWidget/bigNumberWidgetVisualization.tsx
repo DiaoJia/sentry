@@ -1,13 +1,15 @@
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import type {Polarity} from 'sentry/components/percentChange';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import type {MetaType} from 'sentry/utils/discover/eventView';
 import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {AutoSizedText} from 'sentry/views/dashboards/widgetCard/autoSizedText';
 import {DifferenceToPreviousPeriodValue} from 'sentry/views/dashboards/widgets/bigNumberWidget/differenceToPreviousPeriodValue';
 import {NON_FINITE_NUMBER_MESSAGE} from 'sentry/views/dashboards/widgets/common/settings';
@@ -17,11 +19,13 @@ import type {
   TabularValueUnit,
   Thresholds,
 } from 'sentry/views/dashboards/widgets/common/types';
+import {useLLMContext} from 'sentry/views/seerExplorer/contexts/llmContext';
+import {registerLLMContext} from 'sentry/views/seerExplorer/contexts/registerLLMContext';
 
-import {DEEMPHASIS_COLOR_NAME, LOADING_PLACEHOLDER} from './settings';
+import {DEEMPHASIS_VARIANT, LOADING_PLACEHOLDER} from './settings';
 import {ThresholdsIndicator} from './thresholdsIndicator';
 
-interface BigNumberWidgetVisualizationProps {
+type BigNumberWidgetVisualizationProps = {
   field: string;
   value: number | string;
   maximumValue?: number;
@@ -30,9 +34,9 @@ interface BigNumberWidgetVisualizationProps {
   thresholds?: Thresholds;
   type?: TabularValueType;
   unit?: TabularValueUnit;
-}
+};
 
-export function BigNumberWidgetVisualization(props: BigNumberWidgetVisualizationProps) {
+function BigNumberWidgetVisualizationInner(props: BigNumberWidgetVisualizationProps) {
   const {
     field,
     value,
@@ -43,6 +47,10 @@ export function BigNumberWidgetVisualization(props: BigNumberWidgetVisualization
     unit,
   } = props;
 
+  // Push parsed display values into the LLM context tree for Seer Explorer.
+  // These are already computed by the parent — no raw data involved.
+  useLLMContext({field, value, type, unit, thresholds: props.thresholds});
+
   const theme = useTheme();
 
   if ((typeof value === 'number' && !Number.isFinite(value)) || Number.isNaN(value)) {
@@ -50,6 +58,7 @@ export function BigNumberWidgetVisualization(props: BigNumberWidgetVisualization
   }
 
   const location = useLocation();
+  const navigate = useNavigate();
   const organization = useOrganization();
 
   // Create old-school renderer meta, so we can pass it to field renderers
@@ -69,6 +78,7 @@ export function BigNumberWidgetVisualization(props: BigNumberWidgetVisualization
 
   const baggage = {
     location,
+    navigate,
     organization,
     unit: unit ?? undefined, // TODO: Field formatters think units can't be null but they can
   };
@@ -173,7 +183,7 @@ const AutoResizeParent = styled('div')`
   position: absolute;
   inset: 0;
 
-  color: ${p => p.theme.headingColor};
+  color: ${p => p.theme.tokens.content.primary};
 
   container-type: size;
   container-name: auto-resize-parent;
@@ -201,10 +211,15 @@ const NumberContainerOverride = styled('div')`
 `;
 
 const LoadingPlaceholder = styled('span')`
-  color: ${p => p.theme[DEEMPHASIS_COLOR_NAME]};
-  font-size: ${p => p.theme.fontSize.lg};
+  color: ${p => p.theme.tokens.content[DEEMPHASIS_VARIANT]};
+  font-size: ${p => p.theme.font.size.lg};
 `;
 
-BigNumberWidgetVisualization.LoadingPlaceholder = function () {
-  return <LoadingPlaceholder>{LOADING_PLACEHOLDER}</LoadingPlaceholder>;
-};
+export const BigNumberWidgetVisualization = Object.assign(
+  registerLLMContext('chart', BigNumberWidgetVisualizationInner),
+  {
+    LoadingPlaceholder() {
+      return <LoadingPlaceholder>{LOADING_PLACEHOLDER}</LoadingPlaceholder>;
+    },
+  }
+);

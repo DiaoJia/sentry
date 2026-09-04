@@ -1,17 +1,17 @@
 import {useState} from 'react';
-import styled from '@emotion/styled';
 
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
+import {Flex} from '@sentry/scraps/layout';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+
 import {getKnownData} from 'sentry/components/events/contexts/utils';
 import {StructuredData} from 'sentry/components/structuredEventData';
 import {t} from 'sentry/locale';
 import type {EventTransaction} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
-import {
-  type SectionCardKeyValueList,
-  TraceDrawerComponents,
-} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
+import {TraceDrawerComponents} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/styles';
+
+type EventExtra = EventTransaction['context'];
 
 enum EventExtraDataType {
   CRASHED_PROCESS = 'crashed_process',
@@ -45,25 +45,31 @@ function getEventExtraDataKnownDataDetails({
   }
 }
 
-export function hasAdditionalData(event: EventTransaction) {
-  return !!event.context && !isEmptyObject(event.context);
+export function hasAdditionalData(extra: EventExtra | undefined) {
+  return !!extra && !isEmptyObject(extra);
 }
 
-export function AdditionalData({event}: {event: EventTransaction}) {
+export function AdditionalData({
+  extra,
+  meta,
+}: {
+  extra: EventExtra | undefined;
+  meta?: Record<string, any>;
+}) {
   const [raw, setRaw] = useState(false);
 
-  if (!defined(event.context) || isEmptyObject(event.context)) {
+  if (!defined(extra) || isEmptyObject(extra)) {
     return null;
   }
 
   const knownData = getKnownData<TEventExtraData, EventExtraDataType>({
-    data: event.context,
-    knownDataTypes: Object.keys(event.context),
-    meta: event._meta?.context,
+    data: extra,
+    knownDataTypes: Object.keys(extra),
+    meta,
     onGetKnownDataDetails: v => getEventExtraDataKnownDataDetails(v),
   });
 
-  const formattedDataItems: SectionCardKeyValueList = raw
+  const formattedDataItems = raw
     ? knownData
     : knownData.map(data => {
         return {
@@ -74,14 +80,14 @@ export function AdditionalData({event}: {event: EventTransaction}) {
               withAnnotatedText
               value={data.value}
               maxDefaultDepth={2}
-              meta={event._meta?.context}
+              meta={meta}
             />
           ),
         };
       });
 
   const title = (
-    <Title>
+    <Flex justify="between" align="center">
       {t('Additional Data')}
       <SegmentedControl
         aria-label={t('View')}
@@ -92,7 +98,7 @@ export function AdditionalData({event}: {event: EventTransaction}) {
         <SegmentedControl.Item key="formatted">{t('Formatted')}</SegmentedControl.Item>
         <SegmentedControl.Item key="raw">{t('Raw')}</SegmentedControl.Item>
       </SegmentedControl>
-    </Title>
+    </Flex>
   );
 
   return (
@@ -104,9 +110,3 @@ export function AdditionalData({event}: {event: EventTransaction}) {
     />
   );
 }
-
-const Title = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;

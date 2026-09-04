@@ -1,19 +1,19 @@
-import sentry_sdk
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import features
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import NoProjects, OrganizationEventsV2EndpointBase
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases import NoProjects, OrganizationEventsEndpointBase
 from sentry.api.utils import handle_query_errors
+from sentry.models.organization import Organization
 from sentry.search.events.fields import get_function_alias
 from sentry.snuba import discover
+from sentry.utils.tracing import start_span
 
 
-@region_silo_endpoint
-class OrganizationEventsVitalsEndpoint(OrganizationEventsV2EndpointBase):
+@cell_silo_endpoint
+class OrganizationEventsVitalsEndpoint(OrganizationEventsEndpointBase):
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
     }
@@ -25,11 +25,11 @@ class OrganizationEventsVitalsEndpoint(OrganizationEventsV2EndpointBase):
         "measurements.fp": {"thresholds": [0, 1000, 3000]},
     }
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return Response(status=404)
 
-        with sentry_sdk.start_span(op="discover.endpoint", name="parse params"):
+        with start_span(op="discover.endpoint", name="parse params"):
             try:
                 snuba_params = self.get_snuba_params(request, organization)
             except NoProjects:
@@ -39,14 +39,6 @@ class OrganizationEventsVitalsEndpoint(OrganizationEventsV2EndpointBase):
             if len(vitals) == 0:
                 raise ParseError(detail="Need to pass at least one vital")
 
-            performance_use_metrics = features.has(
-                "organizations:performance-use-metrics",
-                organization=organization,
-                actor=request.user,
-            )
-            dataset = self.get_dataset(request) if performance_use_metrics else discover
-            metrics_enhanced = dataset != discover
-            sentry_sdk.set_tag("performance.metrics_enhanced", metrics_enhanced)
             allow_metric_aggregates = request.GET.get("preventMetricAggregates") != "1"
 
             selected_columns = []
@@ -64,9 +56,9 @@ class OrganizationEventsVitalsEndpoint(OrganizationEventsV2EndpointBase):
                 )
 
         with handle_query_errors():
-            events_results = dataset.query(
+            events_results = discover.query(
                 selected_columns=selected_columns,
-                query=request.GET.get("query"),
+                query=request.GET.get("query", ""),
                 snuba_params=snuba_params,
                 # Results should only ever have 1 result
                 limit=1,

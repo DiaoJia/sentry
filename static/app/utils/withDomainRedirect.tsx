@@ -3,13 +3,15 @@ import trim from 'lodash/trim';
 import trimEnd from 'lodash/trimEnd';
 import trimStart from 'lodash/trimStart';
 
-import Redirect from 'sentry/components/redirect';
-import ConfigStore from 'sentry/stores/configStore';
-import type {RouteComponent, RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import recreateRoute from 'sentry/utils/recreateRoute';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {Redirect} from 'sentry/components/redirect';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {recreateRoute} from 'sentry/utils/recreateRoute';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useParams} from 'sentry/utils/useParams';
+import {useRoutes} from 'sentry/utils/useRoutes';
 
-import useOrganization from './useOrganization';
+import {useOrganization} from './useOrganization';
 
 /**
  * withDomainRedirect is a higher-order component (HOC) meant to be used with <Route /> components within
@@ -30,13 +32,14 @@ import useOrganization from './useOrganization';
  * If either a customer domain is not being used, or if :orgId is not present in the route path, then WrappedComponent
  * is rendered.
  */
-function withDomainRedirect<P extends RouteComponentProps>(
-  WrappedComponent: RouteComponent
-) {
-  return function WithDomainRedirectWrapper(props: P) {
+export function withDomainRedirect(WrappedComponent: React.ComponentType<any>) {
+  // eslint-disable-next-line @typescript-eslint/no-restricted-types
+  return function WithDomainRedirectWrapper(props: object) {
     const {customerDomain, links, features} = ConfigStore.getState();
     const {sentryUrl} = links;
     const currentOrganization = useOrganization({allowNull: true});
+    const params = useParams();
+    const routes = useRoutes();
 
     if (customerDomain) {
       // Customer domain is being used on a route that has an :orgId parameter.
@@ -51,14 +54,12 @@ function withDomainRedirect<P extends RouteComponentProps>(
         (currentOrganization.slug !== customerDomain.subdomain ||
           !features.has('system:multi-region'))
       ) {
-        window.location.replace(redirectURL);
+        testableWindowLocation.replace(redirectURL);
         return null;
       }
 
-      const {params, routes} = props;
-
       // Regenerate the full route with the :orgId parameter omitted.
-      const newParams = {...params};
+      const newParams = {...params} as Record<string, string>;
       Object.keys(params).forEach(param => {
         newParams[param] = `:${param}`;
       });
@@ -76,11 +77,9 @@ function withDomainRedirect<P extends RouteComponentProps>(
       }${window.location.hash}`;
 
       // Redirect to a route path with :orgId omitted.
-      return <Redirect to={redirectOrgURL} router={props.router} />;
+      return <Redirect to={redirectOrgURL} />;
     }
 
     return <WrappedComponent {...props} />;
   };
 }
-
-export default withDomainRedirect;

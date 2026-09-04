@@ -1,7 +1,8 @@
-import yaml from 'js-yaml';
-import jsonDiff from 'json-diff';
 import fs from 'node:fs';
 import https from 'node:https';
+
+import jsonDiff from 'json-diff';
+import {parse} from 'yaml';
 
 async function main() {
   const openApiData = await new Promise((resolve, reject) =>
@@ -23,8 +24,7 @@ async function main() {
   );
 
   const readFile = fs.readFileSync('tests/apidocs/openapi-derefed.json', 'utf8');
-  // @ts-expect-error: Types do not match the version of js-yaml installed
-  const target = yaml.safeLoad(readFile);
+  const target = parse(readFile);
 
   // eslint-disable-next-line no-console
   console.log(jsonDiff.diffString(openApiData, target));

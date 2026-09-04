@@ -9,7 +9,6 @@ import set from 'lodash/set';
 import type {BaseChartProps} from 'sentry/components/charts/baseChart';
 import type {SeriesDataUnit} from 'sentry/types/echarts';
 import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
-import {isChonkTheme} from 'sentry/utils/theme/withChonk';
 
 import {BarChart, type BarChartProps, type BarChartSeries} from './barChart';
 
@@ -25,6 +24,8 @@ function makeBaseChartOptions({
   yAxisOptions,
   showXAxisLine,
   xAxisLineColor,
+  tooltip,
+  yAxisMax,
 }: {
   animateBars: boolean;
   height: number;
@@ -35,19 +36,25 @@ function makeBaseChartOptions({
   hideDelay?: number;
   labelYAxisExtents?: boolean;
   showMarkLineLabel?: boolean;
+  tooltip?: BaseChartProps['tooltip'];
   tooltipFormatter?: (value: number) => string;
+  yAxisMax?: number;
   yAxisOptions?: BarChartProps['yAxis'];
 }): Omit<BarChartProps, 'series' | 'barOpacity'> {
   return {
-    tooltip: {
-      trigger: 'axis',
-      hideDelay,
-      valueFormatter: tooltipFormatter
-        ? (value: number) => tooltipFormatter(value)
-        : undefined,
-    },
+    tooltip:
+      tooltip === null
+        ? null
+        : {
+            trigger: 'axis',
+            hideDelay,
+            valueFormatter: tooltipFormatter
+              ? (value: number) => tooltipFormatter(value)
+              : undefined,
+            ...tooltip,
+          },
     yAxis: {
-      max: getYAxisMaxFn(height),
+      max: yAxisMax ?? getYAxisMaxFn(height),
       splitLine: {
         show: false,
       },
@@ -210,9 +217,16 @@ interface Props extends Omit<BaseChartProps, 'css' | 'colors' | 'series' | 'heig
    * Whether timestamps are should be shown in UTC or local timezone.
    */
   utc?: boolean;
+
+  /**
+   * Ceiling of the y-axis. By default the axis scales to the data and rounds a
+   * maximum below ten up to ten, which draws the same value at different heights in
+   * two charts. Set this to draw several charts to one scale.
+   */
+  yAxisMax?: number;
 }
 
-export function getYAxisMaxFn(height: number) {
+function getYAxisMaxFn(height: number) {
   return (value: {max: number; min: number}) => {
     // This keeps small datasets from looking 'scary'
     // by having full bars for < 10 values.
@@ -257,7 +271,7 @@ function updateDataItemBorderRadius(
   });
 }
 
-function MiniBarChart({
+export function MiniBarChart({
   animateBars = false,
   barOpacity = 0.6,
   emphasisColors,
@@ -273,14 +287,14 @@ function MiniBarChart({
   showXAxisLine = false,
   height,
   grid,
+  tooltip,
+  yAxisMax,
   ...props
 }: Props) {
   const theme = useTheme();
-  const xAxisLineColor: string = isChonkTheme(theme)
-    ? theme.tokens.graphics.muted
-    : theme.gray300;
+  const xAxisLineColor = theme.tokens.border.transparent.neutral.muted;
 
-  const updatedSeries: BarChartSeries[] = useMemo(() => {
+  const updatedSeries = useMemo(() => {
     if (!series?.length) {
       return [];
     }
@@ -291,7 +305,11 @@ function MiniBarChart({
 
     const colorList = Array.isArray(colors)
       ? colors
-      : [theme.gray300, theme.purple300, theme.purple300];
+      : [
+          theme.tokens.dataviz.semantic.neutral,
+          theme.tokens.dataviz.semantic.accent,
+          theme.tokens.dataviz.semantic.accent,
+        ];
 
     for (let i = 0; i < series.length; i++) {
       const original = series[i]!;
@@ -303,7 +321,7 @@ function MiniBarChart({
 
       if (i === 0) {
         updated.barMinHeight = 1;
-        if (stacked === false) {
+        if (!stacked) {
           updated.barGap = '-100%';
         }
       }
@@ -322,7 +340,14 @@ function MiniBarChart({
       chartSeries.push(updated);
     }
     return chartSeries;
-  }, [series, emphasisColors, stacked, colors, theme.gray300, theme.purple300]);
+  }, [
+    series,
+    emphasisColors,
+    stacked,
+    colors,
+    theme.tokens.dataviz.semantic.neutral,
+    theme.tokens.dataviz.semantic.accent,
+  ]);
 
   const chartOptions = useMemo(() => {
     const yAxisOptions = labelYAxisExtents
@@ -341,6 +366,8 @@ function MiniBarChart({
       yAxisOptions,
       showXAxisLine,
       xAxisLineColor,
+      tooltip,
+      yAxisMax,
     });
 
     return options;
@@ -353,8 +380,10 @@ function MiniBarChart({
     markLineLabelSide,
     showMarkLineLabel,
     showXAxisLine,
+    tooltip,
     tooltipFormatter,
     xAxisLineColor,
+    yAxisMax,
   ]);
 
   return (
@@ -368,5 +397,3 @@ function MiniBarChart({
     />
   );
 }
-
-export default MiniBarChart;

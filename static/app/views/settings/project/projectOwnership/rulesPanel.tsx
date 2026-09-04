@@ -1,34 +1,29 @@
 import styled from '@emotion/styled';
 
-import {TextArea} from 'sentry/components/core/textarea';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import TimeSince from 'sentry/components/timeSince';
+import {Flex} from '@sentry/scraps/layout';
+import {TextArea} from '@sentry/scraps/textarea';
+
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconGithub, IconGitlab, IconSentry} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 type Props = {
   dateUpdated: string | null;
   raw: string;
   type: 'codeowners' | 'issueowners';
-  controls?: React.ReactNode[];
   'data-test-id'?: string;
-  placeholder?: string;
   provider?: string;
-  repoName?: string;
 };
 
-function RulesPanel({
+export function RulesPanel({
   raw,
   dateUpdated,
   provider,
-  repoName,
   type,
-  placeholder,
-  controls,
-  ['data-test-id']: dataTestId,
+  'data-test-id': dataTestId,
 }: Props) {
   function renderIcon() {
     switch (provider ?? '') {
@@ -55,20 +50,18 @@ function RulesPanel({
   return (
     <Panel data-test-id={dataTestId}>
       <PanelHeader hasButtons>
-        <Container>
+        <Flex align="center" gap="sm">
           {renderIcon()}
           {renderTitle()}
-          {repoName && <div>{`- ${repoName}`}</div>}
-        </Container>
-        <Container>
+        </Flex>
+        <Flex align="center" gap="sm">
           {dateUpdated && (
             <SyncDate>
               {t('Last %s', type === 'codeowners' ? t('synced') : t('edited'))}{' '}
               <TimeSince date={dateUpdated} />
             </SyncDate>
           )}
-          {controls}
-        </Container>
+        </Flex>
       </PanelHeader>
 
       <PanelBody>
@@ -81,21 +74,12 @@ function RulesPanel({
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
-            placeholder={placeholder}
           />
         </InnerPanelBody>
       </PanelBody>
     </Panel>
   );
 }
-
-export default RulesPanel;
-
-const Container = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.75)};
-`;
 
 const InnerPanelBody = styled(PanelBody)`
   height: auto;
@@ -110,7 +94,7 @@ const StyledTextArea = styled(TextArea)`
   margin: 0;
   word-break: break-all;
   white-space: pre-wrap;
-  line-height: ${space(3)};
+  line-height: ${p => p.theme.space['2xl']};
   border: none;
   box-shadow: none;
   color: transparent;
@@ -125,6 +109,6 @@ const StyledTextArea = styled(TextArea)`
 `;
 
 const SyncDate = styled('div')`
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   text-transform: none;
 `;

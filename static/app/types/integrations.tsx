@@ -1,5 +1,7 @@
-import type {AlertProps} from 'sentry/components/core/alert';
-import type {Field} from 'sentry/components/forms/types';
+import type {AlertProps} from '@sentry/scraps/alert';
+
+import type {JsonFormAdapterFieldConfig} from 'sentry/components/backendJsonFormAdapter/types';
+import type {CodeReviewTrigger} from 'sentry/types/seer';
 import type {
   DISABLED as DISABLED_STATUS,
   INSTALLED,
@@ -8,25 +10,16 @@ import type {
   PENDING_DELETION,
 } from 'sentry/views/settings/organizationIntegrations/constants';
 
-import type {Avatar, Choice, Choices, ObjectStatus, Scope} from './core';
-import type {ParsedOwnershipRule} from './group';
-import type {PlatformKey} from './project';
+import type {Avatar, ObjectStatus, Scope} from './core';
+import type {ParsedOwnershipRule} from './ownership';
 import type {BaseRelease} from './release';
 import type {User} from './user';
 
-export type PermissionValue = 'no-access' | 'read' | 'write' | 'admin';
-
-export type Permissions = {
-  Event: PermissionValue;
-  Member: PermissionValue;
-  Organization: PermissionValue;
-  Project: PermissionValue;
-  Release: PermissionValue;
-  Team: PermissionValue;
-  Alerts?: PermissionValue;
-};
-
-export type PermissionResource = keyof Permissions;
+export type {
+  PermissionValue,
+  Permissions,
+  PermissionResource,
+} from 'sentry/types/permissions';
 
 export type ExternalActorMapping = {
   externalName: string;
@@ -86,15 +79,30 @@ export type Repository = {
 };
 
 /**
+ * Available only when calling API with `expand=settings` query parameter
+ */
+export interface RepositoryWithSettings extends Repository {
+  settings: null | {
+    codeReviewTriggers: CodeReviewTrigger[];
+    enabledCodeReview: boolean;
+  };
+}
+
+export const DEFAULT_CODE_REVIEW_TRIGGERS: CodeReviewTrigger[] = ['on_ready_for_review'];
+
+/**
  * Integration Repositories from OrganizationIntegrationReposEndpoint
  */
 export type IntegrationRepository = {
+  externalId: string;
   /**
    * ex - getsentry/sentry
    */
   identifier: string;
+  isInstalled: boolean;
   name: string;
   defaultBranch?: string | null;
+  url?: string | null;
 };
 
 export type Commit = {
@@ -111,12 +119,19 @@ export type Commit = {
 export type Committer = {
   author: User;
   commits: Commit[];
+  /**
+   * Primary key of the GroupOwner record that linked this committer to the issue.
+   * Used for suspect commit feedback analytics.
+   */
+  group_owner_id?: number;
 };
 
 export type CommitAuthor = {
   email?: string;
   name?: string;
 };
+
+export type PullRequestAuthor = User | CommitAuthor;
 
 export type CommitFile = {
   author: CommitAuthor;
@@ -128,12 +143,59 @@ export type CommitFile = {
   type: string;
 };
 
-export type PullRequest = {
+export interface PullRequest {
+  dateCreated: string;
   externalUrl: string;
   id: string;
+  message: string | null;
   repository: Repository;
-  title: string;
+  title: string | null;
+  author?: CommitAuthor;
+}
+
+export type PullRequestStatus = 'merged' | 'open' | 'closed' | 'draft' | 'unknown';
+
+export type PullRequestAttributionAgent =
+  | 'cursor'
+  | 'github_copilot'
+  | 'claude_code'
+  | 'unknown';
+
+type SeerAttribution = {
+  id: 'seer';
+  type: 'seer';
+  agent?: PullRequestAttributionAgent | null;
 };
+
+export type PullRequestAttribution = SeerAttribution;
+
+export type PullRequestChecksStatus = 'success' | 'failure' | 'pending';
+
+export type PullRequestReviewStatus =
+  | 'approved'
+  | 'changes_requested'
+  | 'review_required';
+
+export type PullRequestFileChangeType =
+  | 'ADDED'
+  | 'CHANGED'
+  | 'COPIED'
+  | 'DELETED'
+  | 'MODIFIED'
+  | 'RENAMED';
+
+export interface LinkedPullRequest extends Omit<PullRequest, 'author'> {
+  attribution: PullRequestAttribution | null;
+  checksStatus: PullRequestChecksStatus | null;
+  dateLinked: string;
+  reviewStatus: PullRequestReviewStatus | null;
+  status: PullRequestStatus;
+  author?: PullRequestAuthor;
+}
+
+export interface LinkedPullRequestsResponse {
+  pullRequests: LinkedPullRequest[];
+}
 
 /**
  * Sentry Apps
@@ -181,27 +243,6 @@ type SentryAppSchemaAlertRuleActionSettings = {
   optional_fields?: any[];
 };
 
-export enum Coverage {
-  NOT_APPLICABLE = -1,
-  COVERED = 0,
-  NOT_COVERED = 1,
-  PARTIAL = 2,
-}
-export type LineCoverage = [lineNo: number, coverage: Coverage];
-
-export enum CodecovStatusCode {
-  COVERAGE_EXISTS = 200,
-  NO_INTEGRATION = 404,
-  NO_COVERAGE_DATA = 400,
-}
-
-export interface CodecovResponse {
-  status: CodecovStatusCode;
-  attemptedUrl?: string;
-  coverageUrl?: string;
-  lineCoverage?: LineCoverage[];
-}
-
 export interface StacktraceLinkResult {
   integrations: Integration[];
   attemptedUrl?: string;
@@ -221,7 +262,8 @@ export type SentryAppSchemaElement =
   | SentryAppSchemaStacktraceLink;
 
 export type SentryApp = {
-  author: string;
+  // Null for internal integrations, which have no author.
+  author: string | null;
   events: WebhookEvent[];
   featureData: IntegrationFeature[];
   isAlertable: boolean;
@@ -238,7 +280,11 @@ export type SentryApp = {
   status: SentryAppStatus;
   uuid: string;
   verifyInstall: boolean;
+  // The stored subscriptions as exact event tokens, where `events` consolidates
+  // them to resource names.
+  webhookEvents: string[];
   webhookUrl: string | null;
+  allowedOrigins?: string[];
   avatars?: SentryAppAvatar[];
   clientId?: string;
   clientSecret?: string;
@@ -248,6 +294,8 @@ export type SentryApp = {
     id: number;
     slug: string;
   };
+  // Each entry is a "Header-Name: value" line. Saved values are masked by the API
+  webhookHeaders?: string[];
 };
 
 // Minimal Sentry App representation for use with avatars
@@ -266,7 +314,7 @@ export type SentryAppInstallation = {
   organization: {
     slug: string;
   };
-  status: 'installed' | 'pending';
+  status: 'installed' | 'pending' | 'pending_deletion';
   uuid: string;
   code?: string;
 };
@@ -300,12 +348,24 @@ export type SentryAppWebhookRequest = {
   responseCode: number;
   sentryAppSlug: string;
   webhookUrl: string;
-  errorUrl?: string;
+  durationMs?: number | null;
+  error_id?: string | null;
   organization?: {
-    id: string;
+    id: number;
     name: string;
     slug: string;
   };
+  project_id?: number | null;
+  requestId?: string | null;
+  request_body?: string | null;
+  /**
+   * Values of custom headers are masked before they reach the buffer, so only
+   * the header names are meaningful for those.
+   */
+  request_headers?: Record<string, string> | null;
+  response_body?: string | null;
+  subjectId?: string | null;
+  subjectType?: string | null;
 };
 
 /**
@@ -345,10 +405,18 @@ export type DocIntegration = {
 };
 
 type IntegrationAspects = {
-  alerts?: Array<AlertProps & {text: string; icon?: string | React.ReactNode}>;
+  // This was previously passed to us
+  alerts?: Array<
+    unknown & {
+      text: string;
+      icon?: string | React.ReactNode;
+      variant?: AlertProps['variant'];
+    }
+  >;
   configure_integration?: {
     title: string;
   };
+  directEnable?: boolean;
   disable_dialog?: IntegrationDialog;
   externalInstall?: {
     buttonText: string;
@@ -377,7 +445,6 @@ export interface IntegrationProvider extends BaseIntegrationProvider {
     noun: string;
     source_url: string;
   };
-  setupDialog: {height: number; url: string; width: number};
 }
 
 interface OrganizationIntegrationProvider extends BaseIntegrationProvider {
@@ -394,9 +461,12 @@ interface CommonIntegration {
   organizationIntegrationStatus: ObjectStatus;
   provider: OrganizationIntegrationProvider;
   status: ObjectStatus;
+  outOfDate?: boolean | null;
 }
 
 export interface Integration extends CommonIntegration {
+  /** OAuth scopes from provider metadata. Always sent; null when unused (e.g. GitHub). */
+  scopes: string[] | null;
   dynamicDisplayInformation?: {
     configure_integration?: {
       instructions: string[];
@@ -405,24 +475,26 @@ export interface Integration extends CommonIntegration {
       uninstallationUrl?: string;
     };
   };
-  scopes?: string[];
+  // Present on OrganizationIntegration; for GitHub this is the App installation id.
+  externalId?: string;
 }
 
-type ConfigData = {
+type ConfigData = Record<string, unknown> & {
   installationType?: string;
 };
 
 export interface OrganizationIntegration extends Integration {
   configData: ConfigData | null;
-  configOrganization: Field[];
   externalId: string;
-  organizationId: string;
+  organizationId: number;
+  /** Omitted when the list endpoint is fetched with includeConfig=0. */
+  configOrganization?: JsonFormAdapterFieldConfig[];
 }
 
 // we include the configOrganization when we need it
 export interface IntegrationWithConfig extends Integration {
   configData: ConfigData;
-  configOrganization: Field[];
+  configOrganization: JsonFormAdapterFieldConfig[];
 }
 
 /**
@@ -459,101 +531,19 @@ export type ExternalIssue = {
   title: string;
 };
 
-/**
- * The issue config form fields we get are basically the form fields we use in
- * the UI but with some extra information. Some fields marked optional in the
- * form field are guaranteed to exist so we can mark them as required here
- */
-export type IssueConfigField = Field & {
-  name: string;
-  choices?: Choices;
-  default?: string | number | Choice;
-  multiple?: boolean;
-  url?: string;
-};
-
 export type IntegrationIssueConfig = {
   domainName: string;
   icon: string[];
   name: string;
   provider: IntegrationProvider;
   status: ObjectStatus;
-  createIssueConfig?: IssueConfigField[];
-  linkIssueConfig?: IssueConfigField[];
+  createIssueConfig?: JsonFormAdapterFieldConfig[];
+  linkIssueConfig?: JsonFormAdapterFieldConfig[];
 };
 
-/**
- * Project Plugins
- */
-export type PluginNoProject = {
-  canDisable: boolean;
-  // TODO(ts)
-  contexts: any[];
-  doc: string;
-  featureDescriptions: IntegrationFeature[];
-  features: string[];
-  hasConfiguration: boolean;
-  id: string;
-  isDeprecated: boolean;
-  isHidden: boolean;
-  isTestable: boolean;
-  metadata: any;
-  name: string;
-  shortName: string;
-  slug: string;
-  status: string;
-  type: string;
-  altIsSentryApp?: boolean;
-  author?: {name: string; url: string};
-  deprecationDate?: string;
-  description?: string;
-  firstPartyAlternative?: string;
-  issue?: {
-    issue_id: string;
-    // TODO(TS): Label can be an object, unknown shape
-    label: string | any;
-    url: string;
-  };
-  resourceLinks?: Array<{title: string; url: string}>;
-  version?: string;
-};
+export type AppOrProviderOrPlugin = SentryApp | IntegrationProvider | DocIntegration;
 
-export type Plugin = PluginNoProject & {
-  enabled: boolean;
-};
-
-export type PluginProjectItem = {
-  configured: boolean;
-  enabled: boolean;
-  projectId: string;
-  projectName: string;
-  projectPlatform: PlatformKey;
-  projectSlug: string;
-};
-
-export type PluginWithProjectList = PluginNoProject & {
-  projectList: PluginProjectItem[];
-};
-
-export type AppOrProviderOrPlugin =
-  | SentryApp
-  | IntegrationProvider
-  | PluginWithProjectList
-  | DocIntegration;
-
-/**
- * Webhooks and servicehooks
- */
-export type WebhookEvent = 'issue' | 'error' | 'comment';
-
-export type ServiceHook = {
-  dateCreated: string;
-  events: string[];
-  id: string;
-  secret: string;
-  status: string;
-  url: string;
-};
+export type WebhookEvent = 'issue' | 'error' | 'comment' | 'seer' | 'preprod_artifact';
 
 /**
  * Codeowners and repository path mappings.
@@ -566,6 +556,7 @@ export type CodeOwner = {
    */
   codeOwnersUrl: string | 'unknown';
   dateCreated: string;
+  dateSynced: string | null;
   dateUpdated: string;
   errors: {
     missing_external_teams: string[];
@@ -575,7 +566,7 @@ export type CodeOwner = {
     users_without_access: string[];
   };
   id: string;
-  provider: 'github' | 'gitlab';
+  provider: 'github' | 'gitlab' | 'perforce';
   raw: string;
   codeMapping?: RepositoryProjectPathConfig;
   ownershipSyntax?: string;
@@ -617,8 +608,7 @@ export interface RepositoryProjectPathConfig extends BaseRepositoryProjectPathCo
   provider: BaseIntegrationProvider | null;
 }
 
-interface RepositoryProjectPathConfigWithIntegration
-  extends BaseRepositoryProjectPathConfig {
+interface RepositoryProjectPathConfigWithIntegration extends BaseRepositoryProjectPathConfig {
   integrationId: string;
   provider: BaseIntegrationProvider;
 }

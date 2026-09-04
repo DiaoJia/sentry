@@ -1,7 +1,6 @@
 import {AccountEmailsFixture} from 'sentry-fixture/accountEmails';
 import {AuthenticatorsFixture} from 'sentry-fixture/authenticators';
 import {OrganizationsFixture} from 'sentry-fixture/organizations';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
 import {
   render,
@@ -11,7 +10,8 @@ import {
   waitFor,
 } from 'sentry-test/reactTestingLibrary';
 
-import ModalStore from 'sentry/stores/modalStore';
+import {ModalStore} from 'sentry/stores/modalStore';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
 import AccountSecurity from 'sentry/views/settings/account/accountSecurity';
 import AccountSecurityWrapper from 'sentry/views/settings/account/accountSecurity/accountSecurityWrapper';
 
@@ -20,10 +20,8 @@ const ORG_ENDPOINT = '/organizations/';
 const ACCOUNT_EMAILS_ENDPOINT = '/users/me/emails/';
 const AUTH_ENDPOINT = '/auth/';
 
-describe('AccountSecurity', function () {
-  const router = RouterFixture();
-  beforeEach(function () {
-    MockApiClient.clearMockResponses();
+describe('AccountSecurity', () => {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: ORG_ENDPOINT,
       body: OrganizationsFixture(),
@@ -35,28 +33,23 @@ describe('AccountSecurity', function () {
   });
 
   function renderComponent() {
-    return render(
-      <AccountSecurityWrapper>
-        <AccountSecurity
-          deleteDisabled={false}
-          authenticators={[]}
-          hasVerifiedEmail
-          countEnrolled={0}
-          handleRefresh={jest.fn()}
-          onDisable={jest.fn()}
-          orgsRequire2fa={[]}
-          location={router.location}
-          route={router.routes[0]!}
-          routes={router.routes}
-          router={router}
-          routeParams={router.params}
-          params={{...router.params, authId: '15'}}
-        />
-      </AccountSecurityWrapper>
-    );
+    return render(<AccountSecurityWrapper />, {
+      initialRouterConfig: {
+        location: {
+          pathname: '/settings/account/security/',
+        },
+        route: '/settings/account/security/',
+        children: [
+          {
+            index: true,
+            element: <AccountSecurity />,
+          },
+        ],
+      },
+    });
   }
 
-  it('renders empty', async function () {
+  it('renders empty', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [],
@@ -69,7 +62,7 @@ describe('AccountSecurity', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders a primary interface that is enrolled', async function () {
+  it('renders a primary interface that is enrolled', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Totp({configureButton: 'Info'})],
@@ -86,7 +79,7 @@ describe('AccountSecurity', function () {
     ).toBeInTheDocument();
   });
 
-  it('can delete enrolled authenticator', async function () {
+  it('can delete enrolled authenticator', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [
@@ -136,7 +129,7 @@ describe('AccountSecurity', function () {
     ).toBeInTheDocument();
   });
 
-  it('can remove one of multiple 2fa methods when org requires 2fa', async function () {
+  it('can remove one of multiple 2fa methods when org requires 2fa', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [
@@ -172,7 +165,7 @@ describe('AccountSecurity', function () {
     expect(deleteMock).toHaveBeenCalled();
   });
 
-  it('can not remove last 2fa method when org requires 2fa', async function () {
+  it('can not remove last 2fa method when org requires 2fa', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [
@@ -209,7 +202,7 @@ describe('AccountSecurity', function () {
     ).toBeInTheDocument();
   });
 
-  it('cannot enroll without verified email', async function () {
+  it('cannot enroll without verified email', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Totp({isEnrolled: false})],
@@ -238,7 +231,7 @@ describe('AccountSecurity', function () {
     await waitFor(() => expect(openEmailModalFunc).toHaveBeenCalled());
   });
 
-  it('renders a backup interface that is not enrolled', async function () {
+  it('renders a backup interface that is not enrolled', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Recovery({isEnrolled: false})],
@@ -253,7 +246,7 @@ describe('AccountSecurity', function () {
     expect(screen.getByText('Recovery Codes')).toBeInTheDocument();
   });
 
-  it('renders a primary interface that is not enrolled', async function () {
+  it('renders a primary interface that is not enrolled', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Totp({isEnrolled: false})],
@@ -268,7 +261,7 @@ describe('AccountSecurity', function () {
     expect(screen.getByText('Authenticator App')).toBeInTheDocument();
   });
 
-  it('does not render primary interface that disallows new enrollments', async function () {
+  it('does not render primary interface that disallows new enrollments', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [
@@ -285,7 +278,7 @@ describe('AccountSecurity', function () {
     expect(screen.queryByText('Text Message')).not.toBeInTheDocument();
   });
 
-  it('renders primary interface if new enrollments are disallowed, but we are enrolled', async function () {
+  it('renders primary interface if new enrollments are disallowed, but we are enrolled', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [
@@ -299,7 +292,7 @@ describe('AccountSecurity', function () {
     expect(await screen.findByText('Text Message')).toBeInTheDocument();
   });
 
-  it('renders a backup interface that is enrolled', async function () {
+  it('renders a backup interface that is enrolled', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Recovery({isEnrolled: true})],
@@ -311,7 +304,7 @@ describe('AccountSecurity', function () {
     expect(screen.getByRole('button', {name: 'View Codes'})).toBeEnabled();
   });
 
-  it('can change password', async function () {
+  it('can change password', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Recovery({isEnrolled: false})],
@@ -325,35 +318,28 @@ describe('AccountSecurity', function () {
 
     renderComponent();
 
-    await userEvent.type(
-      await screen.findByRole('textbox', {name: 'Current Password'}),
-      'oldpassword'
-    );
-    await userEvent.type(
-      screen.getByRole('textbox', {name: 'New Password'}),
-      'newpassword'
-    );
-    await userEvent.type(
-      screen.getByRole('textbox', {name: 'Verify New Password'}),
-      'newpassword'
-    );
+    await userEvent.type(await screen.findByLabelText('Current Password'), 'oldpassword');
+    await userEvent.type(screen.getByLabelText('New Password'), 'newpassword');
+    await userEvent.type(screen.getByLabelText('Verify New Password'), 'newpassword');
 
     await userEvent.click(screen.getByRole('button', {name: 'Change password'}));
 
-    expect(mock).toHaveBeenCalledWith(
-      url,
-      expect.objectContaining({
-        method: 'PUT',
-        data: {
-          password: 'oldpassword',
-          passwordNew: 'newpassword',
-          passwordVerify: 'newpassword',
-        },
-      })
-    );
+    await waitFor(() => {
+      expect(mock).toHaveBeenCalledWith(
+        url,
+        expect.objectContaining({
+          method: 'PUT',
+          data: {
+            password: 'oldpassword',
+            passwordNew: 'newpassword',
+            passwordVerify: 'newpassword',
+          },
+        })
+      );
+    });
   });
 
-  it('requires current password to be entered', async function () {
+  it('requires current password to be entered', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Recovery({isEnrolled: false})],
@@ -366,21 +352,15 @@ describe('AccountSecurity', function () {
 
     renderComponent();
 
-    await userEvent.type(
-      await screen.findByRole('textbox', {name: 'New Password'}),
-      'newpassword'
-    );
-    await userEvent.type(
-      screen.getByRole('textbox', {name: 'Verify New Password'}),
-      'newpassword'
-    );
+    await userEvent.type(await screen.findByLabelText('New Password'), 'newpassword');
+    await userEvent.type(screen.getByLabelText('Verify New Password'), 'newpassword');
 
     await userEvent.click(screen.getByRole('button', {name: 'Change password'}));
 
     expect(mock).not.toHaveBeenCalled();
   });
 
-  it('can expire all sessions', async function () {
+  it('can expire all sessions', async () => {
     MockApiClient.addMockResponse({
       url: ENDPOINT,
       body: [AuthenticatorsFixture().Recovery({isEnrolled: false})],
@@ -402,7 +382,7 @@ describe('AccountSecurity', function () {
 
     expect(mock).toHaveBeenCalled();
     await waitFor(() =>
-      expect(window.location.assign).toHaveBeenCalledWith('/auth/login/')
+      expect(testableWindowLocation.assign).toHaveBeenCalledWith('/auth/login/')
     );
   });
 });

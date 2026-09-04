@@ -8,22 +8,22 @@ import {
   useRef,
   useState,
 } from 'react';
-import {type Theme, useTheme} from '@emotion/react';
+import {css, useTheme, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import ConfigStore from 'sentry/stores/configStore';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {ConfigStore} from 'sentry/stores/configStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import type {PlatformKey, Project} from 'sentry/types/project';
+import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {formatTraceDuration} from 'sentry/utils/duration/formatTraceDuration';
 import {VITAL_DETAILS} from 'sentry/utils/performance/vitals/constants';
 import {replayPlayerTimestampEmitter} from 'sentry/utils/replays/replayPlayerTimestampEmitter';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {
   getFormattedDuration,
   WEB_VITALS_METERS_CONFIG,
@@ -35,19 +35,19 @@ import {
 } from 'sentry/views/insights/browser/webVitals/utils/scoreToStatus';
 
 import {TraceTree} from './traceModels/traceTree';
-import type {TraceTreeNode} from './traceModels/traceTreeNode';
+import type {BaseNode} from './traceModels/traceTreeNode/baseNode';
 import type {TraceEvents, TraceScheduler} from './traceRenderers/traceScheduler';
+import {TraceTimeCompression} from './traceRenderers/traceTimeCompression';
+import type {TraceTimeCompressionGap} from './traceRenderers/traceTimeCompression';
 import {
   useVirtualizedList,
   type VirtualizedRow,
 } from './traceRenderers/traceVirtualizedList';
-import type {VirtualizedViewManager} from './traceRenderers/virtualizedViewManager';
-import {TraceAutogroupedRow} from './traceRow/traceAutogroupedRow';
-import {TraceCollapsedRow} from './traceRow/traceCollapsedRow';
-import {TraceErrorRow} from './traceRow/traceErrorRow';
+import type {
+  TraceTimeCompressionManagerOptions,
+  VirtualizedViewManager,
+} from './traceRenderers/virtualizedViewManager';
 import {TraceLoadingRow} from './traceRow/traceLoadingRow';
-import {TraceMissingInstrumentationRow} from './traceRow/traceMissingInstrumentationRow';
-import {TraceRootRow} from './traceRow/traceRootNode';
 import {
   TRACE_CHILDREN_COUNT_WRAPPER_CLASSNAME,
   TRACE_CHILDREN_COUNT_WRAPPER_ORPHANED_CLASSNAME,
@@ -55,26 +55,38 @@ import {
   TRACE_RIGHT_COLUMN_ODD_CLASSNAME,
   type TraceRowProps,
 } from './traceRow/traceRow';
-import {TraceSpanRow} from './traceRow/traceSpanRow';
-import {TraceTransactionRow} from './traceRow/traceTransactionRow';
+import {TRACE_WATERFALL_TIME_COMPRESSION_FEATURE} from './traceState/tracePreferences';
 import {
   getRovingIndexActionFromDOMEvent,
   type RovingTabIndexUserActions,
 } from './traceState/traceRovingTabIndex';
 import {useTraceState, useTraceStateDispatch} from './traceState/traceStateProvider';
-import {
-  isAutogroupedNode,
-  isCollapsedNode,
-  isEAPErrorNode,
-  isEAPSpanNode,
-  isEAPTraceNode,
-  isMissingInstrumentationNode,
-  isSpanNode,
-  isTraceErrorNode,
-  isTraceNode,
-  isTransactionNode,
-} from './traceGuards';
 import type {TraceReducerState} from './traceState';
+
+const traceIssueIconBackgroundStyles = css`
+  &.info {
+    background-color: var(--info);
+  }
+  &.warning {
+    background-color: var(--warning);
+  }
+  &.debug {
+    background-color: var(--debug);
+  }
+  &.error,
+  &.fatal {
+    background-color: var(--error);
+  }
+  &.occurrence {
+    background-color: var(--occurrence);
+  }
+  &.default {
+    background-color: var(--default);
+  }
+  &.unknown {
+    background-color: var(--unknown);
+  }
+`;
 
 function computeNextIndexFromAction(
   current_index: number,
@@ -101,30 +113,36 @@ function computeNextIndexFromAction(
   }
 }
 
+function snapshotVisibleTraceItems(nodes: BaseNode[], _version: number): BaseNode[] {
+  return nodes.slice();
+}
+
 interface TraceProps {
   forceRerender: number;
   isLoading: boolean;
   manager: VirtualizedViewManager;
   onRowClick: (
-    node: TraceTreeNode<TraceTree.NodeValue>,
+    node: BaseNode,
     event: React.MouseEvent<HTMLElement>,
     index: number
   ) => void;
   onTraceSearch: (
     query: string,
-    node: TraceTreeNode<TraceTree.NodeValue>,
+    node: BaseNode,
     behavior: 'track result' | 'persist'
   ) => void;
-  previouslyFocusedNodeRef: React.MutableRefObject<TraceTreeNode<TraceTree.NodeValue> | null>;
+  previouslyFocusedNodeRef: React.MutableRefObject<BaseNode | null>;
   rerender: () => void;
   scheduler: TraceScheduler;
   trace: TraceTree;
   trace_id: string | undefined;
+  onScrollToNode?: (node: BaseNode) => Promise<BaseNode | null>;
 }
 
 export function Trace({
   trace,
   onRowClick,
+  onScrollToNode,
   manager,
   previouslyFocusedNodeRef,
   onTraceSearch,
@@ -142,11 +160,11 @@ export function Trace({
   const traceDispatch = useTraceStateDispatch();
   const {theme: colorMode} = useLegacyStore(ConfigStore);
 
-  const rerenderRef = useRef<TraceProps['rerender']>(rerender);
+  const rerenderRef = useRef(rerender);
   rerenderRef.current = rerender;
 
   const treePromiseStatusRef = useRef<Map<
-    TraceTreeNode<TraceTree.NodeValue>,
+    BaseNode,
     'loading' | 'error' | 'success'
   > | null>(null);
 
@@ -154,11 +172,66 @@ export function Trace({
     treePromiseStatusRef.current = new Map();
   }
 
-  const treeRef = useRef<TraceTree>(trace);
+  const treeRef = useRef(trace);
   treeRef.current = trace;
 
-  const traceStateRef = useRef<TraceReducerState>(traceState);
+  const traceStateRef = useRef(traceState);
   traceStateRef.current = traceState;
+
+  const traceStart = trace.root.space[0];
+  const traceDuration = trace.root.space[1];
+  const hasCompressedTimelineFeature = organization.features.includes(
+    TRACE_WATERFALL_TIME_COMPRESSION_FEATURE
+  );
+
+  const visibleTraceItems = useMemo(
+    () => snapshotVisibleTraceItems(trace.list, forceRerender),
+    [trace.list, forceRerender]
+  );
+
+  const timeCompressionOptions = useMemo((): TraceTimeCompressionManagerOptions => {
+    const traceSpace: [start: number, duration: number] = [traceStart, traceDuration];
+    return {
+      enabled:
+        hasCompressedTimelineFeature &&
+        traceState.preferences.compressed_timeline &&
+        trace.type === 'trace',
+      traceSpace,
+      nodes: visibleTraceItems,
+      indicators: trace.indicators,
+    };
+  }, [
+    trace.indicators,
+    traceDuration,
+    traceStart,
+    trace.type,
+    hasCompressedTimelineFeature,
+    traceState.preferences.compressed_timeline,
+    visibleTraceItems,
+  ]);
+
+  const [physicalWidth, setPhysicalWidth] = useState(
+    () => manager.view.trace_physical_space.width
+  );
+
+  const timeCompression = useMemo(
+    () =>
+      TraceTimeCompression.FromVisibleItems({
+        ...timeCompressionOptions,
+        physicalWidth,
+      }),
+    [physicalWidth, timeCompressionOptions]
+  );
+  const timeCompressionOptionsRef = useRef(timeCompressionOptions);
+  timeCompressionOptionsRef.current = timeCompressionOptions;
+
+  useLayoutEffect(() => {
+    manager.timeCompressionOptions = timeCompressionOptions;
+    manager.recomputeTimeCompression(timeCompressionOptions);
+    manager.recomputeTimelineIntervals();
+    manager.recomputeSpanToPXMatrix();
+    manager.draw();
+  }, [manager, physicalWidth, timeCompressionOptions]);
 
   const traceStatePreferencesRef = useRef<
     Pick<TraceReducerState['preferences'], 'autogroup' | 'missing_instrumentation'>
@@ -173,11 +246,15 @@ export function Trace({
       manager.draw();
     };
     const onPhysicalSpaceChange: TraceEvents['set container physical space'] = () => {
+      const nextPhysicalWidth = manager.view.trace_physical_space.width;
+      setPhysicalWidth(nextPhysicalWidth);
+      manager.recomputeTimeCompression(timeCompressionOptionsRef.current);
       manager.recomputeTimelineIntervals();
       manager.recomputeSpanToPXMatrix();
       manager.draw();
     };
     const onTraceSpaceChange: TraceEvents['initialize trace space'] = () => {
+      manager.recomputeTimeCompression(timeCompressionOptionsRef.current);
       manager.recomputeTimelineIntervals();
       manager.recomputeSpanToPXMatrix();
       manager.draw();
@@ -187,12 +264,17 @@ export function Trace({
       manager.recomputeSpanToPXMatrix();
       manager.draw(view);
     };
+    const onDividerResizeEnd: TraceEvents['divider resize end'] = () => {
+      const nextPhysicalWidth = manager.view.trace_physical_space.width;
+      setPhysicalWidth(nextPhysicalWidth);
+    };
 
     scheduler.on('set trace view', onTraceViewChange);
     scheduler.on('set trace space', onTraceSpaceChange);
     scheduler.on('set container physical space', onPhysicalSpaceChange);
     scheduler.on('initialize trace space', onTraceSpaceChange);
     scheduler.on('divider resize', onDividerResize);
+    scheduler.on('divider resize end', onDividerResizeEnd);
 
     return () => {
       scheduler.off('set trace view', onTraceViewChange);
@@ -200,24 +282,17 @@ export function Trace({
       scheduler.off('set container physical space', onPhysicalSpaceChange);
       scheduler.off('initialize trace space', onTraceSpaceChange);
       scheduler.off('divider resize', onDividerResize);
+      scheduler.off('divider resize end', onDividerResizeEnd);
     };
   }, [manager, scheduler]);
 
   const onNodeZoomIn = useCallback(
-    (
-      event: React.MouseEvent<Element> | React.KeyboardEvent<Element>,
-      node: TraceTreeNode<TraceTree.NodeValue>,
-      value: boolean
-    ) => {
-      if (!isTransactionNode(node) && !isSpanNode(node)) {
-        throw new TypeError('Node must be a transaction or span');
-      }
-
+    (event: React.MouseEvent | React.KeyboardEvent, node: BaseNode, value: boolean) => {
       event.stopPropagation();
       rerenderRef.current();
 
       treeRef.current
-        .zoom(node, value, {
+        .fetchNodeSubTree(value, node, {
           api,
           organization,
           preferences: traceStatePreferencesRef.current,
@@ -241,31 +316,17 @@ export function Trace({
   );
 
   const onNodeExpand = useCallback(
-    (
-      event: React.MouseEvent<Element> | React.KeyboardEvent<Element>,
-      node: TraceTreeNode<TraceTree.NodeValue>,
-      value: boolean
-    ) => {
+    (event: React.MouseEvent | React.KeyboardEvent, node: BaseNode, value: boolean) => {
       event.stopPropagation();
 
-      treeRef.current.expand(node, value);
+      node.expand(value, treeRef.current);
       rerenderRef.current();
-
-      if (traceStateRef.current.search.query) {
-        // If a query exists, we want to reapply the search after expanding
-        // so that new nodes are also highlighted if they match a query
-        onTraceSearch(traceStateRef.current.search.query, node, 'persist');
-      }
     },
-    [onTraceSearch]
+    []
   );
 
   const onRowKeyDown = useCallback(
-    (
-      event: React.KeyboardEvent,
-      index: number,
-      node: TraceTreeNode<TraceTree.NodeValue>
-    ) => {
+    (event: React.KeyboardEvent, index: number, node: BaseNode) => {
       if (!manager.list) {
         return;
       }
@@ -287,13 +348,13 @@ export function Trace({
       }
 
       if (event.key === 'ArrowLeft') {
-        if (node.zoomedIn) {
+        if (node.hasFetchedChildren) {
           onNodeZoomIn(event, node, false);
         } else if (node.expanded) {
           onNodeExpand(event, node, false);
         }
       } else if (event.key === 'ArrowRight') {
-        if (node.canFetch) {
+        if (node.canFetchChildren) {
           onNodeZoomIn(event, node, true);
         } else {
           onNodeExpand(event, node, true);
@@ -303,7 +364,7 @@ export function Trace({
     [manager, onNodeExpand, onNodeZoomIn, traceDispatch]
   );
 
-  const projectLookup: Record<string, PlatformKey | undefined> = useMemo(() => {
+  const projectLookup = useMemo(() => {
     return projects.reduce<Record<Project['slug'], Project['platform']>>(
       (acc, project) => {
         acc[project.slug] = project.platform;
@@ -433,6 +494,18 @@ export function Trace({
                     key={i}
                     ref={r => manager.registerIndicatorLabelRef(r, i, indicator)}
                     className={`TraceIndicatorLabelContainer ${status} ${colorMode}`}
+                    onClick={
+                      onScrollToNode
+                        ? event => {
+                            trackAnalytics('trace.trace_layout.zoom_to_fill', {
+                              organization,
+                            });
+                            event.stopPropagation();
+                            void onScrollToNode(indicator.node);
+                            manager.onZoomToVital(indicator.start, indicator.type);
+                          }
+                        : undefined
+                    }
                   >
                     <Tooltip
                       title={
@@ -480,6 +553,17 @@ export function Trace({
             </div>
           );
         })}
+        {trace.type === 'trace' &&
+          !isLoading &&
+          timeCompression.gaps.map((gap, i) => (
+            <CollapsedGapMarker
+              key={`${gap.start}-${gap.end}`}
+              gap={gap}
+              index={i}
+              manager={manager}
+              scrollContainer={scrollContainer}
+            />
+          ))}
         {traceNode && traceStartTimestamp ? (
           <VerticalTimestampIndicators
             viewmanager={manager}
@@ -512,29 +596,17 @@ function RenderTraceRow(props: {
   index: number;
   isSearchResult: boolean;
   manager: VirtualizedViewManager;
-  node: TraceTreeNode<TraceTree.NodeValue>;
-  onExpand: (
-    event: React.MouseEvent<Element>,
-    node: TraceTreeNode<TraceTree.NodeValue>,
-    value: boolean
-  ) => void;
+  node: BaseNode;
+  onExpand: (event: React.MouseEvent, node: BaseNode, value: boolean) => void;
   onRowClick: (
-    node: TraceTreeNode<TraceTree.NodeValue>,
+    node: BaseNode,
     event: React.MouseEvent<HTMLElement>,
     index: number
   ) => void;
-  onRowKeyDown: (
-    event: React.KeyboardEvent,
-    index: number,
-    node: TraceTreeNode<TraceTree.NodeValue>
-  ) => void;
-  onZoomIn: (
-    event: React.MouseEvent<Element>,
-    node: TraceTreeNode<TraceTree.NodeValue>,
-    value: boolean
-  ) => void;
+  onRowKeyDown: (event: React.KeyboardEvent, index: number, node: BaseNode) => void;
+  onZoomIn: (event: React.MouseEvent, node: BaseNode, value: boolean) => void;
   organization: Organization;
-  previouslyFocusedNodeRef: React.MutableRefObject<TraceTreeNode<TraceTree.NodeValue> | null>;
+  previouslyFocusedNodeRef: React.MutableRefObject<BaseNode | null>;
   projects: Record<Project['slug'], Project['platform']>;
   searchResultsIteratorIndex: number | null;
   style: React.CSSProperties;
@@ -611,7 +683,7 @@ function RenderTraceRow(props: {
   const onZoomInProp = props.onZoomIn;
   const onZoomIn = useCallback(
     (e: React.MouseEvent) => {
-      onZoomInProp(e, node, !node.zoomedIn);
+      onZoomInProp(e, node, !node.hasFetchedChildren);
     },
     [node, onZoomInProp]
   );
@@ -624,15 +696,15 @@ function RenderTraceRow(props: {
       ? TRACE_RIGHT_COLUMN_ODD_CLASSNAME
       : TRACE_RIGHT_COLUMN_EVEN_CLASSNAME;
 
-  const listColumnClassName = isTraceNode(node)
+  const listColumnClassName = node.isRootNodeChild()
     ? TRACE_CHILDREN_COUNT_WRAPPER_ORPHANED_CLASSNAME
     : TRACE_CHILDREN_COUNT_WRAPPER_CLASSNAME;
 
   const listColumnStyle: React.CSSProperties = {
-    paddingLeft: TraceTree.Depth(node) * props.manager.row_depth_padding,
+    paddingLeft: TraceTree.depth(node) * props.manager.row_depth_padding,
   };
 
-  const rowProps: TraceRowProps<TraceTreeNode<TraceTree.NodeValue>> = {
+  const rowProps: TraceRowProps<BaseNode> = {
     onExpand,
     onZoomIn,
     onRowClick,
@@ -659,35 +731,56 @@ function RenderTraceRow(props: {
     registerSpanArrowRef,
   };
 
-  if (isTransactionNode(node)) {
-    return <TraceTransactionRow {...rowProps} node={node} />;
-  }
+  return node.renderWaterfallRow(rowProps);
+}
 
-  if (isSpanNode(node) || isEAPSpanNode(node)) {
-    return <TraceSpanRow {...rowProps} node={node} />;
-  }
+function CollapsedGapMarker({
+  gap,
+  index,
+  manager,
+  scrollContainer,
+}: {
+  gap: TraceTimeCompressionGap;
+  index: number;
+  manager: VirtualizedViewManager;
+  scrollContainer: HTMLElement | null;
+}) {
+  const registerCollapsedGapMarkerRef = useCallback(
+    (ref: HTMLDivElement | null) => {
+      manager.registerCollapsedGapMarkerRef(ref, index, gap);
+    },
+    [gap, index, manager]
+  );
 
-  if (isMissingInstrumentationNode(node)) {
-    return <TraceMissingInstrumentationRow {...rowProps} node={node} />;
-  }
+  const durationLabel = formatTraceDuration(gap.duration);
+  const onPillWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!scrollContainer) {
+      return;
+    }
 
-  if (isAutogroupedNode(node)) {
-    return <TraceAutogroupedRow {...rowProps} node={node} />;
-  }
+    event.preventDefault();
+    scrollContainer.scrollTop += event.deltaY;
+    scrollContainer.scrollLeft += event.deltaX;
+  };
 
-  if (isTraceErrorNode(node) || isEAPErrorNode(node)) {
-    return <TraceErrorRow {...rowProps} node={node} />;
-  }
-
-  if (isTraceNode(node) || isEAPTraceNode(node)) {
-    return <TraceRootRow {...rowProps} node={node} />;
-  }
-
-  if (isCollapsedNode(node)) {
-    return <TraceCollapsedRow {...rowProps} node={node} />;
-  }
-
-  return null;
+  return (
+    <div
+      ref={registerCollapsedGapMarkerRef}
+      className="TraceCollapsedGapMarker"
+      style={{pointerEvents: 'none'}}
+    >
+      <div className="TraceCollapsedGapMarkerBreak" />
+      <Tooltip title={`Skipped ${durationLabel} inactive period`}>
+        <div
+          className="TraceCollapsedGapMarkerPill"
+          style={{pointerEvents: 'auto'}}
+          onWheel={onPillWheel}
+        >
+          {durationLabel}
+        </div>
+      </Tooltip>
+    </div>
+  );
 }
 
 function VerticalTimestampIndicators({
@@ -772,7 +865,8 @@ function VerticalTimestampIndicators({
 const TraceStylingWrapper = styled('div')`
   margin: auto;
   overscroll-behavior: none;
-  box-shadow: 0 0 0 1px ${p => p.theme.border};
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  box-shadow: 0 0 0 1px ${p => p.theme.tokens.border.neutral.muted};
   position: absolute;
   left: 0;
   top: 0;
@@ -783,7 +877,7 @@ const TraceStylingWrapper = styled('div')`
 
   &.WithIndicators {
     &:before {
-      background-color: ${p => p.theme.background};
+      background-color: ${p => p.theme.tokens.background.primary};
       height: 38px;
 
       .TraceScrollbarContainer {
@@ -812,8 +906,8 @@ const TraceStylingWrapper = styled('div')`
     top: 0;
     width: 100%;
     height: 38px;
-    background-color: ${p => p.theme.background};
-    border-bottom: 1px solid ${p => p.theme.border};
+    background-color: ${p => p.theme.tokens.background.primary};
+    border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
     z-index: 10;
   }
 
@@ -877,13 +971,14 @@ const TraceStylingWrapper = styled('div')`
       position: absolute;
       width: 1px;
       height: 100%;
-      background-color: ${p => p.theme.border};
+      /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+      background-color: ${p => p.theme.tokens.border.primary};
       left: 50%;
     }
 
     &:hover {
       &:before {
-        background-color: ${p => p.theme.purple300};
+        background-color: ${p => p.theme.tokens.background.accent.vibrant};
       }
     }
   }
@@ -902,9 +997,52 @@ const TraceStylingWrapper = styled('div')`
   .TraceIndicatorContainerMiddleLine {
     position: absolute;
     top: 18px;
-    background-color: ${p => p.theme.border};
+    /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+    background-color: ${p => p.theme.tokens.border.primary};
     width: 100%;
     height: 1px;
+  }
+
+  .TraceCollapsedGapMarker {
+    opacity: 0;
+    position: absolute;
+    top: 0;
+    height: 100%;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  .TraceCollapsedGapMarkerBreak {
+    position: absolute;
+    top: 19px;
+    left: -2px;
+    right: -2px;
+    height: calc(100% - 19px);
+    box-sizing: border-box;
+    color: ${p => p.theme.tokens.content.secondary};
+    background-color: color-mix(in srgb, currentColor 8%, transparent);
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 8px,
+      color-mix(in srgb, currentColor 24%, transparent) 8px 10px
+    );
+    border-left: 1px solid color-mix(in srgb, currentColor 52%, transparent);
+    border-right: 1px solid color-mix(in srgb, currentColor 52%, transparent);
+  }
+
+  .TraceCollapsedGapMarkerPill {
+    position: relative;
+    top: 20px;
+    font-size: 10px;
+    font-weight: ${p => p.theme.font.weight.sans.regular};
+    color: ${p => p.theme.tokens.content.secondary};
+    background-color: ${p => p.theme.tokens.background.primary};
+    line-height: 1;
+    white-space: nowrap;
+    padding: 2px 6px;
+    border-radius: 100px;
+    border: 1px solid ${p => p.theme.tokens.border.primary};
+    cursor: default;
   }
 
   .TraceIndicatorLabelContainer {
@@ -912,11 +1050,11 @@ const TraceStylingWrapper = styled('div')`
     text-align: center;
     position: absolute;
     font-size: 10px;
-    font-weight: ${p => p.theme.fontWeightBold};
-    color: ${p => p.theme.textColor};
-    background-color: ${p => p.theme.background};
+    font-weight: ${p => p.theme.font.weight.sans.medium};
+    background-color: ${p => p.theme.tokens.background.primary};
+    color: ${p => p.theme.tokens.content.primary};
     border-radius: 100px;
-    border: 1px solid ${p => p.theme.border};
+    border: 1px solid ${p => p.theme.tokens.border.primary};
     display: inline-block;
     line-height: 1;
     margin-top: 2px;
@@ -932,8 +1070,8 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.Poor {
-      color: ${p => p.theme.red300};
-      border: 1px solid ${p => p.theme.red300};
+      color: ${p => p.theme.colors.red400};
+      border: 1px solid ${p => p.theme.colors.red400};
 
       &.light {
         background-color: rgb(251 232 233);
@@ -945,8 +1083,8 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.None {
-      color: ${p => p.theme.subText};
-      border: 1px solid ${p => p.theme.border};
+      color: ${p => p.theme.tokens.content.secondary};
+      border: 1px solid ${p => p.theme.tokens.border.primary};
 
       &.light {
         background-color: rgb(245 245 245);
@@ -958,8 +1096,8 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.Meh {
-      color: ${p => p.theme.yellow400};
-      border: 1px solid ${p => p.theme.yellow300};
+      color: ${p => p.theme.colors.yellow500};
+      border: 1px solid ${p => p.theme.colors.yellow400};
 
       &.light {
         background-color: rgb(249 244 224);
@@ -971,8 +1109,8 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.Good {
-      color: ${p => p.theme.green300};
-      border: 1px solid ${p => p.theme.green300};
+      color: ${p => p.theme.colors.green400};
+      border: 1px solid ${p => p.theme.colors.green400};
 
       &.light {
         background-color: rgb(232 241 239);
@@ -987,6 +1125,7 @@ const TraceStylingWrapper = styled('div')`
   .TraceIndicatorLabel {
     padding: 2px;
     border-radius: 100px;
+    user-select: none;
   }
 
   .TraceIndicator {
@@ -1005,7 +1144,7 @@ const TraceStylingWrapper = styled('div')`
       background: repeating-linear-gradient(
           to bottom,
           transparent 0 4px,
-          ${p => p.theme.textColor} 4px 8px
+          ${p => p.theme.tokens.dataviz.semantic.neutral} 4px 8px
         )
         80%/2px 100% no-repeat;
 
@@ -1013,7 +1152,7 @@ const TraceStylingWrapper = styled('div')`
         background: repeating-linear-gradient(
             to bottom,
             transparent 0 4px,
-            ${p => p.theme.red300} 4px 8px
+            ${p => p.theme.tokens.dataviz.semantic.neutral} 4px 8px
           )
           80%/2px 100% no-repeat;
       }
@@ -1022,7 +1161,7 @@ const TraceStylingWrapper = styled('div')`
         background: repeating-linear-gradient(
             to bottom,
             transparent 0 4px,
-            ${p => p.theme.subText} 4px 8px
+            ${p => p.theme.tokens.dataviz.semantic.neutral} 4px 8px
           )
           80%/2px 100% no-repeat;
       }
@@ -1031,7 +1170,7 @@ const TraceStylingWrapper = styled('div')`
         background: repeating-linear-gradient(
             to bottom,
             transparent 0 4px,
-            ${p => p.theme.yellow300} 4px 8px
+            ${p => p.theme.tokens.dataviz.semantic.meh} 4px 8px
           )
           80%/2px 100% no-repeat;
       }
@@ -1040,7 +1179,7 @@ const TraceStylingWrapper = styled('div')`
         background: repeating-linear-gradient(
             to bottom,
             transparent 0 4px,
-            ${p => p.theme.green300} 4px 8px
+            ${p => p.theme.tokens.dataviz.semantic.good} 4px 8px
           )
           80%/2px 100% no-repeat;
       }
@@ -1055,25 +1194,25 @@ const TraceStylingWrapper = styled('div')`
       top: 26px;
 
       &.CurrentReplayTimestamp {
-        background: ${p => p.theme.purple300};
+        background: ${p => p.theme.tokens.graphics.accent.vibrant};
       }
 
       &.HoverReplayTimestamp {
-        background: ${p => p.theme.purple200};
+        background: ${p => p.theme.tokens.background.transparent.accent.muted};
       }
     }
 
     &.Errored {
       .TraceIndicatorLabelContainer {
-        border: 1px solid ${p => p.theme.error};
-        color: ${p => p.theme.error};
+        border: 1px solid ${p => p.theme.tokens.border.danger.vibrant};
+        color: ${p => p.theme.tokens.content.danger};
       }
 
       .TraceIndicatorLine {
         background: repeating-linear-gradient(
             to bottom,
             transparent 0 4px,
-            ${p => p.theme.error} 4px 8px
+            ${p => p.theme.tokens.dataviz.semantic.bad} 4px 8px
           )
           80%/2px 100% no-repeat;
       }
@@ -1085,17 +1224,17 @@ const TraceStylingWrapper = styled('div')`
       pointer-events: none;
 
       .TraceIndicatorLabelContainer {
-        font-weight: ${p => p.theme.fontWeightNormal};
+        font-weight: ${p => p.theme.font.weight.sans.regular};
         min-width: 0;
         top: 22px;
         width: auto;
         border: none;
         background-color: transparent;
-        color: ${p => p.theme.subText};
+        color: ${p => p.theme.tokens.content.secondary};
       }
 
       .TraceIndicatorLine {
-        background: ${p => p.theme.translucentGray100};
+        background: ${p => p.theme.colors.gray100};
         top: 8px;
       }
     }
@@ -1104,16 +1243,16 @@ const TraceStylingWrapper = styled('div')`
   &.light {
     .TracePattern {
       &.info {
-        --pattern-odd: #d1dff9;
-        --pattern-even: ${p => p.theme.blue300};
+        --pattern-odd: ${p => p.theme.tokens.content.accent};
+        --pattern-even: ${p => p.theme.tokens.graphics.accent.vibrant};
       }
       &.warning {
-        --pattern-odd: #a5752c;
-        --pattern-even: ${p => p.theme.yellow300};
+        --pattern-odd: ${p => p.theme.colors.yellow500};
+        --pattern-even: ${p => p.theme.colors.yellow400};
       }
-      &.occurence {
-        --pattern-odd: #063690;
-        --pattern-even: ${p => p.theme.blue300};
+      &.occurrence {
+        --pattern-odd: ${p => p.theme.tokens.content.accent};
+        --pattern-even: ${p => p.theme.tokens.graphics.accent.vibrant};
       }
 
       &.profile {
@@ -1121,15 +1260,16 @@ const TraceStylingWrapper = styled('div')`
         --pattern-even: transparent;
       }
 
+      /* hardcoded until new color scales are added to theme */
       &.missing_instrumentation {
-        --pattern-odd: #dedae3;
-        --pattern-even: #f4f2f7;
+        --pattern-odd: ${p => p.theme.tokens.background.tertiary};
+        --pattern-even: ${p => p.theme.tokens.background.primary};
       }
 
       &.error,
       &.fatal {
-        --pattern-odd: #872d32;
-        --pattern-even: ${p => p.theme.red300};
+        --pattern-odd: ${p => p.theme.colors.red500};
+        --pattern-even: ${p => p.theme.colors.red400};
       }
 
       /* false positive for grid layout */
@@ -1145,16 +1285,16 @@ const TraceStylingWrapper = styled('div')`
   &.dark {
     .TracePattern {
       &.info {
-        --pattern-odd: #d1dff9;
-        --pattern-even: ${p => p.theme.blue300};
+        --pattern-odd: ${p => p.theme.tokens.content.accent};
+        --pattern-even: ${p => p.theme.tokens.graphics.accent.vibrant};
       }
       &.warning {
-        --pattern-odd: #a5752c;
-        --pattern-even: ${p => p.theme.yellow300};
+        --pattern-odd: ${p => p.theme.colors.yellow500};
+        --pattern-even: ${p => p.theme.colors.yellow400};
       }
-      &.occurence {
-        --pattern-odd: #063690;
-        --pattern-even: ${p => p.theme.blue300};
+      &.occurrence {
+        --pattern-odd: ${p => p.theme.tokens.content.accent};
+        --pattern-even: ${p => p.theme.tokens.graphics.accent.vibrant};
       }
 
       &.profile {
@@ -1162,15 +1302,16 @@ const TraceStylingWrapper = styled('div')`
         --pattern-even: transparent;
       }
 
+      /* hardcoded until new color scales are added to theme */
       &.missing_instrumentation {
-        --pattern-odd: #4b4550;
-        --pattern-even: #1c1521;
+        --pattern-odd: ${p => p.theme.colors.surface200};
+        --pattern-even: ${p => p.theme.colors.surface400};
       }
 
       &.error,
       &.fatal {
-        --pattern-odd: #510d10;
-        --pattern-even: ${p => p.theme.red300};
+        --pattern-odd: ${p => p.theme.colors.red500};
+        --pattern-even: ${p => p.theme.colors.red400};
       }
       /* stylelint-disable */
       &.default {
@@ -1188,30 +1329,33 @@ const TraceStylingWrapper = styled('div')`
     height: 24px;
     width: 100%;
     transition: none;
-    font-size: ${p => p.theme.fontSize.sm};
+    font-size: ${p => p.theme.font.size.sm};
     transform: translateZ(0);
 
-    --row-background-odd: ${p => p.theme.backgroundSecondary};
-    --row-background-hover: ${p => p.theme.backgroundTertiary};
-    --row-background-focused: ${p => p.theme.backgroundTertiary};
-    --row-outline: ${p => p.theme.blue300};
-    --row-children-button-border-color: ${p => p.theme.border};
+    --row-background-odd: ${p => p.theme.tokens.background.secondary};
+    --row-background-hover: ${p =>
+      p.theme.tokens.interactive.transparent.neutral.background.hover};
+    --row-background-focused: ${p => p.theme.tokens.background.tertiary};
+    --row-outline: ${p => p.theme.tokens.focus.default};
+    --row-children-button-border-color: ${p => p.theme.tokens.border.neutral.muted};
 
     /* allow empty blocks so we can keep an exhaustive list of classnames for future reference */
     /* stylelint-disable */
     &.info {
     }
     &.warning {
+      color: ${p => p.theme.tokens.content.warning};
+      --row-children-button-border-color: ${p => p.theme.tokens.content.warning};
+      --row-outline: ${p => p.theme.tokens.content.warning};
     }
     &.debug {
     }
     &.error,
     &.fatal,
-    &.occurence {
-      color: ${p => p.theme.errorText};
-      --autogrouped: ${p => p.theme.error};
-      --row-children-button-border-color: ${p => p.theme.error};
-      --row-outline: ${p => p.theme.error};
+    &.occurrence {
+      color: ${p => p.theme.tokens.content.danger};
+      --row-children-button-border-color: ${p => p.theme.tokens.content.danger};
+      --row-outline: ${p => p.theme.tokens.content.danger};
     }
     &.default {
     }
@@ -1236,7 +1380,7 @@ const TraceStylingWrapper = styled('div')`
       position: absolute;
       top: 50%;
       transform: translate(-50%, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
-      background-color: ${p => p.theme.background};
+      background-color: ${p => p.theme.tokens.background.primary};
       width: 18px !important;
       height: 18px !important;
       border-radius: 50%;
@@ -1245,28 +1389,8 @@ const TraceStylingWrapper = styled('div')`
       justify-content: center;
       z-index: 1;
 
-      &.info {
-        background-color: var(--info);
-      }
-      &.warning {
-        background-color: var(--warning);
-      }
-      &.debug {
-        background-color: var(--debug);
-      }
-      &.error,
-      &.fatal {
-        background-color: var(--error);
-      }
-      &.occurence {
-        background-color: var(--occurence);
-      }
-      &.default {
-        background-color: var(--default);
-      }
-      &.unknown {
-        background-color: var(--unknown);
-      }
+      ${traceIssueIconBackgroundStyles}
+
       &.profile {
         background-color: var(--profile);
       }
@@ -1274,7 +1398,7 @@ const TraceStylingWrapper = styled('div')`
       svg {
         width: 12px;
         height: 12px;
-        fill: ${p => p.theme.white};
+        fill: ${p => p.theme.colors.white};
       }
 
       &.profile svg {
@@ -1283,13 +1407,74 @@ const TraceStylingWrapper = styled('div')`
 
       &.info,
       &.warning,
-      &.occurence,
+      &.occurrence,
       &.default,
       &.unknown {
         svg {
           transform: translateY(-1px);
         }
       }
+    }
+
+    .TraceIconGroup {
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      height: 18px;
+      min-width: 18px;
+      padding: 0 5px 0 5px;
+      box-sizing: border-box;
+      border-radius: ${p => p.theme.radius.lg};
+      color: ${p => p.theme.colors.white};
+      z-index: 1;
+
+      ${traceIssueIconBackgroundStyles}
+
+      .TraceIconGlyph {
+        flex: 0 0 auto;
+        width: 12px;
+        height: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      svg {
+        width: 12px;
+        height: 12px;
+        fill: currentColor;
+      }
+    }
+
+    .TraceIconGroupStart {
+      transform-origin: left center;
+      transform: translate(0, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
+    }
+
+    .TraceIconGroupEnd {
+      transform-origin: right center;
+      transform: translate(-100%, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
+    }
+
+    .TraceIconStart {
+      transform-origin: left center;
+      transform: translate(0, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
+    }
+
+    .TraceIconEnd {
+      transform-origin: right center;
+      transform: translate(-100%, -50%) scaleX(var(--inverse-span-scale)) translateZ(0);
+    }
+
+    .TraceIconCount {
+      min-width: 8px;
+      font-size: ${p => p.theme.font.size.xs};
+      line-height: 18px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
     }
 
     .TracePatternContainer {
@@ -1341,10 +1526,10 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.Highlight {
-      box-shadow: inset 0 0 0 1px ${p => p.theme.blue300} !important;
+      box-shadow: inset 0 0 0 1px ${p => p.theme.tokens.focus.default} !important;
 
       .TraceLeftColumn {
-        box-shadow: inset 0px 0 0px 1px ${p => p.theme.blue300} !important;
+        box-shadow: inset 0px 0 0px 1px ${p => p.theme.tokens.focus.default} !important;
       }
     }
 
@@ -1373,7 +1558,7 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.SearchResult {
-      background-color: ${p => p.theme.yellow100};
+      background-color: ${p => p.theme.colors.yellow100};
 
       .TraceRightColumn {
         background-color: transparent;
@@ -1381,43 +1566,43 @@ const TraceStylingWrapper = styled('div')`
     }
 
     &.Autogrouped {
-      color: ${p => p.theme.blue300};
+      color: ${p => p.theme.tokens.content.accent};
 
       .TraceDescription {
-        font-weight: ${p => p.theme.fontWeightBold};
+        font-weight: ${p => p.theme.font.weight.sans.medium};
       }
 
       .TraceChildrenCountWrapper {
         button {
-          color: ${p => p.theme.white};
-          background-color: ${p => p.theme.blue300};
+          color: ${p => p.theme.tokens.content.onVibrant.light};
+          background-color: ${p => p.theme.tokens.background.accent.vibrant};
         }
         svg {
-          fill: ${p => p.theme.white};
+          fill: ${p => p.theme.tokens.content.onVibrant.light};
         }
       }
 
       &.error {
-        color: ${p => p.theme.red300};
+        color: ${p => p.theme.tokens.content.danger};
 
         .TraceChildrenCountWrapper {
           button {
-            color: ${p => p.theme.white};
-            background-color: ${p => p.theme.red300};
+            color: ${p => p.theme.tokens.content.onVibrant.light};
+            background-color: ${p => p.theme.tokens.background.danger.vibrant};
           }
         }
       }
     }
 
     &.Collapsed {
-      background-color: ${p => p.theme.backgroundSecondary};
-      border-bottom: 1px solid ${p => p.theme.border};
-      border-top: 1px solid ${p => p.theme.border};
+      background-color: ${p => p.theme.tokens.background.secondary};
+      border-bottom: 1px solid ${p => p.theme.tokens.border.neutral.muted};
+      border-top: 1px solid ${p => p.theme.tokens.border.neutral.muted};
 
       .TraceLeftColumn {
         padding-left: 14px;
         width: 100%;
-        color: ${p => p.theme.subText};
+        color: ${p => p.theme.tokens.content.secondary};
 
         .TraceLeftColumnInner {
           padding-left: 0 !important;
@@ -1445,7 +1630,7 @@ const TraceStylingWrapper = styled('div')`
       align-items: center;
       will-change: transform;
       transform-origin: left center;
-      padding-right: ${space(2)};
+      padding-right: ${p => p.theme.space.xl};
 
       img {
         width: 16px;
@@ -1506,14 +1691,14 @@ const TraceStylingWrapper = styled('div')`
     background-color: transparent;
     border: none;
     transition: 60ms ease-out;
-    font-size: ${p => p.theme.fontSize.md};
-    color: ${p => p.theme.subText};
+    font-size: ${p => p.theme.font.size.md};
+    color: ${p => p.theme.tokens.content.secondary};
     padding: 0 2px;
     display: flex;
     align-items: center;
 
     svg {
-      fill: ${p => p.theme.subText};
+      fill: ${p => p.theme.tokens.content.secondary};
     }
 
     &.Left {
@@ -1528,8 +1713,8 @@ const TraceStylingWrapper = styled('div')`
   .TraceBarDuration {
     display: inline-block;
     transform-origin: left center;
-    font-size: ${p => p.theme.fontSize.xs};
-    color: ${p => p.theme.subText};
+    font-size: ${p => p.theme.font.size.xs};
+    color: ${p => p.theme.tokens.content.secondary};
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
     position: absolute;
@@ -1545,12 +1730,12 @@ const TraceStylingWrapper = styled('div')`
     border-radius: 99px;
     padding: 0px 4px;
     transition: all 0.15s ease-in-out;
-    background: ${p => p.theme.background};
+    background: ${p => p.theme.tokens.background.primary};
     border: 1.5px solid var(--row-children-button-border-color);
     line-height: 0;
     z-index: 1;
     font-size: 10px;
-    box-shadow: ${p => p.theme.dropShadowLight};
+    box-shadow: ${p => p.theme.shadow.low};
     margin-right: 8px;
 
     .TraceChildrenCountContent {
@@ -1572,7 +1757,7 @@ const TraceStylingWrapper = styled('div')`
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background-color: ${p => p.theme.background};
+      background-color: ${p => p.theme.tokens.background.primary};
 
       animation: show 0.1s ease-in-out forwards;
 
@@ -1622,11 +1807,11 @@ const TraceStylingWrapper = styled('div')`
       .TraceVerticalConnector,
       .TraceVerticalLastChildConnector,
       .TraceExpandedVerticalConnector {
-        border-left: 2px dashed ${p => p.theme.border};
+        border-left: 2px dashed ${p => p.theme.tokens.border.neutral.muted};
       }
 
       &::before {
-        border-bottom: 2px dashed ${p => p.theme.border};
+        border-bottom: 2px dashed ${p => p.theme.tokens.border.neutral.muted};
       }
     }
 
@@ -1642,7 +1827,7 @@ const TraceStylingWrapper = styled('div')`
       display: block;
       width: 50%;
       height: 2px;
-      border-bottom: 2px solid ${p => p.theme.border};
+      border-bottom: 2px solid ${p => p.theme.tokens.border.neutral.muted};
       position: absolute;
       left: 0;
       top: 50%;
@@ -1651,7 +1836,8 @@ const TraceStylingWrapper = styled('div')`
 
     &::after {
       content: '';
-      background-color: ${p => p.theme.border};
+      /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+      background-color: ${p => p.theme.tokens.border.neutral.muted};
       border-radius: 50%;
       height: 6px;
       width: 6px;
@@ -1669,10 +1855,10 @@ const TraceStylingWrapper = styled('div')`
     bottom: 0;
     height: 100%;
     width: 2px;
-    border-left: 2px solid ${p => p.theme.border};
+    border-left: 2px solid ${p => p.theme.tokens.border.neutral.muted};
 
     &.Orphaned {
-      border-left: 2px dashed ${p => p.theme.border};
+      border-left: 2px dashed ${p => p.theme.tokens.border.neutral.muted};
     }
   }
 
@@ -1683,7 +1869,7 @@ const TraceStylingWrapper = styled('div')`
     bottom: 0;
     height: 50%;
     width: 2px;
-    border-left: 2px solid ${p => p.theme.border};
+    border-left: 2px solid ${p => p.theme.tokens.border.neutral.muted};
     border-bottom-left-radius: 4px;
   }
 
@@ -1693,14 +1879,14 @@ const TraceStylingWrapper = styled('div')`
     height: 50%;
     left: 50%;
     width: 2px;
-    border-left: 2px solid ${p => p.theme.border};
+    border-left: 2px solid ${p => p.theme.tokens.border.neutral.muted};
   }
 
   .TraceOperation {
     margin-left: 4px;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: ${p => p.theme.fontWeightBold};
+    font-weight: ${p => p.theme.font.weight.sans.medium};
   }
 
   .TraceEmDash {
@@ -1710,5 +1896,6 @@ const TraceStylingWrapper = styled('div')`
   .TraceDescription {
     margin-left: 4px;
     white-space: nowrap;
+    text-overflow: ellipsis;
   }
 `;

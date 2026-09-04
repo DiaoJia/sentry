@@ -1,19 +1,33 @@
 import dompurify from 'dompurify';
-import type {Tokens} from 'marked'; // eslint-disable-line no-restricted-imports
-import {Marked, marked} from 'marked'; // eslint-disable-line no-restricted-imports
+import type {MarkedToken, Token, Tokens} from 'marked'; // eslint-disable-line no-restricted-imports
+import {Lexer as MarkedLexer, Marked, marked} from 'marked'; // eslint-disable-line no-restricted-imports
 import {markedHighlight} from 'marked-highlight';
 import Prism from 'prismjs';
 
+import {extensions} from 'sentry/utils/marked/extensions';
 import {loadPrismLanguage} from 'sentry/utils/prism';
 
-// Only https and mailto, (e.g. no javascript, vbscript, data protocols)
-const safeLinkPattern = /^(https?:|mailto:)/i;
+export {MarkedLexer};
+export type {MarkedToken, Token};
+export type {ExtendedToken} from './extensions';
 
-const safeImagePattern = /^https?:\/\/./i;
+// globally registered, applies to all instances
+marked.use({extensions: [...extensions]});
 
-function isSafeHref(href: string, pattern: RegExp) {
+const SAFE_LINK_PATTERN = /^(https?:|mailto:)/i;
+const INTERNAL_PATH_PATTERN = /^\/[^/]/;
+
+export function isSafeHref(href: string): boolean {
   try {
-    return pattern.test(decodeURIComponent(unescape(href)));
+    return SAFE_LINK_PATTERN.test(decodeURIComponent(unescape(href)));
+  } catch {
+    return false;
+  }
+}
+
+export function isInternalHref(href: string): boolean {
+  try {
+    return INTERNAL_PATH_PATTERN.test(decodeURIComponent(unescape(href)));
   } catch {
     return false;
   }
@@ -25,21 +39,12 @@ function isSafeHref(href: string, pattern: RegExp) {
 class SafeRenderer extends marked.Renderer {
   link(tokens: Tokens.Link) {
     // For a bad link, just return the plain text href
-    if (!isSafeHref(tokens.href, safeLinkPattern)) {
+    if (!isSafeHref(tokens.href)) {
       return tokens.href;
     }
 
     const out = super.link(tokens);
-    return dompurify.sanitize(out);
-  }
-
-  image(tokens: Tokens.Image) {
-    // For a bad image, return an empty string
-    if (!isSafeHref(tokens.href, safeImagePattern)) {
-      return '';
-    }
-
-    return super.image(tokens);
+    return sanitizeHtml(out);
   }
 }
 
@@ -50,8 +55,57 @@ class NoParagraphRenderer extends SafeRenderer {
   }
 }
 
+/**
+ * Allowlist of HTML tags that markdown rendering can produce.
+ * Using an allowlist rather than a blocklist ensures unexpected tags
+ * (style, form, input, script, iframe, etc.) are stripped by default.
+ */
+const ALLOWED_TAGS = [
+  // Block elements
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'blockquote',
+  'pre',
+  'ul',
+  'ol',
+  'li',
+  'hr',
+  'br',
+  'table',
+  'thead',
+  'tbody',
+  'tr',
+  'th',
+  'td',
+  // Inline elements
+  'a',
+  'code',
+  'em',
+  'strong',
+  'del',
+  'span',
+  'b',
+  'i',
+  'sub',
+  'sup',
+];
+
+const ALLOWED_ATTR = ['href', 'title', 'alt', 'class', 'align'];
+
+export function sanitizeHtml(html: string) {
+  return dompurify.sanitize(html, {
+    ALLOWED_TAGS,
+    ALLOWED_ATTR,
+  });
+}
+
 function postprocess(html: string) {
-  return dompurify.sanitize(html);
+  return sanitizeHtml(html);
 }
 
 const noHighlightingMarked = new Marked({
@@ -65,7 +119,6 @@ const noHighlightingMarked = new Marked({
 const highlightingMarked = new Marked(
   markedHighlight({
     async: true,
-    // eslint-disable-next-line require-await
     highlight: async (code, lang, _info): Promise<string> => {
       if (!lang) {
         return code;
@@ -124,6 +177,17 @@ export const sanitizedMarked = (src: string): string => {
 };
 
 /**
+ * Renders markdown to sanitized HTML and returns its visible text, stripping
+ * markdown syntax and any HTML/XML tags. Use when markdown must be shown as
+ * plain text (e.g. a single-line title) rather than rendered.
+ */
+export function markdownToPlainText(src: string): string {
+  const html = sanitizedMarked(src);
+  const text = new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '';
+  return text.trim();
+}
+
+/**
  * Renders a single line of markdown not wrapped in a paragraph tag.
  * WARNING: Does not apply any syntax highlighting.
  */
@@ -134,3 +198,46 @@ export const singleLineRenderer = (text: string): string => {
     renderer: new NoParagraphRenderer(),
   });
 };
+
+/**
+ * Whether markdown renders any output a reader can see. Some valid markdown
+ * collapses to nothing — most commonly a bare or empty code fence (```), which
+ * renders an empty `<pre><code>` box. Callers can fall back to showing the raw
+ * text so the content isn't swallowed into a blank space. See TET-2670.
+ */
+export function markdownRendersVisibleContent(text: string): boolean {
+  if (text.trim().length === 0) {
+    return false;
+  }
+  return MarkedLexer.lex(text).some(hasVisibleToken);
+}
+
+// A token renders something visible if it is a rule/image/table, or it (or a
+// descendant) carries non-whitespace text. An empty code fence and bare
+// whitespace are the notable tokens that carry none.
+function hasVisibleToken(token: Token): boolean {
+  switch (token.type) {
+    case 'space':
+      return false;
+    // Images render nothing in this app: `sanitizeHtml` strips `<img>` (not in
+    // ALLOWED_TAGS), and its `alt` is dropped along with it. So image-only
+    // content must fall back to raw text, not count as visible. This needs an
+    // explicit case ahead of `default` — an image token carries its alt as
+    // child text tokens, which the default branch would otherwise treat as
+    // visible text.
+    case 'image':
+      return false;
+    case 'hr':
+    case 'table':
+      return true;
+    case 'list':
+      return token.items.some(hasVisibleToken);
+    default:
+      if ('tokens' in token && token.tokens && token.tokens.length > 0) {
+        return token.tokens.some(hasVisibleToken);
+      }
+      return 'text' in token && typeof token.text === 'string'
+        ? token.text.trim().length > 0
+        : false;
+  }
+}

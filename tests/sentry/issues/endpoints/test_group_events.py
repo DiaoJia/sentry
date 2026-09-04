@@ -1,12 +1,20 @@
 from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 from django.utils import timezone
 from rest_framework.response import Response
+from urllib3.connectionpool import ConnectionPool
+from urllib3.exceptions import ReadTimeoutError
 
+from sentry.issues.endpoints.group_events import FULL_PAYLOAD_MAX_PER_PAGE
 from sentry.issues.grouptype import ProfileFileIOGroupType
+from sentry.models.group import Group
+from sentry.search.eap.occurrences.rollout_utils import EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION
+from sentry.services.eventstore.models import Event
 from sentry.testutils.cases import APITestCase, PerformanceIssueTestCase, SnubaTestCase
 from sentry.testutils.helpers import parse_link_header
 from sentry.testutils.helpers.datetime import before_now, freeze_time
+from sentry.utils.snuba import SnubaError
 from tests.sentry.issues.test_utils import SearchIssueTestMixin
 
 
@@ -47,7 +55,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        url = f"/api/0/issues/{event_1.group.id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -79,7 +87,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        url = f"/api/0/issues/{event_1.group.id}/events/?full=false"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/?full=false"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -110,7 +118,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        url = f"/api/0/issues/{event_1.group.id}/events/?full=true"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/?full=true"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -139,7 +147,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             },
             project_id=self.project.id,
         )
-        url = f"/api/0/issues/{event_1.group.id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/"
         response = self.do_request(url + "?query=foo:baz")
         assert response.status_code == 200, response.content
         assert len(response.data) == 1
@@ -203,7 +211,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             },
             project_id=self.project.id,
         )
-        url = f"/api/0/issues/{event_1.group.id}/events/?query={event_1.event_id}"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/?query={event_1.event_id}"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -238,7 +246,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         query_2 = "hello+world"
 
         # Single Word Query
-        url = f"/api/0/issues/{group.id}/events/?query={query_1}"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/?query={query_1}"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -246,7 +254,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         assert response.data[0]["eventID"] == event_1.event_id
 
         # Multiple Word Query
-        url = f"/api/0/issues/{group.id}/events/?query={query_2}"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/?query={query_2}"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -267,7 +275,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             },
             project_id=self.project.id,
         )
-        url = f"/api/0/issues/{event_1.group.id}/events/?query=release:latest"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/?query=release:latest"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -291,7 +299,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         # Asserts that all are in the same group
         (group_id,) = {e.group.id for e in events.values()}
 
-        url = f"/api/0/issues/{group_id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group_id}/events/"
         response = self.do_request(url + "?environment=production")
 
         assert response.status_code == 200, response.content
@@ -332,7 +340,9 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         group = event_2.group
 
         with self.options({"system.event-retention-days": 1}):
-            response = self.client.get(f"/api/0/issues/{group.id}/events/")
+            response = self.client.get(
+                f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/"
+            )
 
         assert response.status_code == 200, response.content
         assert len(response.data) == 1
@@ -349,7 +359,9 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        response = self.client.get(f"/api/0/issues/{event.group.id}/events/")
+        response = self.client.get(
+            f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/"
+        )
 
         assert response.status_code == 200, response.content
         assert len(response.data) == 1
@@ -369,7 +381,10 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         group = event_1.group
         assert group == event_2.group
 
-        response = self.client.get(f"/api/0/issues/{group.id}/events/", data={"statsPeriod": "6d"})
+        response = self.client.get(
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/",
+            data={"statsPeriod": "6d"},
+        )
 
         assert response.status_code == 200, response.content
         assert len(response.data) == 2
@@ -377,7 +392,10 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             [str(event_1.event_id), str(event_2.event_id)]
         )
 
-        response = self.client.get(f"/api/0/issues/{group.id}/events/", data={"statsPeriod": "2d"})
+        response = self.client.get(
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/",
+            data={"statsPeriod": "2d"},
+        )
 
         assert response.status_code == 200, response.content
         assert len(response.data) == 1
@@ -387,7 +405,10 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         self.login_as(user=self.user)
         first_seen = timezone.now() - timedelta(days=5)
         group = self.create_group(first_seen=first_seen)
-        response = self.client.get(f"/api/0/issues/{group.id}/events/", data={"statsPeriod": "lol"})
+        response = self.client.get(
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/",
+            data={"statsPeriod": "lol"},
+        )
         assert response.status_code == 400
 
     def test_invalid_query(self) -> None:
@@ -395,7 +416,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         first_seen = timezone.now() - timedelta(days=5)
         group = self.create_group(first_seen=first_seen)
         response = self.client.get(
-            f"/api/0/issues/{group.id}/events/",
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/",
             data={"statsPeriod": "7d", "query": "foo(bar"},
         )
         assert response.status_code == 400
@@ -423,7 +444,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
         )
 
         for event in (event_1, event_2):
-            url = f"/api/0/issues/{event.group.id}/events/"
+            url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/"
             response = self.do_request(url)
             assert response.status_code == 200, response.content
             assert len(response.data) == 1, response.data
@@ -443,13 +464,63 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
                 project_id=self.project.id,
             )
 
-        url = f"/api/0/issues/{event.group.id}/events/?per_page=1"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/?per_page=1"
         response = self.do_request(url)
         links = self._parse_links(response["Link"])
         assert response.status_code == 200, response.content
         assert links["previous"]["results"] == "false"
         assert links["next"]["results"] == "true"
         assert len(response.data) == 1
+
+    def _store_events(self, count: int) -> Group:
+        event = None
+        for i in range(count):
+            event = self.store_event(
+                data={
+                    "fingerprint": ["group_1"],
+                    "event_id": f"{i:032x}",
+                    "message": "foo",
+                    "timestamp": self.min_ago.isoformat(),
+                },
+                project_id=self.project.id,
+            )
+        assert event is not None
+        return event.group
+
+    def test_full_clamps_per_page_and_pages_with_cursor(self) -> None:
+        self.login_as(user=self.user)
+        total = FULL_PAYLOAD_MAX_PER_PAGE + 5
+        group = self._store_events(total)
+
+        url: str | None = (
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/"
+            f"?full=true&per_page=100"
+        )
+        seen: list[str] = []
+        pages = 0
+        while url and pages < 4:
+            response = self.do_request(url)
+            assert response.status_code == 200, response.content
+            assert len(response.data) <= FULL_PAYLOAD_MAX_PER_PAGE
+            seen.extend(row["eventID"] for row in response.data)
+            links = self._parse_links(response["Link"])
+            url = links["next"]["href"] if links["next"]["results"] == "true" else None
+            pages += 1
+
+        assert pages == 2
+        assert len(set(seen)) == total
+
+    def test_per_page_not_clamped_without_full(self) -> None:
+        self.login_as(user=self.user)
+        total = FULL_PAYLOAD_MAX_PER_PAGE + 5
+        group = self._store_events(total)
+
+        url = (
+            f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/?per_page=100"
+        )
+        response = self.do_request(url)
+        assert response.status_code == 200, response.content
+        assert len(response.data) == total
 
     def test_orderby(self) -> None:
         self.login_as(user=self.user)
@@ -473,7 +544,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        url = f"/api/0/issues/{event.group.id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/"
         response = self.do_request(url)
         assert len(response.data) == 2
         assert response.data[0]["eventID"] == "a" * 32
@@ -482,10 +553,11 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
     def test_perf_issue(self) -> None:
         event_1 = self.create_performance_issue()
         event_2 = self.create_performance_issue()
+        assert event_1.group is not None
 
         self.login_as(user=self.user)
 
-        url = f"/api/0/issues/{event_1.group.id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event_1.group.id}/events/"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -512,7 +584,7 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
 
         self.login_as(user=self.user)
 
-        url = f"/api/0/issues/{group_info.group.id}/events/"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group_info.group.id}/events/"
         response = self.do_request(url)
 
         assert response.status_code == 200, response.content
@@ -543,6 +615,87 @@ class GroupEventsTest(APITestCase, SnubaTestCase, SearchIssueTestMixin, Performa
             project_id=self.project.id,
         )
 
-        url = f"/api/0/issues/{event.group.id}/events/?sample=true"
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/?sample=true"
         response = self.do_request(url)
         assert len(response.data) == 2
+
+    def test_double_read_with_eap_enabled(self) -> None:
+        self.login_as(user=self.user)
+
+        event_1 = self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "fingerprint": ["1"],
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        event_2 = self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "fingerprint": ["1"],
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        url = f"/api/0/issues/{event_1.group.id}/events/"
+
+        with self.options({EAP_OCCURRENCES_SHOULD_RUN_EXPERIMENT_OPTION: True}):
+            response = self.do_request(url)
+
+        assert response.status_code == 200, response.content
+        assert len(response.data) == 2
+        assert sorted(map(lambda x: x["eventID"], response.data)) == sorted(
+            [str(event_1.event_id), str(event_2.event_id)]
+        )
+
+    @patch("sentry.issues.endpoints.group_events.run_group_events_query")
+    def test_snuba_read_timeout_returns_504(self, mock_query: MagicMock) -> None:
+        mock_query.side_effect = SnubaError(
+            ReadTimeoutError(ConnectionPool("dummy"), "/events/snql", "Read timed out")
+        )
+        self.login_as(user=self.user)
+        event = self.store_event(
+            data={
+                "fingerprint": ["group_1"],
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/"
+        response = self.do_request(url)
+        assert response.status_code == 504
+
+    def _store_platform_tag_collision_events(self) -> tuple[Group, list[Event]]:
+        events = []
+        for i, ts in enumerate(
+            [before_now(seconds=10), before_now(seconds=8), before_now(seconds=6)]
+        ):
+            event = self.store_event(
+                data={
+                    "event_id": f"{i + 1}" * 32,
+                    "timestamp": ts.isoformat(),
+                    "fingerprint": ["platform-collision-group"],
+                    "tags": {"platform": "SJ1"},
+                },
+                project_id=self.project.id,
+            )
+            events.append(event)
+        return event.group, events
+
+    def test_platform_tag_collision_resolved_correctly(self) -> None:
+        self.login_as(user=self.user)
+        group, _events = self._store_platform_tag_collision_events()
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/?query=platform:SJ1"
+        response = self.do_request(url)
+        assert response.status_code == 200
+        assert len(response.data) == 3
+
+    def test_explicit_tag_query_works(self) -> None:
+        self.login_as(user=self.user)
+        group, _events = self._store_platform_tag_collision_events()
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/events/?query=tags[platform]:SJ1"
+        response = self.do_request(url)
+        assert response.status_code == 200
+        assert len(response.data) == 3

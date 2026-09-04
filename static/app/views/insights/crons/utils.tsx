@@ -1,33 +1,11 @@
+import type {SelectValue} from '@sentry/scraps/select';
+
 import type {TickStyle} from 'sentry/components/checkInTimeline/types';
 import {t, tn} from 'sentry/locale';
-import type {SelectValue} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 
 import {CheckInStatus} from './types';
-
-export function makeMonitorListQueryKey(
-  organization: Organization,
-  params: Record<string, any>
-) {
-  const {query, project, environment, owner, cursor, sort, asc} = params;
-
-  return [
-    `/organizations/${organization.slug}/monitors/`,
-    {
-      query: {
-        cursor,
-        query,
-        project,
-        environment,
-        owner,
-        includeNew: true,
-        per_page: 20,
-        sort,
-        asc,
-      },
-    },
-  ] as const;
-}
 
 export function makeMonitorDetailsQueryKey(
   organization: Organization,
@@ -36,7 +14,16 @@ export function makeMonitorDetailsQueryKey(
   query?: Record<string, any>
 ) {
   return [
-    `/projects/${organization.slug}/${projectId}/monitors/${monitorSlug}/`,
+    getApiUrl(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/monitors/$monitorIdOrSlug/',
+      {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: projectId,
+          monitorIdOrSlug: monitorSlug,
+        },
+      }
+    ),
     {query},
   ] as const;
 }
@@ -60,34 +47,34 @@ export const statusToText: Record<CheckInStatus, string> = {
   [CheckInStatus.UNKNOWN]: t('Unknown'),
 };
 
-export const tickStyle: Record<CheckInStatus, TickStyle> = {
+export const tickStyle: TickStyle<CheckInStatus> = theme => ({
   [CheckInStatus.ERROR]: {
-    labelColor: 'red400',
-    tickColor: 'red300',
+    labelColor: theme.tokens.content.danger,
+    tickColor: theme.tokens.dataviz.semantic.bad,
   },
   [CheckInStatus.TIMEOUT]: {
-    labelColor: 'red400',
-    tickColor: 'red300',
-    hatchTick: 'red200',
+    labelColor: theme.tokens.content.danger,
+    tickColor: theme.tokens.dataviz.semantic.bad,
+    hatchTick: theme.tokens.border.danger.muted,
   },
   [CheckInStatus.OK]: {
-    labelColor: 'green400',
-    tickColor: 'green300',
+    labelColor: theme.tokens.content.success,
+    tickColor: theme.tokens.dataviz.semantic.good,
   },
   [CheckInStatus.MISSED]: {
-    labelColor: 'yellow400',
-    tickColor: 'yellow300',
+    labelColor: theme.tokens.content.warning,
+    tickColor: theme.tokens.dataviz.semantic.meh,
   },
   [CheckInStatus.IN_PROGRESS]: {
-    labelColor: 'disabled',
-    tickColor: 'disabled',
+    labelColor: theme.tokens.content.disabled,
+    tickColor: theme.tokens.content.disabled,
   },
   [CheckInStatus.UNKNOWN]: {
-    labelColor: 'gray400',
-    tickColor: 'gray300',
-    hatchTick: 'gray200',
+    labelColor: theme.tokens.content.secondary,
+    tickColor: theme.tokens.dataviz.semantic.neutral,
+    hatchTick: theme.tokens.border.neutral.muted,
   },
-};
+});
 
 export const getScheduleIntervals = (n: number): Array<SelectValue<string>> => [
   {value: 'minute', label: tn('minute', 'minutes', n)},

@@ -1,4 +1,7 @@
+from typing import Any
+
 from django.core.exceptions import SuspiciousOperation
+from rest_framework.exceptions import ParseError
 
 
 class InvalidData(Exception):
@@ -17,7 +20,7 @@ class InvalidOrigin(InvalidRequest):
     def __init__(self, origin):
         self.origin = origin
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "Invalid origin: '%s'" % self.origin
 
 
@@ -60,6 +63,7 @@ class ApiTokenLimitError(Exception):
 
 
 class InvalidSearchQuery(Exception):
+    extra: dict[str, Any] | None = None
     pass
 
 
@@ -89,5 +93,18 @@ class HashDiscarded(Exception):
         self.tombstone_id = tombstone_id
 
 
-class InvalidParams(Exception):
+class InvalidParams(ParseError):
+    """Inherits from ParseError so DRF automatically returns a 400 response
+    when this exception is unhandled in a view."""
+
     pass
+
+
+class MissingTTL(Exception):
+    def __init__(self, key: str) -> None:
+        super().__init__(
+            f"Refusing to write {key!r} with no expiry. Every new Redis key sets a TTL, or is "
+            "registered with Infrastructure Engineering as accepted durable data. There is no "
+            "opt-out at the callsite: "
+            "https://develop.sentry.dev/backend/application-domains/redis/"
+        )

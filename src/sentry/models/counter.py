@@ -1,24 +1,22 @@
-import sentry_sdk
 from django.conf import settings
 from django.db import connections, transaction
 
-from sentry import features
 from sentry.backup.scopes import RelocationScope
 from sentry.db.models import (
     BoundedBigIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.locks import locks
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import ingest_errors_tasks
 from sentry.utils import metrics
 from sentry.utils.locking import UnableToAcquireLock
 from sentry.utils.redis import redis_clusters
+from sentry.utils.tracing import trace
 
 LOW_WATER_RATIO = 0.2
 """
@@ -29,7 +27,7 @@ we will refill the block when there are less than 200 short ids in Redis
 """
 
 
-@region_silo_model
+@cell_silo_model
 class Counter(Model):
     __relocation_scope__ = RelocationScope.Organization
 
@@ -45,7 +43,7 @@ class Counter(Model):
     @classmethod
     def increment(cls, project, delta=1) -> int:
         """Increments a counter.  This can never decrement."""
-        if features.has("projects:short-id-pre-allocation-counter", project) and delta == 1:
+        if delta == 1:
             # only use the cache path if delta is 1, as in other cases we're trying to resolve
             # a stuck counter
             return increment_project_counter_in_cache(project)
@@ -53,7 +51,7 @@ class Counter(Model):
             return increment_project_counter_in_database(project, delta)
 
 
-@sentry_sdk.tracing.trace
+@trace
 @metrics.wraps("counter.increment_project_counter_in_cache")
 def increment_project_counter_in_cache(project, using="default") -> int:
     redis_key = make_short_id_counter_key(project.id)
@@ -86,7 +84,7 @@ def increment_project_counter_in_cache(project, using="default") -> int:
         return short_id_from_redis
 
 
-@sentry_sdk.tracing.trace
+@trace
 @metrics.wraps("counter.increment_project_counter_in_database")
 def increment_project_counter_in_database(project, delta=1, using="default") -> int:
     """This method primarily exists so that south code can use it."""
@@ -131,12 +129,9 @@ def increment_project_counter_in_database(project, delta=1, using="default") -> 
 
 @instrumented_task(
     name="sentry.models.counter.refill_cached_short_ids",
-    queue="shortid.counters.refill",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=ingest_errors_tasks,
-        retry=None,  # No retries since we want to try again on next counter increment
-    ),
+    namespace=ingest_errors_tasks,
+    retry=None,  # No retries since we want to try again on next counter increment
+    silo_mode=SiloMode.CELL,
 )
 def refill_cached_short_ids(project_id, block_size: int, using="default", **kwargs) -> None:
     """Refills the Redis short-id counter block for a project."""

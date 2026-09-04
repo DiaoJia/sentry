@@ -1,16 +1,32 @@
 import * as Sentry from '@sentry/react';
 import keyBy from 'lodash/keyBy';
 
+import {getContextMeta} from 'sentry/components/events/contexts/utils';
 import type {
   RawSpanType,
   TraceContextSpanProxy,
 } from 'sentry/components/events/interfaces/spans/types';
-import type {EntrySpans, EventTransaction} from 'sentry/types/event';
-import {EntryType} from 'sentry/types/event';
+import {
+  type EntrySpans,
+  type EventTransaction,
+  EntryType,
+  type Event,
+} from 'sentry/types/event';
 import {getIssueTypeFromOccurrenceType, IssueType} from 'sentry/types/group';
 
 export const TRACE_WATERFALL_PREFERENCES_KEY =
   'issue-details-trace-waterfall-preferences';
+
+/**
+ * Trace IDs are required for EAP occurrences, but some events will not have a trace (e.g. metric issues).
+ * Relay will synthesize a `trace_id` in this case and flags the field with a `trace_id.missing` remark in `_meta`.
+ */
+export function eventHasSyntheticTrace(event: Event): boolean {
+  const traceMeta = getContextMeta(event, 'trace');
+  return (traceMeta.trace_id?.['']?.err ?? []).some(
+    (err: unknown) => (Array.isArray(err) ? err[0] : err) === 'trace_id.missing'
+  );
+}
 
 export function getSpanInfoFromTransactionEvent(
   event: Pick<
@@ -97,3 +113,7 @@ export function getProblemSpansForSpanTree(event: EventTransaction): {
 
   return {affectedSpanIds, focusedSpanIds};
 }
+
+export const isWebVitalsEvent = (event: Event) => {
+  return getIssueTypeFromOccurrenceType(event.occurrence?.type) === IssueType.WEB_VITALS; // Web Vitals group type id
+};

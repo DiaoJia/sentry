@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, NotRequired, TypedDict, TypeVar
 
 from jsonschema import ValidationError as JsonValidationError
 from rest_framework import serializers
@@ -18,15 +18,21 @@ ComparisonType = TypeVar("ComparisonType")
 ConditionResult = TypeVar("ConditionResult")
 
 
+class DataConditionInput(TypedDict):
+    id: NotRequired[int]
+    type: str
+    comparison: Any
+    conditionResult: Any
+
+
 class AbstractDataConditionValidator(
-    CamelSnakeSerializer,
+    CamelSnakeSerializer[Any],
     Generic[ComparisonType, ConditionResult],
 ):
     id = serializers.IntegerField(required=False)
     type = serializers.ChoiceField(choices=[(t.value, t.value) for t in Condition])
     comparison = serializers.JSONField(required=True)
     condition_result = serializers.JSONField(required=True)
-    condition_group_id = serializers.IntegerField(required=False)
 
     @abstractmethod
     def validate_comparison(self, value: Any) -> ComparisonType:
@@ -40,7 +46,6 @@ class AbstractDataConditionValidator(
 class BaseDataConditionValidator(
     AbstractDataConditionValidator[Any, Any],
 ):
-
     @property
     def condition_type(self) -> Condition:
         if isinstance(self.initial_data, list) and self.initial_data:
@@ -48,7 +53,7 @@ class BaseDataConditionValidator(
 
         return self.initial_data.get("type")
 
-    def _get_handler(self) -> type[DataConditionHandler] | None:
+    def _get_handler(self) -> type[DataConditionHandler[Any]] | None:
         if self._is_operator_condition():
             return None
 
@@ -74,11 +79,17 @@ class BaseDataConditionValidator(
                 raise serializers.ValidationError("Invalid comparison value for condition type")
 
         try:
-            return validate_json_schema(value, handler.comparison_json_schema)
+            validated = validate_json_schema(value, handler.comparison_json_schema)
         except JsonValidationError:
             raise serializers.ValidationError(
                 f"Value, {value} does not match JSON Schema for comparison"
             )
+
+        organization = self.context.get("organization")
+        if organization is not None:
+            validated = handler.validate_comparison(validated, organization)
+
+        return validated
 
     def validate_condition_result(self, value: Any) -> Any:
         """

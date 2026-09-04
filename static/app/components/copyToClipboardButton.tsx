@@ -1,53 +1,38 @@
-import styled from '@emotion/styled';
+import {Button, type ButtonProps} from '@sentry/scraps/button';
 
-import {Button, type ButtonProps} from 'sentry/components/core/button';
 import {IconCopy} from 'sentry/icons';
-import useCopyToClipboard from 'sentry/utils/useCopyToClipboard';
+import {useCopyToClipboard} from 'sentry/utils/useCopyToClipboard';
 
-type Overwrite<T, U> = Pick<T, Exclude<keyof T, keyof U>> & U;
-
-type Props = {
+interface CopyToClipboardButtonProps extends Omit<
+  Extract<ButtonProps, {'aria-label': string}>,
+  'children' | 'onCopy' | 'onError'
+> {
   text: string;
-  iconSize?: React.ComponentProps<typeof IconCopy>['size'];
-  onError?: undefined | ((error: Error) => void);
-} & Overwrite<
-  Omit<ButtonProps, 'children'>,
-  Partial<
-    Pick<ButtonProps, 'aria-label'> & {onCopy: undefined | ((copiedText: string) => void)}
-  >
->;
-
-export function CopyToClipboardButton({
-  iconSize,
-  onCopy,
-  onError,
-  text,
-  onClick: passedOnClick,
-  ...props
-}: Props) {
-  const {onClick, label} = useCopyToClipboard({
-    text,
-    onCopy,
-    onError,
-  });
-
-  return (
-    <CopyButton
-      aria-label={label}
-      title={label}
-      tooltipProps={{delay: 0}}
-      translucentBorder
-      onClick={e => {
-        onClick();
-        passedOnClick?.(e);
-      }}
-      {...props}
-    >
-      <IconCopy size={iconSize} />
-    </CopyButton>
-  );
+  children?: never;
+  onCopy?: undefined | ((copiedText: string) => void);
 }
 
-const CopyButton = styled(Button)`
-  color: ${p => p.theme.subText};
-`;
+export function CopyToClipboardButton({
+  onCopy,
+  onClick,
+  text,
+  icon,
+  ...props
+}: CopyToClipboardButtonProps) {
+  const {copy} = useCopyToClipboard();
+
+  return (
+    <Button
+      {...props}
+      onClick={e => {
+        copy(text).then(result => {
+          if (result !== undefined) {
+            onCopy?.(result);
+          }
+        });
+        onClick?.(e);
+      }}
+      icon={icon ?? <IconCopy variant="muted" />}
+    />
+  );
+}

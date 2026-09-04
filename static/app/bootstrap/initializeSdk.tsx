@@ -1,31 +1,25 @@
-// eslint-disable-next-line simple-import-sort/imports
-import * as Sentry from '@sentry/react';
-import type {Event} from '@sentry/core';
-
-import {SENTRY_RELEASE_VERSION, SPA_DSN} from 'sentry/constants';
-import type {Config} from 'sentry/types/system';
-import {addExtraMeasurements, addUIElementTag} from 'sentry/utils/performanceForSentry';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {useEffect} from 'react';
 import {
   createRoutesFromChildren,
   matchRoutes,
   useLocation,
   useNavigationType,
 } from 'react-router-dom';
-import {useEffect} from 'react';
+import {type Event, type Log} from '@sentry/core';
+import * as Sentry from '@sentry/react';
 
-const SPA_MODE_ALLOW_URLS = [
-  'localhost',
-  'dev.getsentry.net',
-  'sentry.dev',
-  'webpack-internal://',
-];
-
-const SPA_MODE_TRACE_PROPAGATION_TARGETS = [
-  'localhost',
-  'dev.getsentry.net',
-  'sentry.dev',
-];
+import {NODE_ENV} from 'sentry/constants';
+import {
+  IGNORED_BREADCRUMB_FETCH_HOSTS,
+  IGNORED_SPAN_NAMES,
+  SENTRY_RELEASE_VERSION,
+  SPA_DSN,
+  SPA_MODE_ALLOW_URLS,
+  SPA_MODE_TRACE_PROPAGATION_TARGETS,
+} from 'sentry/constants/sdk';
+import type {Config} from 'sentry/types/system';
+import {addUIElementTagToSegmentSpan} from 'sentry/utils/performanceForSentry';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 
 let lastEventId: string | undefined;
 
@@ -33,27 +27,34 @@ export function getLastEventId(): string | undefined {
   return lastEventId;
 }
 
-// We don't care about recording breadcrumbs for these hosts. These typically
-// pollute our breadcrumbs since they may occur a LOT.
-//
-// XXX(epurkhiser): Note some of these hosts may only apply to sentry.io.
-const IGNORED_BREADCRUMB_FETCH_HOSTS = ['amplitude.com', 'reload.getsentry.net'];
+// Each error type maps to the set of HTTP status codes it should be filtered for.
+const FILTERED_STATUSES_BY_ERROR_TYPE: Readonly<Record<string, ReadonlySet<string>>> = {
+  RequestError: new Set(['200', '400', '401', '402', '403', '404', '429']),
+  BadRequestError: new Set(['400']),
+  UnauthorizedError: new Set(['401']),
+  ForbiddenError: new Set(['403']),
+  NotFoundError: new Set(['404']),
+  TooManyRequestsError: new Set(['429']),
+};
+const FILTERED_REQUEST_ERROR_VALUE_REGEX = /^(GET|POST|PUT|DELETE) .* (\d+)$/;
 
-// Ignore analytics in spans as well
-const IGNORED_SPANS_BY_DESCRIPTION = ['amplitude.com', 'reload.getsentry.net'];
+const ENDPOINT_TAG_REGEX = /^([A-Za-z]+ (\/[^/]+)+\/) \d+$/;
+
+/**
+ * Check if the message is from the console banner in `static/app/bootstrap/printConsoleBanner.ts`.
+ * Used to filter it from both breadcrumbs and logs.
+ */
+function isConsoleBannerMessage(message: string | undefined): boolean {
+  return !!message?.includes('Hey, you opened the console!');
+}
 
 // We check for `window.__initialData.user` property and only enable profiling
 // for Sentry employees. This is to prevent a Violation error being visible in
 // the browser console for our users.
 const shouldOverrideBrowserProfiling = window?.__initialData?.user?.isSuperuser;
-/**
- * We accept a routes argument here because importing `static/routes`
- * is expensive in regards to bundle size. Some entrypoints may opt to forgo
- * having routing instrumentation in order to have a smaller bundle size.
- * (e.g.  `static/views/integrationPipeline`)
- */
 function getSentryIntegrations() {
   const integrations = [
+    Sentry.spanStreamingIntegration(),
     Sentry.extraErrorDataIntegration({
       // 6 is arbitrary, seems like a nice number
       depth: 6,
@@ -64,17 +65,16 @@ function getSentryIntegrations() {
       useNavigationType,
       createRoutesFromChildren,
       matchRoutes,
-      _experiments: {
-        enableStandaloneClsSpans: true,
-      },
       linkPreviousTrace: 'session-storage',
     }),
-    Sentry.browserProfilingIntegration(),
+    ...(NODE_ENV === 'production' ? [Sentry.browserProfilingIntegration()] : []),
     Sentry.thirdPartyErrorFilterIntegration({
       filterKeys: ['sentry-spa'],
-      behaviour: 'apply-tag-if-contains-third-party-frames',
+      behaviour: 'drop-error-if-contains-third-party-frames',
     }),
     Sentry.featureFlagsIntegration(),
+    Sentry.consoleLoggingIntegration(),
+    Sentry.userTimingIntegration(),
   ];
 
   return integrations;
@@ -88,13 +88,13 @@ function getSentryIntegrations() {
  */
 export function initializeSdk(config: Config) {
   // NOTE: This config is mutated by `commonInitialization`
-  const {apmSampling, sentryConfig, userIdentity} = config;
+  const {apmSampling, customerDomain, sentryConfig, userIdentity} = config;
   const tracesSampleRate = apmSampling ?? 0;
   const extraTracePropagationTargets = SPA_DSN
     ? SPA_MODE_TRACE_PROPAGATION_TARGETS
     : [...sentryConfig.tracePropagationTargets];
 
-  Sentry.init({
+  const sentryClient = Sentry.init({
     ...sentryConfig,
     /**
      * For SPA mode, we need a way to overwrite the default DSN from backend
@@ -110,36 +110,25 @@ export function initializeSdk(config: Config) {
     allowUrls: SPA_DSN ? SPA_MODE_ALLOW_URLS : sentryConfig?.allowUrls,
     integrations: getSentryIntegrations(),
     tracesSampleRate,
-    profilesSampleRate: shouldOverrideBrowserProfiling ? 1 : 0.1,
+    profileSessionSampleRate: shouldOverrideBrowserProfiling ? 1 : 0.1,
+    profileLifecycle: 'trace',
     tracePropagationTargets: ['localhost', /^\//, ...extraTracePropagationTargets],
     tracesSampler: context => {
-      const op = context.attributes?.[Sentry.SEMANTIC_ATTRIBUTE_SENTRY_OP] || '';
-      if (op.startsWith('ui.action')) {
-        return tracesSampleRate / 100;
+      const op = context.attributes?.[Sentry.SEMANTIC_ATTRIBUTE_SENTRY_OP];
+      if (typeof op === 'string' && op.startsWith('ui.action')) {
+        return context.inheritOrSampleWith(tracesSampleRate / 100);
       }
-      return tracesSampleRate;
+      return context.inheritOrSampleWith(tracesSampleRate);
     },
-    beforeSendTransaction(event) {
-      addExtraMeasurements(event);
-      addUIElementTag(event);
+    ignoreSpans: IGNORED_SPAN_NAMES,
 
-      const filteredSpans = event.spans?.filter(span => {
-        return IGNORED_SPANS_BY_DESCRIPTION.every(
-          partialDesc => !span.description?.includes(partialDesc)
-        );
-      });
-
-      // If we removed any spans at the end above, the end timestamp needs to be adjusted again.
-      if (filteredSpans && filteredSpans?.length !== event.spans?.length) {
-        event.spans = filteredSpans;
-        const newEndTimestamp = Math.max(...event.spans.map(span => span.timestamp ?? 0));
-        event.timestamp = newEndTimestamp;
+    beforeSendSpan: span => {
+      const op = span.attributes['sentry.op'];
+      if (span.name && (op === 'pageload' || op === 'navigation')) {
+        span.name = normalizeUrl(span.name, {forceCustomerDomain: true});
       }
 
-      if (event.transaction) {
-        event.transaction = normalizeUrl(event.transaction, {forceCustomerDomain: true});
-      }
-      return event;
+      return span;
     },
 
     ignoreErrors: [
@@ -153,23 +142,47 @@ export function initializeSdk(config: Config) {
        *
        * Ref: https://bugs.webkit.org/show_bug.cgi?id=215771
        */
-      'AbortError: Fetch is aborted',
+      /AbortError: Fetch is aborted/i,
+      /AbortError: The operation was aborted/i,
+      /AbortError: signal is aborted without reason/i,
+      /AbortError: The user aborted a request/i,
+      /**
+       * Ignore known browser failures while loading, installing, or starting
+       * the service worker.
+       */
+      /service-worker\.js.*(?:failed|error|unsupported|bad HTTP|cannot|redirect)/i,
       /**
        * React internal error thrown when something outside react modifies the DOM
        * This is usually because of a browser extension or chrome translate page
        */
       "NotFoundError: Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node.",
       "NotFoundError: Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.",
+      /**
+       * ECharts re-shows the last tooltip a tick after every `setOption`,
+       * reusing the series indices it captured before the update. Under
+       * `notMerge: false` (see `chartZoomConfig`) the tooltip component
+       * survives an update that replaces the series, so those indices can
+       * outlive the series they point at and reading them throws.
+       *
+       * Transient and self-healing: the tooltip corrects itself as soon as
+       * the pointer moves.
+       */
+      /Cannot read properties of undefined \(reading 'getDataParams'\)/,
     ],
 
     beforeBreadcrumb(crumb) {
       const isFetch = crumb.category === 'fetch' || crumb.category === 'xhr';
 
-      // Ignore
+      // Ignore fetch/xhr requests to certain hosts
       if (
         isFetch &&
         IGNORED_BREADCRUMB_FETCH_HOSTS.some(host => crumb.data?.url?.includes(host))
       ) {
+        return null;
+      }
+
+      // Ignore the console banner
+      if (crumb.category === 'console' && isConsoleBannerMessage(crumb.message)) {
         return null;
       }
 
@@ -187,8 +200,13 @@ export function initializeSdk(config: Config) {
 
       return event;
     },
-    _experiments: {
-      enableLogs: true,
+
+    beforeSendLog: log => {
+      if (isFilteredLog(log)) {
+        return null;
+      }
+
+      return log;
     },
   });
 
@@ -203,15 +221,24 @@ export function initializeSdk(config: Config) {
   }
   if (window.__SENTRY__VERSION) {
     Sentry.setTag('sentry_version', window.__SENTRY__VERSION);
+    Sentry.setAttribute('sentry_version', window.__SENTRY__VERSION);
   }
-
-  const {customerDomain} = window.__initialData;
 
   if (customerDomain) {
     Sentry.setTag('isCustomerDomain', 'yes');
     Sentry.setTag('customerDomain.organizationUrl', customerDomain.organizationUrl);
     Sentry.setTag('customerDomain.sentryUrl', customerDomain.sentryUrl);
     Sentry.setTag('customerDomain.subdomain', customerDomain.subdomain);
+    Sentry.setAttributes({
+      isCustomerDomain: 'yes',
+      'customerDomain.organizationUrl': customerDomain.organizationUrl,
+      'customerDomain.sentryUrl': customerDomain.sentryUrl,
+      'customerDomain.subdomain': customerDomain.subdomain,
+    });
+  }
+
+  if (sentryClient) {
+    addUIElementTagToSegmentSpan(sentryClient);
   }
 }
 
@@ -231,26 +258,12 @@ export function isFilteredRequestErrorEvent(event: Event): boolean {
   for (const error of mainAndMaybeCauseErrors) {
     const {type = '', value = ''} = error;
 
-    const is200 =
-      ['RequestError'].includes(type) && !!value.match('(GET|POST|PUT|DELETE) .* 200');
-    const is400 =
-      ['BadRequestError', 'RequestError'].includes(type) &&
-      !!value.match('(GET|POST|PUT|DELETE) .* 400');
-    const is401 =
-      ['UnauthorizedError', 'RequestError'].includes(type) &&
-      !!value.match('(GET|POST|PUT|DELETE) .* 401');
-    const is403 =
-      ['ForbiddenError', 'RequestError'].includes(type) &&
-      !!value.match('(GET|POST|PUT|DELETE) .* 403');
-    const is404 =
-      ['NotFoundError', 'RequestError'].includes(type) &&
-      !!value.match('(GET|POST|PUT|DELETE) .* 404');
-    const is429 =
-      ['TooManyRequestsError', 'RequestError'].includes(type) &&
-      !!value.match('(GET|POST|PUT|DELETE) .* 429');
-
-    if (is200 || is400 || is401 || is403 || is404 || is429) {
-      return true;
+    const allowedStatuses = FILTERED_STATUSES_BY_ERROR_TYPE[type];
+    if (allowedStatuses) {
+      const match = FILTERED_REQUEST_ERROR_VALUE_REGEX.exec(value);
+      if (match && allowedStatuses.has(match[2]!)) {
+        return true;
+      }
     }
   }
 
@@ -282,10 +295,18 @@ export function addEndpointTagToRequestError(event: Event): void {
   const errorMessage = event.exception?.values?.[0]!.value || '';
 
   // The capturing group here turns `GET /dogs/are/great 500` into just `GET /dogs/are/great`
-  const requestErrorRegex = new RegExp('^([A-Za-z]+ (/[^/]+)+/) \\d+$');
-  const messageMatch = requestErrorRegex.exec(errorMessage);
+  const messageMatch = ENDPOINT_TAG_REGEX.exec(errorMessage);
 
   if (messageMatch) {
     event.tags = {...event.tags, endpoint: messageMatch[1]};
   }
+}
+
+function isFilteredLog(log: Log): boolean {
+  // Ignore the console banner
+  if (isConsoleBannerMessage(log.message)) {
+    return true;
+  }
+
+  return false;
 }

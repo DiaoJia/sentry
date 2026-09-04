@@ -1,24 +1,31 @@
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Sequence
+from typing import Any, cast
 
+import sentry_sdk
 from django.contrib.auth.models import AnonymousUser
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
 from snuba_sdk import Column, Condition, Op, Or
 from snuba_sdk.legacy import is_condition, parse_condition
 
-from sentry import eventstore
+from sentry import features
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases.group import GroupEndpoint
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.helpers.deprecation import deprecated
 from sentry.api.helpers.environments import get_environments
 from sentry.api.helpers.group_index import parse_and_convert_issue_search_query
 from sentry.api.helpers.group_index.validators import ValidationError
 from sentry.api.serializers import EventSerializer, serialize
+from sentry.api.serializers.models.event import (
+    EventSerializerResponse,
+    GroupEventDetailsResponse,
+)
 from sentry.api.utils import get_date_range_from_params
 from sentry.apidocs.constants import (
     RESPONSE_BAD_REQUEST,
@@ -28,31 +35,40 @@ from sentry.apidocs.constants import (
 )
 from sentry.apidocs.examples.event_examples import EventExamples
 from sentry.apidocs.parameters import EventParams, GlobalParams, IssueParams
+from sentry.apidocs.response_types import DetailResponse
 from sentry.apidocs.utils import inline_sentry_response_serializer
-from sentry.eventstore.models import Event, GroupEvent
-from sentry.exceptions import InvalidParams
-from sentry.issues.endpoints.project_event_details import (
-    GroupEventDetailsResponse,
-    wrap_event_response,
+from sentry.constants import CELL_API_DEPRECATION_DATE
+from sentry.exceptions import InvalidParams, InvalidSearchQuery
+from sentry.issues.endpoints.bases.group import GroupEndpoint
+from sentry.issues.endpoints.project_event_details import wrap_event_response
+from sentry.issues.formatting.formatter import FormattedResponse
+from sentry.issues.formatting.mixin import (
+    VALID_FORMATS,
+    FormattableResponseMixin,
+    format_event_response,
 )
 from sentry.issues.grouptype import GroupCategory
 from sentry.models.environment import Environment
 from sentry.models.group import Group
+from sentry.ratelimits.config import RateLimitConfig
 from sentry.search.events.filter import (
     FilterConvertParams,
     convert_search_filter_to_snuba_query,
     format_search_filter,
 )
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.snuba.dataset import Dataset
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 from sentry.users.models.user import User
 from sentry.utils import metrics
+from sentry.utils.snuba import get_snuba_column_name
 
 
 def issue_search_query_to_conditions(
     query: str, group: Group, user: User | AnonymousUser, environments: Sequence[Environment]
-) -> list[Condition]:
-    from sentry.utils.snuba import resolve_column, resolve_conditions
+) -> tuple[list[Condition], list[Any]]:
+    from sentry.utils.snuba import resolve_conditions
 
     dataset = (
         Dataset.Events if group.issue_category == GroupCategory.ERROR else Dataset.IssuePlatform
@@ -64,7 +80,7 @@ def issue_search_query_to_conditions(
     )
 
     # transform search filters -> the legacy condition format
-    legacy_conditions = []
+    legacy_conditions: list[Any] = []
     if search_filters:
         for search_filter in search_filters:
             from sentry.api.serializers import GroupSerializerSnuba
@@ -94,11 +110,13 @@ def issue_search_query_to_conditions(
 
     # the transformed conditions is generic and isn't 'dataset aware', we need to map the generic columns
     # being queried to the appropriate dataset column
-    resolved_legacy_conditions = resolve_conditions(legacy_conditions, resolve_column(dataset))
+    column_resolver = functools.partial(get_snuba_column_name, dataset=dataset)
+
+    resolved_legacy_conditions = resolve_conditions(legacy_conditions, column_resolver) or []
 
     # convert the legacy condition format into the SnQL condition format
-    snql_conditions = []
-    for cond in resolved_legacy_conditions or ():
+    snql_conditions: list[Condition] = []
+    for cond in resolved_legacy_conditions:
         if not is_condition(cond):
             # this shouldn't be possible since issue search only allows ands
             or_conditions = []
@@ -112,36 +130,59 @@ def issue_search_query_to_conditions(
         else:
             snql_conditions.append(parse_condition(cond))
 
-    return snql_conditions
+    return snql_conditions, resolved_legacy_conditions
+
+
+# total=False rather than NotRequired: this module uses `from __future__ import annotations`, so
+# NotRequired arrives as a string, TypedDict marks the key required, and the openapi schema then
+# fails the api-docs example validator. Inherited keys keep their own totality.
+class GroupEventDetailsFormattedResponse(GroupEventDetailsResponse, total=False):
+    # present only when ``?llmFormat`` is requested and the formatter feature is on
+    formatted: FormattedResponse
 
 
 @extend_schema(tags=["Events"])
-@region_silo_endpoint
-class GroupEventDetailsEndpoint(GroupEndpoint):
+@cell_silo_endpoint
+class GroupEventDetailsEndpoint(FormattableResponseMixin, GroupEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PUBLIC,
     }
+    formatter_adapter = staticmethod(format_event_response)
     enforce_rate_limit = True
-    rate_limits = {
-        "GET": {
-            RateLimitCategory.IP: RateLimit(limit=15, window=1),
-            RateLimitCategory.USER: RateLimit(limit=15, window=1),
-            RateLimitCategory.ORGANIZATION: RateLimit(limit=15, window=1),
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "GET": {
+                RateLimitCategory.IP: RateLimit(limit=15, window=1),
+                RateLimitCategory.USER: RateLimit(limit=15, window=1),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=15, window=1),
+            }
         }
-    }
+    )
 
     @extend_schema(
-        operation_id="Retrieve an Issue Event",
+        operation_id="getOrganizationIssueEvent",
+        summary="Retrieve an Issue Event",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             IssueParams.ISSUES_OR_GROUPS,
             IssueParams.ISSUE_ID,
             GlobalParams.ENVIRONMENT,
             EventParams.EVENT_ID_EXTENDED,
+            OpenApiParameter(
+                name="llmFormat",
+                location=OpenApiParameter.QUERY,
+                required=False,
+                type=str,
+                enum=list(VALID_FORMATS),
+                description=(
+                    "If set, adds a `formatted` field to the response with the event rendered "
+                    "as the requested format for LLM consumption."
+                ),
+            ),
         ],
         responses={
             200: inline_sentry_response_serializer(
-                "IssueEventDetailsResponse", GroupEventDetailsResponse
+                "IssueEventDetailsResponse", GroupEventDetailsFormattedResponse
             ),
             400: RESPONSE_BAD_REQUEST,
             401: RESPONSE_UNAUTHORIZED,
@@ -150,7 +191,18 @@ class GroupEventDetailsEndpoint(GroupEndpoint):
         },
         examples=EventExamples.GROUP_EVENT_DETAILS,
     )
-    def get(self, request: Request, group: Group, event_id: str) -> Response:
+    @deprecated(
+        CELL_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-group-group-event-details",
+        url_names=["sentry-api-0-group-event-details"],
+    )
+    def get(
+        self, request: Request, group: Group, event_id: str
+    ) -> (
+        Response[GroupEventDetailsFormattedResponse]
+        | Response[EventSerializerResponse]
+        | Response[DetailResponse]
+    ):
         """
         Retrieves the details of an issue event.
         """
@@ -164,26 +216,32 @@ class GroupEventDetailsEndpoint(GroupEndpoint):
             raise ParseError(detail="Invalid date range")
 
         query = request.GET.get("query")
-        try:
-            conditions: list[Condition] = (
-                issue_search_query_to_conditions(query, group, request.user, environments)
-                if query
-                else []
-            )
-        except ValidationError:
-            raise ParseError(detail="Invalid event query")
-        except Exception:
-            logging.exception(
-                "group_event_details.parse_query",
-                extra={"query": query, "group": group.id, "organization": organization.id},
-            )
-            raise ParseError(detail="Unable to parse query")
+        conditions: list[Condition] = []
+        legacy_conditions: list[Any] = []
+        if query:
+            try:
+                conditions, legacy_conditions = issue_search_query_to_conditions(
+                    query, group, request.user, environments
+                )
+            except ValidationError:
+                raise ParseError(detail="Invalid event query")
+            except InvalidSearchQuery as error:
+                message = str(error)
+                raise ParseError(detail=message)
+            except Exception:
+                logging.exception(
+                    "group_event_details.parse_query",
+                    extra={"query": query, "group": group.id, "organization": organization.id},
+                )
+                raise ParseError(detail="Unable to parse query")
 
         if environments:
             conditions.append(Condition(Column("environment"), Op.IN, environment_names))
 
         metric = "api.endpoints.group_event_details.get"
-        error_response = {"detail": "Unable to apply query. Change or remove it and try again."}
+        error_response: DetailResponse = {
+            "detail": "Unable to apply query. Change or remove it and try again."
+        }
 
         event: Event | GroupEvent | None = None
 
@@ -202,9 +260,19 @@ class GroupEventDetailsEndpoint(GroupEndpoint):
                     return Response(error_response, status=400)
 
         elif event_id == "recommended":
+            verify_replay_exists = features.has(
+                "organizations:issue-details-verify-recommended-replay",
+                organization,
+                actor=request.user,
+            )
             with metrics.timer(metric, tags={"type": "helpful", "query": bool(query)}):
                 try:
-                    event = group.get_recommended_event(conditions=conditions, start=start, end=end)
+                    event = group.get_recommended_event(
+                        conditions=conditions,
+                        start=start,
+                        end=end,
+                        verify_replay_exists=verify_replay_exists,
+                    )
                 except ValueError:
                     return Response(error_response, status=400)
 
@@ -224,9 +292,14 @@ class GroupEventDetailsEndpoint(GroupEndpoint):
             )
             return Response({"detail": error_text}, status=404)
 
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
+
         collapse = request.GET.getlist("collapse", [])
         if "stacktraceOnly" in collapse:
-            return Response(serialize(event, request.user, EventSerializer()))
+            stacktrace_body: EventSerializerResponse = serialize(
+                event, request.user, EventSerializer()
+            )
+            return Response(stacktrace_body)
 
         data = wrap_event_response(
             request_user=request.user,
@@ -234,7 +307,10 @@ class GroupEventDetailsEndpoint(GroupEndpoint):
             environments=environment_names,
             include_full_release_data="fullRelease" not in collapse,
             conditions=conditions,
+            legacy_conditions=legacy_conditions,
             start=start,
             end=end,
         )
-        return Response(data)
+        if data is None:
+            return Response({"detail": "Failed to load event"}, status=500)
+        return Response(cast(GroupEventDetailsFormattedResponse, data))

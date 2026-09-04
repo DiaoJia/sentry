@@ -1,17 +1,20 @@
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {doOpenExternalIssueModal} from 'sentry/components/group/externalIssuesList/externalIssueActions';
-import useFetchIntegrations from 'sentry/components/group/externalIssuesList/useFetchIntegrations';
+import {openExternalIssueModal} from 'sentry/components/externalIssues/externalIssueForm';
+import {useFetchIntegrations} from 'sentry/components/group/externalIssuesList/useFetchIntegrations';
 import {t} from 'sentry/locale';
 import type {Group} from 'sentry/types/group';
 import type {GroupIntegration} from 'sentry/types/integrations';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {
   getIntegrationDisplayName,
   getIntegrationIcon,
 } from 'sentry/utils/integrationUtil';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 import type {ExternalIssueAction, GroupIntegrationIssueResult} from './types';
+
+const UNNUDGED_ICON_PROVIDER_KEYS = new Set(['github', 'github_enterprise']);
 
 interface IntegrationExternalIssueOptions {
   group: Group;
@@ -60,7 +63,7 @@ export function useIntegrationExternalIssues({
         nameSubText: config.domainName ?? undefined,
         disabled: config.status === 'disabled',
         onClick: () => {
-          doOpenExternalIssueModal({
+          openExternalIssueModal({
             group,
             integration: config,
             onChange: refetchIntegrations,
@@ -73,7 +76,7 @@ export function useIntegrationExternalIssues({
       // Roll up all configurations into a single integration item
       results.integrations.push({
         displayName: getIntegrationDisplayName(providerKey),
-        key: providerKey,
+        key: `integration-${providerKey}`,
         displayIcon,
         actions,
       });
@@ -84,9 +87,10 @@ export function useIntegrationExternalIssues({
       ...configurations
         .filter(config => config.externalIssues.length > 0)
         .map<GroupIntegrationIssueResult['linkedIssues'][number]>(config => ({
-          key: config.externalIssues[0]!.id,
+          key: `integration-linked-${config.externalIssues[0]!.id}`,
           displayName: config.externalIssues[0]!.key,
           displayIcon,
+          displayIconOffset: UNNUDGED_ICON_PROVIDER_KEYS.has(providerKey) ? 0 : undefined,
           url: config.externalIssues[0]!.url,
           title: config.externalIssues[0]!.title,
           onUnlink: () => {
@@ -94,20 +98,30 @@ export function useIntegrationExternalIssues({
             // For example, we shouldn't have more than 1 jira ticket created for an issue for each jira configuration.
             const issue = config.externalIssues[0];
 
-            api.request(
-              `/organizations/${organization.slug}/issues/${group.id}/integrations/${config.id}/`,
-              {
-                method: 'DELETE',
-                query: {externalIssue: issue!.id},
-                success: () => {
-                  addSuccessMessage(t('Successfully unlinked issue.'));
-                  refetchIntegrations();
-                },
-                error: () => {
-                  addErrorMessage(t('Unable to unlink issue.'));
-                },
-              }
-            );
+            api
+              .requestPromise(
+                getApiUrl(
+                  '/organizations/$organizationIdOrSlug/issues/$issueId/integrations/$integrationId/',
+                  {
+                    path: {
+                      organizationIdOrSlug: organization.slug,
+                      issueId: group.id,
+                      integrationId: config.id,
+                    },
+                  }
+                ),
+                {
+                  method: 'DELETE',
+                  query: {externalIssue: issue!.id},
+                }
+              )
+              .then(() => {
+                addSuccessMessage(t('Successfully unlinked issue.'));
+                refetchIntegrations();
+              })
+              .catch(() => {
+                addErrorMessage(t('Unable to unlink issue.'));
+              });
           },
         }))
     );

@@ -8,13 +8,14 @@ from enum import Enum
 from typing import Any, cast
 
 import orjson
+import sentry_sdk
 from django.http import HttpRequest, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.exceptions import AuthenticationFailed, NotAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import analytics, audit_log, eventstore, options
+from sentry import analytics, audit_log, options
 from sentry.api import client
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
@@ -37,13 +38,20 @@ from sentry.integrations.messaging.metrics import (
 )
 from sentry.integrations.messaging.spec import MessagingIntegrationSpec
 from sentry.integrations.msteams import parsing
-from sentry.integrations.msteams.spec import PROVIDER, MsTeamsMessagingSpec
+from sentry.integrations.msteams.spec import MsTeamsMessagingSpec
 from sentry.integrations.services.integration import integration_service
-from sentry.integrations.types import EventLifecycleOutcome, IntegrationResponse
+from sentry.integrations.types import (
+    EventLifecycleOutcome,
+    IntegrationProviderSlug,
+    IntegrationResponse,
+)
+from sentry.integrations.utils.webhook_viewer_context import webhook_viewer_context
+from sentry.issues.action_log import ActionSource, GroupActionActor, action_context_scope
 from sentry.models.activity import ActivityIntegration
 from sentry.models.apikey import ApiKey
 from sentry.models.group import Group
 from sentry.models.rule import Rule
+from sentry.services import eventstore
 from sentry.silo.base import SiloMode
 from sentry.users.services.user.service import user_service
 from sentry.utils import jwt
@@ -76,28 +84,35 @@ from .utils import ACTION_TYPE, get_preinstall_client
 logger = logging.getLogger("sentry.integrations.msteams.webhooks")
 
 
+@analytics.eventclass()
 class MsTeamsIntegrationAnalytics(analytics.Event):
-    attributes = (analytics.Attribute("actor_id"), analytics.Attribute("organization_id"))
+    actor_id: int
+    organization_id: int
 
 
+@analytics.eventclass("integrations.msteams.assign")
 class MsTeamsIntegrationAssign(MsTeamsIntegrationAnalytics):
-    type = "integrations.msteams.assign"
+    pass
 
 
+@analytics.eventclass("integrations.msteams.resolve")
 class MsTeamsIntegrationResolve(MsTeamsIntegrationAnalytics):
-    type = "integrations.msteams.resolve"
+    pass
 
 
+@analytics.eventclass("integrations.msteams.archive")
 class MsTeamsIntegrationArchive(MsTeamsIntegrationAnalytics):
-    type = "integrations.msteams.archive"
+    pass
 
 
+@analytics.eventclass("integrations.msteams.unresolve")
 class MsTeamsIntegrationUnresolve(MsTeamsIntegrationAnalytics):
-    type = "integrations.msteams.unresolve"
+    pass
 
 
+@analytics.eventclass("integrations.msteams.unassign")
 class MsTeamsIntegrationUnassign(MsTeamsIntegrationAnalytics):
-    type = "integrations.msteams.unassign"
+    pass
 
 
 analytics.register(MsTeamsIntegrationAssign)
@@ -111,13 +126,13 @@ def verify_signature(request) -> bool:
     # docs for jwt authentication here: https://docs.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-authentication?view=azure-bot-service-4.0#bot-to-connector
     token = request.META.get("HTTP_AUTHORIZATION", "").replace("Bearer ", "")
     if not token:
-        logger.error("msteams.webhook.no-auth-header")
+        logger.warning("msteams.webhook.no-auth-header")
         raise NotAuthenticated("Authorization header required")
 
     try:
         jwt.peek_claims(token)
     except jwt.DecodeError:
-        logger.exception("msteams.webhook.invalid-token-no-verify")
+        logger.warning("msteams.webhook.invalid-token-no-verify")
         raise AuthenticationFailed("Could not decode JWT token")
 
     # get the open id config and jwks
@@ -135,28 +150,33 @@ def verify_signature(request) -> bool:
     kid = jwt.peek_header(token)["kid"]
     key = public_keys[kid]
 
+    # OpenID standard for `id_token_signing_alg_values_supported` is a JSON Array.
+    # Please take a look at the OpenID Provider Metadata:
+    # https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata
+    algorithms: list[str] = open_id_config["id_token_signing_alg_values_supported"]
+
     try:
         decoded = jwt.decode(
             token,
             key,
             audience=options.get("msteams.client-id"),
-            algorithms=open_id_config["id_token_signing_alg_values_supported"],
+            algorithms=algorithms,
         )
     except Exception as err:
-        logger.exception("msteams.webhook.invalid-token-with-verify")
+        logger.warning("msteams.webhook.invalid-token-with-verify")
         raise AuthenticationFailed(f"Could not validate JWT. Got {err}")
 
     # now validate iss, service url, and expiration
     if decoded.get("iss") != "https://api.botframework.com":
-        logger.error("msteams.webhook.invalid-iss")
+        logger.warning("msteams.webhook.invalid-iss")
         raise AuthenticationFailed("The field iss does not match")
 
     if decoded.get("serviceurl") != request.data.get("serviceUrl"):
-        logger.error("msteams.webhook.invalid-service_url")
+        logger.warning("msteams.webhook.invalid-service_url")
         raise AuthenticationFailed("The field serviceUrl does not match")
 
     if int(time.time()) > decoded["exp"] + CLOCK_SKEW:
-        logger.error("msteams.webhook.expired-token")
+        logger.warning("msteams.webhook.expired-token")
         raise AuthenticationFailed("Token is expired")
 
     return True
@@ -178,13 +198,13 @@ class MsTeamsEvents(Enum):
 
 @all_silo_endpoint
 class MsTeamsWebhookEndpoint(Endpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.MESSAGING_INTEGRATIONS
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
     }
     authentication_classes = ()
     permission_classes = ()
-    provider = PROVIDER
+    provider = IntegrationProviderSlug.MSTEAMS.value
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -288,7 +308,7 @@ class MsTeamsWebhookEndpoint(Endpoint):
         # are from a user submitting an option on a card, which
         # will always contain an "payload.actionType" in the data.
         if data.get("value", {}).get("payload", {}).get("actionType"):
-            # Processing card actions can only occur in the Region silo.
+            # Processing card actions can only occur in the Cell silo.
             if SiloMode.get_current_mode() == SiloMode.CONTROL:
                 return self.respond(status=400)
             return self._handle_action_submitted(request)
@@ -416,18 +436,19 @@ class MsTeamsWebhookEndpoint(Endpoint):
         )
         if len(org_integrations) > 0:
             for org_integration in org_integrations:
-                create_audit_entry(
-                    request=request,
-                    organization_id=org_integration.organization_id,
-                    target_object=integration.id,
-                    event=audit_log.get_event_id("INTEGRATION_REMOVE"),
-                    actor_label="Teams User",
-                    data={
-                        "provider": integration.provider,
-                        "name": integration.name,
-                        "team_id": team_id,
-                    },
-                )
+                with webhook_viewer_context(org_integration.organization_id):
+                    create_audit_entry(
+                        request=request,
+                        organization_id=org_integration.organization_id,
+                        target_object=integration.id,
+                        event=audit_log.get_event_id("INTEGRATION_REMOVE"),
+                        actor_label="Teams User",
+                        data={
+                            "provider": integration.provider,
+                            "name": integration.name,
+                            "team_id": team_id,
+                        },
+                    )
 
         integration_service.delete_integration(integration_id=integration.id)
         return self.respond(status=204)
@@ -473,6 +494,14 @@ class MsTeamsWebhookEndpoint(Endpoint):
         ACTION_TYPE.UNASSIGN: ("unassign", MessagingInteractionType.UNASSIGN),
     }
 
+    _EVENT_TYPES: dict[str, type[MsTeamsIntegrationAnalytics]] = {
+        "assign": MsTeamsIntegrationAssign,
+        "resolve": MsTeamsIntegrationResolve,
+        "archive": MsTeamsIntegrationArchive,
+        "unresolve": MsTeamsIntegrationUnresolve,
+        "unassign": MsTeamsIntegrationUnassign,
+    }
+
     def _issue_state_change(self, group: Group, identity: RpcIdentity, data) -> Response:
         event_write_key = ApiKey(
             organization_id=group.project.organization_id, scope_list=["event:write"]
@@ -480,24 +509,31 @@ class MsTeamsWebhookEndpoint(Endpoint):
 
         action_data = self._make_action_data(data, identity.user_id)
         status, interaction_type = self._ACTION_TYPES[data["payload"]["actionType"]]
-        analytics_event = f"integrations.msteams.{status}"
-        analytics.record(
-            analytics_event,
-            actor_id=identity.user_id,
-            organization_id=group.project.organization.id,
-        )
+
+        try:
+            analytics.record(
+                self._EVENT_TYPES[status](
+                    actor_id=identity.user_id,
+                    organization_id=group.project.organization.id,
+                ),
+            )
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
 
         with MessagingInteractionEvent(
             interaction_type, MsTeamsMessagingSpec()
         ).capture() as lifecycle:
             try:
-                response = client.put(
-                    path=f"/projects/{group.project.organization.slug}/{group.project.slug}/issues/",
-                    params={"id": group.id},
-                    data=action_data,
-                    user=user_service.get_user(user_id=identity.user_id),
-                    auth=event_write_key,
-                )
+                with action_context_scope(
+                    source=ActionSource.MSTEAMS, actor=GroupActionActor.user(identity.user_id)
+                ):
+                    response = client.put(
+                        path=f"/projects/{group.project.organization.slug}/{group.project.slug}/issues/",
+                        params={"id": group.id},
+                        data=action_data,
+                        user=user_service.get_user(user_id=identity.user_id),
+                        auth=event_write_key,
+                    )
             except client.ApiError as e:
                 if e.status_code == 403:
                     lifecycle.record_halt(e)
@@ -539,9 +575,18 @@ class MsTeamsWebhookEndpoint(Endpoint):
         group = Group.objects.select_related("project__organization").filter(id=group_id).first()
         if group:
             integration = integration_service.get_integration(
-                integration_id=integration.id, status=ObjectStatus.ACTIVE
+                integration_id=integration.id,
+                status=ObjectStatus.ACTIVE,
+                using_replica=options.get("integration_service.get_integration.using_replica"),
             )
             if integration is None:
+                group = None
+            elif not integration_service.get_organization_integrations(
+                organization_id=group.project.organization_id,
+                integration_id=integration.id,
+                status=ObjectStatus.ACTIVE,
+                limit=1,
+            ):
                 group = None
 
         if integration is None or group is None:
@@ -554,58 +599,61 @@ class MsTeamsWebhookEndpoint(Endpoint):
             )
             return self.respond(status=404)
 
-        idp = identity_service.get_provider(provider_type="msteams", provider_ext_id=team_id)
-        if idp is None:
-            logger.info(
-                "msteams.action.invalid-team-id",
-                extra={
-                    "team_id": team_id,
-                    "integration_id": integration.id,
-                    "organization_id": group.organization.id,
-                },
+        with webhook_viewer_context(group.organization.id):
+            idp = identity_service.get_provider(
+                provider_type=IntegrationProviderSlug.MSTEAMS.value, provider_ext_id=team_id
             )
-            return self.respond(status=404)
+            if idp is None:
+                logger.info(
+                    "msteams.action.invalid-team-id",
+                    extra={
+                        "team_id": team_id,
+                        "integration_id": integration.id,
+                        "organization_id": group.organization.id,
+                    },
+                )
+                return self.respond(status=404)
 
-        identity = identity_service.get_identity(
-            filter={"provider_id": idp.id, "identity_ext_id": user_id}
-        )
-        if identity is None:
-            associate_url = build_linking_url(
-                integration, group.organization, user_id, team_id, tenant_id
+            identity = identity_service.get_identity(
+                filter={"provider_id": idp.id, "identity_ext_id": user_id}
             )
+            if identity is None:
+                associate_url = build_linking_url(
+                    integration, group.organization, user_id, team_id, tenant_id
+                )
 
-            card = build_linking_card(associate_url)
-            user_conversation_id = client.get_user_conversation_id(user_id, tenant_id)
-            client.send_card(user_conversation_id, card)
-            return self.respond(status=201)
+                card = build_linking_card(associate_url)
+                user_conversation_id = client.get_user_conversation_id(user_id, tenant_id)
+                client.send_card(user_conversation_id, card)
+                return self.respond(status=201)
 
-        # update the state of the issue
-        issue_change_response = self._issue_state_change(group, identity, data["value"])
+            # update the state of the issue
+            issue_change_response = self._issue_state_change(group, identity, data["value"])
 
-        # get the rules from the payload
-        rules = tuple(Rule.objects.filter(id__in=payload["rules"]))
+            # get the rules from the payload
+            rules = tuple(Rule.objects.filter(id__in=payload["rules"]))
 
-        # pull the event based off our payload
-        event = eventstore.backend.get_event_by_id(group.project_id, payload["eventId"])
-        if event is None:
-            logger.info(
-                "msteams.action.event-missing",
-                extra={
-                    "team_id": team_id,
-                    "integration_id": integration.id,
-                    "organization_id": group.organization.id,
-                    "event_id": payload["eventId"],
-                    "project_id": group.project_id,
-                },
-            )
-            return self.respond(status=404)
+            # pull the event based off our payload
+            event = eventstore.backend.get_event_by_id(group.project_id, payload["eventId"])
+            if event is None:
+                logger.info(
+                    "msteams.action.event-missing",
+                    extra={
+                        "team_id": team_id,
+                        "integration_id": integration.id,
+                        "organization_id": group.organization.id,
+                        "event_id": payload["eventId"],
+                        "project_id": group.project_id,
+                    },
+                )
+                return self.respond(status=404)
 
-        # refresh issue and update card
-        group.refresh_from_db()
-        card = MSTeamsIssueMessageBuilder(group, event, rules, integration).build_group_card()
-        client.update_card(conversation_id, activity_id, card)
+            # refresh issue and update card
+            group.refresh_from_db()
+            card = MSTeamsIssueMessageBuilder(group, event, rules, integration).build_group_card()
+            client.update_card(conversation_id, activity_id, card)
 
-        return issue_change_response
+            return issue_change_response
 
     def _handle_channel_message(self, request: Request) -> Response:
         data = request.data
@@ -706,7 +754,6 @@ class MsTeamsCommandDispatcher(MessagingIntegrationCommandDispatcher[AdaptiveCar
     def command_handlers(
         self,
     ) -> Iterable[tuple[MessagingIntegrationCommand, CommandHandler[AdaptiveCard]]]:
-
         yield commands.HELP, self.help_handler
         yield commands.LINK_IDENTITY, self.link_user_handler
         yield commands.UNLINK_IDENTITY, self.unlink_user_handler

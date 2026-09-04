@@ -12,12 +12,12 @@ from django.utils.translation import gettext as _
 from django.views.decorators.http import require_http_methods
 
 from sentry import options
+from sentry.auth.twofactor import reset_2fa_rate_limits
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.models.organizationmembermapping import OrganizationMemberMapping
 from sentry.organizations.services.organization import organization_service
 from sentry.security.utils import capture_security_activity
 from sentry.signals import email_verified, terms_accepted
-from sentry.silo.base import control_silo_function
 from sentry.users.models.lostpasswordhash import LostPasswordHash
 from sentry.users.models.user import User
 from sentry.users.models.useremail import UserEmail
@@ -31,7 +31,7 @@ from sentry.users.web.accounts_form import (
 from sentry.utils import auth
 from sentry.utils.signing import unsign
 from sentry.web.decorators import login_required, set_referrer_policy
-from sentry.web.frontend.twofactor import reset_2fa_rate_limits
+from sentry.web.frontend.base import control_silo_view
 from sentry.web.helpers import render_to_response
 
 logger = logging.getLogger("sentry.accounts")
@@ -46,16 +46,10 @@ ERR_SIGNATURE_EXPIRED = _(
     "Settings to resend the verification email."
 )
 
-INFO_EMAIL_ALREADY_VERIFIED = _("The email you are trying to verify has already been verified.")
+SUCCESS_CONFIRMING_EMAIL = _("Thanks for confirming your email")
 
 
 class InvalidRequest(Exception):
-    pass
-
-
-class VerifiedEmailAlreadyExists(Exception):
-    """email already exists as a verified email on the account"""
-
     pass
 
 
@@ -64,13 +58,13 @@ def get_template(mode: str, name: str) -> str:
 
 
 @login_required
-@control_silo_function
+@control_silo_view
 def login_redirect(request: HttpRequest) -> HttpResponseRedirect:
     login_url = auth.get_login_redirect(request)
     return HttpResponseRedirect(login_url)
 
 
-@control_silo_function
+@control_silo_view
 def expired(request: HttpRequest, user: User) -> HttpResponse:
     hash = lost_password_hash_service.get_or_create(user_id=user.id).hash
     LostPasswordHash.send_recover_password_email(user, hash, request.META["REMOTE_ADDR"])
@@ -79,7 +73,7 @@ def expired(request: HttpRequest, user: User) -> HttpResponse:
     return render_to_response(get_template("recover", "expired"), context, request)
 
 
-@control_silo_function
+@control_silo_view
 def recover(request: HttpRequest) -> HttpResponse:
     from sentry import ratelimits as ratelimiter
 
@@ -132,7 +126,7 @@ def recover(request: HttpRequest) -> HttpResponse:
 
 
 @set_referrer_policy("strict-origin-when-cross-origin")
-@control_silo_function
+@control_silo_view
 def relocate_reclaim(request: HttpRequest, user_id: int) -> HttpResponse:
     """
     Ask to receive a new "claim this user" email.
@@ -195,8 +189,8 @@ def relocate_reclaim(request: HttpRequest, user_id: int) -> HttpResponse:
     return render_to_response(get_template("relocate", "sent"), {}, request)
 
 
+@control_silo_view
 @set_referrer_policy("strict-origin-when-cross-origin")
-@control_silo_function
 def recover_confirm(
     request: HttpRequest, user_id: int, hash: str, mode: str = "recover"
 ) -> HttpResponse:
@@ -209,6 +203,9 @@ def recover_confirm(
             raise LostPasswordHash.DoesNotExist
         user = password_hash.user
     except LostPasswordHash.DoesNotExist:
+        return render_to_response(get_template(mode, "failure"), {"user_id": user_id}, request)
+
+    if getattr(user, "is_suspended", False):
         return render_to_response(get_template(mode, "failure"), {"user_id": user_id}, request)
 
     extra = {
@@ -237,21 +234,16 @@ def recover_confirm(
             if mode == "relocate":
                 # Relocation form requires users to accept TOS and privacy policy with an org
                 # associated. We only need the first membership, since all of user's orgs will be in
-                # the same region.
+                # the same cell.
                 membership = OrganizationMemberMapping.objects.filter(user=user).first()
                 assert membership is not None
                 mapping = OrganizationMapping.objects.get(
                     organization_id=membership.organization_id
                 )
 
-                # These service calls need to be outside of the transaction block. Claiming an
-                # account constitutes an email verifying action. We'll verify the primary email
-                # associated with this account in particular, since that is the only one the user
-                # claiming email could have been sent to.
                 rpc_user = user_service.get_user(user_id=user.id)
-                user_service.verify_user_email(email=user.email, user_id=user.id)
                 orgs = organization_service.get_organizations_by_user_and_scope(
-                    region_name=mapping.region_name, user=rpc_user
+                    cell_name=mapping.cell_name, user=rpc_user
                 )
                 for org in orgs:
                     terms_accepted.send_robust(
@@ -260,6 +252,10 @@ def recover_confirm(
                         ip_address=request.META["REMOTE_ADDR"],
                         sender=recover_confirm,
                     )
+
+            # Completing a password reset proves the user controls the email
+            # the reset link was sent to, so verify it.
+            user_service.verify_user_email(email=user.email, user_id=user.id)
 
             with transaction.atomic(router.db_for_write(User)):
                 if mode == "relocate":
@@ -300,16 +296,16 @@ def recover_confirm(
 
 
 # Set password variation of password recovery
-set_password_confirm = partial(recover_confirm, mode="set_password")
+set_password_confirm = control_silo_view(partial(recover_confirm, mode="set_password"))
 
 
 # Relocation variation of password recovery
-relocate_confirm = partial(recover_confirm, mode="relocate")
+relocate_confirm = control_silo_view(partial(recover_confirm, mode="relocate"))
 
 
 @login_required
 @require_http_methods(["POST"])
-@control_silo_function
+@control_silo_view
 def start_confirm_email(request: HttpRequest) -> HttpResponse:
     from sentry import ratelimits as ratelimiter
 
@@ -324,9 +320,9 @@ def start_confirm_email(request: HttpRequest) -> HttpResponse:
             status=429,
         )
 
-    assert isinstance(
-        request.user, User
-    ), "User must have an associated email to send confirm emails to"
+    assert isinstance(request.user, User), (
+        "User must have an associated email to send confirm emails to"
+    )
     if "primary-email" in request.POST:
         email = request.POST.get("email")
         try:
@@ -361,7 +357,7 @@ def start_confirm_email(request: HttpRequest) -> HttpResponse:
 
 @set_referrer_policy("strict-origin-when-cross-origin")
 @login_required
-@control_silo_function
+@control_silo_view
 def confirm_email(request: HttpRequest, user_id: int, hash: str) -> HttpResponseRedirect:
     msg = _("Thanks for confirming your email")
     level = messages.SUCCESS
@@ -398,21 +394,11 @@ def confirm_email(request: HttpRequest, user_id: int, hash: str) -> HttpResponse
 
 @set_referrer_policy("strict-origin-when-cross-origin")
 @login_required
-@control_silo_function
+@control_silo_view
 def confirm_signed_email(
     request: HttpRequest, signed_data: str
 ) -> HttpResponseRedirect | HttpResponse:
     EMAIL_CONFIRMATION_SALT = options.get("user-settings.signed-url-confirmation-emails-salt")
-
-    use_signed_urls = options.get("user-settings.signed-url-confirmation-emails")
-    if not use_signed_urls:
-        msg = ERR_CONFIRMING_EMAIL
-        level = messages.ERROR
-        messages.add_message(request, level, msg)
-        return HttpResponseRedirect(reverse("sentry-account-settings-emails"))
-
-    msg = _("Thanks for confirming your email")
-    level = messages.SUCCESS
 
     try:
         data = unsign(
@@ -424,54 +410,32 @@ def confirm_signed_email(
         if request.user.id != int(data["user_id"]):
             raise InvalidRequest
 
-        # check to see if the email has already been verified
-        try:
-            email = UserEmail.objects.get(user=request.user.id, email=data["email"])
-            if email.is_verified:
-                raise VerifiedEmailAlreadyExists()
-        except UserEmail.DoesNotExist:
-            # user email does not exist, so we can create it
-            pass
-    except VerifiedEmailAlreadyExists:
-        msg = INFO_EMAIL_ALREADY_VERIFIED
-        level = messages.INFO
-        messages.add_message(request, level, msg)
-        return HttpResponseRedirect(reverse("sentry-account-settings-emails"))
+        # Verifying an existing unverified email is a separate path
+        # This path is only emails that don't exist yet
+        email, created = UserEmail.objects.get_or_create(
+            user_id=request.user.id,
+            email=data["email"],
+            defaults={"validation_hash": "", "is_verified": True},
+        )
     except SignatureExpired:
-        msg = ERR_SIGNATURE_EXPIRED
-        level = messages.ERROR
-        messages.add_message(request, level, msg)
-        return HttpResponseRedirect(reverse("sentry-account-settings-emails"))
+        msg, level = ERR_SIGNATURE_EXPIRED, messages.ERROR
     except (InvalidRequest, BadSignature):
-        msg = ERR_CONFIRMING_EMAIL
-        level = messages.ERROR
-        messages.add_message(request, level, msg)
-        return HttpResponseRedirect(reverse("sentry-account-settings-emails"))
+        msg, level = ERR_CONFIRMING_EMAIL, messages.ERROR
     except Exception:
         logger.exception("user.email.signed-confirm.error")
-        msg = ERR_CONFIRMING_EMAIL
-        level = messages.ERROR
-        messages.add_message(request, level, msg)
-        return HttpResponseRedirect(reverse("sentry-account-settings-emails"))
-
-    user = User.objects.get(id=request.user.id)
-    email = UserEmail.objects.create(
-        user=user,
-        email=data["email"],
-        validation_hash="",
-        is_verified=True,
-    )
-    email.save()
-
-    email_verified.send(email=email.email, sender=email)
-    logger.info(
-        "user.email.signed-confirm",
-        extra={
-            "user_id": request.user.id,
-            "ip_address": request.META["REMOTE_ADDR"],
-            "email": email.email,
-        },
-    )
+        msg, level = ERR_CONFIRMING_EMAIL, messages.ERROR
+    else:
+        if created:
+            email_verified.send(email=email.email, sender=email)
+            logger.info(
+                "user.email.signed-confirm",
+                extra={
+                    "user_id": request.user.id,
+                    "ip_address": request.META["REMOTE_ADDR"],
+                    "email": email.email,
+                },
+            )
+        msg, level = SUCCESS_CONFIRMING_EMAIL, messages.SUCCESS
 
     messages.add_message(request, level, msg)
     return HttpResponseRedirect(reverse("sentry-account-settings-emails"))

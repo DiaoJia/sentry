@@ -1,15 +1,14 @@
 import {useCallback} from 'react';
-import styled from '@emotion/styled';
 
-import {DatePageFilter} from 'sentry/components/organizations/datePageFilter';
-import {EnvironmentPageFilter} from 'sentry/components/organizations/environmentPageFilter';
-import PageFilterBar from 'sentry/components/organizations/pageFilterBar';
+import {Grid} from '@sentry/scraps/layout';
+
+import {DatePageFilter} from 'sentry/components/pageFilters/date/datePageFilter';
+import {EnvironmentPageFilter} from 'sentry/components/pageFilters/environment/environmentPageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
 import {SearchQueryBuilder} from 'sentry/components/searchQueryBuilder';
+import type {GetTagValues} from 'sentry/components/searchQueryBuilder';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Tag} from 'sentry/types/group';
 import {SEMVER_TAGS} from 'sentry/utils/discover/fields';
-import useOrganization from 'sentry/utils/useOrganization';
 import type {TagValueLoader} from 'sentry/views/issueList/types';
 
 type Props = {
@@ -27,44 +26,34 @@ const SUPPORTED_TAGS = {
   },
 };
 
-function ProjectFilters({query, relativeDateOptions, tagValueLoader, onSearch}: Props) {
-  const organization = useOrganization();
-  const getTagValues = useCallback(
-    async (tag: Tag, currentQuery: string): Promise<string[]> => {
-      const values = await tagValueLoader(tag.key, currentQuery);
+export function ProjectFilters({
+  query,
+  relativeDateOptions,
+  tagValueLoader,
+  onSearch,
+}: Props) {
+  const getTagValues = useCallback<GetTagValues>(
+    async ({tag, searchQuery}) => {
+      const values = await tagValueLoader(tag.key, searchQuery);
       return values.map(({value}) => value);
     },
     [tagValueLoader]
   );
 
   return (
-    <FiltersWrapper>
+    <Grid columns={{zero: 'minmax(0, 1fr)', xl: 'minmax(0, max-content) 1fr'}} gap="xl">
       <PageFilterBar>
         <EnvironmentPageFilter />
         <DatePageFilter relativeOptions={relativeDateOptions} />
       </PageFilterBar>
       <SearchQueryBuilder
-        searchOnChange={organization.features.includes('ui-search-on-change')}
         searchSource="project_filters"
         initialQuery={query ?? ''}
         placeholder={t('Search by release version, build, package, or stage')}
         filterKeys={SUPPORTED_TAGS}
         onSearch={onSearch}
         getTagValues={getTagValues}
-        showUnsubmittedIndicator
       />
-    </FiltersWrapper>
+    </Grid>
   );
 }
-
-const FiltersWrapper = styled('div')`
-  display: grid;
-  grid-template-columns: minmax(0, max-content) 1fr;
-  gap: ${space(2)};
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-`;
-
-export default ProjectFilters;

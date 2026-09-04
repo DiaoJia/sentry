@@ -7,13 +7,15 @@ from sentry.models.organization import Organization
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
 
+DYNAMIC_SAMPLING_FEATURE = "organizations:dynamic-sampling"
+
 
 def has_dynamic_sampling(
     organization: Organization | None, actor: User | RpcUser | AnonymousUser | None = None
 ) -> bool:
     # If an organization can't be fetched, we will assume it has no dynamic sampling.
     return organization is not None and features.has(
-        "organizations:dynamic-sampling", organization, actor=actor
+        DYNAMIC_SAMPLING_FEATURE, organization, actor=actor
     )
 
 
@@ -22,18 +24,6 @@ def has_custom_dynamic_sampling(
 ) -> bool:
     return organization is not None and features.has(
         "organizations:dynamic-sampling-custom", organization, actor=actor
-    )
-
-
-def has_dynamic_sampling_minimum_sample_rate(
-    organization: Organization | None, actor: User | RpcUser | AnonymousUser | None = None
-) -> bool:
-    return (
-        organization is not None
-        and features.has(
-            "organizations:dynamic-sampling-minimum-sample-rate", organization, actor=actor
-        )
-        and has_custom_dynamic_sampling(organization, actor=actor)
     )
 
 

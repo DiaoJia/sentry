@@ -8,10 +8,8 @@ from uuid import uuid4
 
 import orjson
 from django.apps import apps
-from django.core import serializers
 from django.core.exceptions import FieldDoesNotExist
 from django.db import DatabaseError, connections, router, transaction
-from django.db.models.base import Model
 from sentry_sdk import capture_exception
 
 from sentry.backup.crypto import Decryptor, decrypt_encrypted_tarball
@@ -23,10 +21,10 @@ from sentry.backup.dependencies import (
     dependencies,
     get_model_name,
     reversed_dependencies,
+    sorted_dependencies,
 )
 from sentry.backup.helpers import Filter, ImportFlags, Printer
 from sentry.backup.scopes import ImportScope
-from sentry.backup.services.import_export.impl import fixup_array_fields
 from sentry.backup.services.import_export.model import (
     RpcFilter,
     RpcImportError,
@@ -37,13 +35,14 @@ from sentry.backup.services.import_export.model import (
 )
 from sentry.backup.services.import_export.service import ImportExportService
 from sentry.db.models.paranoia import ParanoidModel
-from sentry.hybridcloud.models.outbox import OutboxFlushError, RegionOutbox
+from sentry.hybridcloud.models.outbox import CellOutbox, ControlOutbox, OutboxFlushError
 from sentry.hybridcloud.outbox.category import OutboxCategory, OutboxScope
 from sentry.models.importchunk import ControlImportChunkReplica
 from sentry.models.orgauthtoken import OrgAuthToken
-from sentry.nodestore.django.models import Node
+from sentry.services.nodestore.django.models import Node
 from sentry.silo.base import SiloMode
 from sentry.silo.safety import unguarded_write
+from sentry.utils import json
 from sentry.utils.env import is_split_db
 
 __all__ = (
@@ -71,7 +70,9 @@ class ImportingError(Exception):
 def _clear_model_tables_before_import():
     reversed = reversed_dependencies()
 
-    for model in reversed:
+    # Outbox models are cleared last: some models (e.g. ProjectKey) use pre_delete signals
+    # that write outbox entries even during queryset-level deletes.
+    for model in reversed + [CellOutbox, ControlOutbox]:
         using = router.db_for_write(model)
         manager = model.with_deleted if issubclass(model, ParanoidModel) else model.objects
         manager.all().delete()
@@ -128,11 +129,10 @@ def _import(
     # Import here to prevent circular module resolutions.
     from sentry.models.organization import Organization
     from sentry.models.organizationmember import OrganizationMember
-    from sentry.users.models.email import Email
     from sentry.users.models.user import User
 
     if SiloMode.get_current_mode() == SiloMode.CONTROL:
-        errText = "Imports must be run in REGION or MONOLITH instances only"
+        errText = "Imports must be run in CELL or MONOLITH instances only"
         printer.echo(errText, err=True)
         raise RuntimeError(errText)
 
@@ -143,7 +143,6 @@ def _import(
         flags = flags._replace(import_uuid=uuid4().hex)
 
     deps = dependencies()
-    user_model_name = get_model_name(User)
     org_auth_token_model_name = get_model_name(OrgAuthToken)
     org_member_model_name = get_model_name(OrganizationMember)
     org_model_name = get_model_name(Organization)
@@ -174,18 +173,11 @@ def _import(
     content: bytes | str = (
         decrypt_encrypted_tarball(src, decryptor) if decryptor is not None else src.read()
     )
-
     content = remove_deleted_models_and_fields(content)
-
-    content = fixup_array_fields(content)
 
     filters = []
     if filter_by is not None:
         filters.append(filter_by)
-
-        # `sentry.Email` models don't have any explicit dependencies on `sentry.User`, so we need to
-        # find and record them manually.
-        user_to_email = dict()
 
         if filter_by.model == Organization:
             # To properly filter organizations, we need to grab their users first. There is no
@@ -198,27 +190,18 @@ def _import(
             user_filter: Filter[int] = Filter[int](model=User, field="pk")
             filters.append(user_filter)
 
-            # TODO(getsentry#team-ospo/190): It turns out that Django's "streaming" JSON
-            # deserializer does no such thing, and actually loads the entire JSON into memory! If we
-            # don't want to choke on large imports, we'll need use a truly "chunkable" JSON
-            # importing library like ijson for this.
-            for obj in serializers.deserialize("json", content):
-                o = obj.object
-                model_name = get_model_name(o)
-                if model_name == user_model_name:
-                    username = getattr(o, "username", None)
-                    email = getattr(o, "email", None)
-                    if username is not None and email is not None:
-                        user_to_email[username] = email
-                elif model_name == org_model_name:
-                    pk = getattr(o, "pk", None)
-                    slug = getattr(o, "slug", None)
+            record_data = json.loads(content)
+            for item in record_data:
+                model_name = NormalizedModelName(item.get("model"))
+                if model_name == org_model_name:
+                    pk = item["pk"]
+                    slug = item["fields"].get("slug", None)
                     if pk is not None and slug in filter_by.values:
                         filtered_org_pks.add(pk)
                 elif model_name == org_member_model_name:
                     seen_first_org_member_model = True
-                    user = getattr(o, "user_id", None)
-                    org = getattr(o, "organization_id", None)
+                    user = item["fields"].get("user_id", None)
+                    org = item["fields"].get("organization", None)
                     if user is not None and org in filtered_org_pks:
                         user_filter.values.add(user)
                 elif seen_first_org_member_model:
@@ -226,32 +209,73 @@ def _import(
                     # org member we're going to see. We can ignore the rest of the models.
                     break
         elif filter_by.model == User:
-            seen_first_user_model = False
-            for obj in serializers.deserialize("json", content):
-                o = obj.object
-                model_name = get_model_name(o)
-                if model_name == user_model_name:
-                    seen_first_user_model = False
-                    username = getattr(o, "username", None)
-                    email = getattr(o, "email", None)
-                    if username is not None and email is not None:
-                        user_to_email[username] = email
-                elif seen_first_user_model:
-                    break
+            pass
         else:
             raise TypeError("Filter arguments must only apply to `Organization` or `User` models")
 
-        user_filter = next(f for f in filters if f.model == User)
-        email_filter = Filter[str](
-            model=Email,
-            field="email",
-            values={v for k, v in user_to_email.items() if k in user_filter.values},
-        )
+    # Reorder models according to dependencies to ensure correct import order.
+    # This is necessary for backward compatibility with exports created before
+    # __relocation_dependencies__ was added to models like DataSource.
+    def reorder_models_by_dependencies(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Reorder a list of model dictionaries to respect dependency ordering.
 
-        filters.append(email_filter)
+        Models are grouped by their model name, then reordered according to
+        sorted_dependencies() to ensure dependencies are imported before
+        models that reference them.
 
-    # The input JSON blob should already be ordered by model kind. We simply break it up into
-    # smaller chunks, while guaranteeing that each chunk contains at most 1 model kind.
+        Models not present in sorted_dependencies() (e.g., deleted models from
+        old exports, plugin models) are preserved at the end in their original
+        relative order to avoid data loss.
+        """
+        # Get the correct dependency order and pre-populate models_by_name
+        correct_order = [get_model_name(model) for model in sorted_dependencies()]
+        models_by_name: dict[NormalizedModelName, list[dict[str, Any]]] = {
+            model_name: [] for model_name in correct_order
+        }
+
+        # Walk through input models, preserving order of unknown models
+        unknown_models = []
+        unknown_model_names_seen: set[NormalizedModelName] = set()
+        for model in models:
+            model_name = NormalizedModelName(model["model"])
+            if model_name in models_by_name:
+                # Known model - add to its bucket
+                models_by_name[model_name].append(model)
+            else:
+                # Unknown model - preserve in original order
+                unknown_models.append(model)
+                # Log first occurrence of each unknown model type
+                if model_name not in unknown_model_names_seen:
+                    unknown_model_names_seen.add(model_name)
+                    logger.info(
+                        "import.reorder_models.unknown_model",
+                        extra={
+                            "model_name": str(model_name),
+                        },
+                    )
+
+        # Rebuild the models list in dependency order
+        reordered = []
+        for model_name in correct_order:
+            reordered.extend(models_by_name[model_name])
+
+        # Append unknown models at the end, preserving their relative order
+        if unknown_models:
+            reordered.extend(unknown_models)
+            logger.warning(
+                "import.reorder_models.unordered_models_appended",
+                extra={
+                    "unordered_count": len(unknown_models),
+                    "total_models": len(reordered),
+                },
+            )
+
+        return reordered
+
+    # The input JSON blob should already be ordered by model kind, but to ensure backward
+    # compatibility with old exports, we reorder it based on our dependency information.
+    # We then break it up into smaller chunks, guaranteeing that each chunk contains at most 1 model kind.
     #
     # This generator returns a three-tuple of values: 1. the name of the model being generated, 2. a
     # serialized JSON string containing some number of such model instances, and 3. an offset
@@ -260,8 +284,11 @@ def _import(
     def yield_json_models(content) -> Iterator[tuple[NormalizedModelName, str, int]]:
         # TODO(getsentry#team-ospo/190): Better error handling for unparsable JSON.
         models = orjson.loads(content)
+
+        # Reorder models to respect dependencies
+        models = reorder_models_by_dependencies(models)
         last_seen_model_name: NormalizedModelName | None = None
-        batch: list[type[Model]] = []
+        batch: list[dict[str, Any]] = []
         num_current_model_instances_yielded = 0
         for model in models:
             model_name = NormalizedModelName(model["model"])
@@ -353,7 +380,7 @@ def _import(
         if result.min_ordinal is not None and SiloMode.CONTROL in deps[model_name].silos:
             # Maybe we are resuming an import on a retry. Check to see if this
             # `ControlImportChunkReplica` already exists, and only write it if it does not. There
-            # can't be races here, since there is only one celery task running at a time, pushing
+            # can't be races here, since there is only one task running at a time, pushing
             # updates in a synchronous manner.
             existing_control_import_chunk_replica = ControlImportChunkReplica.objects.filter(
                 import_uuid=flags.import_uuid, model=model_name_str, min_ordinal=result.min_ordinal
@@ -425,28 +452,20 @@ def _import(
             slug_mapping[org_id] = org_slug or ""
 
         if len(slug_mapping) > 0:
-            # HACK(azaslavsky): Okay, this gets a bit complicated, but bear with me: the following
-            # `bulk_create...` calls will result in some actions on the control silo that call back
-            # into this region. So the client (this region) calls the server (the control silo)
-            # which may need to make one or more calls back into the client (this region). Because
-            # some of our `OrganizationMemberTeam` outboxes may not be drained due to the HACK we
-            # performed in `import_export/impl.py` (see that file for more details), there may be a
-            # massive backlog of `OrganizationMemberTeam` outboxes that need to clear before this
-            # region can respond. In the worst case scenario, this will result in a timeout of the
-            # original, outer `bulk_create...` call.
+            # The `bulk_create...` call below is reentrant: this region calls the control silo,
+            # which may call back into this region before it can answer. Any backlog on an
+            # imported organization's `ORGANIZATION_SCOPE` shard has to clear before this region
+            # can serve that callback, which in the worst case times out the outer call.
             #
-            # So, the solution we take here is to manually clear all `ORGANIZATION_SCOPE` outboxes
-            # for each imported organization on this side first, so that when this region responds
-            # to the call triggered from the server-side of `bulk_create...`, the
-            # `ORGANIZATION`-scoped outbox queue is empty and is free to only serve requests
-            # specifically related to slug provisioning.
+            # Draining each organization's shard up front keeps that queue free to serve only the
+            # slug-provisioning callback.
             for id in slug_mapping.keys():
                 # To combat ephemeral errors, we'll try this a few times before accepting failure.
                 for attempt in range(MAX_SHARD_DRAIN_ATTEMPTS):
                     try:
                         # Manually create an empty outbox targeting this organization's shard, so
                         # that we can force it to drain.
-                        RegionOutbox(
+                        CellOutbox(
                             shard_scope=OutboxScope.ORGANIZATION_SCOPE,
                             shard_identifier=id,
                             category=OutboxCategory.ORGANIZATION_UPDATE,

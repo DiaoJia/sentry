@@ -20,7 +20,7 @@ from sentry.sentry_apps.services.app import (
     RpcSentryAppService,
     SentryAppInstallationFilterArgs,
 )
-from sentry.sentry_apps.services.app.model import RpcSentryAppComponentContext
+from sentry.sentry_apps.services.app.model import RpcSentryAppComponentContext, SentryAppUpdateArgs
 from sentry.silo.base import SiloMode
 from sentry.users.services.user import RpcUser
 
@@ -90,6 +90,11 @@ class AppService(RpcService):
     @rpc_method
     @abc.abstractmethod
     def get_sentry_apps_by_proxy_users(self, *, proxy_user_ids: list[int]) -> list[RpcSentryApp]:
+        pass
+
+    @rpc_method
+    @abc.abstractmethod
+    def get_sentry_apps_by_ids(self, *, ids: list[int]) -> list[RpcSentryApp]:
         pass
 
     @rpc_method
@@ -194,6 +199,16 @@ class AppService(RpcService):
 
     @rpc_method
     @abc.abstractmethod
+    def get_sentry_apps_for_organization(self, *, organization_id: int) -> list[RpcSentryApp]:
+        pass
+
+    @rpc_method
+    @abc.abstractmethod
+    def update_sentry_app(self, *, id: int, attrs: SentryAppUpdateArgs) -> RpcSentryApp | None:
+        pass
+
+    @rpc_method
+    @abc.abstractmethod
     def get_internal_integrations(
         self, *, organization_id: int, integration_name: str
     ) -> list[RpcSentryApp]:
@@ -235,23 +250,25 @@ class AppService(RpcService):
 
     @rpc_method
     @abc.abstractmethod
-    def disable_sentryapp(self, *, id: int) -> None:
+    def get_notification_emails_for_sentry_app(
+        self, *, organization_id: int, creator_label: str | None
+    ) -> list[str]:
         pass
 
 
-@back_with_silo_cache("app_service.get_installation", SiloMode.REGION, RpcSentryAppInstallation)
+@back_with_silo_cache("app_service.get_installation", SiloMode.CELL, RpcSentryAppInstallation)
 def get_installation(id: int) -> RpcSentryAppInstallation | None:
     return app_service.get_installation_by_id(id=id)
 
 
 @back_with_silo_cache_list(
-    "app_service.get_installed_for_organization", SiloMode.REGION, RpcSentryAppInstallation
+    "app_service.get_installed_for_organization", SiloMode.CELL, RpcSentryAppInstallation
 )
 def get_installations_for_organization(organization_id: int) -> list[RpcSentryAppInstallation]:
     return app_service.get_installations_for_organization(organization_id=organization_id)
 
 
-@back_with_silo_cache("app_service.get_by_application_id", SiloMode.REGION, RpcSentryApp)
+@back_with_silo_cache("app_service.get_by_application_id", SiloMode.CELL, RpcSentryApp)
 def get_by_application_id(application_id: int) -> RpcSentryApp | None:
     return app_service.find_service_hook_sentry_app(api_application_id=application_id)
 

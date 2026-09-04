@@ -1,9 +1,13 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {PageFiltersFixture} from 'sentry-fixture/pageFilters';
 import {WidgetFixture} from 'sentry-fixture/widget';
+import {WidgetQueryFixture} from 'sentry-fixture/widgetQuery';
 
-import {DisplayType} from 'sentry/views/dashboards/types';
-import {getWidgetExploreUrl} from 'sentry/views/dashboards/utils/getWidgetExploreUrl';
+import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
+import {
+  getWidgetExploreUrl,
+  getWidgetTableRowExploreUrlFunction,
+} from 'sentry/views/dashboards/utils/getWidgetExploreUrl';
 
 describe('getWidgetExploreUrl', () => {
   const organization = OrganizationFixture();
@@ -27,9 +31,121 @@ describe('getWidgetExploreUrl', () => {
     const url = getWidgetExploreUrl(widget, undefined, selection, organization);
 
     // Note: for table widgets the mode is set to samples and the fields are propagated
-    expect(url).toBe(
-      '/organizations/org-slug/traces/?groupBy=span.description&interval=30m&mode=aggregate&statsPeriod=14d&visualize=%7B%22chartType%22%3A1%2C%22yAxes%22%3A%5B%22avg%28span.duration%29%22%5D%7D'
-    );
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.duration)']})],
+        ['project', ''],
+      ],
+    });
+  });
+
+  it('returns correct URL for widgets with a project selection', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      widgetType: WidgetType.LOGS,
+      queries: [
+        WidgetQueryFixture({
+          fields: ['count()'],
+          aggregates: ['count()'],
+          columns: [],
+          conditions: '',
+          orderby: '-count()',
+        }),
+      ],
+    });
+
+    const widgetSelection = PageFiltersFixture({
+      projects: [17762],
+    });
+
+    const url = getWidgetExploreUrl(widget, undefined, widgetSelection, organization);
+
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/logs/',
+      params: [
+        ['aggregateField', '{"groupBy":""}'],
+        ['aggregateField', '{"chartType":1,"yAxes":["count(message)"]}'],
+        ['interval', '3h'],
+        ['mode', 'aggregate'],
+        ['project', '17762'],
+        ['statsPeriod', '14d'],
+      ],
+    });
+  });
+
+  it('includes the timestamp column when a logs widget has a group-by column', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      widgetType: WidgetType.LOGS,
+      queries: [
+        WidgetQueryFixture({
+          fields: ['message', 'count()'],
+          aggregates: ['count()'],
+          columns: ['message'],
+          conditions: '',
+          orderby: '-count()',
+        }),
+      ],
+    });
+
+    const url = getWidgetExploreUrl(widget, undefined, selection, organization);
+
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/logs/',
+      params: [
+        ['aggregateField', '{"groupBy":"message"}'],
+        ['aggregateField', '{"chartType":1,"yAxes":["count(message)"]}'],
+        ['interval', '3h'],
+        ['logsFields', 'timestamp'],
+        ['logsFields', 'message'],
+        ['mode', 'aggregate'],
+        ['project', ''],
+        ['statsPeriod', '14d'],
+      ],
+    });
+  });
+
+  it('returns the correct aggregate mode url for table widgets with equations sort', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      queries: [
+        {
+          fields: ['span.description', 'equation|avg(span.duration) + 100'],
+          aggregates: ['equation|avg(span.duration) + 100'],
+          columns: ['span.description'],
+          conditions: '',
+          orderby: '-equation[0]',
+          name: '',
+        },
+      ],
+    });
+
+    const url = getWidgetExploreUrl(widget, undefined, selection, organization);
+
+    // Note: for table widgets the mode is set to samples and the fields are propagated
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['statsPeriod', '14d'],
+        ['sort', '-equation|avg(span.duration) + 100'],
+        [
+          'visualize',
+          JSON.stringify({chartType: 1, yAxes: ['equation|avg(span.duration) + 100']}),
+        ],
+        ['project', ''],
+      ],
+    });
   });
 
   it('returns the correct samples mode url for table widgets without aggregation', () => {
@@ -50,9 +166,17 @@ describe('getWidgetExploreUrl', () => {
     const url = getWidgetExploreUrl(widget, undefined, selection, organization);
 
     // Note: for table widgets the mode is set to samples and the fields are propagated
-    expect(url).toBe(
-      '/organizations/org-slug/traces/?field=span.description&field=span.duration&interval=30m&mode=samples&statsPeriod=14d&visualize=%7B%22chartType%22%3A1%2C%22yAxes%22%3A%5B%5D%7D'
-    );
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['interval', '30m'],
+        ['mode', 'samples'],
+        ['statsPeriod', '14d'],
+        ['project', ''],
+      ],
+    });
   });
 
   it('returns the correct url for timeseries widgets', () => {
@@ -74,9 +198,19 @@ describe('getWidgetExploreUrl', () => {
 
     // Note: for line widgets the mode is set to aggregate
     // The chart type is set to 1 for area charts
-    expect(url).toBe(
-      '/organizations/org-slug/traces/?groupBy=span.description&interval=30m&mode=aggregate&statsPeriod=14d&visualize=%7B%22chartType%22%3A2%2C%22yAxes%22%3A%5B%22avg%28span.duration%29%22%5D%7D'
-    );
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 2, yAxes: ['avg(span.duration)']})],
+        ['project', ''],
+      ],
+    });
   });
 
   it('returns the correct url for timeseries widgets without grouping', () => {
@@ -98,9 +232,18 @@ describe('getWidgetExploreUrl', () => {
 
     // Note: for line widgets the mode is set to aggregate
     // The chart type is set to 1 for area charts
-    expect(url).toBe(
-      '/organizations/org-slug/traces/?groupBy=&interval=30m&mode=aggregate&statsPeriod=14d&visualize=%7B%22chartType%22%3A2%2C%22yAxes%22%3A%5B%22avg%28span.duration%29%22%5D%7D'
-    );
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.duration'],
+        ['groupBy', ''],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 2, yAxes: ['avg(span.duration)']})],
+        ['project', ''],
+      ],
+    });
   });
 
   it('returns the correct URL for chart widgets where the sort is not in the yAxes', () => {
@@ -122,9 +265,21 @@ describe('getWidgetExploreUrl', () => {
     const url = getWidgetExploreUrl(widget, undefined, selection, organization);
 
     // The URL should have the sort and another visualize to plot the sort
-    expect(url).toBe(
-      '/organizations/org-slug/traces/?groupBy=span.description&interval=30m&mode=aggregate&sort=-count%28span.duration%29&statsPeriod=14d&visualize=%7B%22chartType%22%3A1%2C%22yAxes%22%3A%5B%22avg%28span.duration%29%22%5D%7D&visualize=%7B%22chartType%22%3A1%2C%22yAxes%22%3A%5B%22count%28span.duration%29%22%5D%7D'
-    );
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['sort', '-count(span.duration)'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.duration)']})],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['count(span.duration)']})],
+        ['project', ''],
+      ],
+    });
   });
 
   it('applies the dashboard filters to the query', () => {
@@ -152,9 +307,76 @@ describe('getWidgetExploreUrl', () => {
     );
 
     // Assert that the query contains the dashboard filters in its resulting URL
-    expect(url).toContain(
-      '&query=%28span.description%3Atest%29%20release%3A%5B%221.0.0%22%2C%222.0.0%22%5D%20'
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['query', '(span.description:test) release:["1.0.0","2.0.0"] '],
+        ['sort', '-avg(span.duration)'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.duration)']})],
+        ['project', ''],
+      ],
+    });
+  });
+
+  it('widens a screen filter when the widget query has a fallback', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      widgetType: WidgetType.SPANS,
+      queries: [
+        {
+          fields: ['span.op', 'avg(span.self_time)'],
+          aggregates: ['avg(span.self_time)'],
+          columns: ['span.op'],
+          conditions: '!is_transaction:true',
+          orderby: '-avg(span.self_time)',
+          name: '',
+          globalFilterFallback: {
+            attribute: 'app.vitals.start.screen',
+            fallbackAttribute: 'transaction',
+          },
+        },
+      ],
+    });
+
+    const url = getWidgetExploreUrl(
+      widget,
+      {
+        globalFilter: [
+          {
+            dataset: WidgetType.SPANS,
+            tag: {key: 'app.vitals.start.screen', name: 'app.vitals.start.screen'},
+            value: 'app.vitals.start.screen:[MainActivity]',
+          },
+        ],
+      },
+      selection,
+      organization
     );
+
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.op'],
+        ['field', 'span.self_time'],
+        ['groupBy', 'span.op'],
+        ['interval', '3h'],
+        ['mode', 'aggregate'],
+        [
+          'query',
+          '(!is_transaction:true) (app.vitals.start.screen:[MainActivity] OR transaction:[MainActivity])',
+        ],
+        ['sort', '-avg(span.self_time)'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.self_time)']})],
+        ['project', ''],
+      ],
+    });
   });
 
   it('returns the correct url for multiple queries', () => {
@@ -181,9 +403,10 @@ describe('getWidgetExploreUrl', () => {
     });
 
     const url = getWidgetExploreUrl(widget, undefined, selection, organization);
+    expect(url).not.toBeNull();
 
     // Provide a fake base URL to allow parsing the relative URL
-    const urlObject = new URL(url, 'https://www.example.com');
+    const urlObject = new URL(url!, 'https://www.example.com');
     expect(urlObject.pathname).toBe('/organizations/org-slug/explore/traces/compare/');
 
     expect(urlObject.searchParams.get('interval')).toBe('30m');
@@ -204,4 +427,173 @@ describe('getWidgetExploreUrl', () => {
     expect(query2.groupBys).toEqual(['span.description']);
     expect(query2.query).toBe('is_transaction:false');
   });
+
+  it('returns null for log widgets with multiple queries', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.LINE,
+      widgetType: WidgetType.LOGS,
+      queries: [
+        WidgetQueryFixture({
+          aggregates: ['count()'],
+          columns: [],
+          conditions: 'level:error',
+          orderby: '',
+        }),
+        WidgetQueryFixture({
+          aggregates: ['count()'],
+          columns: [],
+          conditions: 'level:warning',
+          orderby: '',
+        }),
+      ],
+    });
+
+    const url = getWidgetExploreUrl(widget, undefined, selection, organization);
+    expect(url).toBeNull();
+  });
+
+  it('preserves timestamp column and sort when opening in explore', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      queries: [
+        {
+          fields: ['span.description', 'timestamp'],
+          aggregates: [],
+          columns: ['span.description', 'timestamp'],
+          conditions: '',
+          orderby: '-timestamp',
+          name: '',
+        },
+      ],
+    });
+
+    const url = getWidgetExploreUrl(widget, undefined, selection, organization);
+
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'timestamp'],
+        ['field', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'samples'],
+        ['sort', '-timestamp'],
+        ['statsPeriod', '14d'],
+        ['project', ''],
+      ],
+    });
+  });
+
+  it('adds referrer query parameter if provided', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.LINE,
+      queries: [
+        {
+          fields: [],
+          aggregates: ['avg(span.duration)'],
+          columns: ['span.description'],
+          conditions: 'span.description:test',
+          orderby: '-avg(span.duration)',
+          name: '',
+        },
+      ],
+    });
+
+    const url = getWidgetExploreUrl(
+      widget,
+      {},
+      selection,
+      organization,
+      undefined,
+      'test-referrer'
+    );
+
+    // Assert that the query contains the dashboard filters in its resulting URL
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'span.description'],
+        ['field', 'span.duration'],
+        ['groupBy', 'span.description'],
+        ['interval', '30m'],
+        ['mode', 'aggregate'],
+        ['query', 'span.description:test'],
+        ['sort', '-avg(span.duration)'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.duration)']})],
+        ['referrer', 'test-referrer'],
+        ['project', ''],
+      ],
+    });
+  });
 });
+
+describe('getWidgetTableRowExploreUrlFunction', () => {
+  const organization = OrganizationFixture();
+  const selection = PageFiltersFixture();
+
+  it('uses the filter conditions from the widget to generate the trace URL', () => {
+    const widget = WidgetFixture({
+      displayType: DisplayType.TABLE,
+      queries: [
+        {
+          fields: ['browser.name'],
+          aggregates: ['avg(span.duration)'],
+          columns: ['span.description'],
+          conditions: 'span.description:test',
+          orderby: '-avg(span.duration)',
+          name: '',
+        },
+      ],
+    });
+
+    const urlGenerator = getWidgetTableRowExploreUrlFunction(
+      selection,
+      widget,
+      organization
+    );
+    const url = urlGenerator({
+      'browser.name': 'Chrome',
+    });
+
+    expectUrl(url).toMatch({
+      path: '/organizations/org-slug/explore/traces/',
+      params: [
+        ['field', 'browser.name'],
+        ['groupBy', 'browser.name'],
+        ['interval', '30m'],
+        ['mode', 'samples'],
+        // span.description:test is carried over from the widget query conditions
+        ['query', 'span.description:test browser.name:Chrome'],
+        ['referrer', 'api.dashboards.tablewidget.row'],
+        ['sort', '-span.duration'],
+        ['statsPeriod', '14d'],
+        ['visualize', JSON.stringify({chartType: 1, yAxes: ['avg(span.duration)']})],
+        ['project', ''],
+      ],
+    });
+  });
+});
+
+function expectUrl(url: string | null) {
+  return {
+    toMatch({path, params}: {params: Array<[string, string]>; path: string}) {
+      expect(url).not.toBeNull();
+      expect(url).toMatch(new RegExp(`^${path}\\?`));
+      const urlParams = new URLSearchParams(url!.substring(path.length));
+      function compareFn(a: [string, string], b: [string, string]) {
+        if (a[0] < b[0]) {
+          return -1;
+        }
+
+        if (a[0] > b[0]) {
+          return 1;
+        }
+
+        return a[1].localeCompare(b[1]);
+      }
+      expect([...urlParams.entries()].sort(compareFn)).toEqual(
+        params.toSorted(compareFn)
+      );
+    },
+  };
+}

@@ -1,10 +1,9 @@
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from functools import partial
-from typing import cast
 
-import orjson
+import msgspec
 import sentry_sdk
 from arroyo.backends.kafka.consumer import KafkaPayload
 from arroyo.dlq import InvalidMessage
@@ -13,13 +12,13 @@ from arroyo.processing.strategies.batching import BatchStep, ValuesBatch
 from arroyo.processing.strategies.commit import CommitOffsets
 from arroyo.processing.strategies.run_task import RunTask
 from arroyo.types import BrokerValue, Commit, FilteredPayload, Message, Partition
-from sentry_kafka_schemas.schema_types.ingest_spans_v1 import SpanEvent
 
 from sentry import killswitches
-from sentry.spans.buffer import Span, SpansBuffer
-from sentry.spans.consumers.process.flusher import SpanFlusher
+from sentry.spans.buffer import SpansBuffer
+from sentry.spans.buffer_types import Span
+from sentry.spans.consumers.process.flusher import ProduceToPipe, SpanFlusher
 from sentry.utils import metrics
-from sentry.utils.arroyo import MultiprocessingPool, run_task_with_multiprocessing
+from sentry.utils.arroyo import MultiprocessingPool, SetJoinTimeout, run_task_with_multiprocessing
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
     3. Reduce the messages to find the latest timestamp to process
     4. Fetch all segments are two minutes or older and expire the keys so they
        aren't reprocessed
-    5. Produce segments to buffered-segments topic
+    5. Spawn a process_segment task for each flushed segment
     """
 
     def __init__(
@@ -42,7 +41,8 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
         input_block_size: int | None,
         output_block_size: int | None,
         flusher_processes: int | None = None,
-        produce_to_pipe: Callable[[KafkaPayload], None] | None = None,
+        produce_to_pipe: ProduceToPipe | None = None,
+        kafka_slice_id: int | None = None,
     ):
         super().__init__()
 
@@ -56,6 +56,7 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
         self.num_processes = num_processes
         self.flusher_processes = flusher_processes
         self.produce_to_pipe = produce_to_pipe
+        self.kafka_slice_id = kafka_slice_id
 
         if self.num_processes != 1:
             self.__pool = MultiprocessingPool(num_processes)
@@ -65,13 +66,22 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
         commit: Commit,
         partitions: Mapping[Partition, int],
     ) -> ProcessingStrategy[KafkaPayload]:
+        # TODO: remove once span buffer is live in all regions
+        scope = sentry_sdk.get_isolation_scope()
+        scope.level = "warning"
+
         self.rebalancing_count += 1
         sentry_sdk.set_tag("sentry_spans_rebalancing_count", str(self.rebalancing_count))
+        sentry_sdk.set_attribute("sentry_spans_rebalancing_count", str(self.rebalancing_count))
         sentry_sdk.set_tag("sentry_spans_buffer_component", "consumer")
+        sentry_sdk.set_attribute("sentry_spans_buffer_component", "consumer")
 
         committer = CommitOffsets(commit)
 
-        buffer = SpansBuffer(assigned_shards=[p.index for p in partitions])
+        buffer = SpansBuffer(
+            assigned_shards=[p.index for p in partitions],
+            slice_id=self.kafka_slice_id,
+        )
 
         # patch onto self just for testing
         flusher: ProcessingStrategy[FilteredPayload | int]
@@ -82,9 +92,16 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
             produce_to_pipe=self.produce_to_pipe,
         )
 
+        # The flusher must be given some time to shut down, because otherwise
+        # we may double-produce segments.
+        flusher = SetJoinTimeout(None, flusher)
+
         if self.num_processes != 1:
             run_task = run_task_with_multiprocessing(
-                function=partial(process_batch, buffer),
+                function=partial(
+                    process_batch,
+                    buffer,
+                ),
                 next_step=flusher,
                 max_batch_size=self.max_batch_size,
                 max_batch_time=self.max_batch_time,
@@ -94,8 +111,12 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
             )
         else:
             run_task = RunTask(
-                function=partial(process_batch, buffer),
+                function=partial(
+                    process_batch,
+                    buffer,
+                ),
                 next_step=flusher,
+                better_backpressure=True,
             )
 
         batch = BatchStep(
@@ -120,7 +141,10 @@ class ProcessSpansStrategyFactory(ProcessingStrategyFactory[KafkaPayload]):
             next_step=batch,
         )
 
-        return add_timestamp
+        # Our entire insertion process into redis is perfectly idempotent. It
+        # makes no sense to spend time inserting into redis during rebalancing
+        # when we can just parse and batch again.
+        return SetJoinTimeout(0.0, add_timestamp)
 
     def shutdown(self) -> None:
         if self.num_processes != 1:
@@ -145,17 +169,20 @@ def process_batch(
             if min_timestamp is None or timestamp < min_timestamp:
                 min_timestamp = timestamp
 
+            # Decoding into the typed struct validates the fields the buffer relies on (presence
+            # and types); malformed spans raise here and are routed to the DLQ below. See also:
+            # INC-1453, INC-1458.
             decode_start = time.monotonic()
-            val = cast(SpanEvent, orjson.loads(payload.value))
+            span_event = _PROCESS_SPAN_DECODER.decode(payload.value)
             decode_time += time.monotonic() - decode_start
 
             if killswitches.value_matches(
                 "spans.drop-in-buffer",
                 killswitch_config,
                 {
-                    "org_id": val.get("organization_id"),
-                    "project_id": val.get("project_id"),
-                    "trace_id": val.get("trace_id"),
+                    "org_id": span_event.organization_id,
+                    "project_id": span_event.project_id,
+                    "trace_id": span_event.trace_id,
                     "partition_id": value.partition.index,
                 },
                 emit_metrics=False,
@@ -163,14 +190,16 @@ def process_batch(
                 continue
 
             span = Span(
-                trace_id=val["trace_id"],
-                span_id=val["span_id"],
-                parent_span_id=val.get("parent_span_id"),
-                project_id=val["project_id"],
+                trace_id=span_event.trace_id,
+                span_id=span_event.span_id,
+                parent_span_id=span_event.parent_span_id,
+                segment_id=span_event.segment_id,
+                project_id=span_event.project_id,
                 payload=payload.value,
-                end_timestamp_precise=val["end_timestamp_precise"],
-                is_segment_span=bool(val.get("parent_span_id") is None or val.get("is_remote")),
+                is_segment_span=span_event.is_segment_span,
+                partition=value.partition.index,
             )
+
             spans.append(span)
 
         except Exception:
@@ -195,3 +224,44 @@ def process_batch(
     assert min_timestamp is not None
     buffer.process_spans(spans, now=min_timestamp)
     return min_timestamp
+
+
+class SpanAttributeValue(msgspec.Struct, gc=False):
+    value: str | None = None
+
+
+class SpanAttributes(msgspec.Struct, gc=False):
+    segment_id: SpanAttributeValue | None = msgspec.field(name="sentry.segment.id", default=None)
+
+
+class ProcessSpanEvent(msgspec.Struct, gc=False):
+    organization_id: int
+    project_id: int
+    trace_id: str
+    span_id: str
+    start_timestamp: float
+    end_timestamp: float
+    received: float
+    retention_days: int
+    status: str
+    name: str | None = None
+    parent_span_id: str | None = None
+    is_segment: bool | None = None
+    attributes: SpanAttributes | None = None
+
+    @property
+    def segment_id(self) -> str | None:
+        if self.attributes is None or self.attributes.segment_id is None:
+            return None
+        return self.attributes.segment_id.value
+
+    @property
+    def is_segment_span(self) -> bool:
+        return self.parent_span_id is None or bool(self.is_segment)
+
+
+_PROCESS_SPAN_DECODER = msgspec.json.Decoder(type=ProcessSpanEvent)
+
+
+def decode_process_span_event(buf: bytes) -> ProcessSpanEvent:
+    return _PROCESS_SPAN_DECODER.decode(buf)

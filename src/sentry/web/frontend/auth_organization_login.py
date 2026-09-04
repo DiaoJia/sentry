@@ -1,26 +1,26 @@
 import logging
 
 from django.contrib import messages
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse
 from django.http.response import HttpResponseBase
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
-from rest_framework.request import Request
 
 from sentry.auth.helper import AuthHelper
 from sentry.auth.store import FLOW_LOGIN
 from sentry.constants import WARN_SESSION_EXPIRED
+from sentry.demo_mode.utils import is_demo_mode_enabled, is_demo_org
 from sentry.models.authprovider import AuthProvider
 from sentry.organizations.services.organization import RpcOrganization, organization_service
 from sentry.utils.auth import initiate_login
-from sentry.web.frontend.auth_login import AuthLoginView
+from sentry.web.frontend.auth_login import AuthLoginView, should_render_react_auth
 
 logger = logging.getLogger("sentry.saml_setup_error")
 
 
 class AuthOrganizationLoginView(AuthLoginView):
-    def respond_login(self, request: Request, context, *args, **kwargs) -> HttpResponseBase:
+    def respond_login(self, request: HttpRequest, context: dict, **kwargs) -> HttpResponse:
         return self.respond("sentry/organization-login.html", context)
 
     def handle_sso(self, request: HttpRequest, organization: RpcOrganization, auth_provider):
@@ -59,6 +59,14 @@ class AuthOrganizationLoginView(AuthLoginView):
 
     @method_decorator(never_cache)
     def handle(self, request: HttpRequest, organization_slug) -> HttpResponseBase:
+        if request.method == "GET":
+            customer_domain_redirect = self.get_customer_domain_login_redirect(request)
+            if customer_domain_redirect is not None:
+                return customer_domain_redirect
+
+        if should_render_react_auth(request):
+            return self.handle_react(request)
+
         org_context = organization_service.get_organization_by_slug(
             slug=organization_slug, only_visible=True
         )
@@ -81,6 +89,22 @@ class AuthOrganizationLoginView(AuthLoginView):
             auth_provider = AuthProvider.objects.get(organization_id=organization.id)
         except AuthProvider.DoesNotExist:
             auth_provider = None
+
+        if request.method == "GET" and request.user.is_authenticated:
+            # Don't show the "not a member" warning for the demo org, since
+            # users visiting the sandbox are expected to not be members.
+            if not (is_demo_mode_enabled() and is_demo_org(organization)):
+                membership = organization_service.check_membership_by_id(
+                    organization_id=organization.id, user_id=request.user.id
+                )
+                if membership is None:
+                    messages.add_message(
+                        request,
+                        messages.WARNING,
+                        f"Your account ({request.user.email}) is not a member of the "
+                        f"{organization.name} organization. Ask an organization admin to "
+                        f"invite you, or sign in with a different account.",
+                    )
 
         session_expired = "session_expired" in request.COOKIES
         if session_expired:

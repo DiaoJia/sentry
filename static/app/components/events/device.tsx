@@ -1,10 +1,10 @@
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
-import KeyValueList from './interfaces/keyValueList';
+import {KeyValueList} from './interfaces/keyValueList';
 
 type Props = {
   event: Event;
@@ -24,7 +24,7 @@ export function EventDevice({event}: Props) {
   }
 
   return (
-    <InterimSection type={SectionKey.DEVICE} title={t('Device')}>
+    <FoldSection sectionKey={SectionKey.DEVICE} title={t('Device')}>
       <KeyValueList
         shouldSort={false}
         data={[
@@ -46,6 +46,6 @@ export function EventDevice({event}: Props) {
           ...extras,
         ]}
       />
-    </InterimSection>
+    </FoldSection>
   );
 }

@@ -1,28 +1,27 @@
-import {useCallback, useMemo} from 'react';
+import {Fragment, useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import FeedbackWidgetButton from 'sentry/components/feedback/widget/feedbackWidgetButton';
-import * as Layout from 'sentry/components/layouts/thirds';
+import {LinkButton} from '@sentry/scraps/button';
+
+import {FeedbackButton} from 'sentry/components/feedbackButton/feedbackButton';
 import type {ProfilingBreadcrumbsProps} from 'sentry/components/profiling/profilingBreadcrumbs';
 import {ProfilingBreadcrumbs} from 'sentry/components/profiling/profilingBreadcrumbs';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Event} from 'sentry/types/event';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {SpanResponse} from 'sentry/views/insights/types';
+import {SpanFields} from 'sentry/views/insights/types';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 interface ContinuousProfileHeader {
-  projectId: string;
-  transaction: Event | null;
+  transactionSpan:
+    | Pick<SpanResponse, 'trace' | 'span_id' | 'precise.finish_ts'>
+    | undefined;
 }
 
-export function ContinuousProfileHeader({
-  transaction,
-  projectId,
-}: ContinuousProfileHeader) {
+export function ContinuousProfileHeader({transactionSpan}: ContinuousProfileHeader) {
   const location = useLocation();
   const organization = useOrganization();
 
@@ -31,60 +30,52 @@ export function ContinuousProfileHeader({
     return [{type: 'landing', payload: {query: {}}}];
   }, []);
 
-  const projectSlug = projectId ?? '';
-
-  const transactionTarget = transaction?.id
+  const transactionTarget = transactionSpan
     ? generateLinkToEventInTraceView({
-        timestamp: transaction.endTimestamp ?? '',
-        eventId: transaction.id,
-        projectSlug,
-        traceSlug: transaction.contexts?.trace?.trace_id ?? '',
+        timestamp: transactionSpan[SpanFields.PRECISE_FINISH_TS],
+        targetId: transactionSpan[SpanFields.SPAN_ID],
+        traceSlug: transactionSpan[SpanFields.TRACE],
         location,
         organization,
       })
     : null;
 
-  const handleGoToTransaction = useCallback(() => {
+  const handleGoToTransaction = () => {
     trackAnalytics('profiling_views.go_to_transaction', {
       organization,
     });
-  }, [organization]);
+  };
+
+  const breadcrumbs = (
+    <SmallerProfilingBreadcrumbsWrapper>
+      <ProfilingBreadcrumbs organization={organization} trails={breadCrumbs} />
+    </SmallerProfilingBreadcrumbsWrapper>
+  );
 
   return (
-    <SmallerLayoutHeader>
-      <SmallerHeaderContent>
-        <SmallerProfilingBreadcrumbsWrapper>
-          <ProfilingBreadcrumbs organization={organization} trails={breadCrumbs} />
-        </SmallerProfilingBreadcrumbsWrapper>
-      </SmallerHeaderContent>
-      <StyledHeaderActions>
-        <FeedbackWidgetButton />
-        {transactionTarget && (
-          <LinkButton size="sm" onClick={handleGoToTransaction} to={transactionTarget}>
+    <Fragment>
+      <TopBar.Slot name="title">{breadcrumbs}</TopBar.Slot>
+      {transactionTarget && (
+        <TopBar.Slot name="actions">
+          <LinkButton onClick={handleGoToTransaction} to={transactionTarget}>
             {t('Go to Trace')}
           </LinkButton>
-        )}
-      </StyledHeaderActions>
-    </SmallerLayoutHeader>
+        </TopBar.Slot>
+      )}
+      <TopBar.Slot name="feedback">
+        <FeedbackButton
+          aria-label={t('Give Feedback')}
+          tooltipProps={{title: t('Give Feedback')}}
+        >
+          {null}
+        </FeedbackButton>
+      </TopBar.Slot>
+    </Fragment>
   );
 }
 
-const StyledHeaderActions = styled(Layout.HeaderActions)`
-  display: flex;
-  flex-direction: row;
-  gap: ${space(1)};
-`;
-
-const SmallerHeaderContent = styled(Layout.HeaderContent)`
-  margin-bottom: ${space(1.5)};
-`;
-
 const SmallerProfilingBreadcrumbsWrapper = styled('div')`
   nav {
-    padding-bottom: ${space(1)};
+    padding-bottom: ${p => p.theme.space.md};
   }
-`;
-
-const SmallerLayoutHeader = styled(Layout.Header)`
-  padding: ${space(1)} ${space(2)} 0 ${space(2)} !important;
 `;

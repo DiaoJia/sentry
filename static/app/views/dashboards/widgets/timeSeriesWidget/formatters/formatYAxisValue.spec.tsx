@@ -6,9 +6,9 @@ describe('formatYAxisValue', () => {
       [0, '0'],
       [17, '17'],
       [171, '171'],
-      [17111, '17k'],
-      [17_000_110, '17m'],
-      [1_000_110_000, '1b'],
+      [17111, '17K'],
+      [17_000_110, '17M'],
+      [1_000_110_000, '1B'],
     ])('Formats %s as %s', (value, formattedValue) => {
       expect(formatYAxisValue(value, 'integer')).toEqual(formattedValue);
     });
@@ -16,8 +16,14 @@ describe('formatYAxisValue', () => {
 
   describe('number', () => {
     it.each([
-      [17.1238, '17.124'],
+      [0.000033452, '0.000033452'],
+      [0.00003, '0.00003'],
+      [17.1238, '17.1238'],
+      [170, '170'],
+      [17111, '17K'],
+      [17_000_110, '17M'],
       [1772313.1, '1,772,313.1'],
+      [1772313.11123, '1,772,313.11123'],
     ])('Formats %s as %s', (value, formattedValue) => {
       expect(formatYAxisValue(value, 'number')).toEqual(formattedValue);
     });
@@ -48,7 +54,7 @@ describe('formatYAxisValue', () => {
   describe('size', () => {
     it.each([
       [0, 'byte', '0'],
-      [0.712, 'megabyte', '712 KB'],
+      [0.712, 'megabyte', '712 kB'],
       [1231, 'kibibyte', '1.2 MiB'],
     ])('Formats %s as %s', (value, unit, formattedValue) => {
       expect(formatYAxisValue(value, 'size', unit)).toEqual(formattedValue);
@@ -65,6 +71,7 @@ describe('formatYAxisValue', () => {
       [0.00000153, '1/second', '0.00000153/s'],
       [0.35, '1/second', '0.35/s'],
       [10, '1/second', '10/s'],
+      // eslint-disable-next-line unicorn/no-zero-fractions
       [10.0, '1/second', '10/s'],
       [1231, '1/minute', '1.231K/min'],
       [110000, '1/second', '110K/s'],
@@ -72,6 +79,19 @@ describe('formatYAxisValue', () => {
       [123456789, '1/second', '123.457M/s'],
     ])('Formats %s as %s', (value, unit, formattedValue) => {
       expect(formatYAxisValue(value, 'rate', unit)).toEqual(formattedValue);
+    });
+  });
+
+  describe('currency', () => {
+    it.each([
+      [0, '0'],
+      [17, '$17'],
+      [171, '$171'],
+      [17111, '$17.11K'],
+      [17_000_110, '$17M'],
+      [1_000_110_000, '$1B'],
+    ])('Formats %s as %s', (value, formattedValue) => {
+      expect(formatYAxisValue(value, 'currency')).toEqual(formattedValue);
     });
   });
 });

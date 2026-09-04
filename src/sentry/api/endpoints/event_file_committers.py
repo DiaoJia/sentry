@@ -1,19 +1,17 @@
+import sentry_sdk
 from rest_framework.exceptions import NotFound
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import eventstore
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
-from sentry.models.commit import Commit
-from sentry.models.group import Group
-from sentry.models.release import Release
+from sentry.services import eventstore
 from sentry.utils.committers import get_serialized_event_file_committers
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class EventFileCommittersEndpoint(ProjectEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -22,10 +20,10 @@ class EventFileCommittersEndpoint(ProjectEndpoint):
 
     def get(self, request: Request, project, event_id) -> Response:
         """
-        Retrieve Committer information for an event
+        Retrieve Suspect Commit information for an event
         ```````````````````````````````````````````
 
-        Return committers on an individual event, plus a per-frame breakdown.
+        Return suspect commits on an individual event.
 
         :pparam string project_id_or_slug: the id or slug of the project the event
                                      belongs to.
@@ -39,18 +37,12 @@ class EventFileCommittersEndpoint(ProjectEndpoint):
         elif event.group_id is None:
             raise NotFound(detail="Issue not found")
 
-        try:
-            committers = get_serialized_event_file_committers(
-                project, event, frame_limit=int(request.GET.get("frameLimit", 25))
-            )
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
 
-        # TODO(nisanthan): Remove the Group.DoesNotExist and Release.DoesNotExist once Commit Context goes GA
-        except Group.DoesNotExist:
-            raise NotFound(detail="Issue not found")
-        except Release.DoesNotExist:
-            raise NotFound(detail="Release not found")
-        except Commit.DoesNotExist:
-            raise NotFound(detail="No Commits found for Release")
+        committers = get_serialized_event_file_committers(project, event)
+
+        if not committers:
+            raise NotFound(detail="No committers found")
 
         data = {
             "committers": committers,

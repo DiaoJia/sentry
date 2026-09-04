@@ -3,18 +3,23 @@ import {ProjectFixture} from 'sentry-fixture/project';
 import {ProjectKeysFixture} from 'sentry-fixture/projectKeys';
 import {RouterFixture} from 'sentry-fixture/routerFixture';
 
-import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {withPerformanceOnboarding} from 'sentry/data/platformCategories';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
 import {Tab} from 'sentry/views/explore/hooks/useTab';
 
 import {LegacyOnboarding, Onboarding} from './onboarding';
 
-describe('Performance Onboarding View > Unsupported Banner', function () {
+jest.mock('sentry/utils/analytics');
+
+describe('Performance Onboarding View > Unsupported Banner', () => {
   const organization = OrganizationFixture();
 
-  it('Displays unsupported banner for unsupported projects', function () {
+  it('Displays unsupported banner for unsupported projects', () => {
     const project = ProjectFixture({
       platform: 'nintendo-switch',
     });
@@ -23,7 +28,7 @@ describe('Performance Onboarding View > Unsupported Banner', function () {
     expect(screen.getByTestId('unsupported-alert')).toBeInTheDocument();
   });
 
-  it('Does not display unsupported banner for supported projects', function () {
+  it('Does not display unsupported banner for supported projects', () => {
     const project = ProjectFixture({
       platform: 'java',
     });
@@ -33,20 +38,18 @@ describe('Performance Onboarding View > Unsupported Banner', function () {
   });
 });
 
-describe('Testing new onboarding ui', function () {
-  const organization = OrganizationFixture({
-    features: ['tracing-onboarding-new-ui'],
-  });
+describe('Testing new onboarding ui', () => {
+  const organization = OrganizationFixture();
 
   beforeEach(() => {
     MockApiClient.addMockResponse({
-      url: `/projects/org-slug/project-slug/keys/`,
+      url: '/projects/org-slug/project-slug/keys/',
       method: 'GET',
       body: [ProjectKeysFixture()[0]],
     });
 
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/sdks/`,
+      url: '/organizations/org-slug/sdks/',
       method: 'GET',
     });
 
@@ -57,20 +60,33 @@ describe('Testing new onboarding ui', function () {
     PageFiltersStore.reset();
   });
 
-  it('Renders updated ui', async function () {
+  it('Renders updated ui', async () => {
     const projectMock = ProjectFixture({
       platform: 'javascript-react',
+      access: ['project:read', 'event:write'],
     });
 
     MockApiClient.addMockResponse({
-      url: `/projects/org-slug/project-slug/`,
+      url: '/projects/org-slug/project-slug/',
       method: 'GET',
       body: projectMock,
     });
 
     render(<Onboarding organization={organization} project={projectMock} />);
-    expect(await screen.findByText('Query for Traces, Get Answers')).toBeInTheDocument();
-    expect(await screen.findByText('Preview a Sentry Trace')).toBeInTheDocument();
+    expect(await screen.findByText('Tracing in Sentry')).toBeInTheDocument();
+    expect(await screen.findByText('AI-Assisted Setup')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        textWithMarkupMatcher('First, run this command to install the Sentry plugin:')
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', {name: 'Sentry plugin'})).toHaveAttribute(
+      'href',
+      'https://docs.sentry.io/ai/agent-plugin/'
+    );
+    expect(
+      screen.getByText('Then paste this in your agent of choice:')
+    ).toBeInTheDocument();
 
     expect(
       await screen.findByText(
@@ -103,37 +119,91 @@ describe('Testing new onboarding ui', function () {
     expect(
       await screen.findByText("Waiting for this project's first trace")
     ).toBeInTheDocument();
-
-    expect(
-      screen.getByRole('button', {name: 'Take me to an example'})
-    ).toBeInTheDocument();
   });
 
-  it('when the first trace is received, display a busy button "Take me to my trace"', async function () {
+  it('tracks the AI setup snippets as copied for traces', async () => {
+    const projectMock = ProjectFixture({
+      platform: 'javascript-react',
+      access: ['project:read', 'event:write'],
+    });
+
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/',
+      method: 'GET',
+      body: projectMock,
+    });
+
+    Object.assign(navigator, {
+      clipboard: {writeText: jest.fn().mockResolvedValue(undefined)},
+    });
+
+    render(<Onboarding organization={organization} project={projectMock} />);
+    expect(await screen.findByText('AI-Assisted Setup')).toBeInTheDocument();
+
+    // The AI-assisted column leads the panel, so its install command and prompt
+    // are the first two snippets in the DOM.
+    const [installCommand, prompt] = screen.getAllByRole('button', {
+      name: 'Copy snippet',
+    });
+
+    await userEvent.click(installCommand!);
+    expect(trackAnalytics).toHaveBeenCalledWith('onboarding.ai_prompt_copied', {
+      organization,
+      platform: 'javascript-react',
+      product: 'traces',
+      source: 'install_command',
+    });
+
+    await userEvent.click(prompt!);
+    expect(trackAnalytics).toHaveBeenCalledWith('onboarding.ai_prompt_copied', {
+      organization,
+      platform: 'javascript-react',
+      product: 'traces',
+      source: 'prompt',
+    });
+  });
+
+  it('links to Trace Explorer docs when the tracing checklist is unavailable', async () => {
+    const platform = 'react-native';
+    expect(withPerformanceOnboarding.has(platform)).toBe(false);
+
+    const projectMock = ProjectFixture({platform});
+
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/',
+      method: 'GET',
+      body: projectMock,
+    });
+
+    render(<Onboarding organization={organization} project={projectMock} />);
+
+    expect(
+      await screen.findByRole('button', {name: 'Go to Documentation'})
+    ).toHaveAttribute('href', 'https://docs.sentry.io/product/trace-explorer/');
+  });
+
+  it('when the first trace is received, display a busy button "Take me to my trace"', async () => {
     const projectMock = ProjectFixture({
       platform: 'javascript-react',
       firstTransactionEvent: true,
     });
 
     MockApiClient.addMockResponse({
-      url: `/projects/org-slug/project-slug/`,
+      url: '/projects/org-slug/project-slug/',
       method: 'GET',
       body: projectMock,
     });
 
-    PageFiltersStore.onInitializeUrlState(
-      {
-        projects: [parseInt(projectMock.id, 10)],
-        environments: [],
-        datetime: {
-          period: '14d',
-          start: null,
-          end: null,
-          utc: null,
-        },
+    PageFiltersStore.onInitializeUrlState({
+      projects: [parseInt(projectMock.id, 10)],
+      environments: [],
+      datetime: {
+        period: '14d',
+        start: null,
+        end: null,
+        utc: null,
       },
-      new Set()
-    );
+    });
 
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/traces/`,
@@ -174,31 +244,28 @@ describe('Testing new onboarding ui', function () {
     ).toHaveAttribute('aria-busy', 'true');
   });
 
-  it('when the first trace is processed, display an enabled button "Take me to my trace"', async function () {
+  it('when the first trace is processed, display an enabled button "Take me to my trace"', async () => {
     const projectMock = ProjectFixture({
       platform: 'javascript-react',
       firstTransactionEvent: true,
     });
 
     MockApiClient.addMockResponse({
-      url: `/projects/org-slug/project-slug/`,
+      url: '/projects/org-slug/project-slug/',
       method: 'GET',
       body: projectMock,
     });
 
-    PageFiltersStore.onInitializeUrlState(
-      {
-        projects: [parseInt(projectMock.id, 10)],
-        environments: [],
-        datetime: {
-          period: '14d',
-          start: null,
-          end: null,
-          utc: null,
-        },
+    PageFiltersStore.onInitializeUrlState({
+      projects: [parseInt(projectMock.id, 10)],
+      environments: [],
+      datetime: {
+        period: '14d',
+        start: null,
+        end: null,
+        utc: null,
       },
-      new Set()
-    );
+    });
 
     const trace = {
       breakdowns: [],
@@ -242,7 +309,7 @@ describe('Testing new onboarding ui', function () {
     render(<Onboarding organization={organization} project={projectMock} />, {
       initialRouterConfig: {
         location: {
-          pathname: RouterFixture().location.pathname,
+          pathname: '/onboarding/',
           query: {
             guidedStep: '4',
           },
@@ -250,13 +317,12 @@ describe('Testing new onboarding ui', function () {
       },
     });
 
-    expect(
-      await screen.findByRole('button', {
-        name: 'Take me to my trace',
-      })
-    ).toHaveAttribute('aria-busy', 'false');
+    const traceButton = await screen.findByRole('button', {
+      name: 'Take me to my trace',
+    });
+    await waitFor(() => expect(traceButton).toHaveAttribute('aria-busy', 'false'));
 
-    expect(window.location.href).not.toContain(traceHref);
+    expect(testableWindowLocation.assign).not.toHaveBeenCalled();
 
     await userEvent.click(
       await screen.findByRole('button', {
@@ -264,6 +330,6 @@ describe('Testing new onboarding ui', function () {
       })
     );
 
-    expect(window.location.href).toContain(traceHref);
+    expect(testableWindowLocation.assign).toHaveBeenCalledWith(traceHref);
   });
 });

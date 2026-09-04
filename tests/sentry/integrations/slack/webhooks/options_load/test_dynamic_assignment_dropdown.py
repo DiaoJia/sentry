@@ -1,6 +1,11 @@
 import orjson
 
+from sentry.constants import ObjectStatus
+from sentry.integrations.models.organization_integration import OrganizationIntegration
+from sentry.silo.base import SiloMode
 from sentry.testutils.helpers.datetime import freeze_time
+from sentry.testutils.helpers.slack import install_slack
+from sentry.testutils.silo import assume_test_silo_mode
 from sentry.testutils.skips import requires_snuba
 
 from . import BaseEventTest
@@ -9,7 +14,7 @@ pytestmark = [requires_snuba]
 
 
 class DynamicAssignmentDropdownTest(BaseEventTest):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.event_data = {
             "event_id": "a" * 32,
@@ -63,7 +68,7 @@ class DynamicAssignmentDropdownTest(BaseEventTest):
         }
 
     @freeze_time("2021-01-14T12:27:28.303Z")
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.team1 = self.create_team(name="aaaa", slug="aaaa")
         self.team2 = self.create_team(name="aaab", slug="eeee")
         self.team3 = self.create_team(name="xyz", slug="aaac")
@@ -102,7 +107,7 @@ class DynamicAssignmentDropdownTest(BaseEventTest):
         assert len(resp.data["option_groups"][1]["options"]) == 3
 
     @freeze_time("2021-01-14T12:27:28.303Z")
-    def test_escapes_special_characters(self):
+    def test_escapes_special_characters(self) -> None:
         self.team1 = self.create_team(name="aaaa", slug="aaaa")
         self.project = self.create_project(teams=[self.team1])
         self.group = self.create_group(project=self.project)
@@ -120,14 +125,58 @@ class DynamicAssignmentDropdownTest(BaseEventTest):
         assert resp.status_code == 200
         assert len(resp.data["option_groups"]) == 0
 
-    def test_non_existent_group(self):
+    def test_non_existent_group(self) -> None:
         self.original_message["blocks"][0]["block_id"] = orjson.dumps({"issue": 1}).decode()
         resp = self.post_webhook(substring="bbb", original_message=self.original_message)
 
         assert resp.status_code == 400
 
+    def test_returns_400_when_integration_not_linked_to_group_org(self) -> None:
+        self.team1 = self.create_team(name="aaaa", slug="aaaa")
+        self.project = self.create_project(teams=[self.team1])
+        self.group = self.create_group(project=self.project)
+        self.original_message["blocks"][0]["block_id"] = orjson.dumps(
+            {"issue": self.group.id}
+        ).decode()
+
+        # Slack integration installed in a different organization (different
+        # workspace_id). It must not be able to look up teams or members of
+        # this victim organization's group.
+        attacker_org = self.create_organization()
+        install_slack(attacker_org, workspace_id="TXXXXXXX2")
+
+        resp = self.post_webhook(
+            substring="aaa",
+            original_message=self.original_message,
+            team_id="TXXXXXXX2",
+        )
+
+        assert resp.status_code == 400
+
+    def test_returns_400_when_organization_integration_is_not_active(self) -> None:
+        self.team1 = self.create_team(name="aaaa", slug="aaaa")
+        self.project = self.create_project(teams=[self.team1])
+        self.group = self.create_group(project=self.project)
+        self.original_message["blocks"][0]["block_id"] = orjson.dumps(
+            {"issue": self.group.id}
+        ).decode()
+
+        # The OrganizationIntegration linking the workspace to this org has
+        # been marked for deletion. The link check must reject it as a stale
+        # row rather than treat it as a valid bond between the workspace and
+        # the group's organization.
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            OrganizationIntegration.objects.filter(
+                organization_id=self.organization.id,
+                integration=self.integration,
+            ).update(status=ObjectStatus.PENDING_DELETION)
+
+        resp = self.post_webhook(substring="aaa", original_message=self.original_message)
+
+        assert resp.status_code == 400
+
     @freeze_time("2021-01-14T12:27:28.303Z")
-    def test_escapes_characters_in_substring_but_not_string(self):
+    def test_escapes_characters_in_substring_but_not_string(self) -> None:
         self.team1 = self.create_team(name="aaaa", slug="aaaa")
         self.project = self.create_project(teams=[self.team1])
         self.group = self.create_group(project=self.project)

@@ -4,30 +4,37 @@ import re
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import sentry_sdk
 import sqlparse
 from django.contrib.auth.models import AnonymousUser
 from sentry_relay.processing import meta_with_chunks
 
+from sentry import options
 from sentry.api.serializers import Serializer, register, serialize
 from sentry.api.serializers.models.release import GroupEventReleaseSerializer
 from sentry.api.serializers.models.userreport import UserReportSerializerResponse
 from sentry.api.serializers.types import GroupEventReleaseSerializerResponse
-from sentry.eventstore.models import Event, GroupEvent
+from sentry.eventtypes import EventTypeStr
+from sentry.grouping.api import GroupingConfig
+from sentry.interfaces.sdk import EventSdkApiContext
 from sentry.interfaces.user import EventUserApiContext
+from sentry.issues.issue_occurrence import IssueOccurrenceResponse
 from sentry.models.eventattachment import EventAttachment
-from sentry.models.eventerror import EventError
+from sentry.models.eventerror import EventError, EventErrorApiContext
 from sentry.models.release import Release
 from sentry.models.userreport import UserReport
 from sentry.sdk_updates import SdkSetupState, get_suggested_updates
 from sentry.search.utils import convert_user_tag_to_query, map_device_class_level
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.stacktraces.processing import find_stacktraces_in_data
 from sentry.users.models.user import User
 from sentry.users.services.user.model import RpcUser
 from sentry.utils.json import prune_empty_keys
 from sentry.utils.safe import get_path
+from sentry.utils.tracing import start_span
 
 CRASH_FILE_TYPES = {"event.minidump"}
 RESERVED_KEYS = frozenset(["user", "sdk", "device", "contexts"])
@@ -46,6 +53,11 @@ class EventTagOptional(TypedDict, total=False):
 class EventTag(EventTagOptional):
     key: str
     value: str
+
+
+class MeasurementValue(TypedDict):
+    value: float
+    unit: NotRequired[str | None]
 
 
 def get_crash_files(events):
@@ -155,13 +167,13 @@ class BaseEventSerializerResponse(TypedDict):
     size: int | None
     entries: list[Any]
     dist: str | None
-    sdk: dict[str, str]
+    sdk: EventSdkApiContext | None
     context: dict[str, Any] | None
     packages: dict[str, Any]
-    type: str
-    metadata: Any
-    errors: list[Any]
-    occurrence: Any
+    type: EventTypeStr
+    metadata: dict[str, Any]
+    errors: list[EventErrorApiContext]
+    occurrence: IssueOccurrenceResponse | None
     _meta: dict[str, Any]
 
 
@@ -170,14 +182,14 @@ class ErrorEventFields(TypedDict, total=False):
     culprit: str | None
     dateCreated: datetime
     fingerprints: list[str]
-    groupingConfig: Any
+    groupingConfig: GroupingConfig
 
 
 class TransactionEventFields(TypedDict, total=False):
-    startTimestamp: datetime
-    endTimestamp: datetime
-    measurements: Any
-    breakdowns: Any
+    startTimestamp: float
+    endTimestamp: float
+    measurements: dict[str, MeasurementValue] | None
+    breakdowns: dict[str, dict[str, MeasurementValue]] | None
 
 
 class EventSerializerResponse(
@@ -194,6 +206,11 @@ class IssueEventSerializerResponse(SqlFormatEventSerializerResponse):
     userReport: UserReportSerializerResponse | None
     sdkUpdates: list[dict[str, Any]]
     resolvedWith: list[str]
+
+
+class GroupEventDetailsResponse(IssueEventSerializerResponse):
+    nextEventID: str | None
+    previousEventID: str | None
 
 
 @register(GroupEvent)
@@ -441,7 +458,7 @@ class SqlFormatEventSerializer(EventSerializer):
 
     def _format_breadcrumb_messages(
         self, event_data: EventSerializerResponse, event: Event | GroupEvent, user: User
-    ):
+    ) -> EventSerializerResponse:
         try:
             breadcrumbs = next(
                 filter(lambda entry: entry["type"] == "breadcrumbs", event_data.get("entries", ())),
@@ -485,7 +502,7 @@ class SqlFormatEventSerializer(EventSerializer):
 
     def _format_db_spans(
         self, event_data: EventSerializerResponse, event: Event | GroupEvent, user: User
-    ):
+    ) -> EventSerializerResponse:
         try:
             spans = next(
                 filter(lambda entry: entry["type"] == "spans", event_data.get("entries", ())),
@@ -509,7 +526,7 @@ class SqlFormatEventSerializer(EventSerializer):
         include_full_release_data = kwargs.pop("include_full_release_data", False)
         result = super().serialize(obj, attrs, user, **kwargs)
 
-        with sentry_sdk.start_span(op="serialize", name="Format SQL"):
+        with start_span(op="serialize", name="Format SQL"):
             result = self._format_breadcrumb_messages(result, obj, user)
             result = self._format_db_spans(result, obj, user)
             release_info = self._get_release_info(user, obj, include_full_release_data)
@@ -541,7 +558,10 @@ class IssueEventSerializer(SqlFormatEventSerializer):
         frame_data = [frame.get("data") for frame_list in frame_lists for frame in frame_list]
 
         unique_resolution_methods = {
-            frame.get("resolved_with") for frame in frame_data if frame is not None
+            resolved_with
+            for frame in frame_data
+            if frame is not None
+            if (resolved_with := frame.get("resolved_with")) is not None
         }
 
         return list(unique_resolution_methods)
@@ -589,7 +609,7 @@ SimpleEventSerializerResponse = TypedDict(
         "platform": str | None,
         "dateCreated": datetime,
         "crashFile": str | None,
-        "metadata": dict[str, Any] | None,
+        "metadata": dict[str, Any],
     },
 )
 
@@ -609,6 +629,19 @@ class SimpleEventSerializer(EventSerializer):
     """
 
     def get_attrs(self, item_list, user, **kwargs):
+        # Batch-fetch event bodies from nodestore in a single multi-get RPC.
+        # serialize() accesses properties (tags, message, title,
+        # get_event_metadata, etc.) that fall through to nodestore when the
+        # corresponding Snuba columns are missing from _snuba_data. Without
+        # this pre-fetch, each event triggers a separate Bigtable get — an
+        # N+1 pattern (~100 sequential RPCs, each ~90ms).
+        # Skip events whose node data is already loaded (e.g. when the caller
+        # used eventstore.get_events which calls bind_nodes internally).
+        if options.get("issues.group_events.batch_nodestore_enabled"):
+            unbound = [e for e in item_list if e.data._node_data is None]
+            if unbound:
+                eventstore.backend.bind_nodes(unbound)
+
         crash_files = get_crash_files(item_list)
         serialized_files = {
             file.event_id: serialized

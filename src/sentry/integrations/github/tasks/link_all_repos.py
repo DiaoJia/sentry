@@ -1,31 +1,36 @@
 import logging
+from collections.abc import Mapping
+from typing import Any, TypedDict
+
+from taskbroker_client.retry import Retry
 
 from sentry.constants import ObjectStatus
 from sentry.integrations.services.integration import integration_service
+from sentry.integrations.services.repository.service import repository_service
 from sentry.integrations.source_code_management.metrics import (
     LinkAllReposHaltReason,
     SCMIntegrationInteractionEvent,
     SCMIntegrationInteractionType,
 )
 from sentry.organizations.services.organization import organization_service
-from sentry.plugins.providers.integration_repository import (
-    RepoExistsError,
-    get_integration_repository_provider,
-)
+from sentry.plugins.providers.integration_repository import get_integration_repository_provider
 from sentry.shared_integrations.exceptions import ApiError
 from sentry.silo.base import SiloMode
-from sentry.tasks.base import instrumented_task, retry
-from sentry.taskworker.config import TaskworkerConfig
+from sentry.tasks.base import instrumented_task
 from sentry.taskworker.namespaces import integrations_control_tasks
-from sentry.taskworker.retry import Retry
-from sentry.utils import metrics
 
 logger = logging.getLogger(__name__)
 
 
-def get_repo_config(repo, integration_id):
+class GitHubRepoInputConfig(TypedDict):
+    external_id: str
+    integration_id: int
+    identifier: str
+
+
+def get_repo_config(repo: Mapping[str, Any], integration_id: int) -> GitHubRepoInputConfig:
     return {
-        "external_id": repo["id"],
+        "external_id": str(repo["id"]),
         "integration_id": integration_id,
         "identifier": repo["full_name"],
     }
@@ -33,52 +38,32 @@ def get_repo_config(repo, integration_id):
 
 @instrumented_task(
     name="sentry.integrations.github.tasks.link_all_repos",
-    queue="integrations.control",
-    max_retries=3,
+    namespace=integrations_control_tasks,
+    retry=Retry(times=3, on=(Exception,), ignore=(KeyError,)),
+    processing_deadline_duration=60,
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(
-        namespace=integrations_control_tasks,
-        retry=Retry(times=3),
-        processing_deadline_duration=60,
-    ),
+    silenced_exceptions=(KeyError,),
 )
-@retry(exclude=(RepoExistsError, KeyError))
 def link_all_repos(
     integration_key: str,
     integration_id: int,
     organization_id: int,
 ):
-
     with SCMIntegrationInteractionEvent(
         interaction_type=SCMIntegrationInteractionType.LINK_ALL_REPOS,
+        integration_id=integration_id,
+        organization_id=organization_id,
         provider_key=integration_key,
     ).capture() as lifecycle:
-        lifecycle.add_extra("organization_id", organization_id)
         integration = integration_service.get_integration(
             integration_id=integration_id, status=ObjectStatus.ACTIVE
         )
         if not integration:
-            # TODO: Remove this logger in favor of context manager
-            logger.error(
-                "%s.link_all_repos.integration_missing",
-                integration_key,
-                extra={"organization_id": organization_id},
-            )
-            metrics.incr("github.link_all_repos.error", tags={"type": "missing_integration"})
             lifecycle.record_failure(str(LinkAllReposHaltReason.MISSING_INTEGRATION))
             return
 
         rpc_org = organization_service.get(id=organization_id)
         if rpc_org is None:
-            logger.error(
-                "%s.link_all_repos.organization_missing",
-                integration_key,
-                extra={"organization_id": organization_id},
-            )
-            metrics.incr(
-                f"{integration_key}.link_all_repos.error",
-                tags={"type": "missing_organization"},
-            )
             lifecycle.record_failure(str(LinkAllReposHaltReason.MISSING_ORGANIZATION))
             return
 
@@ -93,26 +78,38 @@ def link_all_repos(
                 lifecycle.record_halt(str(LinkAllReposHaltReason.RATE_LIMITED))
                 return
 
-            metrics.incr(f"{integration_key}.link_all_repos.api_error")
             raise
 
         integration_repo_provider = get_integration_repository_provider(integration)
 
-        # If we successfully create any repositories, we'll set this to True
-        success = False
-
+        repo_configs: list[GitHubRepoInputConfig] = []
+        missing_repos = []
         for repo in repositories:
             try:
-                config = get_repo_config(repo, integration_id)
-                integration_repo_provider.create_repository(
-                    repo_config=config, organization=rpc_org
-                )
-                success = True
+                repo_configs.append(get_repo_config(repo, integration_id))
             except KeyError:
-                continue
-            except RepoExistsError:
-                metrics.incr("sentry.integration_repo_provider.repo_exists")
+                missing_repos.append(repo)
                 continue
 
-        if not success:
-            lifecycle.record_halt(str(LinkAllReposHaltReason.REPOSITORY_NOT_CREATED))
+        created_repos, _reactivated_repos, existing_repos = (
+            integration_repo_provider.create_repositories(
+                configs=repo_configs, organization=rpc_org
+            )
+        )
+
+        if created_repos:
+            repository_service.auto_link_repos_by_name(
+                organization_id=rpc_org.id, repo_ids=[r.id for r in created_repos]
+            )
+
+        if existing_repos:
+            lifecycle.record_halt(
+                str(LinkAllReposHaltReason.REPOSITORY_NOT_CREATED),
+                {"missing_repos": existing_repos, "integration_id": integration_id},
+            )
+
+        if missing_repos:
+            lifecycle.record_halt(
+                str(LinkAllReposHaltReason.REPOSITORY_NOT_CREATED),
+                {"missing_repos": missing_repos, "integration_id": integration_id},
+            )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hmac
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from hashlib import sha256
 from wsgiref.util import is_hop_by_hop
 
@@ -13,7 +13,9 @@ PROXY_BASE_URL_HEADER = "X-Sentry-Subnet-Base-URL"
 PROXY_SIGNATURE_HEADER = "X-Sentry-Subnet-Signature"
 PROXY_PATH = "X-Sentry-Subnet-Path"
 PROXY_KEYID_HEADER = "X-Sentry-Subnet-Keyid"
+PROXY_TIMEOUT_HEADER = "X-Sentry-Subnet-Timeout"
 PROXY_DIRECT_LOCATION_HEADER = "X-Sentry-Proxy-URL"
+PROXY_APIGATEWAY_HEADER = "X-Apigateway"
 
 INVALID_PROXY_HEADERS = {"Host", "X-Forwarded-Proto", "Content-Length", "Content-Encoding"}
 INVALID_OUTBOUND_HEADERS = INVALID_PROXY_HEADERS | {
@@ -21,7 +23,18 @@ INVALID_OUTBOUND_HEADERS = INVALID_PROXY_HEADERS | {
     PROXY_SIGNATURE_HEADER,
     PROXY_BASE_URL_HEADER,
     PROXY_PATH,
+    PROXY_TIMEOUT_HEADER,
 }
+
+# url_names whose request body is forwarded raw through the gateway and whose
+# Content-Encoding header must therefore be preserved (it is otherwise stripped
+# by clean_proxy_headers via INVALID_PROXY_HEADERS).
+PRESERVE_CONTENT_ENCODING_URL_NAMES = frozenset(
+    {
+        "sentry-api-0-organization-objectstore",
+        "sentry-api-0-project-preprod-snapshots-create",
+    }
+)
 
 DEFAULT_REQUEST_BODY = b""
 
@@ -34,7 +47,7 @@ def trim_leading_slashes(path: str) -> str:
 
 def clean_headers(
     headers: Mapping[str, str] | None, invalid_headers: Iterable[str]
-) -> Mapping[str, str]:
+) -> MutableMapping[str, str]:
     if not headers:
         headers = {}
     normalized_invalid = {h.lower() for h in invalid_headers}
@@ -46,12 +59,44 @@ def clean_headers(
     return modified_headers
 
 
-def clean_proxy_headers(headers: Mapping[str, str] | None) -> Mapping[str, str]:
+def clean_proxy_headers(headers: Mapping[str, str] | None) -> MutableMapping[str, str]:
     return clean_headers(headers, invalid_headers=INVALID_PROXY_HEADERS)
 
 
-def clean_outbound_headers(headers: Mapping[str, str] | None) -> Mapping[str, str]:
+def clean_outbound_headers(headers: Mapping[str, str] | None) -> MutableMapping[str, str]:
     return clean_headers(headers, invalid_headers=INVALID_OUTBOUND_HEADERS)
+
+
+def encode_proxy_timeout(timeout: float | tuple[float, float] | None) -> str | None:
+    """Serialize a requests-style timeout for transport in a proxy header.
+
+    A scalar is encoded as a single value; a (connect, read) tuple is encoded as
+    two comma-separated values. ``None`` returns ``None`` so callers can skip the
+    header entirely and let the downstream client fall back to its default.
+    """
+    if timeout is None:
+        return None
+    if isinstance(timeout, tuple):
+        connect, read = timeout
+        return f"{connect},{read}"
+    return str(timeout)
+
+
+def decode_proxy_timeout(value: str | None) -> float | tuple[float, float] | None:
+    """Parse the value produced by :func:`encode_proxy_timeout`.
+
+    Returns ``None`` for a missing or unparseable header so the downstream client
+    falls back to its own default timeout rather than failing the request.
+    """
+    if not value:
+        return None
+    try:
+        if "," in value:
+            connect, read = value.split(",", 1)
+            return (float(connect), float(read))
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def encode_subnet_signature(

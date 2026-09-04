@@ -5,13 +5,14 @@ from django.urls import reverse
 
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
-from sentry.types.region import get_local_region
+from sentry.testutils.silo import assume_test_silo_mode
+from sentry.types.cell import get_local_locality
 from sentry.utils import linksign
 
 
 class LinkSignTestCase(TestCase):
-    def test_link_signing(self):
-        base_url = get_local_region().to_url("/")
+    def test_link_signing(self) -> None:
+        base_url = get_local_locality().to_url("/")
         assert base_url.startswith("http://")
 
         url = linksign.generate_signed_link(self.user.id, "sentry")
@@ -28,7 +29,7 @@ class LinkSignTestCase(TestCase):
         assert "referrer=alert_view" in url
         assert "unsubscribe/project" in url
 
-    def test_link_signing_custom_url_prefix(self):
+    def test_link_signing_custom_url_prefix(self) -> None:
         if SiloMode.get_current_mode() != SiloMode.MONOLITH:
             return
         rf = RequestFactory()
@@ -42,7 +43,7 @@ class LinkSignTestCase(TestCase):
             assert signed_user
             assert signed_user.id == self.user.id
 
-    def test_process_signature(self):
+    def test_process_signature(self) -> None:
         rf = RequestFactory()
         url = linksign.generate_signed_link(self.user.id, "sentry")
 
@@ -59,7 +60,7 @@ class LinkSignTestCase(TestCase):
         signed_user = linksign.process_signature(req)
         assert signed_user is None
 
-    def test_generate_signed_unsubscribe_link_path_based(self):
+    def test_generate_signed_unsubscribe_link_path_based(self) -> None:
         rf = RequestFactory()
         org = self.organization
         user = self.user
@@ -78,7 +79,18 @@ class LinkSignTestCase(TestCase):
         signed_user = linksign.process_signature(req)
         assert signed_user
 
-    def test_generate_signed_unsubscribe_link_domain_based(self):
+    def test_process_signature_suspended_user(self) -> None:
+        rf = RequestFactory()
+        url = linksign.generate_signed_link(self.user.id, "sentry")
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.user.update(is_suspended=True)
+
+        req = rf.get("/" + url.split("/", 3)[-1])
+        signed_user = linksign.process_signature(req)
+        assert signed_user is None
+
+    def test_generate_signed_unsubscribe_link_domain_based(self) -> None:
         rf = RequestFactory()
         org = self.organization
         user = self.user

@@ -3,6 +3,7 @@ from rest_framework import status
 
 from sentry.api.serializers import serialize
 from sentry.integrations.models.repository_project_path_config import RepositoryProjectPathConfig
+from sentry.models.projectrepository import ProjectRepository, ProjectRepositorySource
 from sentry.models.repository import Repository
 from sentry.testutils.cases import APITestCase
 
@@ -10,7 +11,7 @@ from sentry.testutils.cases import APITestCase
 class OrganizationCodeMappingDetailsTest(APITestCase):
     endpoint = "sentry-api-0-organization-code-mapping-details"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.login_as(user=self.user)
@@ -37,15 +38,19 @@ class OrganizationCodeMappingDetailsTest(APITestCase):
         self.repo = Repository.objects.create(
             name="example", organization_id=self.org.id, integration_id=self.integration.id
         )
+        self.project_repo, _ = ProjectRepository.objects.get_or_create(
+            project=self.project,
+            repository=self.repo,
+            defaults={"source": ProjectRepositorySource.MANUAL},
+        )
         self.config = RepositoryProjectPathConfig.objects.create(
-            repository_id=self.repo.id,
-            project_id=self.project.id,
             organization_integration_id=self.org_integration.id,
             integration_id=self.org_integration.integration_id,
             organization_id=self.org_integration.organization_id,
             stack_root="/stack/root",
             source_root="/source/root",
             default_branch="master",
+            project_repository=self.project_repo,
         )
 
         self.url = reverse(
@@ -61,10 +66,13 @@ class OrganizationCodeMappingDetailsTest(APITestCase):
             {**config_data, **data, "repositoryId": self.repo.id},
         )
 
-    def test_non_project_member_permissions(self):
+    def test_non_project_member_permissions(self) -> None:
         non_member = self.create_user()
         non_member_om = self.create_member(organization=self.org, user=non_member)
         self.login_as(user=non_member)
+
+        response = self.client.put(self.url, {"sourceRoot": ""})
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
         response = self.make_put({"sourceRoot": "newRoot"})
         assert response.status_code == status.HTTP_403_FORBIDDEN
@@ -86,23 +94,57 @@ class OrganizationCodeMappingDetailsTest(APITestCase):
         response = self.client.delete(self.url)
         assert response.status_code == status.HTTP_204_NO_CONTENT
 
-    def test_basic_delete(self):
+    def test_basic_delete(self) -> None:
         resp = self.client.delete(self.url)
         assert resp.status_code == 204
         assert not RepositoryProjectPathConfig.objects.filter(id=str(self.config.id)).exists()
 
-    def test_basic_edit(self):
+    def test_basic_edit(self) -> None:
         resp = self.make_put({"sourceRoot": "newRoot"})
         assert resp.status_code == 200
         assert resp.data["id"] == str(self.config.id)
         assert resp.data["sourceRoot"] == "newRoot"
 
-    def test_basic_edit_from_member_permissions(self):
+    def test_edit_rejects_missing_required_fields(self) -> None:
+        resp = self.client.put(self.url, {"sourceRoot": ""})
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.data == {
+            "projectId": ["This field is required."],
+            "repositoryId": ["This field is required."],
+            "stackRoot": ["This field is required."],
+        }
+
+    def test_edit_snake_case_project_id_is_access_checked(self) -> None:
+        member = self.create_user()
+        self.create_member(
+            organization=self.org, user=member, has_global_access=False, teams=[self.team]
+        )
+        self.login_as(user=member)
+
+        # every key is snake_case so `projectId` never appears in the body, but the
+        # serializer still reads it as project_id and would move the mapping
+        resp = self.client.put(
+            self.url,
+            {
+                "repository_id": self.repo.id,
+                "project_id": self.project2.id,
+                "stack_root": "/stack/root",
+                "source_root": "/source/root",
+                "default_branch": "master",
+            },
+        )
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        self.config.refresh_from_db()
+        assert self.config.project_repository.project_id == self.project.id
+
+    def test_basic_edit_from_member_permissions(self) -> None:
         self.login_as(user=self.user2)
         resp = self.make_put({"sourceRoot": "newRoot"})
         assert resp.status_code == 200
 
-    def test_delete_with_existing_codeowners(self):
+    def test_delete_with_existing_codeowners(self) -> None:
         self.create_codeowners(project=self.project, code_mapping=self.config)
         resp = self.client.delete(self.url)
         assert resp.status_code == 409
@@ -112,7 +154,7 @@ class OrganizationCodeMappingDetailsTest(APITestCase):
         )
         assert RepositoryProjectPathConfig.objects.filter(id=str(self.config.id)).exists()
 
-    def test_delete_another_orgs_code_mapping(self):
+    def test_delete_another_orgs_code_mapping(self) -> None:
         invalid_user = self.create_user()
         invalid_organization = self.create_organization(owner=invalid_user)
         self.login_as(user=invalid_user)

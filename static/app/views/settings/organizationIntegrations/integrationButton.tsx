@@ -1,29 +1,31 @@
 import {useContext} from 'react';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
+import {LinkButton} from '@sentry/scraps/button';
+
 import {IconOpen} from 'sentry/icons';
 import type {Integration} from 'sentry/types/integrations';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {AddIntegrationButton} from 'sentry/views/settings/organizationIntegrations/addIntegrationButton';
+import {DirectEnableButton} from 'sentry/views/settings/organizationIntegrations/directEnableButton';
 import {IntegrationContext} from 'sentry/views/settings/organizationIntegrations/integrationContext';
-import RequestIntegrationButton from 'sentry/views/settings/organizationIntegrations/integrationRequest/RequestIntegrationButton';
+import {RequestIntegrationButton} from 'sentry/views/settings/organizationIntegrations/integrationRequest/RequestIntegrationButton';
 
 type Props = {
-  buttonProps: ButtonProps;
+  /**
+   * This could accept most props from AddIntegrationButton, but we are
+   * selectively picking the ones that we are actively using
+   */
+  buttonProps: Pick<
+    React.ComponentProps<typeof AddIntegrationButton>,
+    'size' | 'variant' | 'disabled' | 'style' | 'data-test-id' | 'icon' | 'buttonText'
+  >;
   onAddIntegration: (integration: Integration) => void;
   onExternalClick: () => void;
   userHasAccess: boolean;
   externalInstallText?: string;
 };
 
-type ButtonProps = {
-  disabled?: any;
-  priority?: any;
-  size?: any;
-  style?: any;
-} | null;
-
-function IntegrationButton({
+export function IntegrationButton({
   userHasAccess,
   onAddIntegration,
   onExternalClick,
@@ -31,7 +33,7 @@ function IntegrationButton({
   buttonProps,
 }: Props) {
   const organization = useOrganization();
-  const {provider, type, installStatus, analyticsParams, modalParams} =
+  const {provider, type, installStatus, analyticsParams, suppressSuccessMessage} =
     useContext(IntegrationContext) ?? {};
   if (!provider || !type) {
     return null;
@@ -43,6 +45,15 @@ function IntegrationButton({
       <RequestIntegrationButton name={provider.name} slug={provider.slug} type={type} />
     );
   }
+  if (metadata.aspects.directEnable) {
+    return provider.canAdd ? (
+      <DirectEnableButton
+        providerSlug={provider.slug}
+        buttonProps={buttonProps}
+        userHasAccess={userHasAccess}
+      />
+    ) : null;
+  }
   if (provider.canAdd) {
     return (
       <AddIntegrationButton
@@ -50,9 +61,9 @@ function IntegrationButton({
         onAddIntegration={onAddIntegration}
         installStatus={installStatus}
         analyticsParams={analyticsParams}
-        modalParams={modalParams}
-        organization={organization}
+        suppressSuccessMessage={suppressSuccessMessage}
         {...buttonProps}
+        organization={organization}
       />
     );
   }
@@ -73,5 +84,3 @@ function IntegrationButton({
   }
   return null;
 }
-
-export default IntegrationButton;

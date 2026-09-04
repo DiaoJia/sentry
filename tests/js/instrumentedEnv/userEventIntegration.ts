@@ -1,4 +1,5 @@
-import {fill, isThenable, loadModule} from '@sentry/core';
+import {fill, isThenable} from '@sentry/core';
+import {loadModule} from '@sentry/core/server';
 import * as Sentry from '@sentry/react';
 
 export function instrumentUserEvent(): void {
@@ -24,7 +25,7 @@ const ACTIONS = [
 ];
 
 function _patchAction(userEvent: any, action: Action): void {
-  fill(userEvent, action, function (orig: () => void | Promise<unknown>) {
+  fill(userEvent, action, (orig: () => void | Promise<unknown>) => {
     return function patchedAction(this: unknown, ...args: unknown[]) {
       const span = Sentry.startInactiveSpan({
         op: 'user event',

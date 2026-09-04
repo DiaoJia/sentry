@@ -4,10 +4,15 @@ from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import analytics, deletions
+from sentry import analytics, audit_log, deletions
+from sentry.analytics.events.sentry_app_installation_token_deleted import (
+    SentryAppInstallationTokenDeleted,
+)
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.authentication import SessionNoAuthTokenAuthentication
 from sentry.api.base import control_silo_endpoint
+from sentry.api.permissions import DisallowImpersonatedTokenCreation
 from sentry.models.apitoken import ApiToken
 from sentry.sentry_apps.api.bases.sentryapps import (
     SentryAppBaseEndpoint,
@@ -15,15 +20,18 @@ from sentry.sentry_apps.api.bases.sentryapps import (
 )
 from sentry.sentry_apps.api.endpoints.sentry_app_details import PARTNERSHIP_RESTRICTED_ERROR_MESSAGE
 from sentry.sentry_apps.models.sentry_app_installation_token import SentryAppInstallationToken
+from sentry.utils.audit import create_audit_entry
 
 
 @control_silo_endpoint
 class SentryInternalAppTokenDetailsEndpoint(SentryAppBaseEndpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.INTEGRATION_PLATFORM
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
     }
-    permission_classes = (SentryInternalAppTokenPermission,)
+    authentication_classes = (SessionNoAuthTokenAuthentication,)
+    permission_classes = (SentryInternalAppTokenPermission, DisallowImpersonatedTokenCreation)
+    allow_disabled_sentry_app_for_methods = {"DELETE"}
 
     def convert_args(self, request: Request, sentry_app_id_or_slug, api_token_id, *args, **kwargs):
         # get the sentry_app from the SentryAppBaseEndpoint class
@@ -62,12 +70,24 @@ class SentryInternalAppTokenDetailsEndpoint(SentryAppBaseEndpoint):
 
             deletions.exec_sync(install_token)
 
-        analytics.record(
-            "sentry_app_installation_token.deleted",
-            user_id=request.user.id,
-            organization_id=sentry_app_installation.organization_id,
-            sentry_app_installation_id=sentry_app_installation.id,
-            sentry_app=sentry_app.slug,
-        )
+        if request.user.is_authenticated:
+            analytics.record(
+                SentryAppInstallationTokenDeleted(
+                    user_id=request.user.id,
+                    organization_id=sentry_app_installation.organization_id,
+                    sentry_app_installation_id=sentry_app_installation.id,
+                    sentry_app=sentry_app.slug,
+                )
+            )
+            create_audit_entry(
+                request=request,
+                organization_id=sentry_app_installation.organization_id,
+                target_object=api_token.id,
+                event=audit_log.get_event_id("INTERNAL_INTEGRATION_REMOVE_TOKEN"),
+                data={
+                    "sentry_app_slug": sentry_app.slug,
+                    "sentry_app_installation_uuid": sentry_app_installation.uuid,
+                },
+            )
 
         return Response(status=204)

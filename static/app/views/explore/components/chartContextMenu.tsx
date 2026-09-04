@@ -2,31 +2,36 @@ import {useMemo} from 'react';
 import styled from '@emotion/styled';
 
 import Feature from 'sentry/components/acl/feature';
-import {DropdownMenu, type MenuItemProps} from 'sentry/components/dropdownMenu';
+import {DropdownMenu} from 'sentry/components/dropdownMenu';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {IconEllipsis} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {Dataset} from 'sentry/views/alerts/rules/metric/types';
 import {useAddToDashboard} from 'sentry/views/explore/hooks/useAddToDashboard';
+import {
+  isVisualizeEquation,
+  type Visualize,
+} from 'sentry/views/explore/queryParams/visualize';
+import {hasConditionalAggregateFilter} from 'sentry/views/explore/utils/conditionalAggregate';
+import {
+  getCreateAlertForLabel,
+  getSaveAsAlertMenuItem,
+} from 'sentry/views/explore/utils/saveAsAlertMenuItem';
 import {getAlertsUrl} from 'sentry/views/insights/common/utils/getAlertsUrl';
 
-function ChartContextMenu({
+export function ChartContextMenu({
   visualizeIndex,
   visualizeYAxes,
   query,
   interval,
-  visible,
-  setVisible,
 }: {
   interval: string;
   query: string;
-  setVisible: (visible: boolean) => void;
-  visible: boolean;
   visualizeIndex: number;
-  visualizeYAxes: readonly string[];
+  visualizeYAxes: readonly Visualize[];
 }) {
   const {addToDashboard} = useAddToDashboard();
   const organization = useOrganization();
@@ -34,7 +39,7 @@ function ChartContextMenu({
   const {projects} = useProjects();
   const pageFilters = usePageFilters();
 
-  const items: MenuItemProps[] = useMemo(() => {
+  const items = useMemo(() => {
     const menuItems = [];
 
     const project =
@@ -43,38 +48,43 @@ function ChartContextMenu({
         : projects.find(p => p.id === `${pageFilters.selection.projects[0]}`);
 
     if (visualizeYAxes.length === 1) {
-      const yAxis = visualizeYAxes[0]!;
-      menuItems.push({
-        key: 'create-alert',
-        textValue: t('Create an Alert'),
-        label: t('Create an Alert'),
-        to: getAlertsUrl({
-          project,
-          query,
-          pageFilters: pageFilters.selection,
-          aggregate: yAxis,
-          organization,
-          dataset: Dataset.EVENTS_ANALYTICS_PLATFORM,
-          interval,
-        }),
-        onAction: () => {
-          trackAnalytics('trace_explorer.save_as', {
-            save_type: 'alert',
-            ui_source: 'chart',
+      const yAxis = visualizeYAxes[0]!.yAxis;
+      menuItems.push(
+        getSaveAsAlertMenuItem({
+          disabled:
+            isVisualizeEquation(visualizeYAxes[0]!) ||
+            hasConditionalAggregateFilter(yAxis),
+          to: getAlertsUrl({
+            project,
+            query,
+            pageFilters: pageFilters.selection,
+            aggregate: yAxis,
             organization,
-          });
-          return undefined;
-        },
-      });
+            dataset: Dataset.EVENTS_ANALYTICS_PLATFORM,
+            interval,
+          }),
+          onAction: () => {
+            trackAnalytics('trace_explorer.save_as', {
+              save_type: 'alert',
+              ui_source: 'chart',
+              organization,
+            });
+            return;
+          },
+        })
+      );
     } else {
-      const alertsUrls = visualizeYAxes.map((yAxis, index) => ({
-        key: `${yAxis}-${index}`,
-        label: yAxis,
+      const alertsUrls = visualizeYAxes.map((visualizeYAxis, index) => ({
+        key: `${visualizeYAxis.yAxis}-${index}`,
+        label: visualizeYAxis.yAxis,
+        disabled:
+          isVisualizeEquation(visualizeYAxis) ||
+          hasConditionalAggregateFilter(visualizeYAxis.yAxis),
         to: getAlertsUrl({
           project,
           query,
           pageFilters: pageFilters.selection,
-          aggregate: yAxis,
+          aggregate: visualizeYAxis.yAxis,
           organization,
           dataset: Dataset.EVENTS_ANALYTICS_PLATFORM,
           interval,
@@ -85,17 +95,17 @@ function ChartContextMenu({
             ui_source: 'chart',
             organization,
           });
-          return undefined;
+          return;
         },
       }));
 
-      menuItems.push({
-        key: 'create-alert',
-        label: t('Create an alert for'),
-        children: alertsUrls ?? [],
-        disabled: !alertsUrls || alertsUrls.length === 0,
-        isSubmenu: true,
-      });
+      menuItems.push(
+        getSaveAsAlertMenuItem({
+          alertsUrls,
+          submenu: true,
+          label: getCreateAlertForLabel(),
+        })
+      );
     }
 
     const disableAddToDashboard = !organization.features.includes('dashboards-edit');
@@ -104,7 +114,7 @@ function ChartContextMenu({
       textValue: t('Add to Dashboard'),
       label: (
         <Feature
-          hookName="feature-disabled:dashboards-edit"
+          overrideName="feature-disabled:dashboards-edit"
           features="organizations:dashboards-edit"
           renderDisabled={() => <DisabledText>{t('Add to Dashboard')}</DisabledText>}
         >
@@ -114,7 +124,7 @@ function ChartContextMenu({
       disabled: disableAddToDashboard,
       onAction: () => {
         if (disableAddToDashboard) {
-          return undefined;
+          return;
         }
         trackAnalytics('trace_explorer.save_as', {
           save_type: 'dashboard',
@@ -124,22 +134,6 @@ function ChartContextMenu({
         return addToDashboard(visualizeIndex);
       },
     });
-
-    if (visible) {
-      menuItems.push({
-        key: 'hide-chart',
-        textValue: t('Hide Chart'),
-        label: t('Hide Chart'),
-        onAction: () => setVisible(false),
-      });
-    } else {
-      menuItems.push({
-        key: 'show-chart',
-        textValue: t('Show Chart'),
-        label: t('Show Chart'),
-        onAction: () => setVisible(true),
-      });
-    }
 
     return menuItems;
   }, [
@@ -151,8 +145,6 @@ function ChartContextMenu({
     query,
     visualizeIndex,
     visualizeYAxes,
-    visible,
-    setVisible,
   ]);
 
   if (items.length === 0) {
@@ -163,7 +155,7 @@ function ChartContextMenu({
     <DropdownMenu
       triggerProps={{
         size: 'xs',
-        borderless: true,
+        variant: 'transparent',
         showChevron: false,
         icon: <IconEllipsis />,
       }}
@@ -173,8 +165,6 @@ function ChartContextMenu({
   );
 }
 
-export default ChartContextMenu;
-
-const DisabledText = styled('span')`
-  color: ${p => p.theme.disabled};
+export const DisabledText = styled('span')`
+  color: ${p => p.theme.tokens.content.disabled};
 `;

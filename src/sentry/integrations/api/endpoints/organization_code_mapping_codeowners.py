@@ -6,7 +6,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationIntegrationsPermission
 from sentry.constants import ObjectStatus
 from sentry.integrations.models.repository_project_path_config import RepositoryProjectPathConfig
@@ -24,12 +24,14 @@ def get_codeowner_contents(config):
     )
     if not integration:
         return None
-    install = integration.get_installation(organization_id=config.project.organization_id)
+    org_id = config.project_repository.project.organization_id
+    repository = config.project_repository.repository
+    install = integration.get_installation(organization_id=org_id)
     if isinstance(install, RepositoryIntegration):
-        return install.get_codeowner_file(config.repository, ref=config.default_branch)
+        return install.get_codeowner_file(repository, ref=config.default_branch)
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationCodeMappingCodeOwnersEndpoint(OrganizationEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
@@ -44,7 +46,10 @@ class OrganizationCodeMappingCodeOwnersEndpoint(OrganizationEndpoint):
         organization = kwargs["organization"]
 
         try:
-            kwargs["config"] = RepositoryProjectPathConfig.objects.get(
+            kwargs["config"] = RepositoryProjectPathConfig.objects.select_related(
+                "project_repository__project",
+                "project_repository__repository",
+            ).get(
                 id=config_id,
                 organization_id=organization.id,
             )
@@ -54,6 +59,10 @@ class OrganizationCodeMappingCodeOwnersEndpoint(OrganizationEndpoint):
         return (args, kwargs)
 
     def get(self, request: Request, config_id, organization, config) -> Response:
+        project = config.project_repository.project
+        if not request.access.has_project_access(project):
+            return self.respond(status=status.HTTP_403_FORBIDDEN)
+
         try:
             codeowner_contents = get_codeowner_contents(config)
         except ApiError as e:

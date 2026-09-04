@@ -1,7 +1,10 @@
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from sentry.discover.models import DiscoverSavedQueryTypes
+from sentry.search.eap.types import SupportedTraceItemType
 from sentry.snuba import (
     discover,
     errors,
@@ -9,15 +12,22 @@ from sentry.snuba import (
     issue_platform,
     metrics_enhanced_performance,
     metrics_performance,
-    ourlogs,
     profiles,
-    spans_indexed,
     spans_metrics,
-    spans_rpc,
     transactions,
-    uptime_checks,
 )
 from sentry.snuba.models import QuerySubscription, SnubaQuery
+from sentry.snuba.occurrences_rpc import Occurrences
+from sentry.snuba.ourlogs import OurLogs
+from sentry.snuba.preprod_size import PreprodSize
+from sentry.snuba.processing_errors_rpc import ProcessingErrors
+from sentry.snuba.profile_functions import ProfileFunctions
+from sentry.snuba.replays import Replays
+from sentry.snuba.spans_rpc import Spans
+from sentry.snuba.trace_metrics import TraceMetrics
+from sentry.snuba.uptime_results import UptimeResults
+
+logger = logging.getLogger(__name__)
 
 # Doesn't map 1:1 with real datasets, but rather what we present to users
 # ie. metricsEnhanced is not a real dataset
@@ -26,17 +36,48 @@ DATASET_OPTIONS = {
     "errors": errors,
     "metricsEnhanced": metrics_enhanced_performance,
     "metrics": metrics_performance,
-    "ourlogs": ourlogs,
-    "uptimeChecks": uptime_checks,
+    SupportedTraceItemType.OCCURRENCES.value: Occurrences,
+    # ourlogs is deprecated, please use logs instead
+    "ourlogs": OurLogs,
+    SupportedTraceItemType.LOGS.value: OurLogs,
+    SupportedTraceItemType.UPTIME_RESULTS.value: UptimeResults,
+    "preprodSize": PreprodSize,
     "profiles": profiles,
     "issuePlatform": issue_platform,
     "profileFunctions": functions,
-    "spans": spans_rpc,
-    "spansIndexed": spans_indexed,
+    SupportedTraceItemType.PROFILE_FUNCTIONS.value: ProfileFunctions,
+    SupportedTraceItemType.REPLAYS.value: Replays,
+    SupportedTraceItemType.SPANS.value: Spans,
     "spansMetrics": spans_metrics,
+    SupportedTraceItemType.TRACEMETRICS.value: TraceMetrics,
+    SupportedTraceItemType.PROCESSING_ERRORS.value: ProcessingErrors,
     "transactions": transactions,
 }
-DATASET_LABELS = {value: key for key, value in DATASET_OPTIONS.items()}
+DEPRECATED_LABELS = {"ourlogs"}
+FEATURE_FLAGGED_DATASETS = {
+    SupportedTraceItemType.OCCURRENCES.value,
+    SupportedTraceItemType.REPLAYS.value,
+}
+# Labels that we're okay showing to users; not behind a feature flag and not deprecated
+PUBLIC_DATASET_LABELS = sorted(
+    key
+    for key in DATASET_OPTIONS.keys()
+    if key not in DEPRECATED_LABELS and key not in FEATURE_FLAGGED_DATASETS
+)
+RPC_DATASETS = {
+    Occurrences,
+    OurLogs,
+    PreprodSize,
+    ProcessingErrors,
+    ProfileFunctions,
+    Replays,
+    Spans,
+    TraceMetrics,
+    UptimeResults,
+}
+DATASET_LABELS = {
+    value: key for key, value in DATASET_OPTIONS.items() if key not in DEPRECATED_LABELS
+}
 
 
 TRANSACTION_ONLY_FIELDS = [
@@ -93,7 +134,11 @@ ERROR_ONLY_FIELDS = [
 ]
 
 
-def get_dataset(dataset_label: str) -> Any | None:
+def get_dataset(dataset_label: str | None) -> Any | None:
+    if dataset_label in DEPRECATED_LABELS:
+        logger.warning("query.deprecated_dataset.%s", dataset_label)
+    if dataset_label is None:
+        return None
     return DATASET_OPTIONS.get(dataset_label)
 
 
@@ -126,7 +171,7 @@ def build_query_strings(
     )
 
 
-def dataset_split_decision_inferred_from_query(columns, query):
+def dataset_split_decision_inferred_from_query(columns: Sequence[str], query: str) -> int | None:
     """
     Infers split decision based on fields we know exclusively belong to one
     dataset or the other. Biases towards Errors dataset.

@@ -1,12 +1,15 @@
+from sentry.models.organization import Organization
 from sentry.sentry_apps.models.platformexternalissue import PlatformExternalIssue
 from sentry.testutils.cases import APITestCase
+from sentry.testutils.silo import assume_test_silo_mode_of, control_silo_test
 
 
+@control_silo_test
 class SentryAppInstallationExternalIssueDetailsEndpointTest(APITestCase):
     endpoint = "sentry-api-0-sentry-app-installation-external-issue-details"
     method = "delete"
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user(email="boop@example.com")
         self.org = self.create_organization(owner=self.user)
         self.project = self.create_project(organization=self.org)
@@ -29,15 +32,17 @@ class SentryAppInstallationExternalIssueDetailsEndpointTest(APITestCase):
         )
         self.login_as(self.user)
 
-    def test_deletes_external_issue(self):
-        assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
+    def test_deletes_external_issue(self) -> None:
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
         self.get_success_response(self.install.uuid, self.external_issue.id, status_code=204)
-        assert not PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert not PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
 
-    def test_handles_non_existing_external_issue(self):
+    def test_handles_non_existing_external_issue(self) -> None:
         self.get_error_response(self.install.uuid, 999999, status_code=404)
 
-    def test_handles_issue_from_wrong_org(self):
+    def test_handles_issue_from_wrong_org(self) -> None:
         """
         Ensure that an outside organization cannot delete another organization's external issue
         """
@@ -56,4 +61,34 @@ class SentryAppInstallationExternalIssueDetailsEndpointTest(APITestCase):
         )
 
         self.get_error_response(evil_install.uuid, self.external_issue.id, status_code=404)
-        assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
+
+    def test_handles_member_without_project_access(self) -> None:
+        """
+        Ensure that a member fenced out of the issue's project cannot delete its external issue
+        """
+        with assume_test_silo_mode_of(Organization):
+            self.org.flags.allow_joinleave = False
+            self.org.save()
+
+        member_team = self.create_team(organization=self.org)
+        self.create_project(organization=self.org, teams=[member_team])
+        restricted_member = self.create_user(email="restricted@example.com")
+        self.create_member(
+            organization=self.org, user=restricted_member, role="member", teams=[member_team]
+        )
+        self.login_as(restricted_member)
+
+        self.get_error_response(self.install.uuid, self.external_issue.id, status_code=403)
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()
+
+    def test_handles_invalid_external_issue_id_format(self) -> None:
+        """Test that non-numeric external_issue_id returns 400 error"""
+        # Non-numeric string
+        self.get_error_response(self.install.uuid, "test-issue-id-123", status_code=400)
+
+        # Ensure the external issue still exists after failed attempts
+        with assume_test_silo_mode_of(PlatformExternalIssue):
+            assert PlatformExternalIssue.objects.filter(id=self.external_issue.id).exists()

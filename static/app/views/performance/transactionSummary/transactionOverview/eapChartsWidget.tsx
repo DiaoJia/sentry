@@ -1,13 +1,15 @@
 import {useMemo} from 'react';
 
-import {CompactSelect, type SelectOption} from 'sentry/components/core/compactSelect';
+import {CompactSelect, type SelectOption} from '@sentry/scraps/compactSelect';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+
 import {t} from 'sentry/locale';
 import {decodeScalar} from 'sentry/utils/queryString';
-import useLocationQuery from 'sentry/utils/url/useLocationQuery';
+import {useLocationQuery} from 'sentry/utils/url/useLocationQuery';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
 import {Widget} from 'sentry/views/dashboards/widgets/widget/widget';
-import {SpanIndexedField} from 'sentry/views/insights/types';
+import {SpanFields} from 'sentry/views/insights/types';
 import {useWidgetChartVisualization} from 'sentry/views/performance/transactionSummary/transactionOverview/useWidgetChartVisualization';
 
 export enum EAPWidgetType {
@@ -32,7 +34,7 @@ const WIDGET_OPTIONS: Record<
     title: t('Duration Percentiles'),
     spanCategoryTitle: t('Span Category Percentiles'),
     description: t(
-      `Compare the duration at each percentile. Compare with Latency Histogram to see transaction volume at duration intervals.`
+      'Compare the duration at each percentile. Compare with Latency Histogram to see transaction volume at duration intervals.'
     ),
     disabled: false,
   },
@@ -52,7 +54,7 @@ const WIDGET_OPTIONS: Record<
     description: t(
       'Web Vitals Breakdown reflects the 75th percentile of web vitals over time.'
     ),
-    disabled: true,
+    disabled: false,
   },
 };
 
@@ -80,11 +82,11 @@ export function EAPChartsWidget({transactionName, query}: EAPChartsWidgetProps) 
   const navigate = useNavigate();
 
   const {
-    [SpanIndexedField.SPAN_CATEGORY]: spanCategoryUrlParam,
+    [SpanFields.SPAN_CATEGORY]: spanCategoryUrlParam,
     [SELECTED_CHART_QUERY_PARAM]: selectedChartUrlParam,
   } = useLocationQuery({
     fields: {
-      [SpanIndexedField.SPAN_CATEGORY]: decodeScalar,
+      [SpanFields.SPAN_CATEGORY]: decodeScalar,
       [SELECTED_CHART_QUERY_PARAM]: decodeScalar,
     },
   });
@@ -124,7 +126,9 @@ export function EAPChartsWidget({transactionName, query}: EAPChartsWidgetProps) 
           options={options}
           value={selectedChart}
           onChange={handleChartChange}
-          triggerProps={{borderless: true, size: 'zero'}}
+          trigger={triggerProps => (
+            <OverlayTrigger.Button {...triggerProps} variant="transparent" size="zero" />
+          )}
         />
       }
       Actions={

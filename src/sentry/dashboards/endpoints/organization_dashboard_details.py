@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from django.db import IntegrityError, router, transaction
+from django.db.models import F
+from django.utils import timezone
+from drf_spectacular.utils import extend_schema
+from rest_framework.request import Request
+from rest_framework.response import Response
+
+from sentry import audit_log, features
+from sentry.api.api_owners import ApiOwner
+from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases.organization import OrganizationEndpoint
+from sentry.api.exceptions import ResourceDoesNotExist
+from sentry.api.serializers import serialize
+from sentry.api.serializers.models.dashboard import (
+    DashboardDetailsModelSerializer,
+    DashboardDetailsResponse,
+)
+from sentry.api.serializers.rest_framework import DashboardDetailsSerializer
+from sentry.apidocs.constants import (
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NO_CONTENT,
+    RESPONSE_NOT_FOUND,
+)
+from sentry.apidocs.examples.dashboard_examples import DashboardExamples
+from sentry.apidocs.parameters import DashboardParams, GlobalParams
+from sentry.apidocs.response_types import (
+    DetailResponse,
+    ValidationErrorResponse,
+    as_validation_errors,
+)
+from sentry.dashboards.endpoints.organization_dashboards import OrganizationDashboardsPermission
+from sentry.models.dashboard import (
+    Dashboard,
+    DashboardFavoriteUser,
+    DashboardLastVisited,
+    DashboardRevision,
+)
+from sentry.models.organization import Organization
+
+EDIT_FEATURE = "organizations:dashboards-edit"
+READ_FEATURE = "organizations:dashboards-basic"
+
+logger = logging.getLogger(__name__)
+
+
+def _take_dashboard_snapshot(
+    dashboard: Dashboard,
+    user: Any,
+) -> dict[str, Any] | None:
+    """
+    Serialize the current dashboard state as a snapshot, or return None if
+    serialization fails.
+
+    Must be called outside any transaction.atomic block because the serializer
+    makes hybrid-cloud RPC calls (user_service.serialize_many) that cannot run
+    inside a transaction.
+    """
+    try:
+        return serialize(dashboard, user)
+    except Exception:
+        # Snapshot failures must not block the dashboard save. Log and skip.
+        logger.exception(
+            "Failed to serialize dashboard snapshot; proceeding without creating revision",
+            extra={"dashboard_id": dashboard.id},
+        )
+        return None
+
+
+class OrganizationDashboardBase(OrganizationEndpoint):
+    owner = ApiOwner.DASHBOARDS
+    permission_classes = (OrganizationDashboardsPermission,)
+
+    def convert_args(
+        self,
+        request: Request,
+        organization_id_or_slug: str | int,
+        dashboard_id: str | int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        args, kwargs = super().convert_args(request, organization_id_or_slug, *args, **kwargs)
+
+        try:
+            kwargs["dashboard"] = Dashboard.objects.get(
+                id=dashboard_id, organization_id=kwargs["organization"].id
+            )
+        except (Dashboard.DoesNotExist, ValueError):
+            raise ResourceDoesNotExist
+
+        return (args, kwargs)
+
+
+@extend_schema(tags=["Dashboards"])
+@cell_silo_endpoint
+class OrganizationDashboardDetailsEndpoint(OrganizationDashboardBase):
+    publish_status = {
+        "DELETE": ApiPublishStatus.PUBLIC,
+        "GET": ApiPublishStatus.PUBLIC,
+        "PUT": ApiPublishStatus.PUBLIC,
+    }
+
+    @extend_schema(
+        operation_id="getOrganizationDashboard",
+        summary="Retrieve an Organization's Custom Dashboard",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG, DashboardParams.DASHBOARD_ID],
+        responses={
+            200: DashboardDetailsModelSerializer,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=DashboardExamples.DASHBOARD_GET_RESPONSE,
+    )
+    def get(
+        self, request: Request, organization: Organization, dashboard: Dashboard
+    ) -> Response[DashboardDetailsResponse] | Response[None]:
+        """
+        Return details about an organization's custom dashboard.
+        """
+        if not features.has(READ_FEATURE, organization, actor=request.user):
+            return Response(status=404)
+
+        body: DashboardDetailsResponse = serialize(dashboard, request.user)
+        return self.respond(body)
+
+    @extend_schema(
+        operation_id="deleteOrganizationDashboard",
+        summary="Delete an Organization's Custom Dashboard",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG, DashboardParams.DASHBOARD_ID],
+        responses={
+            204: RESPONSE_NO_CONTENT,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def delete(
+        self, request: Request, organization: Organization, dashboard: Dashboard
+    ) -> Response[None] | Response[DetailResponse]:
+        """
+        Delete an organization's custom dashboard.
+        """
+        if not features.has(EDIT_FEATURE, organization, actor=request.user):
+            return Response(status=404)
+
+        self.check_object_permissions(request, dashboard)
+
+        if dashboard.prebuilt_id is not None:
+            return self.respond({"detail": "Cannot delete prebuilt Dashboards."}, status=409)
+
+        audit_data = dashboard.get_audit_log_data()
+        self.create_audit_entry(
+            request=request,
+            organization=organization,
+            target_object=audit_data["id"],
+            event=audit_log.get_event_id("DASHBOARD_REMOVE"),
+            data=audit_data,
+        )
+        dashboard.delete()
+
+        return self.respond(status=204)
+
+    @extend_schema(
+        operation_id="updateOrganizationDashboard",
+        summary="Edit an Organization's Custom Dashboard",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG, DashboardParams.DASHBOARD_ID],
+        request=DashboardDetailsSerializer,
+        responses={
+            200: DashboardDetailsModelSerializer,
+            400: RESPONSE_BAD_REQUEST,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=DashboardExamples.DASHBOARD_PUT_RESPONSE,
+    )
+    def put(
+        self,
+        request: Request,
+        organization: Organization,
+        dashboard: Dashboard,
+    ) -> (
+        Response[DashboardDetailsResponse]
+        | Response[None]
+        | Response[DetailResponse]
+        | Response[ValidationErrorResponse]
+    ):
+        """
+        Edit an organization's custom dashboard as well as any bulk
+        edits on widgets that may have been made. (For example, widgets
+        that have been rearranged, updated queries and fields, specific
+        display types, and so on.)
+        """
+        if not features.has(EDIT_FEATURE, organization, actor=request.user):
+            return Response(status=404)
+
+        self.check_object_permissions(request, dashboard)
+
+        is_prebuilt = dashboard.prebuilt_id is not None
+
+        projects = self.get_projects(request, organization)
+        serializer = DashboardDetailsSerializer(
+            data=request.data,
+            instance=dashboard,
+            context={
+                "organization": organization,
+                "request": request,
+                "projects": projects,
+                # allow_joinleave grants project access without team membership.
+                "validation_projects": projects
+                or self.get_projects(request, organization, include_all_accessible=True),
+                "environment": self.request.GET.getlist("environment"),
+            },
+        )
+
+        if not serializer.is_valid():
+            return Response(as_validation_errors(serializer), status=400)
+
+        if is_prebuilt:
+            if "widgets" in serializer.validated_data:
+                return self.respond(
+                    {"detail": "Cannot edit widgets on prebuilt Dashboards."}, status=409
+                )
+            if (
+                "title" in serializer.validated_data
+                and serializer.validated_data["title"] != dashboard.title
+            ):
+                return self.respond(
+                    {"detail": "Cannot change the title of prebuilt Dashboards."}, status=409
+                )
+
+        snapshot = _take_dashboard_snapshot(dashboard, request.user)
+
+        revision_source = request.data.get("revisionSource", "edit")
+        if revision_source not in ("edit", "edit-with-agent"):
+            revision_source = "edit"
+
+        try:
+            with transaction.atomic(router.db_for_write(Dashboard)):
+                if snapshot is not None:
+                    DashboardRevision.create_for_dashboard(
+                        dashboard, request.user, snapshot, source=revision_source
+                    )
+                serializer.save()
+        except IntegrityError:
+            return self.respond({"detail": "Dashboard with that title already exists."}, status=409)
+
+        updated_dashboard = serializer.instance
+        assert updated_dashboard is not None
+        self.create_audit_entry(
+            request=request,
+            organization=organization,
+            target_object=updated_dashboard.id,
+            event=audit_log.get_event_id("DASHBOARD_EDIT"),
+            data=updated_dashboard.get_audit_log_data(),
+        )
+
+        body: DashboardDetailsResponse = serialize(updated_dashboard, request.user)
+        return self.respond(body, status=200)
+
+
+@cell_silo_endpoint
+class OrganizationDashboardVisitEndpoint(OrganizationDashboardBase):
+    publish_status = {
+        "POST": ApiPublishStatus.PRIVATE,
+    }
+
+    def post(self, request: Request, organization: Organization, dashboard: Dashboard) -> Response:
+        """
+        Update last_visited and increment visits counter
+        """
+        if not features.has(EDIT_FEATURE, organization, actor=request.user):
+            return Response(status=404)
+
+        dashboard.visits = F("visits") + 1
+        dashboard.last_visited = timezone.now()
+        dashboard.save(update_fields=["visits", "last_visited"])
+
+        # TODO: Only keep the last_visited per user logic once `dashboards-user-last-visited` is fully rolled out
+        if (
+            features.has(
+                "organizations:dashboards-user-last-visited", organization, actor=request.user
+            )
+            and request.user.is_authenticated
+        ):
+            DashboardLastVisited.objects.update_or_create(
+                user_id=request.user.id,
+                dashboard=dashboard,
+                defaults={"last_visited": timezone.now()},
+            )
+
+        return Response(status=204)
+
+
+@cell_silo_endpoint
+class OrganizationDashboardFavoriteEndpoint(OrganizationDashboardBase):
+    """
+    Endpoint for managing the favorite status of dashboards for users
+    """
+
+    publish_status = {
+        "PUT": ApiPublishStatus.PRIVATE,
+    }
+
+    def put(self, request: Request, organization: Organization, dashboard: Dashboard) -> Response:
+        """
+        Toggle favorite status for current user by adding or removing
+        current user from dashboard favorites
+        """
+        if not features.has(EDIT_FEATURE, organization, actor=request.user):
+            return Response(status=404)
+
+        if not request.user.is_authenticated:
+            return Response(status=401)
+
+        should_favorite = request.data.get("shouldFavorite", request.data.get("isFavorited"))
+
+        if features.has("organizations:dashboards-starred", organization, actor=request.user):
+            if should_favorite:
+                DashboardFavoriteUser.objects.insert_favorite_dashboard(
+                    organization=organization,
+                    user_id=request.user.id,
+                    dashboard=dashboard,
+                )
+            else:
+                DashboardFavoriteUser.objects.unfavorite_dashboard(
+                    organization=organization,
+                    user_id=request.user.id,
+                    dashboard=dashboard,
+                )
+            return Response(status=204)
+
+        current_favorites = set(dashboard.favorited_by)
+
+        if should_favorite and request.user.id not in current_favorites:
+            current_favorites.add(request.user.id)
+        elif not should_favorite and request.user.id in current_favorites:
+            current_favorites.remove(request.user.id)
+        else:
+            return Response(status=204)
+
+        dashboard.favorited_by = current_favorites
+
+        return Response(status=204)

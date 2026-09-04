@@ -2,9 +2,11 @@ from sentry.models.group import Group
 from sentry.testutils.cases import APITestCase, PerformanceIssueTestCase, SnubaTestCase
 from sentry.testutils.helpers.datetime import before_now
 
+FORMATTER_FEATURE = "organizations:issue-standardized-markdown-for-llm"
+
 
 class GroupEventDetailsTest(APITestCase, SnubaTestCase, PerformanceIssueTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
 
@@ -34,85 +36,136 @@ class GroupEventDetailsTest(APITestCase, SnubaTestCase, PerformanceIssueTestCase
 
         self.group = Group.objects.first()
 
-    def test_snuba_no_environment_latest(self):
-        url = f"/api/0/issues/{self.group.id}/events/latest/"
+    def test_snuba_no_environment_latest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/latest/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event2.event_id)
 
-    def test_snuba_no_environment_oldest(self):
-        url = f"/api/0/issues/{self.group.id}/events/oldest/"
-        response = self.client.get(url, format="json")
-
-        assert response.status_code == 200
-        assert response.data["id"] == str(self.event1.event_id)
-
-    def test_snuba_no_environment_event_id(self):
-        url = f"/api/0/issues/{self.group.id}/events/{self.event1.event_id}/"
+    def test_snuba_no_environment_oldest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/oldest/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event1.event_id)
 
-    def test_snuba_environment_latest(self):
-        url = f"/api/0/issues/{self.group.id}/events/latest/"
+    def test_snuba_no_environment_event_id(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/{self.event1.event_id}/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["id"] == str(self.event1.event_id)
+
+    def test_snuba_environment_latest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/latest/"
         response = self.client.get(url, format="json", data={"environment": ["production"]})
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event2.event_id)
 
-    def test_snuba_environment_oldest(self):
-        url = f"/api/0/issues/{self.group.id}/events/oldest/"
+    def test_snuba_environment_oldest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/oldest/"
         response = self.client.get(url, format="json", data={"environment": ["production"]})
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event2.event_id)
 
-    def test_snuba_environment_event_id(self):
-        url = f"/api/0/issues/{self.group.id}/events/{self.event2.event_id}/"
+    def test_snuba_environment_event_id(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/{self.event2.event_id}/"
         response = self.client.get(url, format="json", data={"environment": ["production"]})
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event2.event_id)
 
-    def test_simple_latest(self):
-        url = f"/api/0/issues/{self.group.id}/events/latest/"
+    def test_simple_latest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/latest/"
         response = self.client.get(url, format="json")
         assert response.status_code == 200
         assert response.data["eventID"] == str(self.event2.event_id)
 
-    def test_simple_oldest(self):
-        url = f"/api/0/issues/{self.group.id}/events/oldest/"
+    def test_simple_oldest(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/oldest/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event1.event_id)
 
-    def test_simple_event_id(self):
-        url = f"/api/0/issues/{self.group.id}/events/{self.event1.event_id}/"
+    def test_simple_event_id(self) -> None:
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/{self.event1.event_id}/"
         response = self.client.get(url, format="json")
 
         assert response.status_code == 200
         assert response.data["id"] == str(self.event1.event_id)
 
-    def test_perf_issue_latest(self):
+    def test_perf_issue_latest(self) -> None:
         event = self.create_performance_issue()
-        url = f"/api/0/issues/{event.group.id}/events/latest/"
+        assert event.group is not None
+        url = (
+            f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/latest/"
+        )
         response = self.client.get(url, format="json")
         assert response.status_code == 200
         assert response.data["eventID"] == event.event_id
 
-    def test_perf_issue_oldest(self):
+    def test_perf_issue_oldest(self) -> None:
         event = self.create_performance_issue()
-        url = f"/api/0/issues/{event.group.id}/events/oldest/"
+        assert event.group is not None
+        url = (
+            f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/oldest/"
+        )
         response = self.client.get(url, format="json")
         assert response.status_code == 200
         assert response.data["eventID"] == event.event_id
 
-    def test_perf_issue_event_id(self):
+    def test_perf_issue_event_id(self) -> None:
         event = self.create_performance_issue()
-        url = f"/api/0/issues/{event.group.id}/events/{event.event_id}/"
+        assert event.group is not None
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/{event.event_id}/"
         response = self.client.get(url, format="json")
         assert response.status_code == 200
         assert response.data["eventID"] == event.event_id
+
+    def test_invalid_query(self) -> None:
+        event = self.create_performance_issue()
+        assert event.group is not None
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{event.group.id}/events/{event.event_id}/"
+        response = self.client.get(url, format="json", data={"query": "release.version:foobar"})
+        assert response.status_code == 400
+
+    def _latest_url(self, query: str = "") -> str:
+        base = (
+            f"/api/0/organizations/{self.organization.slug}/issues/{self.group.id}/events/latest/"
+        )
+        return base + query
+
+    def test_format_markdown_adds_formatted_field(self) -> None:
+        with self.feature(FORMATTER_FEATURE):
+            response = self.client.get(self._latest_url("?llmFormat=markdown"))
+
+        assert response.status_code == 200
+        assert response.data["id"] == str(self.event2.event_id)
+        assert response.data["formatted"]["format"] == "markdown"
+        assert "## Title" in response.data["formatted"]["content"]
+
+    def test_no_format_param_has_no_formatted_field(self) -> None:
+        with self.feature(FORMATTER_FEATURE):
+            response = self.client.get(self._latest_url())
+
+        assert response.status_code == 200
+        assert "formatted" not in response.data
+
+    def test_format_ignored_when_feature_off(self) -> None:
+        # feature defaults off -> ?llmFormat is inert, response unchanged
+        response = self.client.get(self._latest_url("?llmFormat=markdown"))
+
+        assert response.status_code == 200
+        assert "formatted" not in response.data
+
+    def test_invalid_format_is_ignored(self) -> None:
+        # an unrecognized value is inert, not a 400 -> response is unchanged
+        with self.feature(FORMATTER_FEATURE):
+            response = self.client.get(self._latest_url("?llmFormat=banana"))
+
+        assert response.status_code == 200
+        assert "formatted" not in response.data

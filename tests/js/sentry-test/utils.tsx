@@ -1,5 +1,29 @@
 import MockDate from 'mockdate';
 
+/**
+ * Emotion injects its styles through the CSSOM (`insertRule`), so they are not
+ * reflected in `getComputedStyle` under jsdom. Read the generated rules for an
+ * element directly off `document.styleSheets` instead.
+ */
+export function getEmotionRules(element: HTMLElement): string[] {
+  const classes = element.className.split(' ').filter(cls => cls.startsWith('css-'));
+  const rules: string[] = [];
+  for (const sheet of Array.from(document.styleSheets)) {
+    let sheetRules: CSSRuleList;
+    try {
+      sheetRules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    for (const rule of Array.from(sheetRules)) {
+      if (classes.some(cls => rule.cssText.includes(cls))) {
+        rules.push(rule.cssText);
+      }
+    }
+  }
+  return rules;
+}
+
 // Taken from https://stackoverflow.com/a/56859650/1015027
 function findTextWithMarkup(contentNode: null | Element, textMatch: string | RegExp) {
   const hasText = (node: Element): boolean => {
@@ -12,7 +36,7 @@ function findTextWithMarkup(contentNode: null | Element, textMatch: string | Reg
     return textMatch.test(node.textContent);
   };
 
-  const nodeHasText = hasText(contentNode as Element);
+  const nodeHasText = hasText(contentNode!);
   const childrenDontHaveText = Array.from(contentNode?.children || []).every(
     child => !hasText(child)
   );
@@ -41,4 +65,29 @@ export function setMockDate(date: Date | number) {
 export function resetMockDate() {
   const constantDate = new Date(1508208080000);
   MockDate.set(constantDate);
+}
+
+/**
+ * Set the window.location to a given URL
+ * see {@link https://github.com/jsdom/jsdom#reconfiguring-the-jsdom-with-reconfiguresettings}
+ */
+export function setWindowLocation(url: string) {
+  // global jsdom is coming from `@sentry/jest-environment`
+  (global as any).jsdom.reconfigure({url});
+}
+
+/**
+ * Mocks window.matchMedia to always return the provided `matches`.
+ */
+export function mockMatchMedia(matches: boolean) {
+  jest.spyOn(window, 'matchMedia').mockImplementation(() => ({
+    matches,
+    media: '',
+    onchange: null,
+    addListener: jest.fn(),
+    removeListener: jest.fn(),
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  }));
 }

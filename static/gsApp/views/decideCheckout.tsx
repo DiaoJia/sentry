@@ -1,43 +1,21 @@
-import {useState} from 'react';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import useOrganization from 'sentry/utils/useOrganization';
-
-import {PlanTier} from 'getsentry/types';
 import AMCheckout from 'getsentry/views/amCheckout';
 
-interface Props extends RouteComponentProps<Record<PropertyKey, unknown>, unknown> {}
-
-function DecideCheckout(props: Props) {
+// The checkout tier is resolved server-side (the billing-config endpoint
+// resolves `tier=checkout`), so this view no longer needs to pick a tier — it
+// just renders the checkout.
+function DecideCheckout() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const organization = useOrganization();
-  const [tier, setTier] = useState<string | null>(null);
-
-  const checkoutProps = {...props, organization, onToggleLegacy: setTier};
-
-  const hasAm3Feature = organization.features?.includes('am3-billing');
-  const hasPartnerMigrationFeature = organization.features.includes(
-    'partner-billing-migration'
-  );
-  if (hasAm3Feature || hasPartnerMigrationFeature) {
-    return (
-      <ErrorBoundary errorTag={{checkout: PlanTier.AM3}}>
-        <AMCheckout checkoutTier={PlanTier.AM3} {...checkoutProps} />
-      </ErrorBoundary>
-    );
-  }
-
-  if (tier !== PlanTier.AM1) {
-    return (
-      <ErrorBoundary errorTag={{checkout: PlanTier.AM2}}>
-        <AMCheckout checkoutTier={PlanTier.AM2} {...checkoutProps} />
-      </ErrorBoundary>
-    );
-  }
 
   return (
-    <ErrorBoundary errorTag={{checkout: PlanTier.AM1}}>
-      <AMCheckout checkoutTier={PlanTier.AM1} {...checkoutProps} />
+    <ErrorBoundary>
+      <AMCheckout organization={organization} location={location} navigate={navigate} />
     </ErrorBoundary>
   );
 }

@@ -1,5 +1,7 @@
 from datetime import timedelta
+from unittest import mock
 
+import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.backends.base import SessionBase
 from django.http import HttpRequest
@@ -10,17 +12,19 @@ from sentry.testutils.cases import TestCase
 from sentry.testutils.silo import control_silo_test
 from sentry.users.models.user import User
 from sentry.utils.auth import (
+    REACT_AUTH_COOKIE,
     EmailAuthBackend,
     SsoSession,
     construct_link_with_query,
     get_login_redirect,
+    is_valid_relative_redirect,
     login,
 )
 
 
 @control_silo_test
 class EmailAuthBackendTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = User(username="foo", email="baz@example.com")
         self.user.set_password("bar")
         self.user.save()
@@ -29,29 +33,50 @@ class EmailAuthBackendTest(TestCase):
     def backend(self):
         return EmailAuthBackend()
 
-    def test_can_authenticate_with_username(self):
+    def test_can_authenticate_with_username(self) -> None:
         result = self.backend.authenticate(HttpRequest(), username="foo", password="bar")
         self.assertEqual(result, self.user)
 
-    def test_can_authenticate_with_username_case_insensitive(self):
+    def test_can_authenticate_with_username_case_insensitive(self) -> None:
         result = self.backend.authenticate(HttpRequest(), username="FOO", password="bar")
         self.assertEqual(result, self.user)
 
-    def test_can_authenticate_with_email(self):
+    def test_can_authenticate_with_email(self) -> None:
         result = self.backend.authenticate(
             HttpRequest(), username="baz@example.com", password="bar"
         )
         self.assertEqual(result, self.user)
 
-    def test_can_authenticate_with_email_case_insensitive(self):
+    def test_can_authenticate_with_email_case_insensitive(self) -> None:
         result = self.backend.authenticate(
             HttpRequest(), username="BAZ@example.com", password="bar"
         )
         self.assertEqual(result, self.user)
 
-    def test_does_not_authenticate_with_invalid_password(self):
+    def test_does_not_authenticate_with_invalid_password(self) -> None:
         result = self.backend.authenticate(HttpRequest(), username="foo", password="pizza")
         self.assertEqual(result, None)
+
+    def test_suspended_user_can_authenticate_but_login_blocked(self) -> None:
+        self.user.update(is_suspended=True)
+        result = self.backend.authenticate(HttpRequest(), username="foo", password="bar")
+        assert result is not None
+        assert result.id == self.user.id
+
+    def test_get_user_returns_none_for_suspended_user(self) -> None:
+        self.user.update(is_suspended=True)
+        with mock.patch("sentry.utils.auth.record_suspended_user_rejection") as mock_metric:
+            result = self.backend.get_user(self.user.id)
+        assert result is None
+        mock_metric.assert_called_once_with("session_get_user")
+
+    def test_get_user_returns_user_for_active_user(self) -> None:
+        result = self.backend.get_user(self.user.id)
+        assert result is not None
+        assert result.id == self.user.id
+
+    def test_user_can_authenticate_allows_active(self) -> None:
+        assert self.backend.user_can_authenticate(self.user) is True
 
 
 @control_silo_test
@@ -66,14 +91,14 @@ class GetLoginRedirectTest(TestCase):
             request.session["_next"] = next
         return request
 
-    def test_schema_uses_default(self):
+    def test_schema_uses_default(self) -> None:
         result = get_login_redirect(self._make_request("http://example.com"))
         assert result == reverse("sentry-login")
 
         result = get_login_redirect(self._make_request("ftp://testserver"))
         assert result == reverse("sentry-login")
 
-    def test_next(self):
+    def test_next(self) -> None:
         result = get_login_redirect(self._make_request("http://testserver/foobar/"))
         assert result == "http://testserver/foobar/"
 
@@ -95,7 +120,7 @@ class GetLoginRedirectTest(TestCase):
         result = get_login_redirect(request)
         assert result == f"http://orgslug.testserver{reverse('sentry-login')}"
 
-    def test_after_2fa(self):
+    def test_after_2fa(self) -> None:
         request = self._make_request()
         request.session["_after_2fa"] = "http://testserver/foobar/"
         result = get_login_redirect(request)
@@ -107,7 +132,7 @@ class GetLoginRedirectTest(TestCase):
         result = get_login_redirect(request)
         assert result == "http://orgslug.testserver/foobar/"
 
-    def test_pending_2fa(self):
+    def test_pending_2fa(self) -> None:
         request = self._make_request()
         request.session["_pending_2fa"] = [1234, 1234, 1234]
         result = get_login_redirect(request)
@@ -119,11 +144,20 @@ class GetLoginRedirectTest(TestCase):
         result = get_login_redirect(request)
         assert result == f"http://orgslug.testserver{reverse('sentry-2fa-dialog')}"
 
-    def test_login_uses_default(self):
+    def test_pending_2fa_with_react_auth(self) -> None:
+        request = self._make_request()
+        request.session["_pending_2fa"] = [1234, 1234, 1234]
+        request.COOKIES[REACT_AUTH_COOKIE] = "1"
+
+        result = get_login_redirect(request)
+
+        assert result == reverse("sentry-login")
+
+    def test_login_uses_default(self) -> None:
         result = get_login_redirect(self._make_request(reverse("sentry-login")))
         assert result == reverse("sentry-login")
 
-    def test_no_value_uses_default(self):
+    def test_no_value_uses_default(self) -> None:
         result = get_login_redirect(self._make_request())
         assert result == reverse("sentry-login")
 
@@ -131,6 +165,28 @@ class GetLoginRedirectTest(TestCase):
         request.subdomain = "orgslug"
         result = get_login_redirect(request)
         assert result == f"http://orgslug.testserver{reverse('sentry-login')}"
+
+    def test_static_asset_next_uses_default(self) -> None:
+        default = reverse("sentry-login")
+
+        result = get_login_redirect(self._make_request("/org-slug/service-worker.abc123.js.map/"))
+        assert result == default
+
+        result = get_login_redirect(self._make_request("/_static/sentry/entrypoints/app.js"))
+        assert result == default
+
+        result = get_login_redirect(
+            self._make_request("http://testserver/org-slug/service-worker.abc123.js.map")
+        )
+        assert result == default
+
+        request = self._make_request("/org-slug/service-worker.abc123.js.map")
+        request.subdomain = "orgslug"
+        result = get_login_redirect(request)
+        assert result == f"http://orgslug.testserver{default}"
+
+        result = get_login_redirect(self._make_request("/organizations/org-slug/issues/"))
+        assert result == "/organizations/org-slug/issues/"
 
 
 @control_silo_test
@@ -142,20 +198,20 @@ class LoginTest(TestCase):
         request.user = AnonymousUser()
         return request
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         request = self._make_request()
         assert login(request, self.user)
         assert request.user == self.user
         assert "_nonce" not in request.session
 
-    def test_with_organization(self):
+    def test_with_organization(self) -> None:
         org = self.create_organization(name="foo", owner=self.user)
         request = self._make_request()
         assert login(request, self.user, organization_id=org.id)
         assert request.user == self.user
         assert f"{SsoSession.SSO_SESSION_KEY}:{org.id}" in request.session
 
-    def test_with_nonce(self):
+    def test_with_nonce(self) -> None:
         self.user.refresh_session_nonce()
         self.user.save()
         assert self.user.session_nonce is not None
@@ -164,19 +220,51 @@ class LoginTest(TestCase):
         assert request.user == self.user
         assert request.session["_nonce"] == self.user.session_nonce
 
+    def test_suspended_user_cannot_login(self) -> None:
+        self.user.update(is_suspended=True)
+        request = self._make_request()
+        with mock.patch("sentry.utils.auth.record_suspended_user_rejection") as mock_metric:
+            assert not login(request, self.user)
+        mock_metric.assert_called_once_with("session_login")
 
-def test_sso_expiry_default():
+
+@control_silo_test
+class ActiveOrganizationTest(TestCase):
+    def test_clear_active_org(self) -> None:
+        request = HttpRequest()
+        request.session = SessionBase()
+        request.session["activeorg"] = "acme"
+
+        sentry.utils.auth.clear_active_org(request)
+
+        assert "activeorg" not in request.session
+
+    def test_clear_active_org_without_active_org(self) -> None:
+        request = HttpRequest()
+        request.session = SessionBase()
+
+        sentry.utils.auth.clear_active_org(request)
+
+        assert "activeorg" not in request.session
+
+    def test_clear_active_org_without_session(self) -> None:
+        request = HttpRequest()
+
+        sentry.utils.auth.clear_active_org(request)
+
+
+def test_sso_expiry_default() -> None:
     value = sentry.utils.auth._sso_expiry_from_env(None)
     # make sure no accidental changes affect sso timeout
     assert value == timedelta(days=7)
 
 
-def test_sso_expiry_from_env():
+def test_sso_expiry_from_env() -> None:
     value = sentry.utils.auth._sso_expiry_from_env("20")
     assert value == timedelta(seconds=20)
 
 
-def test_construct_link_with_query():
+def test_construct_link_with_query() -> None:
     # testing basic query param construction
     path = "foobar"
     query_params = {"biz": "baz"}
@@ -190,3 +278,28 @@ def test_construct_link_with_query():
     expected_path = "foobar"
 
     assert construct_link_with_query(path=path, query_params=query_params) == expected_path
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("/organizations/foo/explorer/?explorerRunId=5", True),
+        ("/", True),
+        ("", False),
+        ("foo/bar", False),  # not rooted
+        ("http://testserver/foo", False),  # same-host absolute
+        ("https://myorg.sentry.io/foo", False),  # sentry subdomain absolute
+        ("https://evil.example.com/phish", False),  # external
+        ("//evil.com", False),  # protocol-relative
+        ("//myorg.sentry.io/foo", False),  # protocol-relative sentry subdomain
+        ("/\\evil.com", False),  # backslash trick
+        ("javascript:alert(1)", False),  # scheme
+        # non-string JSON values
+        (None, False),
+        (123, False),
+        (["/x"], False),
+        ({"/x": 1}, False),
+    ],
+)
+def test_is_valid_relative_redirect(url: object, expected: bool) -> None:
+    assert is_valid_relative_redirect(url) is expected

@@ -5,13 +5,16 @@ import {initializeData} from 'sentry-test/performance/initializePerformanceData'
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import {EntryType} from 'sentry/types/event';
-import type {TraceEventResponse} from 'sentry/views/issueDetails/traceTimeline/useTraceTimelineEvents';
 import {
   makeTraceError,
   makeTransaction,
 } from 'sentry/views/performance/newTraceDetails/traceModels/traceTreeTestUtils';
 
 import {EventTraceView} from './eventTraceView';
+
+jest.mock('sentry/components/lazyRender', () => ({
+  LazyRender: ({children}: {children: React.ReactNode}) => children,
+}));
 
 describe('EventTraceView', () => {
   const traceId = 'this-is-a-good-trace-id';
@@ -20,6 +23,8 @@ describe('EventTraceView', () => {
   });
   const group = GroupFixture();
   const event = EventFixture({
+    groupID: group.id,
+    projectID: group.project.id,
     contexts: {
       trace: {
         trace_id: traceId,
@@ -27,22 +32,26 @@ describe('EventTraceView', () => {
     },
     eventID: 'issue-5',
   });
-  const issuePlatformBody: TraceEventResponse = {
-    data: [],
-    meta: {fields: {}, units: {}},
-  };
-
   beforeEach(() => {
     MockApiClient.addMockResponse({
-      url: `/organizations/${organization.slug}/events/`,
-      body: issuePlatformBody,
+      url: `/organizations/${organization.slug}/issues/`,
+      body: [],
+      headers: {'X-Hits': '0'},
+      match: [
+        MockApiClient.matchQuery({
+          limit: '20',
+          project: '-1',
+          query: `trace:${traceId} !issue.id:${group.id}`,
+          statsPeriod: '90d',
+        }),
+      ],
     });
   });
 
   it('renders a trace', async () => {
     const size = 20;
     MockApiClient.addMockResponse({
-      url: '/subscriptions/org-slug/',
+      url: '/customers/org-slug/',
       method: 'GET',
       body: {},
     });
@@ -54,7 +63,7 @@ describe('EventTraceView', () => {
         performance_issues: 1,
         projects: 1,
         transactions: 1,
-        transaction_child_count_map: new Array(size)
+        transaction_child_count_map: Array.from({length: size})
           .fill(0)
           .map((_, i) => [{'transaction.id': i.toString(), count: 1}]),
         span_count: 0,
@@ -90,7 +99,7 @@ describe('EventTraceView', () => {
       },
     });
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/events-facets/`,
+      url: '/organizations/org-slug/events-facets/',
       method: 'GET',
       asyncDelay: 1,
       body: {},
@@ -117,7 +126,7 @@ describe('EventTraceView', () => {
 
   it('does not render the trace preview if it has no transactions', async () => {
     MockApiClient.addMockResponse({
-      url: '/subscriptions/org-slug/',
+      url: '/customers/org-slug/',
       method: 'GET',
       body: {},
     });
@@ -145,5 +154,37 @@ describe('EventTraceView', () => {
     render(<EventTraceView group={group} event={event} organization={organization} />);
 
     expect(await screen.findByText('Trace Preview')).toBeInTheDocument();
+  });
+
+  it('does not render the trace section when the trace_id is synthetic', () => {
+    const missingTraceIdEvent = EventFixture({
+      contexts: {
+        trace: {
+          trace_id: traceId,
+        },
+      },
+      eventID: 'issue-5',
+      _meta: {
+        contexts: {
+          trace: {
+            trace_id: {
+              '': {
+                err: ['trace_id.missing'],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    render(
+      <EventTraceView
+        group={group}
+        event={missingTraceIdEvent}
+        organization={organization}
+      />
+    );
+
+    expect(screen.queryByText('Trace Preview')).not.toBeInTheDocument();
   });
 });

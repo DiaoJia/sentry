@@ -45,7 +45,7 @@ class IntegrationSerializer(serializers.Serializer):
 @control_silo_endpoint
 @extend_schema(tags=["Integrations"])
 class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.INTEGRATION_PLATFORM
     publish_status = {
         "DELETE": ApiPublishStatus.PUBLIC,
         "GET": ApiPublishStatus.PUBLIC,
@@ -53,7 +53,8 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
     }
 
     @extend_schema(
-        operation_id="Retrieve an Integration for an Organization",
+        operation_id="getOrganizationIntegration",
+        summary="Retrieve an Integration for an Organization",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             GlobalParams.INTEGRATION_ID,
@@ -73,7 +74,7 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
         organization_context: RpcUserOrganizationContext,
         integration_id: int,
         **kwds: Any,
-    ) -> Response:
+    ) -> Response[OrganizationIntegrationResponse]:
         org_integration = self.get_organization_integration(
             organization_context.organization.id, integration_id
         )
@@ -85,7 +86,8 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
         )
 
     @extend_schema(
-        operation_id="Delete an Integration for an Organization",
+        operation_id="deleteOrganizationIntegration",
+        summary="Delete an Integration for an Organization",
         parameters=[GlobalParams.ORG_ID_OR_SLUG, GlobalParams.INTEGRATION_ID],
         responses={
             204: RESPONSE_NO_CONTENT,
@@ -100,7 +102,7 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
         organization_context: RpcUserOrganizationContext,
         integration_id: int,
         **kwds: Any,
-    ) -> Response:
+    ) -> Response[None]:
         # Removing the integration removes the organization
         # integrations and all linked issues.
 
@@ -119,7 +121,7 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
         with transaction.atomic(using=router.db_for_write(OrganizationIntegration)):
             updated = False
             for oi in OrganizationIntegration.objects.filter(
-                id=org_integration.id, status=ObjectStatus.ACTIVE
+                id=org_integration.id, status__in=[ObjectStatus.ACTIVE, ObjectStatus.DISABLED]
             ):
                 oi.update(status=ObjectStatus.PENDING_DELETION)
                 updated = True
@@ -150,10 +152,10 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
         integration = self.get_integration(organization.id, integration_id)
         installation = integration.get_installation(organization_id=organization.id)
         try:
-            installation.update_organization_config(request.data)
+            extra_audit_data = installation.update_organization_config(request.data) or {}
         except (IntegrationError, ApiError) as e:
             sentry_sdk.capture_exception(e)
-            return self.respond({"detail": [str(e)]}, status=400)
+            return self.respond({"detail": str(e)}, status=400)
 
         self.create_audit_entry(
             request=request,
@@ -162,5 +164,17 @@ class OrganizationIntegrationDetailsEndpoint(OrganizationIntegrationBaseEndpoint
             event=audit_log.get_event_id("INTEGRATION_EDIT"),
             data={"provider": integration.provider, "name": "config"},
         )
+
+        # `INTEGRATION_EDIT` only records that "config" changed. Project status mappings own
+        # rows of their own, so record what was added and removed under a dedicated event.
+        project_mapping_changes = extra_audit_data.get("sync_status_forward")
+        if project_mapping_changes:
+            self.create_audit_entry(
+                request=request,
+                organization=organization,
+                target_object=integration.id,
+                event=audit_log.get_event_id("INTEGRATION_PROJECT_MAPPINGS_UPDATE"),
+                data={"provider": integration.provider, **project_mapping_changes},
+            )
 
         return self.respond(status=200)

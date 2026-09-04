@@ -1,30 +1,36 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {LinkButton} from '@sentry/scraps/button';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+
 import {
   useDeleteEventAttachmentOptimistic,
   useFetchEventAttachments,
 } from 'sentry/actionCreators/events';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
-import EventAttachmentActions from 'sentry/components/events/eventAttachmentActions';
-import FileSize from 'sentry/components/fileSize';
-import LoadingError from 'sentry/components/loadingError';
-import {PanelTable} from 'sentry/components/panels/panelTable';
+import {EventAttachmentActions} from 'sentry/components/events/eventAttachmentActions';
+import {FileSize} from 'sentry/components/fileSize';
+import {LoadingError} from 'sentry/components/loadingError';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {Group, IssueAttachment} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 import {InlineEventAttachment} from 'sentry/views/issueDetails/groupEventAttachments/inlineEventAttachment';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
 import {Tab, TabPaths} from 'sentry/views/issueDetails/types';
 import {useGroupDetailsRoute} from 'sentry/views/issueDetails/useGroupDetailsRoute';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
 
-import EventAttachmentsCrashReportsNotice from './eventAttachmentsCrashReportsNotice';
+import {EventAttachmentsCrashReportsNotice} from './eventAttachmentsCrashReportsNotice';
+
+const ATTACHMENT_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: '1fr'},
+  {key: 'size', width: 'auto'},
+  {key: 'actions', width: 'auto'},
+];
 
 type EventAttachmentsProps = {
   event: Event;
@@ -82,17 +88,16 @@ function EventAttachmentsContent({
   const [attachmentPreviews, setAttachmentPreviews] = useState<AttachmentPreviewOpenMap>(
     {}
   );
-  const hasStreamlinedUI = useHasStreamlinedUI();
   const crashFileStripped = event.metadata.stripped_crash;
 
   if (isError) {
     return (
-      <InterimSection type={SectionKey.ATTACHMENTS} title={t('Attachments')}>
+      <FoldSection sectionKey={SectionKey.ATTACHMENTS} title={t('Attachments')}>
         <LoadingError
           onRetry={refetch}
           message={t('An error occurred while fetching attachments')}
         />
-      </InterimSection>
+      </FoldSection>
     );
   }
 
@@ -102,10 +107,6 @@ function EventAttachmentsContent({
 
   const title = t('Attachments (%s)', attachments.length);
 
-  const lastAttachment = attachments.at(-1);
-  const lastAttachmentPreviewed =
-    lastAttachment && attachmentPreviewIsOpen(attachmentPreviews, lastAttachment);
-
   const togglePreview = (attachment: IssueAttachment) => {
     setAttachmentPreviews(previewsMap => ({
       ...previewsMap,
@@ -114,12 +115,10 @@ function EventAttachmentsContent({
   };
 
   return (
-    <InterimSection
-      type={SectionKey.ATTACHMENTS}
+    <FoldSection
+      sectionKey={SectionKey.ATTACHMENTS}
       title={title}
-      actions={
-        hasStreamlinedUI && project && group ? <ViewAllGroupAttachmentsButton /> : null
-      }
+      actions={project && group ? <ViewAllGroupAttachmentsButton /> : null}
       disableCollapsePersistence={disableCollapsePersistence}
     >
       {crashFileStripped && (
@@ -131,58 +130,67 @@ function EventAttachmentsContent({
       )}
 
       {attachments.length > 0 && (
-        <StyledPanelTable
-          headers={[
-            <Name key="name">{t('File Name')}</Name>,
-            <Size key="size">{t('Size')}</Size>,
-            t('Actions'),
-          ]}
+        <SimpleTable
+          columns={ATTACHMENT_COLUMNS}
+          header={
+            <SimpleTable.HeaderRow>
+              <SimpleTable.HeaderCell>
+                <Name>{t('File Name')}</Name>
+              </SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>
+                <Size>{t('Size')}</Size>
+              </SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Actions')}</SimpleTable.HeaderCell>
+            </SimpleTable.HeaderRow>
+          }
         >
           {attachments.map(attachment => (
             <Fragment key={attachment.id}>
-              <Flex align="center">
-                <Name>{attachment.name}</Name>
-              </Flex>
+              <SimpleTable.Row>
+                <SimpleTable.RowCell>
+                  <Name>{attachment.name}</Name>
+                </SimpleTable.RowCell>
 
-              <Size>
-                <FileSize bytes={attachment.size} />
-              </Size>
-              <div>
-                <EventAttachmentActions
-                  withPreviewButton
-                  attachment={attachment}
-                  projectSlug={project.slug}
-                  onDelete={() =>
-                    deleteAttachment({
-                      orgSlug: organization.slug,
-                      projectSlug: project.slug,
-                      eventId: event.id,
-                      attachmentId: attachment.id,
-                    })
-                  }
-                  onPreviewClick={() => togglePreview(attachment)}
-                  previewIsOpen={attachmentPreviewIsOpen(attachmentPreviews, attachment)}
-                />
-              </div>
+                <SimpleTable.RowCell>
+                  <Size>
+                    <FileSize bytes={attachment.size} />
+                  </Size>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  <EventAttachmentActions
+                    withPreviewButton
+                    attachment={attachment}
+                    projectSlug={project.slug}
+                    onDelete={() =>
+                      deleteAttachment({
+                        orgSlug: organization.slug,
+                        projectSlug: project.slug,
+                        eventId: event.id,
+                        attachmentId: attachment.id,
+                      })
+                    }
+                    onPreviewClick={() => togglePreview(attachment)}
+                    previewIsOpen={attachmentPreviewIsOpen(
+                      attachmentPreviews,
+                      attachment
+                    )}
+                  />
+                </SimpleTable.RowCell>
+              </SimpleTable.Row>
               {attachmentPreviewIsOpen(attachmentPreviews, attachment) ? (
-                <InlineEventAttachment
-                  attachment={attachment}
-                  eventId={event.id}
-                  projectSlug={project.slug}
-                />
+                <SimpleTable.FullWidthRow>
+                  <InlineEventAttachment
+                    attachment={attachment}
+                    eventId={event.id}
+                    projectSlug={project.slug}
+                  />
+                </SimpleTable.FullWidthRow>
               ) : null}
-              {/* XXX: hack to deal with table grid borders */}
-              {lastAttachmentPreviewed && (
-                <Fragment>
-                  <div style={{display: 'none'}} />
-                  <div style={{display: 'none'}} />
-                </Fragment>
-              )}
             </Fragment>
           ))}
-        </StyledPanelTable>
+        </SimpleTable>
       )}
-    </InterimSection>
+    </FoldSection>
   );
 }
 
@@ -196,13 +204,12 @@ export function EventAttachments(props: EventAttachmentsProps) {
   return <EventAttachmentsContent {...props} />;
 }
 
-const StyledPanelTable = styled(PanelTable)`
-  grid-template-columns: 1fr auto auto;
-`;
-
 const Name = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const Size = styled('div')`

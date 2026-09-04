@@ -1,3 +1,84 @@
+from sentry.utils import json
+
+
+def push_event_with_author(*, name: str, email: str, username: str | None = None) -> str:
+    """Build a minimal push event body with a single commit by the given author.
+
+    Unlike ``PUSH_EVENT_EXAMPLE_INSTALLATION``, this is not a raw string with a precomputed
+    signature: callers are expected to sign the returned body themselves, so field ordering is
+    irrelevant here.
+    """
+    author: dict[str, str] = {"name": name, "email": email}
+    if username is not None:
+        author["username"] = username
+    return json.dumps(
+        {
+            "ref": "refs/heads/main",
+            "installation": {"id": 12345},
+            "commits": [
+                {
+                    "id": "133d60480286590a610a0eb7352ff6e02b9674c4",
+                    "distinct": True,
+                    "message": "Update hello.py",
+                    "timestamp": "2015-05-05T19:45:15-04:00",
+                    "author": author,
+                    "added": [],
+                    "removed": [],
+                    "modified": ["hello.py"],
+                }
+            ],
+            "repository": {
+                "id": 35129377,
+                "full_name": "baxterthehacker/public-repo",
+                "html_url": "https://github.com/baxterthehacker/public-repo",
+            },
+        }
+    )
+
+
+def push_event_with_commit_authors(authors: list[dict[str, str | None]]) -> str:
+    """Build a push event body with one distinct commit per provided author.
+
+    Each entry in ``authors`` is a mapping with ``name`` and ``email`` keys and an
+    optional ``username`` key. This is useful for exercising behavior across
+    multiple distinct commits within a single push (e.g. when a later commit for
+    the same email carries a GitHub username the earlier commit was missing).
+
+    Like ``push_event_with_author``, callers are expected to sign the returned
+    body themselves.
+    """
+    commits = []
+    for i, entry in enumerate(authors):
+        author: dict[str, str] = {"name": entry["name"], "email": entry["email"]}  # type: ignore[dict-item]
+        if entry.get("username") is not None:
+            author["username"] = entry["username"]  # type: ignore[assignment]
+        commits.append(
+            {
+                # Commit keys must be unique within a repository.
+                "id": f"{i:040x}",
+                "distinct": True,
+                "message": "Update hello.py",
+                "timestamp": "2015-05-05T19:45:15-04:00",
+                "author": author,
+                "added": [],
+                "removed": [],
+                "modified": ["hello.py"],
+            }
+        )
+    return json.dumps(
+        {
+            "ref": "refs/heads/main",
+            "installation": {"id": 12345},
+            "commits": commits,
+            "repository": {
+                "id": 35129377,
+                "full_name": "baxterthehacker/public-repo",
+                "html_url": "https://github.com/baxterthehacker/public-repo",
+            },
+        }
+    )
+
+
 # we keep this as a raw string as order matters for hmac signing
 PUSH_EVENT_EXAMPLE_INSTALLATION = r"""{
   "ref": "refs/heads/changes",
@@ -606,6 +687,7 @@ INSTALLATION_DELETE_EVENT_EXAMPLE = """{
   "action": "deleted",
   "installation": {
     "id": 2,
+    "app_id": 123,
     "account": {
       "login": "octocat",
       "id": 1,
@@ -645,6 +727,72 @@ INSTALLATION_DELETE_EVENT_EXAMPLE = """{
     "events_url": "https://api.github.com/users/octocat/events{/privacy}",
     "received_events_url": "https://api.github.com/users/octocat/received_events",
     "type": "User",
+    "site_admin": false
+  }
+}"""
+
+INSTALLATION_NEW_PERMISSIONS_EVENT_EXAMPLE = """{
+  "action": "new_permissions_accepted",
+  "installation": {
+    "id": 2,
+    "client_id": "Iv1.abc123",
+    "account": {
+      "login": "octocat",
+      "id": 1,
+      "node_id": "MDQ6VXNlcjE=",
+      "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/octocat",
+      "html_url": "https://github.com/octocat",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "repository_selection": "all",
+    "access_tokens_url": "https://api.github.com/app/installations/2/access_tokens",
+    "repositories_url": "https://api.github.com/installation/repositories",
+    "html_url": "https://github.com/settings/installations/2",
+    "app_id": 123,
+    "app_slug": "octocat-app",
+    "target_id": 1,
+    "target_type": "User",
+    "permissions": {
+      "actions": "read",
+      "administration": "read",
+      "checks": "write",
+      "contents": "write",
+      "issues": "write",
+      "metadata": "read",
+      "pull_requests": "write",
+      "repository_hooks": "write",
+      "statuses": "write"
+    },
+    "events": [
+      "check_suite",
+      "issues",
+      "issue_comment",
+      "pull_request",
+      "pull_request_review",
+      "push"
+    ],
+    "created_at": "2019-01-01T08:56:55.000-04:00",
+    "updated_at": "2019-01-02T12:16:12.000-04:00",
+    "single_file_name": null,
+    "has_multiple_single_files": false,
+    "single_file_paths": [],
+    "suspended_by": null,
+    "suspended_at": null
+  },
+  "sender": {
+    "login": "octocat",
+    "id": 1,
+    "node_id": "MDQ6VXNlcjE=",
+    "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/octocat",
+    "html_url": "https://github.com/octocat",
+    "type": "User",
+    "user_view_type": "public",
     "site_admin": false
   }
 }"""
@@ -945,6 +1093,7 @@ PULL_REQUEST_OPENED_EVENT_EXAMPLE = b"""{
     "state": "open",
     "locked": false,
     "title": "Update the README with new information",
+    "author_association": "MEMBER",
     "user": {
       "login": "baxterthehacker",
       "id": 6752317,
@@ -1361,6 +1510,7 @@ PULL_REQUEST_EDITED_EVENT_EXAMPLE = b"""{
     "state": "open",
     "locked": false,
     "title": "new edited title",
+    "author_association": "MEMBER",
     "user": {
       "login": "baxterthehacker",
       "id": 6752317,
@@ -1777,6 +1927,7 @@ PULL_REQUEST_CLOSED_EVENT_EXAMPLE = b"""{
     "state": "open",
     "locked": false,
     "title": "new closed title",
+    "author_association": "MEMBER",
     "user": {
       "login": "baxterthehacker",
       "id": 6752317,
@@ -2956,3 +3107,638 @@ GET_LAST_2_COMMITS_EXAMPLE = """[
   ]
 }
 ]"""
+
+# GitHub Issues webhook events
+ISSUES_ASSIGNED_EVENT_EXAMPLE = r"""{
+  "action": "assigned",
+  "issue": {
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2",
+    "repository_url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/labels{/name}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/comments",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/events",
+    "html_url": "https://github.com/baxterthehacker/public-repo/issues/2",
+    "id": 73464126,
+    "number": 2,
+    "title": "Spelling error in the README file",
+    "user": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignee": {
+      "login": "octocat",
+      "id": 1,
+      "avatar_url": "https://avatars.githubusercontent.com/u/1?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/octocat",
+      "html_url": "https://github.com/octocat",
+      "followers_url": "https://api.github.com/users/octocat/followers",
+      "following_url": "https://api.github.com/users/octocat/following{/other_user}",
+      "gists_url": "https://api.github.com/users/octocat/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/octocat/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/octocat/subscriptions",
+      "organizations_url": "https://api.github.com/users/octocat/orgs",
+      "repos_url": "https://api.github.com/users/octocat/repos",
+      "events_url": "https://api.github.com/users/octocat/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/octocat/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "assignees": [
+      {
+        "login": "octocat",
+        "id": 1,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1?v=3",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/octocat",
+        "html_url": "https://github.com/octocat",
+        "followers_url": "https://api.github.com/users/octocat/followers",
+        "following_url": "https://api.github.com/users/octocat/following{/other_user}",
+        "gists_url": "https://api.github.com/users/octocat/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/octocat/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/octocat/subscriptions",
+        "organizations_url": "https://api.github.com/users/octocat/orgs",
+        "repos_url": "https://api.github.com/users/octocat/repos",
+        "events_url": "https://api.github.com/users/octocat/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/octocat/received_events",
+        "type": "User",
+        "site_admin": false
+      }
+    ],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2015-05-05T23:40:28Z",
+    "updated_at": "2015-05-05T23:40:28Z",
+    "closed_at": null,
+    "body": "It looks like you accidently spelled 'commit' with two 't's."
+  },
+  "assignee": {
+    "login": "octocat",
+    "id": 1,
+    "avatar_url": "https://avatars.githubusercontent.com/u/1?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/octocat",
+    "html_url": "https://github.com/octocat",
+    "followers_url": "https://api.github.com/users/octocat/followers",
+    "following_url": "https://api.github.com/users/octocat/following{/other_user}",
+    "gists_url": "https://api.github.com/users/octocat/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/octocat/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/octocat/subscriptions",
+    "organizations_url": "https://api.github.com/users/octocat/orgs",
+    "repos_url": "https://api.github.com/users/octocat/repos",
+    "events_url": "https://api.github.com/users/octocat/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/octocat/received_events",
+    "type": "User",
+    "site_admin": false
+  },
+  "repository": {
+    "id": 35129377,
+    "name": "public-repo",
+    "full_name": "baxterthehacker/public-repo",
+    "owner": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "private": false,
+    "html_url": "https://github.com/baxterthehacker/public-repo",
+    "description": "",
+    "fork": false,
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "archive_url": "https://api.github.com/repos/baxterthehacker/public-repo/{archive_format}{/ref}",
+    "assignees_url": "https://api.github.com/repos/baxterthehacker/public-repo/assignees{/user}",
+    "blobs_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/blobs{/sha}",
+    "branches_url": "https://api.github.com/repos/baxterthehacker/public-repo/branches{/branch}",
+    "collaborators_url": "https://api.github.com/repos/baxterthehacker/public-repo/collaborators{/collaborator}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/comments{/number}",
+    "commits_url": "https://api.github.com/repos/baxterthehacker/public-repo/commits{/sha}",
+    "compare_url": "https://api.github.com/repos/baxterthehacker/public-repo/compare/{base}...{head}",
+    "contents_url": "https://api.github.com/repos/baxterthehacker/public-repo/contents/{+path}",
+    "contributors_url": "https://api.github.com/repos/baxterthehacker/public-repo/contributors",
+    "deployments_url": "https://api.github.com/repos/baxterthehacker/public-repo/deployments",
+    "downloads_url": "https://api.github.com/repos/baxterthehacker/public-repo/downloads",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/events",
+    "forks_url": "https://api.github.com/repos/baxterthehacker/public-repo/forks",
+    "git_commits_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/commits{/sha}",
+    "git_refs_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/refs{/sha}",
+    "git_tags_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/tags{/sha}",
+    "git_url": "git://github.com/baxterthehacker/public-repo.git",
+    "issue_comment_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/comments{/number}",
+    "issue_events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/events{/number}",
+    "issues_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues{/number}",
+    "keys_url": "https://api.github.com/repos/baxterthehacker/public-repo/keys{/key_id}",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/labels{/name}",
+    "languages_url": "https://api.github.com/repos/baxterthehacker/public-repo/languages",
+    "merges_url": "https://api.github.com/repos/baxterthehacker/public-repo/merges",
+    "milestones_url": "https://api.github.com/repos/baxterthehacker/public-repo/milestones{/number}",
+    "notifications_url": "https://api.github.com/repos/baxterthehacker/public-repo/notifications{?since,all,participating}",
+    "pulls_url": "https://api.github.com/repos/baxterthehacker/public-repo/pulls{/number}",
+    "releases_url": "https://api.github.com/repos/baxterthehacker/public-repo/releases{/id}",
+    "ssh_url": "git@github.com:baxterthehacker/public-repo.git",
+    "stargazers_url": "https://api.github.com/repos/baxterthehacker/public-repo/stargazers",
+    "statuses_url": "https://api.github.com/repos/baxterthehacker/public-repo/statuses/{sha}",
+    "subscribers_url": "https://api.github.com/repos/baxterthehacker/public-repo/subscribers",
+    "subscription_url": "https://api.github.com/repos/baxterthehacker/public-repo/subscription",
+    "tags_url": "https://api.github.com/repos/baxterthehacker/public-repo/tags",
+    "teams_url": "https://api.github.com/repos/baxterthehacker/public-repo/teams",
+    "trees_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/trees{/sha}",
+    "created_at": "2015-05-05T23:40:12Z",
+    "updated_at": "2015-05-05T23:40:12Z",
+    "pushed_at": "2015-05-05T23:40:27Z",
+    "git_url": "git://github.com/baxterthehacker/public-repo.git",
+    "ssh_url": "git@github.com:baxterthehacker/public-repo.git",
+    "clone_url": "https://github.com/baxterthehacker/public-repo.git",
+    "svn_url": "https://github.com/baxterthehacker/public-repo",
+    "size": 0,
+    "stargazers_count": 0,
+    "watchers_count": 0,
+    "language": null,
+    "has_issues": true,
+    "has_downloads": true,
+    "has_wiki": true,
+    "has_pages": true,
+    "forks_count": 0,
+    "mirror_url": null,
+    "open_issues_count": 2,
+    "forks": 0,
+    "open_issues": 2,
+    "watchers": 0,
+    "default_branch": "master"
+  },
+  "installation": {
+    "id": 12345
+  },
+  "sender": {
+    "login": "baxterthehacker",
+    "id": 6752317,
+    "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/baxterthehacker",
+    "html_url": "https://github.com/baxterthehacker",
+    "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+    "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+    "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+    "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+    "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+    "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+    "type": "User",
+    "site_admin": false
+  }
+}"""
+
+ISSUES_UNASSIGNED_EVENT_EXAMPLE = r"""{
+  "action": "unassigned",
+  "issue": {
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2",
+    "repository_url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/labels{/name}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/comments",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/events",
+    "html_url": "https://github.com/baxterthehacker/public-repo/issues/2",
+    "id": 73464126,
+    "number": 2,
+    "title": "Spelling error in the README file",
+    "user": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2015-05-05T23:40:28Z",
+    "updated_at": "2015-05-05T23:40:28Z",
+    "closed_at": null,
+    "body": "It looks like you accidently spelled 'commit' with two 't's."
+  },
+  "assignee": {
+    "login": "octocat",
+    "id": 1,
+    "avatar_url": "https://avatars.githubusercontent.com/u/1?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/octocat",
+    "html_url": "https://github.com/octocat",
+    "followers_url": "https://api.github.com/users/octocat/followers",
+    "following_url": "https://api.github.com/users/octocat/following{/other_user}",
+    "gists_url": "https://api.github.com/users/octocat/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/octocat/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/octocat/subscriptions",
+    "organizations_url": "https://api.github.com/users/octocat/orgs",
+    "repos_url": "https://api.github.com/users/octocat/repos",
+    "events_url": "https://api.github.com/users/octocat/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/octocat/received_events",
+    "type": "User",
+    "site_admin": false
+  },
+  "repository": {
+    "id": 35129377,
+    "name": "public-repo",
+    "full_name": "baxterthehacker/public-repo",
+    "owner": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "private": false,
+    "html_url": "https://github.com/baxterthehacker/public-repo",
+    "description": "",
+    "fork": false,
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "archive_url": "https://api.github.com/repos/baxterthehacker/public-repo/{archive_format}{/ref}",
+    "assignees_url": "https://api.github.com/repos/baxterthehacker/public-repo/assignees{/user}",
+    "blobs_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/blobs{/sha}",
+    "branches_url": "https://api.github.com/repos/baxterthehacker/public-repo/branches{/branch}",
+    "collaborators_url": "https://api.github.com/repos/baxterthehacker/public-repo/collaborators{/collaborator}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/comments{/number}",
+    "commits_url": "https://api.github.com/repos/baxterthehacker/public-repo/commits{/sha}",
+    "compare_url": "https://api.github.com/repos/baxterthehacker/public-repo/compare/{base}...{head}",
+    "contents_url": "https://api.github.com/repos/baxterthehacker/public-repo/contents/{+path}",
+    "contributors_url": "https://api.github.com/repos/baxterthehacker/public-repo/contributors",
+    "deployments_url": "https://api.github.com/repos/baxterthehacker/public-repo/deployments",
+    "downloads_url": "https://api.github.com/repos/baxterthehacker/public-repo/downloads",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/events",
+    "forks_url": "https://api.github.com/repos/baxterthehacker/public-repo/forks",
+    "git_commits_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/commits{/sha}",
+    "git_refs_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/refs{/sha}",
+    "git_tags_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/tags{/sha}",
+    "git_url": "git://github.com/baxterthehacker/public-repo.git",
+    "issue_comment_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/comments{/number}",
+    "issue_events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/events{/number}",
+    "issues_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues{/number}",
+    "keys_url": "https://api.github.com/repos/baxterthehacker/public-repo/keys{/key_id}",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/labels{/name}",
+    "languages_url": "https://api.github.com/repos/baxterthehacker/public-repo/languages",
+    "merges_url": "https://api.github.com/repos/baxterthehacker/public-repo/merges",
+    "milestones_url": "https://api.github.com/repos/baxterthehacker/public-repo/milestones{/number}",
+    "notifications_url": "https://api.github.com/repos/baxterthehacker/public-repo/notifications{?since,all,participating}",
+    "pulls_url": "https://api.github.com/repos/baxterthehacker/public-repo/pulls{/number}",
+    "releases_url": "https://api.github.com/repos/baxterthehacker/public-repo/releases{/id}",
+    "ssh_url": "git@github.com:baxterthehacker/public-repo.git",
+    "stargazers_url": "https://api.github.com/repos/baxterthehacker/public-repo/stargazers",
+    "statuses_url": "https://api.github.com/repos/baxterthehacker/public-repo/statuses/{sha}",
+    "subscribers_url": "https://api.github.com/repos/baxterthehacker/public-repo/subscribers",
+    "subscription_url": "https://api.github.com/repos/baxterthehacker/public-repo/subscription",
+    "tags_url": "https://api.github.com/repos/baxterthehacker/public-repo/tags",
+    "teams_url": "https://api.github.com/repos/baxterthehacker/public-repo/teams",
+    "trees_url": "https://api.github.com/repos/baxterthehacker/public-repo/git/trees{/sha}",
+    "created_at": "2015-05-05T23:40:12Z",
+    "updated_at": "2015-05-05T23:40:12Z",
+    "pushed_at": "2015-05-05T23:40:27Z",
+    "git_url": "git://github.com/baxterthehacker/public-repo.git",
+    "ssh_url": "git@github.com:baxterthehacker/public-repo.git",
+    "clone_url": "https://github.com/baxterthehacker/public-repo.git",
+    "svn_url": "https://github.com/baxterthehacker/public-repo",
+    "size": 0,
+    "stargazers_count": 0,
+    "watchers_count": 0,
+    "language": null,
+    "has_issues": true,
+    "has_downloads": true,
+    "has_wiki": true,
+    "has_pages": true,
+    "forks_count": 0,
+    "mirror_url": null,
+    "open_issues_count": 2,
+    "forks": 0,
+    "open_issues": 2,
+    "watchers": 0,
+    "default_branch": "master"
+  },
+  "installation": {
+    "id": 12345
+  },
+  "sender": {
+    "login": "baxterthehacker",
+    "id": 6752317,
+    "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/baxterthehacker",
+    "html_url": "https://github.com/baxterthehacker",
+    "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+    "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+    "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+    "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+    "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+    "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+    "type": "User",
+    "site_admin": false
+  }
+}"""
+ISSUES_CLOSED_EVENT_EXAMPLE = r"""{
+  "action": "closed",
+  "issue": {
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2",
+    "repository_url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/labels{/name}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/comments",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/events",
+    "html_url": "https://github.com/baxterthehacker/public-repo/issues/2",
+    "id": 73464126,
+    "number": 2,
+    "title": "Spelling error in the README file",
+    "user": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "closed",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2015-05-05T23:40:28Z",
+    "updated_at": "2015-05-05T23:40:28Z",
+    "closed_at": "2015-05-05T23:40:28Z",
+    "body": "It looks like you accidentally spelled 'commit' with two 't's."
+  },
+  "installation": {
+    "id": 12345
+  },
+  "repository": {
+    "id": 35129377,
+    "name": "public-repo",
+    "full_name": "baxterthehacker/public-repo",
+    "owner": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "private": false,
+    "html_url": "https://github.com/baxterthehacker/public-repo",
+    "description": "",
+    "fork": false,
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "created_at": "2015-05-05T23:40:12Z",
+    "updated_at": "2015-05-05T23:40:12Z",
+    "pushed_at": "2015-05-05T23:40:27Z"
+  },
+  "sender": {
+    "login": "baxterthehacker",
+    "id": 6752317,
+    "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/baxterthehacker",
+    "html_url": "https://github.com/baxterthehacker",
+    "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+    "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+    "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+    "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+    "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+    "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+    "type": "User",
+    "site_admin": false
+  }
+}"""
+
+ISSUES_REOPENED_EVENT_EXAMPLE = r"""{
+  "action": "reopened",
+  "issue": {
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2",
+    "repository_url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "labels_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/labels{/name}",
+    "comments_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/comments",
+    "events_url": "https://api.github.com/repos/baxterthehacker/public-repo/issues/2/events",
+    "html_url": "https://github.com/baxterthehacker/public-repo/issues/2",
+    "id": 73464126,
+    "number": 2,
+    "title": "Spelling error in the README file",
+    "user": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2015-05-05T23:40:28Z",
+    "updated_at": "2015-05-05T23:40:28Z",
+    "closed_at": null,
+    "body": "It looks like you accidentally spelled 'commit' with two 't's."
+  },
+  "installation": {
+    "id": 12345
+  },
+  "repository": {
+    "id": 35129377,
+    "name": "public-repo",
+    "full_name": "baxterthehacker/public-repo",
+    "owner": {
+      "login": "baxterthehacker",
+      "id": 6752317,
+      "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/baxterthehacker",
+      "html_url": "https://github.com/baxterthehacker",
+      "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+      "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+      "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+      "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+      "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+      "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "private": false,
+    "html_url": "https://github.com/baxterthehacker/public-repo",
+    "description": "",
+    "fork": false,
+    "url": "https://api.github.com/repos/baxterthehacker/public-repo",
+    "created_at": "2015-05-05T23:40:12Z",
+    "updated_at": "2015-05-05T23:40:12Z",
+    "pushed_at": "2015-05-05T23:40:27Z"
+  },
+  "sender": {
+    "login": "baxterthehacker",
+    "id": 6752317,
+    "avatar_url": "https://avatars.githubusercontent.com/u/6752317?v=3",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/baxterthehacker",
+    "html_url": "https://github.com/baxterthehacker",
+    "followers_url": "https://api.github.com/users/baxterthehacker/followers",
+    "following_url": "https://api.github.com/users/baxterthehacker/following{/other_user}",
+    "gists_url": "https://api.github.com/users/baxterthehacker/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/baxterthehacker/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/baxterthehacker/subscriptions",
+    "organizations_url": "https://api.github.com/users/baxterthehacker/orgs",
+    "repos_url": "https://api.github.com/users/baxterthehacker/repos",
+    "events_url": "https://api.github.com/users/baxterthehacker/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/baxterthehacker/received_events",
+    "type": "User",
+    "site_admin": false
+  }
+}"""
+
+# Simplified example of a check_run rerequested action event
+# Note: installation.id must match the external_id used in create_github_integration (default: "12345")
+# Note: repository.id must match a Repository created for the organization (use create_repo in tests)
+CHECK_RUN_REREQUESTED_ACTION_EVENT_EXAMPLE = b"""{
+    "action": "rerequested",
+    "installation": {"id": 12345},
+    "repository": {
+        "id": 35129377,
+        "name": "sentry",
+        "full_name": "getsentry/sentry",
+        "html_url": "https://github.com/getsentry/sentry",
+        "owner": {
+            "login": "getsentry",
+            "id": 1396951
+        }
+    },
+    "check_run": {
+        "external_id": "4663713",
+        "html_url": "https://github.com/getsentry/sentry/runs/4"
+    },
+    "sender": {
+        "id": 12345678,
+        "login": "test-user"
+    }
+}"""
+
+CHECK_RUN_COMPLETED_EVENT_EXAMPLE = b"""{
+    "action": "completed",
+    "installation": {"id": 12345},
+    "repository": {
+        "id": 35129377,
+        "name": "sentry",
+        "full_name": "getsentry/sentry",
+        "html_url": "https://github.com/getsentry/sentry",
+        "owner": {
+            "login": "getsentry",
+            "id": 1396951
+        }
+    },
+    "check_run": {
+        "id": 9876543,
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/getsentry/sentry/runs/9876543"
+    },
+    "sender": {
+        "id": 12345678,
+        "login": "test-user"
+    }
+}"""

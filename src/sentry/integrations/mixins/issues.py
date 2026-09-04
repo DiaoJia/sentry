@@ -7,29 +7,36 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from operator import attrgetter
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from sentry.eventstore.models import GroupEvent
+from sentry import features
 from sentry.integrations.base import IntegrationInstallation
 from sentry.integrations.models.external_issue import ExternalIssue
+from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.assignment_source import AssignmentSource
 from sentry.integrations.services.integration import integration_service
 from sentry.integrations.tasks.sync_status_inbound import (
     sync_status_inbound as sync_status_inbound_task,
 )
-from sentry.integrations.utils.sync import where_should_sync
+from sentry.integrations.types import IntegrationIssueConfigField
+from sentry.integrations.utils.external_issues import maybe_generate_external_issue_details
 from sentry.issues.grouptype import GroupCategory
 from sentry.issues.issue_occurrence import IssueOccurrence
 from sentry.models.group import Group
 from sentry.models.grouplink import GroupLink
+from sentry.models.organization import Organization
 from sentry.models.project import Project
-from sentry.notifications.utils import get_notification_group_title
-from sentry.silo.base import all_silo_function
+from sentry.services.eventstore.models import GroupEvent
+from sentry.shared_integrations.exceptions import IntegrationError
+from sentry.silo.base import all_silo_function, cell_silo_function
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
 from sentry.users.services.user_option import get_option_from_list, user_option_service
 from sentry.utils.http import absolute_uri
 from sentry.utils.safe import safe_execute
+
+if TYPE_CHECKING:
+    from sentry.integrations.services.integration import RpcIntegration
 
 logger = logging.getLogger("sentry.integrations.issues")
 MAX_CHAR = 50
@@ -64,10 +71,14 @@ class ResolveSyncAction(enum.Enum):
 
 
 class IssueBasicIntegration(IntegrationInstallation, ABC):
-    def should_sync(self, attribute, sync_source: AssignmentSource | None = None):
+    def should_sync(self, attribute, sync_source: AssignmentSource | None = None) -> bool:
         return False
 
     def get_group_title(self, group, event, **kwargs):
+        # Imported lazily to avoid a circular import: sentry.notifications.utils
+        # imports sentry.utils.committers -> sentry.api.serializers -> this module.
+        from sentry.notifications.utils import get_notification_group_title
+
         return get_notification_group_title(group, event, **kwargs)
 
     @abstractmethod
@@ -113,15 +124,11 @@ class IssueBasicIntegration(IntegrationInstallation, ABC):
 
         if group.issue_category == GroupCategory.FEEDBACK:
             return [
-                "Sentry Feedback: [{}]({})\n".format(
-                    group.qualified_short_id, absolute_uri(group.get_absolute_url(params=params))
-                )
+                f"Sentry Feedback: [{group.qualified_short_id}]({absolute_uri(group.get_absolute_url(params=params))})\n"
             ]
 
         return [
-            "Sentry Issue: [{}]({})".format(
-                group.qualified_short_id, absolute_uri(group.get_absolute_url(params=params))
-            )
+            f"Sentry Issue: [{group.qualified_short_id}]({absolute_uri(group.get_absolute_url(params=params))})"
         ]
 
     def get_group_description(self, group, event, **kwargs):
@@ -144,7 +151,7 @@ class IssueBasicIntegration(IntegrationInstallation, ABC):
     @all_silo_function
     def get_create_issue_config(
         self, group: Group | None, user: User | RpcUser, **kwargs
-    ) -> list[dict[str, Any]]:
+    ) -> list[IntegrationIssueConfigField]:
         """
         These fields are used to render a form for the user,
         and are then passed in the format of:
@@ -159,18 +166,29 @@ class IssueBasicIntegration(IntegrationInstallation, ABC):
 
         event = group.get_latest_event()
 
+        default_title = self.get_group_title(group, event, **kwargs)
+        default_description = self.get_group_description(group, event, **kwargs)
+
+        llm_details = maybe_generate_external_issue_details(group=group, user=user, event=event)
+        title = llm_details["title"] if llm_details["title"] else default_title
+        description = (
+            f"**{default_title}**\n\n{llm_details['description']}\n\n---\n\n{default_description}"
+            if llm_details["description"]
+            else default_description
+        )
+
         return [
             {
                 "name": "title",
                 "label": "Title",
-                "default": self.get_group_title(group, event, **kwargs),
+                "default": title,
                 "type": "string",
                 "required": True,
             },
             {
                 "name": "description",
                 "label": "Description",
-                "default": self.get_group_description(group, event, **kwargs),
+                "default": description,
                 "type": "textarea",
                 "autosize": True,
                 "maxRows": 10,
@@ -368,6 +386,40 @@ class IssueBasicIntegration(IntegrationInstallation, ABC):
 
     def update_comment(self, issue_id, user_id, group_note):
         pass
+
+
+@cell_silo_function
+def where_should_sync(
+    integration: RpcIntegration | Integration,
+    key: str,
+    organization_id: int | None = None,
+) -> Sequence[Organization]:
+    """
+    Given an integration, get the list of organizations where the sync type in
+    `key` is enabled. If an optional `organization_id` is passed, then only
+    check the integration for that organization.
+    """
+    kwargs = dict()
+    if organization_id is not None:
+        kwargs["id"] = organization_id
+        ois = integration_service.get_organization_integrations(
+            integration_id=integration.id, organization_id=organization_id
+        )
+    else:
+        ois = integration_service.get_organization_integrations(integration_id=integration.id)
+
+    organizations = Organization.objects.filter(id__in=[oi.organization_id for oi in ois])
+    ret = []
+    for organization in organizations.filter(**kwargs):
+        if features.has("organizations:integrations-issue-sync", organization):
+            installation = integration.get_installation(organization_id=organization.id)
+            if isinstance(installation, IssueBasicIntegration) and installation.should_sync(key):
+                ret.append(organization)
+    return ret
+
+
+class IntegrationSyncTargetNotFound(IntegrationError):
+    pass
 
 
 class IssueSyncIntegration(IssueBasicIntegration, ABC):

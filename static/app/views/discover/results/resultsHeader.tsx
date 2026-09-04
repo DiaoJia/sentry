@@ -1,26 +1,25 @@
-import {Component, Fragment} from 'react';
-import styled from '@emotion/styled';
+import {Fragment, useCallback, useEffect, useState} from 'react';
 import type {Location} from 'history';
+
+import type {ContainerProps} from '@sentry/scraps/layout';
 
 import {fetchHomepageQuery} from 'sentry/actionCreators/discoverHomepageQueries';
 import {fetchSavedQuery} from 'sentry/actionCreators/discoverSavedQueries';
 import type {Client} from 'sentry/api';
-import GuideAnchor from 'sentry/components/assistant/guideAnchor';
+import {GuideAnchor} from 'sentry/components/assistant/guideAnchor';
 import * as Layout from 'sentry/components/layouts/thirds';
 import {PageHeadingQuestionTooltip} from 'sentry/components/pageHeadingQuestionTooltip';
-import TimeSince from 'sentry/components/timeSince';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {InjectedRouter} from 'sentry/types/legacyReactRouter';
 import type {Organization, SavedQuery} from 'sentry/types/organization';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import type {SavedQueryDatasets} from 'sentry/utils/discover/types';
-import withApi from 'sentry/utils/withApi';
-import DiscoverBreadcrumb from 'sentry/views/discover/breadcrumb';
-import EventInputName from 'sentry/views/discover/eventInputName';
+import {withApi} from 'sentry/utils/withApi';
+import {DiscoverBreadcrumb} from 'sentry/views/discover/breadcrumb';
 import SavedQueryButtonGroup from 'sentry/views/discover/savedQuery';
 import {DatasetSelectorTabs} from 'sentry/views/discover/savedQuery/datasetSelectorTabs';
 import {getSavedQueryWithDataset} from 'sentry/views/discover/savedQuery/utils';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 type Props = {
   api: Client;
@@ -28,197 +27,143 @@ type Props = {
   eventView: EventView;
   location: Location;
   organization: Organization;
-  router: InjectedRouter;
   setSavedQuery: (savedQuery?: SavedQuery) => void;
   yAxis: string[];
   isHomepage?: boolean;
   splitDecision?: SavedQueryDatasets;
 };
 
-type State = {
-  homepageQuery: SavedQuery | undefined;
-  loading: boolean;
-  savedQuery: SavedQuery | undefined;
-};
+function ResultsHeaderBase({
+  api,
+  errorCode,
+  eventView,
+  location,
+  organization,
+  setSavedQuery,
+  yAxis,
+  isHomepage,
+  splitDecision,
+}: Props) {
+  const [homepageQuery, setHomepageQuery] = useState<SavedQuery | undefined>(undefined);
+  const [savedQuery, setSavedQueryState] = useState<SavedQuery | undefined>(undefined);
+  const [loading, setLoading] = useState(true);
 
-class ResultsHeader extends Component<Props, State> {
-  state: State = {
-    homepageQuery: undefined,
-    savedQuery: undefined,
-    loading: true,
+  const fetchData = useCallback(() => {
+    if (!isHomepage && typeof eventView.id === 'string') {
+      setLoading(true);
+      fetchSavedQuery(api, organization.slug, eventView.id).then(fetchedSavedQuery => {
+        setSavedQueryState(getSavedQueryWithDataset(fetchedSavedQuery));
+        setLoading(false);
+      });
+    }
+  }, [api, eventView.id, isHomepage, organization.slug]);
+
+  const fetchHomepageQueryData = useCallback(() => {
+    setLoading(true);
+    fetchHomepageQuery(api, organization.slug).then(fetchedHomepageQuery => {
+      setHomepageQuery(getSavedQueryWithDataset(fetchedHomepageQuery));
+      setLoading(false);
+    });
+  }, [api, organization.slug]);
+
+  useEffect(() => {
+    if (!isHomepage && eventView.id) {
+      fetchData();
+    } else if (eventView.id === undefined) {
+      setLoading(false);
+    }
+  }, [eventView.id, isHomepage, fetchData]);
+
+  useEffect(() => {
+    if (isHomepage) {
+      fetchHomepageQueryData();
+    }
+  }, [isHomepage, fetchHomepageQueryData]);
+
+  const hasDiscoverQueryFeature = organization.features.includes('discover-query');
+
+  const savedQueryButton = (
+    <SavedQueryButtonGroup
+      setSavedQuery={setSavedQuery}
+      location={location}
+      organization={organization}
+      eventView={eventView}
+      savedQuery={savedQuery}
+      queryDataLoading={loading}
+      disabled={errorCode >= 400 && errorCode < 500}
+      updateCallback={fetchData}
+      yAxis={yAxis}
+      isHomepage={isHomepage}
+      setHomepageQuery={updatedHomepageQuery => {
+        setHomepageQuery(getSavedQueryWithDataset(updatedHomepageQuery));
+        if (isHomepage) {
+          setSavedQuery(updatedHomepageQuery);
+        }
+      }}
+      homepageQuery={homepageQuery}
+    />
+  );
+
+  const title = (
+    <Fragment>
+      {getDiscoverDeprecation(organization) ? t('Errors') : t('Discover')}
+      <PageHeadingQuestionTooltip
+        docsUrl="https://docs.sentry.io/product/discover-queries/"
+        title={t('Create queries to get insights into the health of your system.')}
+      />
+    </Fragment>
+  );
+
+  const discoverBreadcrumb = (
+    <DiscoverBreadcrumb
+      eventView={eventView}
+      organization={organization}
+      location={location}
+      isHomepage={isHomepage}
+      savedQuery={savedQuery}
+    />
+  );
+
+  // there's some styling that gets messed up when choosing to not render the
+  // dataset selector tabs so i'm injecting some styles fix it. This should be removed
+  // when the dataset selector tabs are removed.
+  const deprecationHeaderStyles: ContainerProps<'header'> = {
+    padding: {
+      'screen:sm': '0',
+      'screen:md': '0',
+    },
+    borderBottom: {
+      '2xs': 'none',
+      xs: 'none',
+      sm: 'none',
+      md: 'none',
+    },
   };
 
-  componentDidMount() {
-    const {eventView, isHomepage} = this.props;
-    const {loading} = this.state;
-    if (!isHomepage && eventView.id) {
-      this.fetchData();
-    } else if (eventView.id === undefined && loading) {
-      // If this is a new query, there's nothing to load
-      this.setState({loading: false});
-    }
-    if (isHomepage) {
-      this.fetchHomepageQueryData();
-    }
-  }
-
-  componentDidUpdate(prevProps: Props) {
-    if (
-      prevProps.eventView &&
-      this.props.eventView &&
-      prevProps.eventView.id !== this.props.eventView.id
-    ) {
-      this.fetchData();
-    }
-  }
-
-  fetchData() {
-    const {api, eventView, organization, isHomepage} = this.props;
-    if (!isHomepage && typeof eventView.id === 'string') {
-      this.setState({loading: true});
-      fetchSavedQuery(api, organization.slug, eventView.id).then(savedQuery => {
-        this.setState({
-          savedQuery: getSavedQueryWithDataset(savedQuery) as SavedQuery,
-          loading: false,
-        });
-      });
-    }
-  }
-
-  fetchHomepageQueryData() {
-    const {api, organization} = this.props;
-    this.setState({loading: true});
-    fetchHomepageQuery(api, organization.slug).then(homepageQuery => {
-      this.setState({
-        homepageQuery: getSavedQueryWithDataset(homepageQuery) as SavedQuery,
-        loading: false,
-      });
-    });
-  }
-
-  renderAuthor() {
-    const {eventView, isHomepage} = this.props;
-    const {savedQuery} = this.state;
-    // No saved query in use.
-    if (!eventView.id || isHomepage) {
-      return null;
-    }
-    let createdBy = ' \u2014 ';
-    let lastEdit: React.ReactNode = ' \u2014 ';
-    if (savedQuery !== undefined) {
-      createdBy = savedQuery.createdBy?.email || '\u2014';
-      lastEdit = <TimeSince date={savedQuery.dateUpdated} />;
-    }
-    return (
-      <Subtitle>
-        {t('Created by:')} {createdBy} | {t('Last edited:')} {lastEdit}
-      </Subtitle>
-    );
-  }
-
-  render() {
-    const {
-      organization,
-      location,
-      errorCode,
-      eventView,
-      yAxis,
-      router,
-      setSavedQuery,
-      isHomepage,
-      splitDecision,
-    } = this.props;
-    const {savedQuery, loading, homepageQuery} = this.state;
-    const hasDiscoverQueryFeature = organization.features.includes('discover-query');
-
-    return (
-      <Layout.Header>
-        <Layout.HeaderContent>
-          {isHomepage ? (
-            <GuideAnchor target="discover_landing_header">
-              <Layout.Title>
-                {t('Discover')}
-                <PageHeadingQuestionTooltip
-                  docsUrl="https://docs.sentry.io/product/discover-queries/"
-                  title={t(
-                    'Create queries to get insights into the health of your system.'
-                  )}
-                />
-              </Layout.Title>
-            </GuideAnchor>
-          ) : hasDiscoverQueryFeature ? (
-            <Fragment>
-              <DiscoverBreadcrumb
-                eventView={eventView}
-                organization={organization}
-                location={location}
-                isHomepage={isHomepage}
-              />
-              <EventInputName
-                savedQuery={savedQuery}
-                organization={organization}
-                eventView={eventView}
-                isHomepage={isHomepage}
-              />
-            </Fragment>
-          ) : (
-            // Only has discover-basic
-            <Fragment>
-              <Layout.Title>
-                {t('Discover')}
-                <PageHeadingQuestionTooltip
-                  docsUrl="https://docs.sentry.io/product/discover-queries/"
-                  title={t(
-                    'Create queries to get insights into the health of your system.'
-                  )}
-                />
-              </Layout.Title>
-            </Fragment>
-          )}
-          {this.renderAuthor()}
-        </Layout.HeaderContent>
-        <Layout.HeaderActions>
-          <SavedQueryButtonGroup
-            setSavedQuery={setSavedQuery}
-            location={location}
-            organization={organization}
-            eventView={eventView}
-            savedQuery={savedQuery}
-            queryDataLoading={loading}
-            disabled={errorCode >= 400 && errorCode < 500}
-            updateCallback={() => this.fetchData()}
-            yAxis={yAxis}
-            router={router}
-            isHomepage={isHomepage}
-            setHomepageQuery={updatedHomepageQuery => {
-              this.setState({
-                homepageQuery: getSavedQueryWithDataset(
-                  updatedHomepageQuery
-                ) as SavedQuery,
-              });
-              if (isHomepage) {
-                setSavedQuery(updatedHomepageQuery);
-              }
-            }}
-            homepageQuery={homepageQuery}
-          />
-        </Layout.HeaderActions>
+  return (
+    <Layout.Header
+      {...(getDiscoverDeprecation(organization) ? deprecationHeaderStyles : {})}
+    >
+      <TopBar.Slot name="title">
+        {isHomepage ? (
+          <GuideAnchor target="discover_landing_header">{title}</GuideAnchor>
+        ) : hasDiscoverQueryFeature ? (
+          discoverBreadcrumb
+        ) : (
+          title
+        )}
+      </TopBar.Slot>
+      <TopBar.Slot name="actions">{savedQueryButton}</TopBar.Slot>
+      {!getDiscoverDeprecation(organization) && (
         <DatasetSelectorTabs
           eventView={eventView}
           isHomepage={isHomepage}
           savedQuery={savedQuery}
           splitDecision={splitDecision}
         />
-      </Layout.Header>
-    );
-  }
+      )}
+    </Layout.Header>
+  );
 }
 
-const Subtitle = styled('h4')`
-  font-size: ${p => p.theme.fontSize.lg};
-  font-weight: ${p => p.theme.fontWeightNormal};
-  color: ${p => p.theme.subText};
-  margin: ${space(0.5)} 0 0 0;
-`;
-
-export default withApi(ResultsHeader);
+export const ResultsHeader = withApi(ResultsHeaderBase);

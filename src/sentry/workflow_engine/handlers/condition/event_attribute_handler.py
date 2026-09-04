@@ -2,9 +2,9 @@ from typing import Any
 
 import sentry_sdk
 
-from sentry.eventstore.models import GroupEvent
-from sentry.rules import MatchType, match_values
+from sentry.rules import MATCH_CHOICES, MatchType, match_values
 from sentry.rules.conditions.event_attribute import ATTR_CHOICES, attribute_registry
+from sentry.services.eventstore.models import GroupEvent
 from sentry.utils.registry import NoRegistrationExistsError
 from sentry.workflow_engine.models.data_condition import Condition
 from sentry.workflow_engine.registry import condition_handler_registry
@@ -15,6 +15,7 @@ from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
 class EventAttributeConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.ACTION_FILTER
     subgroup = DataConditionHandler.Subgroup.EVENT_ATTRIBUTES
+    label_template = "The event's {attribute} value {match} {value}"
 
     comparison_json_schema = {
         "type": "object",
@@ -77,12 +78,16 @@ class EventAttributeConditionHandler(DataConditionHandler[WorkflowEventData]):
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
         event = event_data.event
+        if not isinstance(event, GroupEvent):
+            # cannot evaluate event attributes on non-GroupEvent types
+            return False
+
         attribute = comparison.get("attribute", "")
         attribute_values = EventAttributeConditionHandler.get_attribute_values(event, attribute)
 
         match = comparison.get("match")
         desired_value = comparison.get("value")
-        if not (match and desired_value) and not (match in (MatchType.IS_SET, MatchType.NOT_SET)):
+        if not (match and desired_value) and match not in (MatchType.IS_SET, MatchType.NOT_SET):
             return False
 
         desired_value = str(desired_value).lower()
@@ -97,3 +102,12 @@ class EventAttributeConditionHandler(DataConditionHandler[WorkflowEventData]):
         return match_values(
             group_values=attribute_values, match_value=desired_value, match_type=match
         )
+
+    @classmethod
+    def render_label(cls, condition_data: dict[str, Any], organization_id: int) -> str:
+        data = {
+            "attribute": condition_data["attribute"],
+            "value": condition_data["value"],
+            "match": MATCH_CHOICES[condition_data["match"]],
+        }
+        return cls.label_template.format(**data)

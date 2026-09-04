@@ -4,20 +4,24 @@ import type {LocationRange} from 'peggy';
 import {
   isTokenFreeText,
   isTokenFunction,
+  isTokenLiteral,
+  isTokenReference,
   Operator,
-  type Token,
   TokenAttribute,
   TokenCloseParenthesis,
   TokenFreeText,
   TokenFunction,
   TokenKind,
+  TokenLiteral,
   TokenOpenParenthesis,
   TokenOperator,
+  TokenReference,
+  type Token,
   type TokenParenthesis,
 } from 'sentry/components/arithmeticBuilder/token';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
-import grammar from './grammar.pegjs';
+import {parse} from './grammar.pegjs';
 
 function space(prev: LocationRange | null, next: LocationRange | null): TokenFreeText {
   const location: LocationRange = {
@@ -42,28 +46,50 @@ function space(prev: LocationRange | null, next: LocationRange | null): TokenFre
   return new TokenFreeText(location, '');
 }
 
-function tryTokenizeExpression(expression: string): Token[] {
+function tryTokenizeExpression(expression: string, references?: Set<string>): Token[] {
   if (!expression.trim()) {
     return [];
   }
 
-  const tc = new TokenConverter();
-  return grammar.parse(expression, {tc});
+  const tc = new TokenConverter(references);
+  return parse(expression, {tc});
 }
 
-export function tokenizeExpression(expression: string): Token[] {
+export function tokenizeExpression(
+  expression: string,
+  references?: Set<string>
+): Token[] {
   let loc: LocationRange | null = null;
-
   const tokens: Token[] = [];
 
-  for (const token of tryTokenizeExpression(expression)) {
+  for (const token of tryTokenizeExpression(expression, references)) {
     const prev = tokens[tokens.length - 1];
-    if (isTokenFreeText(prev) && isTokenFreeText(token)) {
+    if (isTokenFreeText(token) && isTokenFreeText(prev)) {
       prev.merge(token);
+    } else if (
+      isTokenLiteral(token) &&
+      defined(token.sign) &&
+      (isTokenLiteral(prev) || isTokenFunction(prev) || isTokenReference(prev))
+    ) {
+      // Because we're tokenizing expressions, we have to permit some intermedate
+      // invalid states. As a result, we greedily pair positive/negative signs with
+      // a trailing literal. This means an expression like  `1+1` gets tokenized as
+      // `1` and `+1`. But what we want is to tokenize it was `1` `+` `1`. To handle
+      // this situation, we check to see if a signed literal trails another valid
+      // literal or expression, and in this case we treat the sign as an operation.
+      const [op, lit] = token.split();
+
+      // make sure to inject a free text token before the operator
+      tokens.push(space(loc, op.location), op);
+      loc = op.location;
+
+      // make sure to inject a free text token before the literal
+      tokens.push(space(loc, lit.location), lit);
+      loc = lit.location;
     } else {
       // make sure to inject a free text token between every pair of non free space
       // tokens to allow users to enter things between them
-      if (!isTokenFreeText(prev) && !isTokenFreeText(token)) {
+      if (!isTokenFreeText(token) && !isTokenFreeText(prev)) {
         tokens.push(space(loc, token.location));
       }
 
@@ -85,6 +111,8 @@ export function tokenizeExpression(expression: string): Token[] {
     [TokenKind.FREE_TEXT]: 0,
     [TokenKind.ATTRIBUTE]: 0,
     [TokenKind.FUNCTION]: 0,
+    [TokenKind.LITERAL]: 0,
+    [TokenKind.REFERENCE]: 0,
   };
 
   // assign an unique key to each token based on it's type
@@ -118,15 +146,16 @@ function isTokenKeyOfKind(key: string, kind: TokenKind) {
   return key.startsWith(kind);
 }
 
-export function nextSimilarTokenKey(key: string): string {
+export function nextSimilarTokenKey(key: string, offset = 1): string {
   const {kind, index} = parseTokenKey(key);
-  return makeTokenKey(kind, index + 1);
+  return makeTokenKey(kind, index + offset);
 }
 
 export function nextTokenKeyOfKind(
   state: ListState<Token>,
   token: Token,
-  kind: TokenKind
+  kind: TokenKind,
+  offset?: number
 ): string {
   let key: string | null = null;
 
@@ -142,7 +171,7 @@ export function nextTokenKeyOfKind(
   }
 
   return defined(key)
-    ? nextSimilarTokenKey(key)
+    ? nextSimilarTokenKey(key, offset)
     : // unable to find any tokens of the given kind, so assume this will be the first one
       makeTokenKey(kind);
 }
@@ -155,6 +184,25 @@ class ArithmeticError extends Error {
 }
 
 class TokenConverter {
+  /**
+   * A map of reference aliases to their corresponding values.
+   */
+  private references = new Set<string>();
+
+  constructor(references?: Set<string>) {
+    if (references) {
+      this.references = references;
+    }
+  }
+
+  isReference(value: string): boolean {
+    return this.references.has(value);
+  }
+
+  tokenReference(value: string, location: LocationRange): TokenReference {
+    return new TokenReference(location, value);
+  }
+
   tokenParenthesis(parenthesis: string, location: LocationRange): TokenParenthesis {
     if (parenthesis === '(') {
       return new TokenOpenParenthesis(location);
@@ -175,6 +223,10 @@ class TokenConverter {
     return new TokenFreeText(location, value);
   }
 
+  tokenLiteral(value: string, location: LocationRange): TokenLiteral {
+    return new TokenLiteral(location, value);
+  }
+
   tokenAttribute(
     attribute: string,
     type: string | undefined,
@@ -185,10 +237,10 @@ class TokenConverter {
 
   tokenFunction(
     func: string,
-    attribute: TokenAttribute,
+    attributes: TokenAttribute[],
     location: LocationRange
   ): TokenFunction {
-    return new TokenFunction(location, func, [attribute]);
+    return new TokenFunction(location, func, attributes);
   }
 }
 
@@ -221,6 +273,10 @@ function toTokenKind(kind: string): TokenKind {
       return TokenKind.ATTRIBUTE;
     case TokenKind.FUNCTION:
       return TokenKind.FUNCTION;
+    case TokenKind.LITERAL:
+      return TokenKind.LITERAL;
+    case TokenKind.REFERENCE:
+      return TokenKind.REFERENCE;
     default:
       throw new ArithmeticError(`Unknown token kind: ${kind}`);
   }

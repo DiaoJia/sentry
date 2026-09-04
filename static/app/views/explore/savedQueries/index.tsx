@@ -1,44 +1,35 @@
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import FeedbackWidgetButton from 'sentry/components/feedback/widget/feedbackWidgetButton';
+import {Stack} from '@sentry/scraps/layout';
+
+import {FeedbackButton} from 'sentry/components/feedbackButton/feedbackButton';
 import * as Layout from 'sentry/components/layouts/thirds';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {IconAdd} from 'sentry/icons/iconAdd';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {SavedQueriesLandingContent} from 'sentry/views/explore/savedQueries/savedQueriesLandingContent';
-import {getExploreUrl} from 'sentry/views/explore/utils';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 export default function SavedQueriesView() {
   const organization = useOrganization();
 
   return (
     <SentryDocumentTitle title={t('All Queries')} orgSlug={organization?.slug}>
-      <Layout.Page>
-        <Layout.Header unified>
-          <Layout.HeaderContent>
-            <Layout.Title>{t('All Queries')}</Layout.Title>
-          </Layout.HeaderContent>
-          <Layout.HeaderActions>
-            <ButtonBar gap={1}>
-              <FeedbackWidgetButton />
-              <LinkButton
-                priority="primary"
-                icon={<IconAdd />}
-                size="sm"
-                to={getExploreUrl({organization, visualize: []})}
-              >
-                {t('Create Query')}
-              </LinkButton>
-            </ButtonBar>
-          </Layout.HeaderActions>
-        </Layout.Header>
+      <Stack flex={1}>
+        <TopBar.Slot name="title">{t('All Queries')}</TopBar.Slot>
+        <TopBar.Slot name="feedback">
+          <FeedbackButton
+            aria-label={t('Give Feedback')}
+            tooltipProps={{title: t('Give Feedback')}}
+          >
+            {null}
+          </FeedbackButton>
+        </TopBar.Slot>
+
         <Layout.Body>
-          <Layout.Main fullWidth>
+          <Layout.Main width="full">
             <SavedQueriesLandingContent />
           </Layout.Main>
         </Layout.Body>
-      </Layout.Page>
+      </Stack>
     </SentryDocumentTitle>
   );
 }

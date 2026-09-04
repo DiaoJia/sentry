@@ -1,80 +1,106 @@
-import {Fragment} from 'react';
-import type {Location} from 'history';
+import {mutationOptions, useQuery, useQueryClient} from '@tanstack/react-query';
+import {z} from 'zod';
+
+import {AutoSaveForm, FieldGroup} from '@sentry/scraps/form';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import Form from 'sentry/components/forms/form';
-import JsonForm from 'sentry/components/forms/jsonForm';
-import type {JsonFormObject} from 'sentry/components/forms/types';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {t} from 'sentry/locale';
-import type {OrganizationAuthProvider} from 'sentry/types/auth';
 import type {Scope} from 'sentry/types/core';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
 
-interface Props extends RouteComponentProps {
+interface Props {
   access: Set<Scope>;
-  location: Location;
 }
 
-type FeatureFlags = Record<string, {description: string; value: boolean}>;
+type FeatureFlag = {description: string; value: boolean};
+type FeatureFlags = Record<string, FeatureFlag>;
 
-export default function EarlyFeaturesSettingsForm({access, location}: Props) {
-  const organization = useOrganization();
+const featureFlagsQueryOptions = apiOptions.as<FeatureFlags>()(
+  '/internal/feature-flags/',
+  {
+    staleTime: 0,
+  }
+);
 
-  const {data: authProvider, isPending: authProviderIsLoading} =
-    useApiQuery<OrganizationAuthProvider>(
-      [`/organizations/${organization.slug}/auth-provider/`],
-      {staleTime: 0}
-    );
+function getFeatureFlagSchema(flag: string) {
+  return z.object({[flag]: z.boolean()});
+}
 
-  const {data: featureFlags, isPending: featureFlagsIsLoading} =
-    useApiQuery<FeatureFlags>(['/internal/feature-flags/'], {staleTime: 0});
+function updateFeatureFlags(
+  featureFlags: FeatureFlags,
+  updatedFlags: Record<string, boolean>
+): FeatureFlags {
+  return Object.fromEntries(
+    Object.entries(featureFlags).map(([flag, featureFlag]) => {
+      const newValue = updatedFlags[flag];
+      return [
+        flag,
+        newValue === undefined ? featureFlag : {...featureFlag, value: newValue},
+      ];
+    })
+  );
+}
 
-  if (authProviderIsLoading || featureFlagsIsLoading) {
+export function EarlyFeaturesSettingsForm({access}: Props) {
+  const queryClient = useQueryClient();
+  const {data: featureFlags, isPending, isError} = useQuery(featureFlagsQueryOptions);
+
+  if (isPending) {
     return <LoadingIndicator />;
   }
 
-  const initialData: Record<string, boolean> = {};
-  for (const flag in featureFlags) {
-    if (featureFlags.hasOwnProperty(flag)) {
-      const obj = featureFlags[flag]!;
-      initialData[flag] = obj.value;
-    }
+  if (isError) {
+    return <LoadingError />;
   }
 
-  const jsonFormSettings = {
-    additionalFieldProps: {hasSsoEnabled: !!authProvider},
-    features: new Set(organization.features),
-    access,
-    location,
-    disabled: !access.has('org:write'),
-  };
+  const disabled = !access.has('org:write');
+  const featureFlagMutationOptions = mutationOptions({
+    mutationFn: (data: Record<string, boolean>) =>
+      fetchMutation<void>({
+        method: 'PUT',
+        url: getApiUrl('/internal/feature-flags/'),
+        data,
+      }),
+    onSuccess: (_response, updatedFlags) => {
+      queryClient.setQueryData(featureFlagsQueryOptions.queryKey, prev => {
+        if (!prev) {
+          return prev;
+        }
 
-  const featuresForm: JsonFormObject = {
-    title: t('Early Adopter Features'),
-    fields: Object.entries(featureFlags || {}).map(([flag, obj]) => ({
-      label: obj.description,
-      name: flag,
-      type: 'boolean',
-    })),
-  };
+        return {
+          ...prev,
+          json: updateFeatureFlags(prev.json, updatedFlags),
+        };
+      });
+    },
+    onError: () => addErrorMessage(t('Unable to save change')),
+  });
 
   return (
-    <Fragment>
-      <Form
-        data-test-id="organization-settings"
-        apiMethod="PUT"
-        apiEndpoint={`/internal/feature-flags/`}
-        saveOnBlur
-        allowUndo
-        initialData={initialData}
-        onSubmitError={() => addErrorMessage('Unable to save change')}
-        onSubmitSuccess={() => {}}
-      >
-        <JsonForm {...jsonFormSettings} forms={[featuresForm]} />
-      </Form>
-    </Fragment>
+    <FieldGroup title={t('Early Adopter Features')}>
+      {Object.entries(featureFlags ?? {}).map(([flag, {description, value}]) => (
+        <AutoSaveForm
+          key={flag}
+          name={flag}
+          schema={getFeatureFlagSchema(flag)}
+          initialValue={value}
+          mutationOptions={featureFlagMutationOptions}
+        >
+          {field => (
+            <field.Layout.Row label={description}>
+              <field.Switch
+                checked={field.state.value}
+                onChange={field.handleChange}
+                disabled={disabled}
+              />
+            </field.Layout.Row>
+          )}
+        </AutoSaveForm>
+      ))}
+    </FieldGroup>
   );
 }

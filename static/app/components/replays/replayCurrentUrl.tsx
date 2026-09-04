@@ -1,19 +1,21 @@
 import {useMemo} from 'react';
 import * as Sentry from '@sentry/react';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import {useReplayContext} from 'sentry/components/replays/replayContext';
-import TextCopyInput from 'sentry/components/textCopyInput';
-import {t, tct} from 'sentry/locale';
-import getCurrentUrl from 'sentry/utils/replays/getCurrentUrl';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
-function ReplayCurrentUrl() {
-  const {currentTime, replay} = useReplayContext();
+import {useReplayContext} from 'sentry/components/replays/replayContext';
+import {TextCopyInput} from 'sentry/components/textCopyInput';
+import {t, tct} from 'sentry/locale';
+import {getCurrentUrl} from 'sentry/utils/replays/getCurrentUrl';
+import {useReplayReader} from 'sentry/utils/replays/playback/providers/replayReaderProvider';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+
+export function ReplayCurrentUrl() {
+  const replay = useReplayReader();
+  const {currentTime} = useReplayContext();
   const replayRecord = replay?.getReplay();
   const frames = replay?.getNavigationFrames();
   const projId = replayRecord?.project_id;
@@ -77,5 +79,3 @@ function ReplayCurrentUrl() {
     </TextCopyInput>
   );
 }
-
-export default ReplayCurrentUrl;

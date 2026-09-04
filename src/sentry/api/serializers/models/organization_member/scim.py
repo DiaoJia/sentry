@@ -2,20 +2,19 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sentry.api.serializers import Serializer
+from sentry.core.endpoints.scim.constants import SCIM_SCHEMA_USER
 from sentry.models.organizationmember import OrganizationMember
-from sentry.scim.endpoints.constants import SCIM_SCHEMA_USER
 
 from .response import OrganizationMemberSCIMSerializerResponse
 
 
-class OrganizationMemberSCIMSerializer(Serializer):
+class OrganizationMemberSCIMSerializer(Serializer[OrganizationMemberSCIMSerializerResponse]):
     def __init__(self, expand: Sequence[str] | None = None) -> None:
         self.expand = expand or []
 
     def serialize(
         self, obj: OrganizationMember, attrs: Mapping[str, Any], user: Any, **kwargs: Any
     ) -> OrganizationMemberSCIMSerializerResponse:
-
         result: OrganizationMemberSCIMSerializerResponse = {
             "schemas": [SCIM_SCHEMA_USER],
             "id": str(obj.id),

@@ -3,16 +3,19 @@ from unittest import mock
 
 from arroyo import Partition, Topic
 from arroyo.backends.kafka import KafkaPayload
-from confluent_kafka.admin import PartitionMetadata
+from confluent_kafka.admin import PartitionMetadata  # type: ignore[attr-defined]
 from django.test import override_settings
 
 from sentry.monitors.tasks.clock_pulse import MONITOR_CODEC, clock_pulse
 
 
-@override_settings(KAFKA_TOPIC_OVERRIDES={"ingest-monitors": "monitors-test-topic"})
+@override_settings(
+    KAFKA_TOPIC_OVERRIDES={"ingest-monitors": "monitors-test-topic"},
+    KAFKA_TOPIC_TO_CLUSTER={"monitors-test-topic": "default"},
+)
 @override_settings(SENTRY_EVENTSTREAM="sentry.eventstream.kafka.KafkaEventStream")
 @mock.patch("sentry.monitors.tasks.clock_pulse._checkin_producer")
-def test_clock_pulse(checkin_producer_mock):
+def test_clock_pulse(checkin_producer_mock: mock.MagicMock) -> None:
     partition_count = 2
 
     mock_partitions: MutableMapping[int, PartitionMetadata] = {}

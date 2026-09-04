@@ -1,0 +1,74 @@
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {useAnalyticsArea} from 'sentry/components/analyticsArea';
+import {Placeholder} from 'sentry/components/placeholder';
+import {IconOpen} from 'sentry/icons/iconOpen';
+import {t} from 'sentry/locale';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {AutofixContent} from 'sentry/views/issueDetails/sidebar/autofixSection';
+import type {AutofixContentProps} from 'sentry/views/issueDetails/sidebar/autofixSectionTypes';
+
+import {useSubscription} from 'getsentry/hooks/useSubscription';
+import {hasAccessToSubscriptionOverview} from 'getsentry/utils/billing';
+
+export function AiConfigureSeerQuotaSidebar({
+  aiConfig,
+  group,
+  project,
+}: AutofixContentProps) {
+  const organization = useOrganization();
+  const analyticsArea = useAnalyticsArea() || 'seer';
+  const subscription = useSubscription();
+
+  useRouteAnalyticsParams({
+    seerNeedQuota: aiConfig.isAutofixSetupLoading ? undefined : !aiConfig.hasAutofixQuota,
+  });
+
+  if (aiConfig.isAutofixSetupLoading) {
+    return <Placeholder height="160px" />;
+  }
+
+  if (aiConfig.hasAutofixQuota) {
+    return <AutofixContent aiConfig={aiConfig} group={group} project={project} />;
+  }
+
+  const hasBillingPerms = hasAccessToSubscriptionOverview(subscription, organization);
+
+  return (
+    <Stack border="muted" radius="md" padding="lg" gap="lg">
+      <Text bold>{t('Meet Seer, your AI assistant')}</Text>
+      <Text>
+        {t(
+          'Debug faster with Sentry’s agent, Seer. Seer connects to your repos, scans your issues, highlights quick fixes, and proposes solutions. You can even integrate with your favorite agent to implement changes in code.'
+        )}
+      </Text>
+      <Flex>
+        <Tooltip
+          title={t(
+            'You need to be a billing member to try out Seer. Please contact your organization owner to upgrade your plan.'
+          )}
+          disabled={hasBillingPerms}
+        >
+          <LinkButton
+            to={`/settings/${organization.slug}/billing/overview/?product=seer`}
+            icon={<IconOpen />}
+            disabled={!hasBillingPerms}
+            analyticsEventKey={`${analyticsArea}.upsell_clicked`}
+            analyticsEventName={
+              analyticsArea === 'issue_inbox'
+                ? 'Issue Inbox: Seer Upsell Clicked'
+                : 'Seer: Upsell Clicked'
+            }
+            analyticsParams={{group_id: group.id}}
+          >
+            {t('Try out Seer now')}
+          </LinkButton>
+        </Tooltip>
+      </Flex>
+    </Stack>
+  );
+}

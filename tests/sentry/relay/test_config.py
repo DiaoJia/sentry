@@ -1,12 +1,12 @@
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from unittest import mock
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from sentry_relay.processing import normalize_project_config
 
+from sentry import quotas
 from sentry.constants import HEALTH_CHECK_GLOBS, ObjectStatus
 from sentry.discover.models import TeamKeyTransaction
 from sentry.dynamic_sampling import (
@@ -17,17 +17,16 @@ from sentry.dynamic_sampling import (
     get_redis_client_for_ds,
 )
 from sentry.dynamic_sampling.rules.base import NEW_MODEL_THRESHOLD_IN_MINUTES
+from sentry.ingest.inbound_filters import CUSTOM_INBOUND_FILTER_ID_PREFIX
+from sentry.models.project import Project
 from sentry.models.projectkey import ProjectKey
 from sentry.models.projectteam import ProjectTeam
-from sentry.models.transaction_threshold import TransactionMetric
 from sentry.relay.config import ProjectConfig, TransactionNameRule, get_project_config
-from sentry.snuba.dataset import Dataset
 from sentry.testutils.factories import Factories
 from sentry.testutils.helpers import Feature
 from sentry.testutils.helpers.datetime import freeze_time
-from sentry.testutils.helpers.options import override_options
-from sentry.testutils.pytest.fixtures import django_db_all
-from sentry.testutils.silo import region_silo_test
+from sentry.testutils.pytest.fixtures import InstaSnapshotter, django_db_all
+from sentry.testutils.silo import cell_silo_test
 from sentry.utils.safe import get_path
 
 PII_CONFIG = """
@@ -86,19 +85,15 @@ DEFAULT_IGNORE_HEALTHCHECKS_RULE = {
 
 
 def _validate_project_config(config):
-    # Relay keeps BTreeSets for these, so sort here as well:
-    for rule in config.get("metricConditionalTagging", []):
-        rule["targetMetrics"] = sorted(rule["targetMetrics"])
     # Relay uses a BTreeSet for features:
     if features := config.get("features"):
         config["features"] = sorted(features)
-
     assert normalize_project_config(config) == config
 
 
 @django_db_all
-@region_silo_test
-def test_get_project_config_non_visible(default_project):
+@cell_silo_test
+def test_get_project_config_non_visible(default_project) -> None:
     keys = ProjectKey.objects.filter(project=default_project)
     default_project.update(status=ObjectStatus.PENDING_DELETION)
     cfg = get_project_config(default_project, project_keys=keys)
@@ -106,8 +101,8 @@ def test_get_project_config_non_visible(default_project):
 
 
 @django_db_all
-@region_silo_test
-def test_get_project_config(default_project, insta_snapshot):
+@cell_silo_test
+def test_get_project_config(default_project: Project, insta_snapshot: InstaSnapshotter) -> None:
     # We could use the default_project fixture here, but we would like to avoid 1) hitting the db 2) creating a mock
     default_project.update_option("sentry:relay_pii_config", PII_CONFIG)
     default_project.organization.update_option("sentry:relay_pii_config", PII_CONFIG)
@@ -135,10 +130,10 @@ SOME_EXCEPTION = RuntimeError("foo")
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
 @mock.patch("sentry.relay.config.generate_rules", side_effect=SOME_EXCEPTION)
 @mock.patch("sentry.relay.config.experimental.logger")
-def test_get_experimental_config_dyn_sampling(mock_logger, _, default_project):
+def test_get_experimental_config_dyn_sampling(mock_logger, _, default_project) -> None:
     keys = ProjectKey.objects.filter(project=default_project)
     with Feature({"organizations:dynamic-sampling": True}):
         # Does not raise:
@@ -151,48 +146,40 @@ def test_get_experimental_config_dyn_sampling(mock_logger, _, default_project):
 
 
 @django_db_all
-@region_silo_test
-@mock.patch("sentry.relay.config.capture_exception")
-def test_get_experimental_config_transaction_metrics_exception(
-    mock_capture_exception, default_project
-):
-    keys = ProjectKey.objects.filter(project=default_project)
-    default_project.update_option("sentry:breakdowns", {"invalid_breakdowns": "test"})
-    # wrong type
-    default_project.update_option("sentry:transaction_metrics_custom_tags", 42)
-
-    with Feature({"organizations:transaction-metrics-extraction": True}):
-        cfg = get_project_config(default_project, project_keys=keys)
-
-    config = cfg.to_dict()["config"]
-
-    assert config["transactionMetrics"]["extractCustomTags"] == []
-    assert mock_capture_exception.call_count == 2
-
-
-@django_db_all
-@region_silo_test
+@cell_silo_test
 @pytest.mark.parametrize("has_custom_filters", [False, True])
 @pytest.mark.parametrize("has_blacklisted_ips", [False, True])
 def test_project_config_uses_filter_features(
     default_project, has_custom_filters, has_blacklisted_ips
 ):
+    log_messages = ["some log"]
+    trace_metric_names = ["some metric"]
     error_messages = ["some_error"]
     releases = ["1.2.3", "4.5.6"]
     blacklisted_ips = ["112.69.248.54"]
+    default_project.update_option("sentry:log_messages", log_messages)
+    default_project.update_option("sentry:trace_metric_names", trace_metric_names)
     default_project.update_option("sentry:error_messages", error_messages)
     default_project.update_option("sentry:releases", releases)
     default_project.update_option("filters:react-hydration-errors", "0")
     default_project.update_option("filters:chunk-load-error", "0")
+    default_project.update_option("filters:custom-error", "0")
 
     if has_blacklisted_ips:
         default_project.update_option("sentry:blacklisted_ips", blacklisted_ips)
 
-    with Feature({"projects:custom-inbound-filters": has_custom_filters}):
+    with Feature(
+        {
+            "projects:custom-inbound-filters": has_custom_filters,
+            "organizations:ourlogs-ingestion": True,
+            "organizations:tracemetrics-ingestion": True,
+        }
+    ):
         project_cfg = get_project_config(default_project)
 
     cfg = project_cfg.to_dict()
     _validate_project_config(cfg["config"])
+    cfg_generic = get_path(cfg, "config", "filterSettings", "generic", "filters")
     cfg_error_messages = get_path(cfg, "config", "filterSettings", "errorMessages")
     cfg_releases = get_path(cfg, "config", "filterSettings", "releases")
     cfg_client_ips = get_path(cfg, "config", "filterSettings", "clientIps")
@@ -200,9 +187,28 @@ def test_project_config_uses_filter_features(
     if has_custom_filters:
         assert {"patterns": error_messages} == cfg_error_messages
         assert {"releases": releases} == cfg_releases
+        assert {
+            "id": "log-message",
+            "isEnabled": True,
+            "condition": {
+                "op": "glob",
+                "name": "log.body",
+                "value": ["some log"],
+            },
+        } in cfg_generic
+        assert {
+            "id": "trace-metric-name",
+            "isEnabled": True,
+            "condition": {
+                "op": "glob",
+                "name": "trace_metric.name",
+                "value": ["some metric"],
+            },
+        } in cfg_generic
     else:
         assert cfg_releases is None
         assert cfg_error_messages is None
+        assert cfg_generic is None
 
     if has_blacklisted_ips:
         assert {"blacklistedIps": ["112.69.248.54"]} == cfg_client_ips
@@ -211,9 +217,53 @@ def test_project_config_uses_filter_features(
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
+@pytest.mark.parametrize("has_custom_filters", [False, True])
+@pytest.mark.parametrize("has_inbound_filters_v2", [False, True])
+def test_project_config_custom_inbound_filters_v2(
+    default_project, factories, has_custom_filters, has_inbound_filters_v2
+):
+    active_filter = factories.create_project_custom_inbound_filter(
+        default_project,
+        name="Block old releases",
+        conditions=[{"type": "release", "value": ["1.2.3"]}],
+    )
+    factories.create_project_custom_inbound_filter(
+        default_project,
+        name="Disabled filter",
+        active=False,
+        conditions=[{"type": "release", "value": ["4.5.6"]}],
+    )
+
+    with Feature(
+        {
+            "projects:custom-inbound-filters": has_custom_filters,
+            "organizations:inbound-filters-v2": has_inbound_filters_v2,
+        }
+    ):
+        project_cfg = get_project_config(default_project)
+
+    cfg = project_cfg.to_dict()
+    _validate_project_config(cfg["config"])
+    cfg_generic = get_path(cfg, "config", "filterSettings", "generic", "filters") or []
+    custom_filters = [f for f in cfg_generic if f["id"].startswith(CUSTOM_INBOUND_FILTER_ID_PREFIX)]
+
+    if has_custom_filters and has_inbound_filters_v2:
+        assert custom_filters == [
+            {
+                "id": f"{CUSTOM_INBOUND_FILTER_ID_PREFIX}{active_filter.id}",
+                "isEnabled": True,
+                "condition": {"op": "glob", "name": "event.release", "value": ["1.2.3"]},
+            }
+        ]
+    else:
+        assert custom_filters == []
+
+
+@django_db_all
+@cell_silo_test
 @mock.patch("sentry.relay.config.EXPOSABLE_FEATURES", ["organizations:profiling"])
-def test_project_config_exposed_features(default_project):
+def test_project_config_exposed_features(default_project: MagicMock) -> None:
     with Feature({"organizations:profiling": True}):
         project_cfg = get_project_config(default_project)
 
@@ -224,9 +274,9 @@ def test_project_config_exposed_features(default_project):
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
 @mock.patch("sentry.relay.config.EXPOSABLE_FEATURES", ["badprefix:custom-inbound-filters"])
-def test_project_config_exposed_features_raise_exc(default_project):
+def test_project_config_exposed_features_raise_exc(default_project: MagicMock) -> None:
     with Feature({"projects:custom-inbound-filters": True}):
         with pytest.raises(RuntimeError) as exc_info:
             get_project_config(default_project)
@@ -237,7 +287,7 @@ def test_project_config_exposed_features_raise_exc(default_project):
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
 @patch("sentry.dynamic_sampling.rules.biases.boost_latest_releases_bias.apply_dynamic_factor")
 @freeze_time("2022-10-21 18:50:25.000000+00:00")
 def test_project_config_with_all_biases_enabled(
@@ -298,7 +348,8 @@ def test_project_config_with_all_biases_enabled(
     # Set factor
     default_factor = 0.5
     redis_client.set(
-        f"ds::o:{default_project.organization.id}:rate_rebalance_factor2", default_factor
+        f"ds::o:{default_project.organization.id}:rate_rebalance_factor2",
+        default_factor,
     )
 
     with Feature(
@@ -319,14 +370,14 @@ def test_project_config_with_all_biases_enabled(
         "version": 2,
         "rules": [
             {
-                "samplingValue": {"type": "sampleRate", "value": 0.02},
-                "type": "transaction",
+                "samplingValue": {"type": "sampleRate", "value": 0.1 / 3},
+                "type": "trace",
                 "condition": {
                     "op": "or",
                     "inner": [
                         {
                             "op": "glob",
-                            "name": "event.transaction",
+                            "name": "trace.transaction",
                             "value": HEALTH_CHECK_GLOBS,
                         }
                     ],
@@ -347,12 +398,6 @@ def test_project_config_with_all_biases_enabled(
                 "samplingValue": {"type": "sampleRate", "value": 1.0},
                 "type": "trace",
             },
-            # {
-            #     "condition": {"inner": [], "op": "and"},
-            #     "id": 1004,
-            #     "samplingValue": {"type": "factor", "value": default_factor},
-            #     "type": "trace",
-            # },
             {
                 "samplingValue": {"type": "sampleRate", "value": 1.0},
                 "type": "trace",
@@ -367,6 +412,12 @@ def test_project_config_with_all_biases_enabled(
                     ],
                 },
                 "id": 1001,
+            },
+            {
+                "condition": {"inner": [], "op": "and"},
+                "id": 1004,
+                "samplingValue": {"type": "factor", "value": default_factor},
+                "type": "trace",
             },
             {
                 "samplingValue": {"type": "factor", "value": 1.5},
@@ -421,29 +472,91 @@ def test_project_config_with_all_biases_enabled(
 
 
 @django_db_all
-@pytest.mark.parametrize("transaction_metrics", ("with_metrics", "without_metrics"))
-@region_silo_test
-def test_project_config_with_breakdown(default_project, insta_snapshot, transaction_metrics):
+@cell_silo_test
+@patch("sentry.dynamic_sampling.rules.biases.boost_latest_releases_bias.apply_dynamic_factor")
+@freeze_time("2022-10-21 18:50:25.000000+00:00")
+def test_project_config_with_trace_health_checks_enabled(
+    eval_dynamic_factor_lr, default_project, default_team
+):
+    eval_dynamic_factor_lr.return_value = 1.5
+
+    default_project.update_option(
+        "sentry:dynamic_sampling_biases",
+        [
+            {"id": "boostEnvironments", "active": False},
+            {"id": "ignoreHealthChecks", "active": True},
+            {"id": "boostLatestRelease", "active": False},
+            {"id": "boostKeyTransactions", "active": False},
+            {"id": "boostLowVolumeTransactions", "active": False},
+            {"id": "boostReplayId", "active": False},
+        ],
+    )
+    default_project.add_team(default_team)
+    old_date = datetime.now(tz=timezone.utc) - timedelta(minutes=NEW_MODEL_THRESHOLD_IN_MINUTES + 1)
+    default_project.organization.date_added = old_date
+    default_project.date_added = old_date
+
     with Feature(
         {
-            "organizations:transaction-metrics-extraction": transaction_metrics == "with_metrics",
+            "organizations:dynamic-sampling": True,
         }
     ):
-        project_cfg = get_project_config(default_project)
+        with patch(
+            "sentry.dynamic_sampling.rules.base.quotas.backend.get_blended_sample_rate",
+            return_value=0.1,
+        ):
+            project_cfg = get_project_config(default_project)
 
     cfg = project_cfg.to_dict()
     _validate_project_config(cfg["config"])
-    insta_snapshot(
-        {
-            "breakdownsV2": cfg["config"]["breakdownsV2"],
-            "transactionMetrics": cfg["config"].get("transactionMetrics"),
-            "metricConditionalTagging": cfg["config"].get("metricConditionalTagging"),
-        }
-    )
+    dynamic_sampling = get_path(cfg, "config", "sampling")
+    assert dynamic_sampling == {
+        "version": 2,
+        "rules": [
+            {
+                "samplingValue": {"type": "sampleRate", "value": 0.1 / 3},
+                "type": "trace",
+                "condition": {
+                    "op": "or",
+                    "inner": [
+                        {
+                            "op": "glob",
+                            "name": "trace.transaction",
+                            "value": HEALTH_CHECK_GLOBS,
+                        }
+                    ],
+                },
+                "id": 1002,
+            },
+            {
+                "samplingValue": {"type": "sampleRate", "value": 0.1},
+                "type": "trace",
+                "condition": {"op": "and", "inner": []},
+                "id": 1000,
+            },
+        ],
+    }
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
+def test_project_config_with_breakdown(default_project: Project) -> None:
+    breakdowns = {
+        "span_ops": {
+            "type": "spanOperations",
+            "matches": ["http", "db", "browser", "resource", "ui"],
+        }
+    }
+    default_project.update_option("sentry:breakdowns", breakdowns)
+    project_cfg = get_project_config(default_project)
+
+    cfg = project_cfg.to_dict()
+    _validate_project_config(cfg["config"])
+    assert cfg["config"]["breakdownsV2"] == breakdowns
+
+
+@django_db_all
+@cell_silo_test
 @pytest.mark.parametrize("abnormal_mechanism_rollout", (0, 1))
 def test_project_config_with_organizations_metrics_extraction(
     default_project, set_sentry_option, abnormal_mechanism_rollout
@@ -462,98 +575,12 @@ def test_project_config_with_organizations_metrics_extraction(
         }
 
 
-@django_db_all
-@pytest.mark.parametrize("has_project_transaction_threshold", (False, True))
-@pytest.mark.parametrize("has_project_transaction_threshold_overrides", (False, True))
-@region_silo_test
-def test_project_config_satisfaction_thresholds(
-    default_project,
-    insta_snapshot,
-    has_project_transaction_threshold_overrides,
-    has_project_transaction_threshold,
-):
-    if has_project_transaction_threshold:
-        default_project.projecttransactionthreshold_set.create(
-            organization=default_project.organization,
-            threshold=500,
-            metric=TransactionMetric.LCP.value,
-        )
-    if has_project_transaction_threshold_overrides:
-        default_project.projecttransactionthresholdoverride_set.create(
-            organization=default_project.organization,
-            transaction="foo",
-            threshold=400,
-            metric=TransactionMetric.DURATION.value,
-        )
-        default_project.projecttransactionthresholdoverride_set.create(
-            organization=default_project.organization,
-            transaction="bar",
-            threshold=600,
-            metric=TransactionMetric.LCP.value,
-        )
-    with Feature(
-        {
-            "organizations:transaction-metrics-extraction": True,
-        }
-    ):
-        project_cfg = get_project_config(default_project)
-
-    cfg = project_cfg.to_dict()
-    _validate_project_config(cfg["config"])
-    insta_snapshot(cfg["config"]["metricConditionalTagging"])
-
-
-@django_db_all
-@region_silo_test
-@pytest.mark.parametrize("feature_flag", (False, True), ids=("feature_disabled", "feature_enabled"))
-@pytest.mark.parametrize(
-    "killswitch", (False, True), ids=("killswitch_disabled", "killswitch_enabled")
-)
-def test_has_metric_extraction(default_project, feature_flag, killswitch):
-    options = override_options(
-        {
-            "relay.drop-transaction-metrics": (
-                [{"project_id": default_project.id}] if killswitch else []
-            )
-        }
-    )
-    feature = Feature(
-        {
-            "organizations:transaction-metrics-extraction": feature_flag,
-        }
-    )
-    with feature, options:
-        project_config = get_project_config(default_project)
-        config = project_config.to_dict()["config"]
-        _validate_project_config(config)
-        if killswitch or not feature_flag:
-            assert "transactionMetrics" not in config
-        else:
-            config = config["transactionMetrics"]
-            assert config["customMeasurements"]["limit"] > 0
-
-
-@django_db_all
-def test_accept_transaction_names(default_project):
-    feature = Feature(
-        {
-            "organizations:transaction-metrics-extraction": True,
-        }
-    )
-    with feature:
-        config = get_project_config(default_project).to_dict()["config"]
-
-        _validate_project_config(config)
-        transaction_metrics_config = config["transactionMetrics"]
-
-        assert transaction_metrics_config["acceptTransactionNames"] == "clientBased"
-
-
 @pytest.mark.parametrize("num_clusterer_runs", [9, 10])
 @django_db_all
-def test_txnames_ready(default_project, num_clusterer_runs):
+def test_txnames_ready(default_project, num_clusterer_runs) -> None:
     with mock.patch(
-        "sentry.relay.config.get_clusterer_meta", return_value={"runs": num_clusterer_runs}
+        "sentry.relay.config.get_clusterer_meta",
+        return_value={"runs": num_clusterer_runs},
     ):
         config = get_project_config(default_project).to_dict()["config"]
     _validate_project_config(config)
@@ -564,8 +591,8 @@ def test_txnames_ready(default_project, num_clusterer_runs):
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_setattr(default_project):
+@cell_silo_test
+def test_project_config_setattr(default_project) -> None:
     project_cfg = ProjectConfig(default_project)
     with pytest.raises(Exception) as exc_info:
         project_cfg.foo = "bar"
@@ -573,15 +600,15 @@ def test_project_config_setattr(default_project):
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_getattr(default_project):
+@cell_silo_test
+def test_project_config_getattr(default_project) -> None:
     project_cfg = ProjectConfig(default_project, foo="bar")
     assert project_cfg.foo == "bar"
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_str(default_project):
+@cell_silo_test
+def test_project_config_str(default_project) -> None:
     project_cfg = ProjectConfig(default_project, foo="bar")
     assert str(project_cfg) == '{"foo":"bar"}'
 
@@ -592,22 +619,22 @@ def test_project_config_str(default_project):
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_repr(default_project):
+@cell_silo_test
+def test_project_config_repr(default_project) -> None:
     project_cfg = ProjectConfig(default_project, foo="bar")
     assert repr(project_cfg) == '(ProjectConfig){"foo":"bar"}'
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_to_json_string(default_project):
+@cell_silo_test
+def test_project_config_to_json_string(default_project) -> None:
     project_cfg = ProjectConfig(default_project, foo="bar")
     assert project_cfg.to_json_string() == '{"foo":"bar"}'
 
 
 @django_db_all
-@region_silo_test
-def test_project_config_get_at_path(default_project):
+@cell_silo_test
+def test_project_config_get_at_path(default_project) -> None:
     project_cfg = ProjectConfig(default_project, a=1, b="The b", foo="bar")
     assert project_cfg.get_at_path("b") == "The b"
     assert project_cfg.get_at_path("bb") is None
@@ -621,7 +648,7 @@ def test_project_config_get_at_path(default_project):
     [True, False],
     ids=["healthcheck set", "healthcheck not set"],
 )
-def test_healthcheck_filter(default_project, health_check_set):
+def test_healthcheck_filter(default_project, health_check_set) -> None:
     """
     Tests that the project config properly returns healthcheck filters when the
     user has enabled healthcheck filters.
@@ -643,68 +670,7 @@ def test_healthcheck_filter(default_project, health_check_set):
 
 
 @django_db_all
-def test_alert_metric_extraction_rules_empty(default_project):
-    features = {
-        "organizations:transaction-metrics-extraction": True,
-        "organizations:on-demand-metrics-extraction": True,
-    }
-
-    with Feature(features):
-        config = get_project_config(default_project).to_dict()["config"]
-        _validate_project_config(config)
-        assert "metricExtraction" not in config
-
-
-@django_db_all
-def test_alert_metric_extraction_rules(default_project, factories):
-    # Alert compatible with out-of-the-box metrics. This should NOT be included
-    # in the config.
-    factories.create_alert_rule(
-        default_project.organization,
-        [default_project],
-        query="event.type:transaction environment:production",
-        dataset=Dataset.Transactions,
-    )
-
-    # Alert requiring an on-demand metric. This should be included in the config.
-    factories.create_alert_rule(
-        default_project.organization,
-        [default_project],
-        query="event.type:transaction transaction.duration:<10m",
-        dataset=Dataset.PerformanceMetrics,
-    )
-
-    features = {
-        "organizations:transaction-metrics-extraction": True,
-        "organizations:on-demand-metrics-extraction": True,
-    }
-
-    with Feature(features):
-        config = get_project_config(default_project).to_dict()["config"]
-
-        assert config["metricExtraction"] == {
-            "version": 4,
-            "metrics": [
-                {
-                    "category": "transaction",
-                    "mri": "c:transactions/on_demand@none",
-                    "field": None,
-                    "condition": {"name": "event.duration", "op": "lt", "value": 600000.0},
-                    "tags": [{"key": "query_hash", "value": ANY}],
-                }
-            ],
-        }
-
-        normalized = normalize_project_config(config)
-        del normalized["metricExtraction"]["conditionalTagsExtended"]
-        del normalized["metricExtraction"]["spanMetricsExtended"]
-        del config["metricExtraction"]["metrics"][0]["field"]
-
-        assert normalized["metricExtraction"] == config["metricExtraction"]
-
-
-@django_db_all
-def test_desktop_performance_calculate_score(default_project):
+def test_desktop_performance_calculate_score(default_project) -> None:
     config = get_project_config(default_project).to_dict()["config"]
 
     # Set a version field that is returned even though it's optional.
@@ -716,15 +682,49 @@ def test_desktop_performance_calculate_score(default_project):
     assert performance_score[0] == {
         "name": "Chrome",
         "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 900, "p50": 1600, "optional": True},
-            {"measurement": "lcp", "weight": 0.3, "p10": 1200, "p50": 2400, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.1, "p10": 200, "p50": 400, "optional": True},
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 900,
+                "p50": 1600,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.3,
+                "p10": 1200,
+                "p50": 2400,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.1,
+                "p10": 200,
+                "p50": 400,
+                "optional": True,
+            },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Chrome",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Chrome",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Chrome",
+                },
+            ],
         },
         "version": "1",
     }
@@ -745,7 +745,13 @@ def test_desktop_performance_calculate_score(default_project):
                 "p50": 2400.0,
                 "optional": True,
             },
-            {"measurement": "cls", "weight": 0.0, "p10": 0.1, "p50": 0.25, "optional": False},
+            {
+                "measurement": "cls",
+                "weight": 0.0,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": False,
+            },
             {
                 "measurement": "ttfb",
                 "weight": 0.1,
@@ -755,9 +761,19 @@ def test_desktop_performance_calculate_score(default_project):
             },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Firefox",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Firefox",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Firefox",
+                },
+            ],
         },
         "version": "1",
     }
@@ -778,7 +794,13 @@ def test_desktop_performance_calculate_score(default_project):
                 "p50": 2400.0,
                 "optional": False,
             },
-            {"measurement": "cls", "weight": 0.0, "p10": 0.1, "p50": 0.25, "optional": False},
+            {
+                "measurement": "cls",
+                "weight": 0.0,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": False,
+            },
             {
                 "measurement": "ttfb",
                 "weight": 0.1,
@@ -788,39 +810,117 @@ def test_desktop_performance_calculate_score(default_project):
             },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Safari",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Safari",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Safari",
+                },
+            ],
         },
         "version": "1",
     }
     assert performance_score[3] == {
         "name": "Edge",
         "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 900, "p50": 1600, "optional": True},
-            {"measurement": "lcp", "weight": 0.3, "p10": 1200, "p50": 2400, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.1, "p10": 200, "p50": 400, "optional": True},
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 900,
+                "p50": 1600,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.3,
+                "p10": 1200,
+                "p50": 2400,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.1,
+                "p10": 200,
+                "p50": 400,
+                "optional": True,
+            },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Edge",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Edge",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Edge",
+                },
+            ],
         },
         "version": "1",
     }
     assert performance_score[4] == {
         "name": "Opera",
         "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 900, "p50": 1600, "optional": True},
-            {"measurement": "lcp", "weight": 0.3, "p10": 1200, "p50": 2400, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.1, "p10": 200, "p50": 400, "optional": True},
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 900,
+                "p50": 1600,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.3,
+                "p10": 1200,
+                "p50": 2400,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.1,
+                "p10": 200,
+                "p50": 400,
+                "optional": True,
+            },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Opera",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Opera",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Opera",
+                },
+            ],
         },
         "version": "1",
     }
@@ -828,7 +928,13 @@ def test_desktop_performance_calculate_score(default_project):
     assert performance_score[5] == {
         "name": "Chrome INP",
         "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200, "p50": 500, "optional": False},
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200,
+                "p50": 500,
+                "optional": False,
+            },
         ],
         "condition": {
             "op": "or",
@@ -843,6 +949,16 @@ def test_desktop_performance_calculate_score(default_project):
                     "name": "event.contexts.browser.name",
                     "value": "Google Chrome",
                 },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Chrome",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Google Chrome",
+                },
             ],
         },
         "version": "1",
@@ -851,28 +967,64 @@ def test_desktop_performance_calculate_score(default_project):
     assert performance_score[6] == {
         "name": "Edge INP",
         "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200.0, "p50": 500.0, "optional": False},
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200.0,
+                "p50": 500.0,
+                "optional": False,
+            },
         ],
-        "condition": {"op": "eq", "name": "event.contexts.browser.name", "value": "Edge"},
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Edge",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Edge",
+                },
+            ],
+        },
         "version": "1",
     }
 
     assert performance_score[7] == {
         "name": "Opera INP",
         "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200.0, "p50": 500.0, "optional": False},
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200.0,
+                "p50": 500.0,
+                "optional": False,
+            },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Opera",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Opera",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Opera",
+                },
+            ],
         },
         "version": "1",
     }
 
 
 @django_db_all
-def test_mobile_performance_calculate_score(default_project):
+def test_mobile_performance_calculate_score(default_project) -> None:
     config = get_project_config(default_project).to_dict()["config"]
 
     # Set a version field that is returned even though it's optional.
@@ -885,83 +1037,34 @@ def test_mobile_performance_calculate_score(default_project):
     assert performance_score[8] == {
         "name": "Chrome Mobile",
         "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 1800.0, "p50": 3000.0, "optional": True},
-            {"measurement": "lcp", "weight": 0.30, "p10": 2500.0, "p50": 4000.0, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.10, "p10": 800.0, "p50": 1800.0, "optional": True},
-        ],
-        "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Chrome Mobile",
-        },
-        "version": "1",
-    }
-    assert performance_score[9] == {
-        "name": "Firefox Mobile",
-        "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 1800.0, "p50": 3000.0, "optional": True},
-            {"measurement": "lcp", "weight": 0.30, "p10": 2500.0, "p50": 4000.0, "optional": True},
-            {"measurement": "cls", "weight": 0.0, "p10": 0.1, "p50": 0.25, "optional": False},
-            {"measurement": "ttfb", "weight": 0.10, "p10": 800.0, "p50": 1800.0, "optional": True},
-        ],
-        "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Firefox Mobile",
-        },
-        "version": "1",
-    }
-    assert performance_score[10] == {
-        "name": "Safari Mobile",
-        "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 1800.0, "p50": 3000.0, "optional": True},
-            {"measurement": "lcp", "weight": 0.0, "p10": 2500.0, "p50": 4000.0, "optional": False},
-            {"measurement": "cls", "weight": 0.0, "p10": 0.1, "p50": 0.25, "optional": False},
-            {"measurement": "ttfb", "weight": 0.10, "p10": 800.0, "p50": 1800.0, "optional": True},
-        ],
-        "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Mobile Safari",
-        },
-        "version": "1",
-    }
-    assert performance_score[11] == {
-        "name": "Edge Mobile",
-        "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 1800.0, "p50": 3000.0, "optional": True},
-            {"measurement": "lcp", "weight": 0.30, "p10": 2500.0, "p50": 4000.0, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.10, "p10": 800.0, "p50": 1800.0, "optional": True},
-        ],
-        "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Edge Mobile",
-        },
-        "version": "1",
-    }
-
-    assert performance_score[12] == {
-        "name": "Opera Mobile",
-        "scoreComponents": [
-            {"measurement": "fcp", "weight": 0.15, "p10": 1800.0, "p50": 3000.0, "optional": True},
-            {"measurement": "lcp", "weight": 0.30, "p10": 2500.0, "p50": 4000.0, "optional": True},
-            {"measurement": "cls", "weight": 0.15, "p10": 0.1, "p50": 0.25, "optional": True},
-            {"measurement": "ttfb", "weight": 0.10, "p10": 800.0, "p50": 1800.0, "optional": True},
-        ],
-        "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Opera Mobile",
-        },
-        "version": "1",
-    }
-    assert performance_score[13] == {
-        "name": "Chrome Mobile INP",
-        "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200.0, "p50": 500.0, "optional": False},
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 1800.0,
+                "p50": 3000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.30,
+                "p10": 2500.0,
+                "p50": 4000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.10,
+                "p10": 800.0,
+                "p50": 1800.0,
+                "optional": True,
+            },
         ],
         "condition": {
             "op": "or",
@@ -971,6 +1074,236 @@ def test_mobile_performance_calculate_score(default_project):
                     "name": "event.contexts.browser.name",
                     "value": "Chrome Mobile",
                 },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Chrome Mobile",
+                },
+            ],
+        },
+        "version": "1",
+    }
+    assert performance_score[9] == {
+        "name": "Firefox Mobile",
+        "scoreComponents": [
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 1800.0,
+                "p50": 3000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.30,
+                "p10": 2500.0,
+                "p50": 4000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.0,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": False,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.10,
+                "p10": 800.0,
+                "p50": 1800.0,
+                "optional": True,
+            },
+        ],
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Firefox Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Firefox Mobile",
+                },
+            ],
+        },
+        "version": "1",
+    }
+    assert performance_score[10] == {
+        "name": "Safari Mobile",
+        "scoreComponents": [
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 1800.0,
+                "p50": 3000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.0,
+                "p10": 2500.0,
+                "p50": 4000.0,
+                "optional": False,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.0,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": False,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.10,
+                "p10": 800.0,
+                "p50": 1800.0,
+                "optional": True,
+            },
+        ],
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Mobile Safari",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Mobile Safari",
+                },
+            ],
+        },
+        "version": "1",
+    }
+    assert performance_score[11] == {
+        "name": "Edge Mobile",
+        "scoreComponents": [
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 1800.0,
+                "p50": 3000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.30,
+                "p10": 2500.0,
+                "p50": 4000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.10,
+                "p10": 800.0,
+                "p50": 1800.0,
+                "optional": True,
+            },
+        ],
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Edge Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Edge Mobile",
+                },
+            ],
+        },
+        "version": "1",
+    }
+
+    assert performance_score[12] == {
+        "name": "Opera Mobile",
+        "scoreComponents": [
+            {
+                "measurement": "fcp",
+                "weight": 0.15,
+                "p10": 1800.0,
+                "p50": 3000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "lcp",
+                "weight": 0.30,
+                "p10": 2500.0,
+                "p50": 4000.0,
+                "optional": True,
+            },
+            {
+                "measurement": "cls",
+                "weight": 0.15,
+                "p10": 0.1,
+                "p50": 0.25,
+                "optional": True,
+            },
+            {
+                "measurement": "ttfb",
+                "weight": 0.10,
+                "p10": 800.0,
+                "p50": 1800.0,
+                "optional": True,
+            },
+        ],
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Opera Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Opera Mobile",
+                },
+            ],
+        },
+        "version": "1",
+    }
+    assert performance_score[13] == {
+        "name": "Chrome Mobile INP",
+        "scoreComponents": [
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200.0,
+                "p50": 500.0,
+                "optional": False,
+            },
+        ],
+        "condition": {
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Chrome Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Chrome Mobile",
+                },
             ],
         },
         "version": "1",
@@ -978,249 +1311,64 @@ def test_mobile_performance_calculate_score(default_project):
     assert performance_score[14] == {
         "name": "Edge Mobile INP",
         "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200.0, "p50": 500.0, "optional": False},
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200.0,
+                "p50": 500.0,
+                "optional": False,
+            },
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Edge Mobile",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Edge Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Edge Mobile",
+                },
+            ],
         },
         "version": "1",
     }
     assert performance_score[15] == {
         "name": "Opera Mobile INP",
         "scoreComponents": [
-            {"measurement": "inp", "weight": 1.0, "p10": 200.0, "p50": 500.0, "optional": False}
+            {
+                "measurement": "inp",
+                "weight": 1.0,
+                "p10": 200.0,
+                "p50": 500.0,
+                "optional": False,
+            }
         ],
         "condition": {
-            "op": "eq",
-            "name": "event.contexts.browser.name",
-            "value": "Opera Mobile",
+            "op": "or",
+            "inner": [
+                {
+                    "op": "eq",
+                    "name": "event.contexts.browser.name",
+                    "value": "Opera Mobile",
+                },
+                {
+                    "op": "eq",
+                    "name": "span.attributes.browser.name.value",
+                    "value": "Opera Mobile",
+                },
+            ],
         },
         "version": "1",
     }
 
 
 @django_db_all
-@region_silo_test
-@pytest.mark.parametrize("passive", [False, True])
-def test_project_config_cardinality_limits(default_project, insta_snapshot, passive):
-    options: dict[Any, Any] = {
-        "relay.cardinality-limiter.mode": "enabled",
-        "sentry-metrics.cardinality-limiter.limits.transactions.per-org": [
-            {"window_seconds": 1000, "granularity_seconds": 100, "limit": 10}
-        ],
-        "sentry-metrics.cardinality-limiter.limits.sessions.per-org": [
-            {"window_seconds": 2000, "granularity_seconds": 200, "limit": 20}
-        ],
-        "sentry-metrics.cardinality-limiter.limits.spans.per-org": [
-            {"window_seconds": 3000, "granularity_seconds": 300, "limit": 30}
-        ],
-        "sentry-metrics.cardinality-limiter.limits.custom.per-org": [
-            {"window_seconds": 4000, "granularity_seconds": 400, "limit": 40}
-        ],
-        "sentry-metrics.cardinality-limiter.limits.generic-metrics.per-org": [
-            {"window_seconds": 5000, "granularity_seconds": 500, "limit": 50}
-        ],
-        "sentry-metrics.cardinality-limiter.limits.profiles.per-org": [
-            {"window_seconds": 3600, "granularity_seconds": 600, "limit": 60}
-        ],
-    }
-
-    if passive:
-        options["relay.cardinality-limiter.passive-limits-by-org"] = {
-            str(default_project.organization.id): [
-                "sessions",
-                "transactions",
-                "spans",
-                "profiles",
-            ]
-        }
-
-    options["relay.cardinality-limiter.limits"] = [
-        {
-            "rollout_rate": 0,
-            "limit": {
-                "id": "test1",
-                "window": {"windowSeconds": 7000, "granularitySeconds": 700},
-                "limit": 70,
-                "scope": "name",
-            },
-        },
-        {
-            "rollout_rate": 1,
-            "limit": {
-                "id": "test2",
-                "window": {"windowSeconds": 8000, "granularitySeconds": 800},
-                "limit": 80,
-                "scope": "name",
-                "report": True,
-            },
-        },
-    ]
-
-    default_project.update_option(
-        "relay.cardinality-limiter.limits",
-        [
-            {
-                "limit": {
-                    "id": "test3",
-                    "window": {"windowSeconds": 9000, "granularitySeconds": 900},
-                    "limit": 90,
-                    "scope": "name",
-                }
-            }
-        ],
-    )
-
-    default_project.organization.update_option(
-        "relay.cardinality-limiter.limits",
-        [
-            {
-                "limit": {
-                    "id": "test4",
-                    "window": {"windowSeconds": 10000, "granularitySeconds": 1000},
-                    "limit": 100,
-                    "scope": "name",
-                }
-            }
-        ],
-    )
-
-    with override_options(options):
-        project_cfg = get_project_config(default_project)
-
-        cfg = project_cfg.to_dict()
-        _validate_project_config(cfg["config"])
-
-        insta_snapshot(cfg["config"]["metrics"])
-
-
-@django_db_all
-@region_silo_test
-def test_project_config_cardinality_limits_project_options_override_other_options(default_project):
-    options: dict[Any, Any] = {
-        "relay.cardinality-limiter.mode": "enabled",
-        "sentry-metrics.cardinality-limiter.limits.transactions.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.sessions.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.spans.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.custom.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.generic-metrics.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.profiles.per-org": None,
-    }
-
-    options["relay.cardinality-limiter.limits"] = [
-        {
-            "limit": {
-                "id": "test1",
-                "window": {"windowSeconds": 1000, "granularitySeconds": 100},
-                "limit": 10,
-                "scope": "name",
-            },
-        },
-    ]
-
-    default_project.organization.update_option(
-        "relay.cardinality-limiter.limits",
-        [
-            {
-                "limit": {
-                    "id": "test1",
-                    "window": {"windowSeconds": 2000, "granularitySeconds": 200},
-                    "limit": 20,
-                    "scope": "name",
-                }
-            }
-        ],
-    )
-
-    default_project.update_option(
-        "relay.cardinality-limiter.limits",
-        [
-            {
-                "limit": {
-                    "id": "test1",
-                    "window": {"windowSeconds": 3000, "granularitySeconds": 300},
-                    "limit": 30,
-                    "scope": "project",
-                }
-            }
-        ],
-    )
-
-    with override_options(options):
-        project_cfg = get_project_config(default_project)
-
-        cfg = project_cfg.to_dict()
-        _validate_project_config(cfg["config"])
-
-        assert cfg["config"]["metrics"]["cardinalityLimits"] == [
-            {
-                "id": "test1",
-                "window": {"windowSeconds": 3000, "granularitySeconds": 300},
-                "limit": 30,
-                "scope": "project",
-            }
-        ]
-
-
-@django_db_all
-@region_silo_test
-def test_project_config_cardinality_limits_organization_options_override_options(default_project):
-    options: dict[Any, Any] = {
-        "relay.cardinality-limiter.mode": "enabled",
-        "sentry-metrics.cardinality-limiter.limits.transactions.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.sessions.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.spans.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.custom.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.generic-metrics.per-org": None,
-        "sentry-metrics.cardinality-limiter.limits.profiles.per-org": None,
-    }
-
-    options["relay.cardinality-limiter.limits"] = [
-        {
-            "limit": {
-                "id": "test1",
-                "window": {"windowSeconds": 1000, "granularitySeconds": 100},
-                "limit": 10,
-                "scope": "name",
-            },
-        },
-    ]
-
-    default_project.organization.update_option(
-        "relay.cardinality-limiter.limits",
-        [
-            {
-                "limit": {
-                    "id": "test1",
-                    "window": {"windowSeconds": 2000, "granularitySeconds": 200},
-                    "limit": 20,
-                    "scope": "project",
-                }
-            }
-        ],
-    )
-
-    with override_options(options):
-        project_cfg = get_project_config(default_project)
-
-        cfg = project_cfg.to_dict()
-        _validate_project_config(cfg["config"])
-
-        assert cfg["config"]["metrics"]["cardinalityLimits"] == [
-            {
-                "id": "test1",
-                "window": {"windowSeconds": 2000, "granularitySeconds": 200},
-                "limit": 20,
-                "scope": "project",
-            }
-        ]
-
-
-@django_db_all
-@region_silo_test
-def test_project_config_with_generic_filters(default_project):
+@cell_silo_test
+def test_project_config_with_generic_filters(default_project) -> None:
     config = get_project_config(default_project).to_dict()
     _validate_project_config(config["config"])
 
@@ -1228,7 +1376,7 @@ def test_project_config_with_generic_filters(default_project):
 
 
 @django_db_all
-@region_silo_test
+@cell_silo_test
 @mock.patch("sentry.relay.config.get_transaction_names_config")
 def test_project_config_with_transaction_name_clustering_disabled(
     mock_get_transaction_name_config, default_project
@@ -1252,3 +1400,52 @@ def test_project_config_with_transaction_name_clustering_disabled(
         config = get_project_config(default_project).to_dict()
         _validate_project_config(config["config"])
         assert "txNameRules" not in config["config"]
+
+
+@django_db_all
+@cell_silo_test
+def test_project_config_trusted_relay_settings_enabled(default_project):
+    default_project.organization.update_option(
+        "sentry:ingest-through-trusted-relays-only", "enabled"
+    )
+
+    config = get_project_config(default_project).to_dict()
+
+    trusted_relay_settings = config["config"].get("trustedRelaySettings")
+    assert trusted_relay_settings is not None
+    assert trusted_relay_settings["verifySignature"] == "enabled"
+
+
+@django_db_all
+@cell_silo_test
+def test_project_config_trusted_relay_settings_disabled(default_project):
+    default_project.organization.update_option(
+        "sentry:ingest-through-trusted-relays-only", "disabled"
+    )
+
+    config = get_project_config(default_project).to_dict()
+
+    # "disabled" is the default — Relay treats absent and disabled as equivalent,
+    # so we don't write the key at all.
+    assert config["config"].get("trustedRelaySettings") is None
+
+
+@django_db_all
+@cell_silo_test
+@pytest.mark.parametrize("trimming_configs", [{}, {"span": {"maxSize": 17}}])
+def test_project_config_trimming(default_project, trimming_configs):
+    with patch.object(
+        quotas.backend,
+        "get_trimming_configs",
+        return_value=trimming_configs,
+    ):
+        project_cfg = get_project_config(default_project)
+
+        cfg = project_cfg.to_dict()["config"]
+
+        if trimming_configs:
+            assert cfg["trimming"] == {"span": {"maxSize": 17}}
+        else:
+            assert "trimming" not in cfg
+
+        _validate_project_config(cfg)

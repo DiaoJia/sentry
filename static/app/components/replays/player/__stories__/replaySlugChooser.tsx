@@ -1,65 +1,112 @@
 import {Fragment, type ReactNode} from 'react';
-import {css} from '@emotion/react';
+import {ClassNames} from '@emotion/react';
+import {useInfiniteQuery} from '@tanstack/react-query';
+import {parseAsString, useQueryState} from 'nuqs';
 
-import Providers from 'sentry/components/replays/player/__stories__/providers';
-import ReplayLoadingState from 'sentry/components/replays/player/replayLoadingState';
-import useLoadReplayReader from 'sentry/utils/replays/hooks/useLoadReplayReader';
-import useOrganization from 'sentry/utils/useOrganization';
+import {InputGroup} from '@sentry/scraps/input';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+
+import {Hovercard} from 'sentry/components/hovercard';
+import {ReplayList} from 'sentry/components/replays/list/__stories__/replayList';
+import {EnvironmentPicker} from 'sentry/components/replays/player/__stories__/environmentPicker';
+import {Providers} from 'sentry/components/replays/player/__stories__/providers';
+import {ReplayLoadingState} from 'sentry/components/replays/player/replayLoadingState';
+import * as Storybook from 'sentry/stories';
+import {useLoadReplayReader} from 'sentry/utils/replays/hooks/useLoadReplayReader';
+import {replayListInfiniteApiOptions} from 'sentry/utils/replays/replayListApiOptions';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useSessionStorage} from 'sentry/utils/useSessionStorage';
 
-type Props =
-  | {render: (replaySlug: string) => ReactNode; children?: never}
-  | {children: ReactNode; render?: never};
+interface Props {
+  children: ReactNode;
+}
 
-export default function ReplaySlugChooser(props: Props) {
-  const {children, render} = props;
-
+export function ReplaySlugChooser({children}: Props) {
+  const organization = useOrganization();
+  const [project, setProject] = useQueryState('project', parseAsString);
+  const [environment, setEnvironment] = useQueryState('environment', parseAsString);
   const [replaySlug, setReplaySlug] = useSessionStorage('stories:replaySlug', '');
 
-  const input = (
-    <input
-      defaultValue={replaySlug}
-      onChange={event => {
-        setReplaySlug(event.target.value);
-      }}
-      placeholder="Paste a replaySlug"
-      css={css`
-        font-variant-numeric: tabular-nums;
-      `}
-      size={34}
-    />
+  const query = {
+    environment: environment ? [environment] : undefined,
+    project: project ? [project] : undefined,
+    sort: '-started_at',
+    statsPeriod: '90d',
+  };
+
+  const queryResult = useInfiniteQuery(
+    replayListInfiniteApiOptions({
+      options: {query},
+      organization,
+      queryReferrer: 'replayList',
+    })
   );
 
-  if (replaySlug && children) {
-    function Content() {
-      const organization = useOrganization();
-      const readerResult = useLoadReplayReader({
-        orgSlug: organization.slug,
-        replaySlug,
-        clipWindow: undefined,
-      });
-      return (
-        <ReplayLoadingState readerResult={readerResult}>
-          {({replay}) => <Providers replay={replay}>{children}</Providers>}
-        </ReplayLoadingState>
-      );
-    }
-    return (
-      <Fragment>
-        {input}
-        <Content />
-      </Fragment>
-    );
-  }
+  const input = (
+    <Flex direction="row" gap="sm">
+      <Storybook.SelectProject projectSlug={project} setProjectSlug={setProject} />
+      <EnvironmentPicker
+        project={project}
+        environment={environment}
+        onChange={setEnvironment}
+      />
 
-  if (replaySlug && render) {
-    return (
-      <Fragment>
-        {input}
-        {render(replaySlug)}
-      </Fragment>
-    );
-  }
+      <ClassNames>
+        {({css}) => (
+          <Hovercard
+            body={
+              <Stack gap="md">
+                <Flex height="500px">
+                  <Stack gap="md" flex="1">
+                    <ReplayList onSelect={setReplaySlug} queryResult={queryResult} />
+                  </Stack>
+                </Flex>
+              </Stack>
+            }
+            containerClassName={css`
+              width: max-content;
+            `}
+          >
+            <Flex direction="row" gap="sm" wrap="nowrap" align="center">
+              <Text wrap="nowrap">Replay ID:</Text>
+              <InputGroup.Input
+                value={replaySlug}
+                onChange={event => {
+                  setReplaySlug(event.target.value);
+                }}
+                placeholder="Paste a replaySlug"
+                css={css`
+                  font-variant-numeric: tabular-nums;
+                  min-width: calc(32ch + 1em);
+                `}
+                size="sm"
+              />
+            </Flex>
+          </Hovercard>
+        )}
+      </ClassNames>
+    </Flex>
+  );
 
-  return null;
+  return (
+    <Fragment>
+      {input}
+      {replaySlug ? <Content replaySlug={replaySlug}>{children}</Content> : null}
+    </Fragment>
+  );
+}
+
+function Content({children, replaySlug}: {children: ReactNode; replaySlug: string}) {
+  const organization = useOrganization();
+  const readerResult = useLoadReplayReader({
+    orgSlug: organization.slug,
+    replaySlug,
+    clipWindow: undefined,
+  });
+  return (
+    <ReplayLoadingState readerResult={readerResult}>
+      {({replay}) => <Providers replay={replay}>{children}</Providers>}
+    </ReplayLoadingState>
+  );
 }

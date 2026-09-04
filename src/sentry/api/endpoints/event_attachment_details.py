@@ -1,22 +1,59 @@
 import posixpath
 
-from django.http import StreamingHttpResponse
+import sentry_sdk
+from django.http import HttpResponseRedirect, StreamingHttpResponse
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import eventstore, features, roles
+from sentry import features, roles
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectPermission
 from sentry.api.serializers import serialize
+from sentry.api.serializers.models.eventattachment import EventAttachmentSerializerResponse
+from sentry.apidocs.constants import RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
+from sentry.apidocs.examples.event_attachment_examples import EventAttachmentExamples
+from sentry.apidocs.parameters import EventParams, GlobalParams
+from sentry.apidocs.response_types import DetailResponse
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.auth.superuser import superuser_has_permission
 from sentry.auth.system import is_system_auth
 from sentry.constants import ATTACHMENTS_ROLE_DEFAULT
+from sentry.issues.action_log import (
+    action_context_scope,
+    resolve_action_actor,
+    resolve_action_source,
+)
 from sentry.models.activity import Activity
 from sentry.models.eventattachment import EventAttachment
 from sentry.models.organizationmember import OrganizationMember
+from sentry.objectstore import parse_accept_encoding
+from sentry.services import eventstore
 from sentry.types.activity import ActivityType
+
+ATTACHMENT_ID_PARAM = OpenApiParameter(
+    name="attachment_id",
+    location="path",
+    required=True,
+    type=str,
+    description="The numeric ID of the attachment, as returned from the attachments list endpoint.",
+)
+
+DOWNLOAD_PARAM = OpenApiParameter(
+    name="download",
+    location="query",
+    required=False,
+    type=str,
+    description=(
+        "If this parameter is present, the response will be a binary file download "
+        "instead of JSON metadata. The value does not matter — any value (including "
+        "empty) triggers the download. Depending on where the attachment is stored, "
+        "the response may be a redirect to the storage service, so clients must follow "
+        "redirects."
+    ),
+)
 
 
 class EventAttachmentDetailsPermission(ProjectPermission):
@@ -47,44 +84,73 @@ class EventAttachmentDetailsPermission(ProjectPermission):
         return om_role.priority >= required_role.priority
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Events"])
+@cell_silo_endpoint
 class EventAttachmentDetailsEndpoint(ProjectEndpoint):
-    owner = ApiOwner.OWNERS_INGEST
+    owner = ApiOwner.FOUNDATIONAL_STORAGE
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
-        "GET": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.PUBLIC,
     }
     permission_classes = (EventAttachmentDetailsPermission,)
 
-    def download(self, attachment):
+    def download(
+        self, attachment: EventAttachment, request: Request
+    ) -> HttpResponseRedirect | StreamingHttpResponse:
+        if attachment.uses_objectstore():
+            return HttpResponseRedirect(attachment.get_objectstore_presigned_url(request))
+
         name = posixpath.basename(" ".join(attachment.name.split()))
+        accept_encoding = parse_accept_encoding(request.headers.get("Accept-Encoding", ""))
+        blob_stream = attachment.get_blob_stream(accept_encoding)
 
         def stream_attachment():
-            with attachment.getfile() as fp:
-                while chunk := fp.read(4096):
+            with blob_stream.payload as payload:
+                while chunk := payload.read(4096):
                     yield chunk
 
-        response = StreamingHttpResponse(
-            stream_attachment(),
-            content_type=attachment.content_type,
-        )
-        response["Content-Length"] = attachment.size
+        response = StreamingHttpResponse(stream_attachment(), content_type=attachment.content_type)
+        if blob_stream.encoding:
+            response["Content-Encoding"] = blob_stream.encoding
+        else:
+            response["Content-Length"] = attachment.size
         response["Content-Disposition"] = f'attachment; filename="{name}"'
-
         return response
 
-    def get(self, request: Request, project, event_id, attachment_id) -> Response:
+    @extend_schema(
+        operation_id="getProjectEventAttachment",
+        summary="Retrieve an Event Attachment",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            EventParams.EVENT_ID,
+            ATTACHMENT_ID_PARAM,
+            DOWNLOAD_PARAM,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "EventAttachmentDetailsResponse", EventAttachmentSerializerResponse
+            ),
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=EventAttachmentExamples.EVENT_ATTACHMENT_DETAILS,
+    )
+    def get(
+        self, request: Request, project, event_id, attachment_id
+    ) -> (
+        Response[EventAttachmentSerializerResponse]
+        | Response[None]
+        | Response[DetailResponse]
+        | HttpResponseRedirect
+        | StreamingHttpResponse
+    ):
         """
-        Retrieve an Attachment
-        ``````````````````````
+        Retrieve metadata for a single attachment on an event, or download its
+        contents by passing the `download` query parameter.
 
-        :pparam string organization_id_or_slug: the id or slug of the organization the
-                                          issues belong to.
-        :pparam string project_id_or_slug: the id or slug of the project the event
-                                     belongs to.
-        :pparam string event_id: the id of the event.
-        :pparam string attachment_id: the id of the attachment.
-        :auth: required
+        Requires the `event-attachments` organization feature.
         """
         if not features.has(
             "organizations:event-attachments", project.organization, actor=request.user
@@ -95,6 +161,8 @@ class EventAttachmentDetailsEndpoint(ProjectEndpoint):
         if event is None:
             return self.respond({"detail": "Event not found"}, status=404)
 
+        sentry_sdk.set_attribute("event.type", event.get_event_type())
+
         try:
             attachment = EventAttachment.objects.filter(
                 project_id=project.id, event_id=event.event_id, id=attachment_id
@@ -103,7 +171,7 @@ class EventAttachmentDetailsEndpoint(ProjectEndpoint):
             return self.respond({"detail": "Attachment not found"}, status=404)
 
         if request.GET.get("download") is not None:
-            return self.download(attachment)
+            return self.download(attachment, request)
 
         return self.respond(serialize(attachment, request.user))
 
@@ -132,12 +200,15 @@ class EventAttachmentDetailsEndpoint(ProjectEndpoint):
 
         # an activity with no group cannot be associated with an issue or displayed in an issue details page
         if attachment.group_id is not None:
-            Activity.objects.create(
-                group_id=attachment.group_id,
-                project=project,
-                type=ActivityType.DELETED_ATTACHMENT.value,
-                user_id=request.user.id,
-                data={},
-            )
+            with action_context_scope(
+                source=resolve_action_source(request), actor=resolve_action_actor(request)
+            ):
+                Activity.objects.create(
+                    group_id=attachment.group_id,
+                    project=project,
+                    type=ActivityType.DELETED_ATTACHMENT.value,
+                    user_id=request.user.id,
+                    data={},
+                )
         attachment.delete()
         return self.respond(status=204)

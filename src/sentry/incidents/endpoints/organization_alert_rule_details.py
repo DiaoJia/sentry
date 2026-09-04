@@ -3,34 +3,22 @@ import logging
 from collections.abc import Callable
 
 from django.contrib.auth.models import AnonymousUser
-from django.db import router, transaction
-from django.db.models import Q
-from drf_spectacular.utils import extend_schema, extend_schema_serializer
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.fields.actor import ActorField
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.fields.actor import OwnerActorField
+from sentry.api.helpers.deprecation import deprecated
 from sentry.api.serializers import serialize
 from sentry.api.serializers.rest_framework.project import ProjectField
-from sentry.apidocs.constants import (
-    RESPONSE_ACCEPTED,
-    RESPONSE_FORBIDDEN,
-    RESPONSE_NOT_FOUND,
-    RESPONSE_UNAUTHORIZED,
-)
-from sentry.apidocs.examples.metric_alert_examples import MetricAlertExamples
-from sentry.apidocs.parameters import GlobalParams, MetricAlertParams
-from sentry.incidents.endpoints.bases import OrganizationAlertRuleEndpoint
-from sentry.incidents.endpoints.serializers.alert_rule import (
-    AlertRuleSerializer,
-    DetailedAlertRuleSerializer,
-)
+from sentry.constants import ALERTS_API_DEPRECATION_DATE, ALERTS_API_DEPRECATION_KEY
+from sentry.incidents.endpoints.bases import WorkflowEngineOrganizationAlertRuleEndpoint
 from sentry.incidents.endpoints.serializers.workflow_engine_detector import (
+    DetailedWorkflowEngineDetectorSerializer,
     WorkflowEngineDetectorSerializer,
 )
 from sentry.incidents.logic import (
@@ -46,12 +34,14 @@ from sentry.integrations.slack.tasks.find_channel_id_for_alert_rule import (
 )
 from sentry.integrations.slack.utils.rule_status import RedisRuleStatus
 from sentry.models.organization import Organization
-from sentry.models.rulesnooze import RuleSnooze
 from sentry.sentry_apps.services.app import app_service
 from sentry.sentry_apps.utils.errors import SentryAppBaseError
-from sentry.users.services.user.service import user_service
-from sentry.workflow_engine.migration_helpers.alert_rule import dual_delete_migrated_alert_rule
-from sentry.workflow_engine.models import Detector
+from sentry.workflow_engine.endpoints.organization_detector_details import remove_detector
+from sentry.workflow_engine.models import AlertRuleDetector, Detector
+from sentry.workflow_engine.utils.legacy_metric_tracking import (
+    report_used_legacy_models,
+    track_alert_endpoint_execution,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,50 +51,27 @@ def _anon_to_None[T](u: T | AnonymousUser) -> T | None:
 
 
 def fetch_alert_rule(
-    request: Request, organization: Organization, alert_rule: AlertRule
+    request: Request, organization: Organization, alert_rule: AlertRule | Detector
 ) -> Response:
-    # Serialize Alert Rule
     expand = request.GET.getlist("expand", [])
-
-    if features.has("organizations:workflow-engine-rule-serializers", organization):
-        try:
-            detector = Detector.objects.get(alertruledetector__alert_rule_id=alert_rule.id)
-            return Response(
-                serialize(
-                    detector,
-                    request.user,
-                    WorkflowEngineDetectorSerializer(expand=expand, prepare_component_fields=True),
-                )
-            )
-        except Detector.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-    serialized_rule = serialize(
+    assert isinstance(alert_rule, Detector)
+    serialized = serialize(
         alert_rule,
         request.user,
-        DetailedAlertRuleSerializer(expand=expand, prepare_component_fields=True),
+        DetailedWorkflowEngineDetectorSerializer(expand=expand, prepare_component_fields=True),
     )
-
-    rule_snooze = RuleSnooze.objects.filter(
-        Q(user_id=request.user.id) | Q(user_id=None), alert_rule=alert_rule
-    ).first()
-    if rule_snooze:
-        serialized_rule["snooze"] = True
-        if request.user.id == rule_snooze.owner_id:
-            serialized_rule["snoozeCreatedBy"] = "You"
-        else:
-            if rule_snooze.owner_id:
-                user = user_service.get_user(rule_snooze.owner_id)
-                if user:
-                    serialized_rule["snoozeCreatedBy"] = user.get_display_name()
-        serialized_rule["snoozeForEveryone"] = rule_snooze.user_id is None
-
-    return Response(serialized_rule)
+    return Response(serialized)
 
 
 def update_alert_rule(
-    request: Request, organization: Organization, alert_rule: AlertRule
+    request: Request, organization: Organization, alert_rule: AlertRule | Detector
 ) -> Response:
+    if isinstance(alert_rule, Detector):
+        return Response(
+            {"alert_rule": ["Passing a detector through this endpoint is not yet supported"]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    report_used_legacy_models()
     data = request.data
     validator = DrfAlertRuleSerializer(
         context={
@@ -122,7 +89,7 @@ def update_alert_rule(
     )
     if validator.is_valid():
         try:
-            trigger_sentry_app_action_creators_for_incidents(validator.validated_data)
+            trigger_sentry_app_action_creators_for_incidents(validator.validated_data, organization)
         except SentryAppBaseError as e:
             return e.response_from_exception()
 
@@ -140,55 +107,38 @@ def update_alert_rule(
             # The user has requested a new Slack channel and we tell the client to check again in a bit
             return Response({"uuid": client.uuid}, status=202)
         else:
-            if features.has("organizations:workflow-engine-rule-serializers", organization):
-                validator.save()
-                try:
-                    detector = Detector.objects.get(alertruledetector__alert_rule_id=alert_rule.id)
-                    return Response(
-                        serialize(
-                            detector,
-                            request.user,
-                            WorkflowEngineDetectorSerializer(),
-                        ),
-                        status=status.HTTP_200_OK,
-                    )
-                except Detector.DoesNotExist:
-                    return Response(status=status.HTTP_404_NOT_FOUND)
-            return Response(serialize(validator.save(), request.user), status=status.HTTP_200_OK)
+            updated_rule = validator.save()
+            detector = Detector.objects.get(alertruledetector__alert_rule_id=updated_rule.id)
+            return Response(
+                serialize(detector, request.user, WorkflowEngineDetectorSerializer()),
+                status=status.HTTP_200_OK,
+            )
 
     return Response(validator.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 def remove_alert_rule(
-    request: Request, organization: Organization, alert_rule: AlertRule
+    request: Request, organization: Organization, target: AlertRule | Detector
 ) -> Response:
+    assert isinstance(target, Detector)
     try:
-        # NOTE: we want to run the dual delete regardless of whether the user is flagged into dual writes:
-        # the user could be removed from the dual write flag for whatever reason, and we need to make sure
-        # that the extra table data is deleted. If the rows don't exist, we'll exit early.
-        with transaction.atomic(router.db_for_write(AlertRule)):
-            try:
-                dual_delete_migrated_alert_rule(alert_rule=alert_rule)
-            except Exception as e:
-                logger.exception(
-                    "Error when dual deleting alert rule",
-                    extra={"details": str(e)},
-                )
-                return Response(
-                    "Error when dual deleting alert rule",
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+        remove_detector(request, organization, target)
+        try:
+            ard = AlertRuleDetector.objects_for_deletion.get(detector_id=target.id)
+            alert_rule = AlertRule.objects.get(id=ard.alert_rule_id, organization=organization)
             delete_alert_rule(
                 alert_rule,
                 user=_anon_to_None(request.user),
                 ip_address=request.META.get("REMOTE_ADDR"),
             )
+        except (AlertRuleDetector.DoesNotExist, AlertRule.DoesNotExist):
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
         return Response(status=status.HTTP_204_NO_CONTENT)
     except AlreadyDeletedError:
         return Response("This rule has already been deleted", status=status.HTTP_400_BAD_REQUEST)
 
 
-@extend_schema_serializer(exclude_fields=["excludedProjects", "thresholdPeriod"])
 class OrganizationAlertRuleDetailsPutSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=256, help_text="The name for the rule.")
     aggregate = serializers.CharField(
@@ -286,28 +236,33 @@ Metric alert rule trigger actions follow the following structure:
         required=False,
         help_text="Optional value that the metric needs to reach to resolve the alert. If no value is provided, this is set automatically based on the lowest severity trigger's `alertThreshold`. For example, if the alert is set to trigger at the warning level when the number of errors is above 50, then the alert would be set to resolve when there are less than 50 errors. If `thresholdType` is `0`, `resolveThreshold` must be greater than the critical threshold. Otherwise, it must be less than the critical threshold.",
     )
-    owner = ActorField(
+    owner = OwnerActorField(
         required=False, allow_null=True, help_text="The ID of the team or user that owns the rule."
     )
-    thresholdPeriod = serializers.IntegerField(required=False, default=1, min_value=1, max_value=20)
+    thresholdPeriod = serializers.IntegerField(
+        required=False,
+        default=1,
+        min_value=1,
+        max_value=20,
+        help_text="Number of consecutive times the threshold must be met before the alert fires.",
+    )
 
 
-def _check_project_access[
-    T
-](
-    func: Callable[[T, Request, Organization, AlertRule], Response],
-) -> Callable[
-    [T, Request, Organization, AlertRule], Response
-]:
+def _check_project_access[T](
+    func: Callable[[T, Request, Organization, AlertRule | Detector], Response],
+) -> Callable[[T, Request, Organization, AlertRule | Detector], Response]:
     @functools.wraps(func)
     def wrapper(
-        self, request: Request, organization: Organization, alert_rule: AlertRule
+        self, request: Request, organization: Organization, alert_rule: AlertRule | Detector
     ) -> Response:
         project = None
 
         try:
-            # check to see if there's a project associated with the alert rule
-            project = alert_rule.projects.get()
+            if isinstance(alert_rule, Detector):
+                project = alert_rule.project
+            else:
+                # check to see if there's a project associated with the alert rule
+                project = alert_rule.projects.get()
         except Exception:
             pass
 
@@ -323,29 +278,33 @@ def _check_project_access[
 
 
 @extend_schema(tags=["Alerts"])
-@region_silo_endpoint
-class OrganizationAlertRuleDetailsEndpoint(OrganizationAlertRuleEndpoint):
+@cell_silo_endpoint
+class OrganizationAlertRuleDetailsEndpoint(WorkflowEngineOrganizationAlertRuleEndpoint):
     owner = ApiOwner.ISSUES
     publish_status = {
-        "DELETE": ApiPublishStatus.PUBLIC,
-        "GET": ApiPublishStatus.PUBLIC,
-        "PUT": ApiPublishStatus.PUBLIC,
+        "DELETE": ApiPublishStatus.PRIVATE,
+        "GET": ApiPublishStatus.PRIVATE,
+        "PUT": ApiPublishStatus.PRIVATE,
     }
 
     @extend_schema(
-        operation_id="Retrieve a Metric Alert Rule for an Organization",
-        parameters=[GlobalParams.ORG_ID_OR_SLUG, MetricAlertParams.METRIC_RULE_ID],
-        responses={
-            200: AlertRuleSerializer,
-            401: RESPONSE_UNAUTHORIZED,
-            403: RESPONSE_FORBIDDEN,
-            404: RESPONSE_NOT_FOUND,
-        },
-        examples=MetricAlertExamples.GET_METRIC_ALERT_RULE,
+        operation_id="(DEPRECATED) Retrieve a Metric Alert Rule for an Organization",
+    )
+    @track_alert_endpoint_execution("GET", "sentry-api-0-organization-alert-rule-details")
+    @deprecated(
+        ALERTS_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-detector-details",
+        key=ALERTS_API_DEPRECATION_KEY,
     )
     @_check_project_access
-    def get(self, request: Request, organization: Organization, alert_rule: AlertRule) -> Response:
+    def get(
+        self, request: Request, organization: Organization, alert_rule: AlertRule | Detector
+    ) -> Response:
         """
+        ## Deprecated
+        🚧 Use [Fetch a Monitor](/api/monitors/fetch-a-monitor) and [Fetch an Alert](/api/monitors/fetch-an-alert) instead.
+
+
         Return details on an individual metric alert rule.
 
         A metric alert rule is a configuration that defines the conditions for triggering an alert.
@@ -358,20 +317,23 @@ class OrganizationAlertRuleDetailsEndpoint(OrganizationAlertRuleEndpoint):
         return fetch_alert_rule(request, organization, alert_rule)
 
     @extend_schema(
-        operation_id="Update a Metric Alert Rule",
-        parameters=[GlobalParams.ORG_ID_OR_SLUG, MetricAlertParams.METRIC_RULE_ID],
-        request=OrganizationAlertRuleDetailsPutSerializer,
-        responses={
-            200: AlertRuleSerializer,
-            401: RESPONSE_UNAUTHORIZED,
-            403: RESPONSE_FORBIDDEN,
-            404: RESPONSE_NOT_FOUND,
-        },
-        examples=MetricAlertExamples.UPDATE_METRIC_ALERT_RULE,
+        operation_id="(DEPRECATED) Update a Metric Alert Rule",
+    )
+    @track_alert_endpoint_execution("PUT", "sentry-api-0-organization-alert-rule-details")
+    @deprecated(
+        ALERTS_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-detector-details",
+        key=ALERTS_API_DEPRECATION_KEY,
     )
     @_check_project_access
-    def put(self, request: Request, organization: Organization, alert_rule: AlertRule) -> Response:
+    def put(
+        self, request: Request, organization: Organization, alert_rule: AlertRule | Detector
+    ) -> Response:
         """
+        ## Deprecated
+        🚧 Use [Update a Monitor by ID](/api/monitors/update-a-monitor-by-id) and [Update an Alert by ID](/api/monitors/update-an-alert-by-id) instead.
+
+
         Updates a metric alert rule. See **Metric Alert Rule Types** under
         [Create a Metric Alert Rule for an Organization](/api/alerts/create-a-metric-alert-rule-for-an-organization/#metric-alert-rule-types)
         to see valid request body configurations for different types of metric alert rule types.
@@ -389,27 +351,29 @@ class OrganizationAlertRuleDetailsEndpoint(OrganizationAlertRuleEndpoint):
         return update_alert_rule(request, organization, alert_rule)
 
     @extend_schema(
-        operation_id="Delete a Metric Alert Rule",
-        parameters=[GlobalParams.ORG_ID_OR_SLUG, MetricAlertParams.METRIC_RULE_ID],
-        responses={
-            202: RESPONSE_ACCEPTED,
-            401: RESPONSE_UNAUTHORIZED,
-            403: RESPONSE_FORBIDDEN,
-            404: RESPONSE_NOT_FOUND,
-        },
+        operation_id="(DEPRECATED) Delete a Metric Alert Rule",
+    )
+    @track_alert_endpoint_execution("DELETE", "sentry-api-0-organization-alert-rule-details")
+    @deprecated(
+        ALERTS_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-detector-details",
+        key=ALERTS_API_DEPRECATION_KEY,
     )
     @_check_project_access
     def delete(
-        self, request: Request, organization: Organization, alert_rule: AlertRule
+        self, request: Request, organization: Organization, alert_rule: AlertRule | Detector
     ) -> Response:
         """
-        Delete a specific metric alert rule.
+        ## Deprecated
+         🚧 Use [Delete a Monitor](/api/monitors/delete-a-monitor) and [Delete an Alert](/api/monitors/delete-an-alert) instead.
 
-        A metric alert rule is a configuration that defines the conditions for triggering an alert.
-        It specifies the metric type, function, time interval, and threshold
-        values that determine when an alert should be triggered. Metric alert rules are used to monitor
-        and notify you when certain metrics, like error count, latency, or failure rate, cross a
-        predefined threshold. These rules help you proactively identify and address issues in your
-        project.
+         Delete a specific metric alert rule.
+
+         A metric alert rule is a configuration that defines the conditions for triggering an alert.
+         It specifies the metric type, function, time interval, and threshold
+         values that determine when an alert should be triggered. Metric alert rules are used to monitor
+         and notify you when certain metrics, like error count, latency, or failure rate, cross a
+         predefined threshold. These rules help you proactively identify and address issues in your
+         project.
         """
         return remove_alert_rule(request, organization, alert_rule)

@@ -1,26 +1,28 @@
-import {Fragment, useEffect} from 'react';
+import {useEffect} from 'react';
 
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t, tct} from 'sentry/locale';
-import type {Organization} from 'sentry/types/organization';
-import withOrganization from 'sentry/utils/withOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
 
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
 import type {Subscription} from 'getsentry/types';
-import trackSpendVisibilityAnaltyics, {
+import {
   SpendVisibilityEvents,
+  trackSpendVisibilityAnaltyics,
 } from 'getsentry/utils/trackSpendVisibilityAnalytics';
 import {SPIKE_PROTECTION_DOCS_LINK} from 'getsentry/views/spikeProtection/constants';
 import SpikeProtectionProjects from 'getsentry/views/spikeProtection/spikeProtectionProjects';
+import {SubscriptionPageContainer} from 'getsentry/views/subscriptionPage/components/subscriptionPageContainer';
 
-type Props = {organization: Organization; subscription: Subscription};
+type Props = {subscription: Subscription};
 
-function SpikeProtectionRoot({organization, subscription}: Props) {
+function SpikeProtectionRoot({subscription}: Props) {
+  const organization = useOrganization();
   useEffect(() => {
     trackSpendVisibilityAnaltyics(SpendVisibilityEvents.SP_SETTINGS_VIEWED, {
       organization,
@@ -47,7 +49,7 @@ function SpikeProtectionRoot({organization, subscription}: Props) {
   );
 
   return (
-    <Fragment>
+    <SubscriptionPageContainer>
       <SentryDocumentTitle
         title={t('Spike Protection Settings')}
         orgSlug={organization.slug}
@@ -64,8 +66,8 @@ function SpikeProtectionRoot({organization, subscription}: Props) {
       <NoProjectMessage organization={organization}>
         <SpikeProtectionProjects />
       </NoProjectMessage>
-    </Fragment>
+    </SubscriptionPageContainer>
   );
 }
 
-export default withOrganization(withSubscription(SpikeProtectionRoot));
+export default withSubscription(SpikeProtectionRoot);

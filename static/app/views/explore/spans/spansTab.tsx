@@ -1,82 +1,88 @@
-import {Fragment, useEffect, useMemo, useState} from 'react';
+import {Fragment, useEffect} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 
-import {getDiffInMinutes} from 'sentry/components/charts/utils';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+
 import * as Layout from 'sentry/components/layouts/thirds';
-import {DatePageFilter} from 'sentry/components/organizations/datePageFilter';
-import {EnvironmentPageFilter} from 'sentry/components/organizations/environmentPageFilter';
-import PageFilterBar from 'sentry/components/organizations/pageFilterBar';
-import {ProjectPageFilter} from 'sentry/components/organizations/projectPageFilter';
-import type {EAPSpanSearchQueryBuilderProps} from 'sentry/components/performance/spanSearchQueryBuilder';
-import {
-  EAPSpanSearchQueryBuilder,
-  useEAPSpanSearchQueryBuilderProps,
-} from 'sentry/components/performance/spanSearchQueryBuilder';
-import {
-  SearchQueryBuilderProvider,
-  useSearchQueryBuilder,
-} from 'sentry/components/searchQueryBuilder/context';
+import type {DatePageFilterProps} from 'sentry/components/pageFilters/date/datePageFilter';
+import {DatePageFilter} from 'sentry/components/pageFilters/date/datePageFilter';
+import {EnvironmentPageFilter} from 'sentry/components/pageFilters/environment/environmentPageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
+import {ProjectPageFilter} from 'sentry/components/pageFilters/project/projectPageFilter';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {useCaseInsensitivity} from 'sentry/components/searchQueryBuilder/hooks';
 import {TourElement} from 'sentry/components/tours/components';
 import {IconChevron} from 'sentry/icons/iconChevron';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {PageFilters} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {defined} from 'sentry/utils/defined';
+import {parseError} from 'sentry/utils/discover/genericDiscoverQuery';
+import {DiscoverDatasets} from 'sentry/utils/discover/types';
+import {useChartInterval} from 'sentry/utils/useChartInterval';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {ChartSelectionProvider} from 'sentry/views/explore/components/attributeBreakdowns/chartSelectionContext';
+import {OverChartButtonGroup} from 'sentry/views/explore/components/overChartButtonGroup';
 import {
-  type AggregationKey,
-  ALLOWED_EXPLORE_VISUALIZE_AGGREGATES,
-} from 'sentry/utils/fields';
-import {chonkStyled} from 'sentry/utils/theme/theme.chonk';
-import {withChonk} from 'sentry/utils/theme/withChonk';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import usePrevious from 'sentry/utils/usePrevious';
-import {ExploreCharts} from 'sentry/views/explore/charts';
-import SchemaHintsList, {
-  SchemaHintsSection,
-} from 'sentry/views/explore/components/schemaHints/schemaHintsList';
-import {SchemaHintsSources} from 'sentry/views/explore/components/schemaHints/schemaHintsUtils';
-import {SeerSearch} from 'sentry/views/explore/components/seerSearch';
-import {
-  useExploreFields,
-  useExploreId,
-  useExploreMode,
-  useExploreQuery,
-  useExploreVisualizes,
-  useSetExplorePageParams,
-  useSetExploreVisualizes,
-} from 'sentry/views/explore/contexts/pageParamsContext';
+  ExploreBodyContent,
+  ExploreBodySearch,
+  ExploreContentSection,
+  ExploreControlSection,
+} from 'sentry/views/explore/components/styles';
 import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
 import {useAnalytics} from 'sentry/views/explore/hooks/useAnalytics';
-import {useChartInterval} from 'sentry/views/explore/hooks/useChartInterval';
+import {useControlSectionExpanded} from 'sentry/views/explore/hooks/useControlSectionExpanded';
+import {useCrossEventQueries} from 'sentry/views/explore/hooks/useCrossEventQueries';
 import {useExploreAggregatesTable} from 'sentry/views/explore/hooks/useExploreAggregatesTable';
 import {useExploreSpansTable} from 'sentry/views/explore/hooks/useExploreSpansTable';
 import {useExploreTimeseries} from 'sentry/views/explore/hooks/useExploreTimeseries';
-import {useExploreTracesTable} from 'sentry/views/explore/hooks/useExploreTracesTable';
+import {
+  type TracesTableResult,
+  useExploreTracesTableApiOptions,
+} from 'sentry/views/explore/hooks/useExploreTracesTable';
 import {Tab, useTab} from 'sentry/views/explore/hooks/useTab';
 import {useVisitQuery} from 'sentry/views/explore/hooks/useVisitQuery';
+import {
+  useQueryParamsAggregateSortBys,
+  useQueryParamsExtrapolate,
+  useQueryParamsGroupBys,
+  useQueryParamsId,
+  useQueryParamsQuery,
+  useQueryParamsSortBys,
+  useQueryParamsVisualizes,
+  useSetQueryParamsVisualizes,
+} from 'sentry/views/explore/queryParams/context';
+import {ExploreCharts} from 'sentry/views/explore/spans/charts';
+import {SPANS_TABLE_LIMIT} from 'sentry/views/explore/spans/constants';
+import {useCrossEventDatasetAvailability} from 'sentry/views/explore/spans/crossEvents/useCrossEventDatasetAvailability';
+import {DroppedFieldsAlert} from 'sentry/views/explore/spans/droppedFieldsAlert';
+import {ExtrapolationEnabledAlert} from 'sentry/views/explore/spans/extrapolationEnabledAlert';
+import {SettingsDropdown} from 'sentry/views/explore/spans/settingsDropdown';
+import {SpanTabSearchSection} from 'sentry/views/explore/spans/spansTabSearchSection';
 import {ExploreSpansTour, ExploreSpansTourContext} from 'sentry/views/explore/spans/tour';
+import {TracesExportModalButton} from 'sentry/views/explore/spans/tracesExportModalButton';
 import {ExploreTables} from 'sentry/views/explore/tables';
 import {ExploreToolbar} from 'sentry/views/explore/toolbar';
-import {
-  combineConfidenceForSeries,
-  findSuggestedColumns,
-  type PickableDays,
-} from 'sentry/views/explore/utils';
+import {useRawCounts} from 'sentry/views/explore/useRawCounts';
 import {Onboarding} from 'sentry/views/performance/onboarding';
+import {useLLMContext} from 'sentry/views/seerExplorer/contexts/llmContext';
+import {registerLLMContext} from 'sentry/views/seerExplorer/contexts/registerLLMContext';
+import {
+  toLLMContextProjectFields,
+  useSelectedProjectsForLLMContext,
+} from 'sentry/views/seerExplorer/utils/selectedProjectsForLLMContext';
 
-// eslint-disable-next-line no-restricted-imports,boundaries/element-types
+// eslint-disable-next-line boundaries/dependencies
 import QuotaExceededAlert from 'getsentry/components/performance/quotaExceededAlert';
 
 interface SpansTabOnboardingProps {
-  datePageFilterProps: PickableDays;
+  datePageFilterProps: DatePageFilterProps;
   organization: Organization;
   project: Project;
 }
@@ -94,6 +100,7 @@ export function SpansTabOnboarding({
         <DatePageFilter {...datePageFilterProps} />
       </PageFilterBar>
       <OnboardingContentSection>
+        <QuotaExceededAlert referrer="spans-explore" traceItemDataset="spans" />
         <Onboarding project={project} organization={organization} />
       </OnboardingContentSection>
     </Layout.Body>
@@ -101,37 +108,38 @@ export function SpansTabOnboarding({
 }
 
 interface SpanTabProps {
-  datePageFilterProps: PickableDays;
+  datePageFilterProps: DatePageFilterProps;
 }
+
+const SPANS_TOOLBAR_STORAGE_KEY = 'explore-spans-toolbar';
 
 export function SpansTabContent({datePageFilterProps}: SpanTabProps) {
   useVisitExplore();
 
-  const organization = useOrganization();
-  const [controlSectionExpanded, setControlSectionExpanded] = useState(true);
+  const [controlSectionExpanded, setControlSectionExpanded] = useControlSectionExpanded(
+    SPANS_TOOLBAR_STORAGE_KEY
+  );
 
   return (
     <Fragment>
-      <BodySearch>
-        <SpanTabSearchSection datePageFilterProps={datePageFilterProps} />
-      </BodySearch>
-      <BodyContent>
-        <SpanTabControlSection
-          organization={organization}
-          controlSectionExpanded={controlSectionExpanded}
-        />
-        <SpanTabContentSection
-          maxPickableDays={datePageFilterProps.maxPickableDays}
-          setControlSectionExpanded={setControlSectionExpanded}
-          controlSectionExpanded={controlSectionExpanded}
-        />
-      </BodyContent>
+      <ChartSelectionProvider>
+        <ExploreBodySearch>
+          <SpanTabSearchSection datePageFilterProps={datePageFilterProps} />
+        </ExploreBodySearch>
+        <ExploreBodyContent>
+          <SpanTabControlSection controlSectionExpanded={controlSectionExpanded} />
+          <SpanTabContentSection
+            setControlSectionExpanded={setControlSectionExpanded}
+            controlSectionExpanded={controlSectionExpanded}
+          />
+        </ExploreBodyContent>
+      </ChartSelectionProvider>
     </Fragment>
   );
 }
 
 function useVisitExplore() {
-  const id = useExploreId();
+  const id = useQueryParamsId();
   const visitQuery = useVisitQuery();
   useEffect(() => {
     if (defined(id)) {
@@ -140,136 +148,15 @@ function useVisitExplore() {
   }, [id, visitQuery]);
 }
 
-interface SpanTabSearchSectionProps {
-  datePageFilterProps: PickableDays;
-}
-
-function SpansSearchBar({
-  eapSpanSearchQueryBuilderProps,
-}: {
-  eapSpanSearchQueryBuilderProps: EAPSpanSearchQueryBuilderProps;
-}) {
-  const {displaySeerResults, query} = useSearchQueryBuilder();
-
-  return displaySeerResults ? (
-    <SeerSearch initialQuery={query} />
-  ) : (
-    <EAPSpanSearchQueryBuilder autoFocus {...eapSpanSearchQueryBuilderProps} />
-  );
-}
-
-function SpanTabSearchSection({datePageFilterProps}: SpanTabSearchSectionProps) {
-  const mode = useExploreMode();
-  const fields = useExploreFields();
-  const query = useExploreQuery();
-  const setExplorePageParams = useSetExplorePageParams();
-
-  const {tags: numberTags, isLoading: numberTagsLoading} = useTraceItemTags('number');
-  const {tags: stringTags, isLoading: stringTagsLoading} = useTraceItemTags('string');
-
-  const search = useMemo(() => new MutableSearch(query), [query]);
-  const oldSearch = usePrevious(search);
-
-  const eapSpanSearchQueryBuilderProps = useMemo(
-    () => ({
-      initialQuery: query,
-      onSearch: (newQuery: string) => {
-        const newSearch = new MutableSearch(newQuery);
-        const suggestedColumns = findSuggestedColumns(newSearch, oldSearch, {
-          numberAttributes: numberTags,
-          stringAttributes: stringTags,
-        });
-
-        const existingFields = new Set(fields);
-        const newColumns = suggestedColumns.filter(col => !existingFields.has(col));
-
-        setExplorePageParams({
-          query: newQuery,
-          fields: newColumns.length ? [...fields, ...newColumns] : undefined,
-        });
-      },
-      searchSource: 'explore',
-      getFilterTokenWarning:
-        mode === Mode.SAMPLES
-          ? (key: string) => {
-              if (ALLOWED_EXPLORE_VISUALIZE_AGGREGATES.includes(key as AggregationKey)) {
-                return t(
-                  "This key won't affect the results because samples mode does not support aggregate functions"
-                );
-              }
-              return undefined;
-            }
-          : undefined,
-      supportedAggregates:
-        mode === Mode.SAMPLES ? [] : ALLOWED_EXPLORE_VISUALIZE_AGGREGATES,
-      numberTags,
-      stringTags,
-    }),
-    [fields, mode, query, setExplorePageParams, numberTags, stringTags, oldSearch]
-  );
-
-  const eapSpanSearchQueryProviderProps = useEAPSpanSearchQueryBuilderProps(
-    eapSpanSearchQueryBuilderProps
-  );
-
-  return (
-    <Layout.Main fullWidth>
-      <SearchQueryBuilderProvider {...eapSpanSearchQueryProviderProps}>
-        <TourElement<ExploreSpansTour>
-          tourContext={ExploreSpansTourContext}
-          id={ExploreSpansTour.SEARCH_BAR}
-          title={t('Start Your Search')}
-          description={t(
-            'Specify the keys you’d like to narrow your search down to (ex. span.operation) and then any values (ex. db, res, http, etc.).'
-          )}
-          position="bottom"
-          margin={-8}
-        >
-          <FilterSection>
-            <StyledPageFilterBar condensed>
-              <ProjectPageFilter />
-              <EnvironmentPageFilter />
-              <DatePageFilter {...datePageFilterProps} />
-            </StyledPageFilterBar>
-            <SpansSearchBar
-              eapSpanSearchQueryBuilderProps={eapSpanSearchQueryBuilderProps}
-            />
-          </FilterSection>
-          <StyledSchemaHintsSection>
-            <SchemaHintsList
-              supportedAggregates={
-                mode === Mode.SAMPLES ? [] : ALLOWED_EXPLORE_VISUALIZE_AGGREGATES
-              }
-              numberTags={numberTags}
-              stringTags={stringTags}
-              isLoading={numberTagsLoading || stringTagsLoading}
-              exploreQuery={query}
-              source={SchemaHintsSources.EXPLORE}
-            />
-          </StyledSchemaHintsSection>
-        </TourElement>
-      </SearchQueryBuilderProvider>
-    </Layout.Main>
-  );
-}
-
 interface SpanTabControlSectionProps {
   controlSectionExpanded: boolean;
-  organization: Organization;
 }
 
-function SpanTabControlSection({
-  controlSectionExpanded,
-  organization,
-}: SpanTabControlSectionProps) {
-  const toolbarExtras = [
-    ...(organization?.features?.includes('visibility-explore-equations')
-      ? ['equations' as const]
-      : []),
-  ];
+function SpanTabControlSection({controlSectionExpanded}: SpanTabControlSectionProps) {
+  const toolbarExtras: Array<'equations'> = ['equations'];
 
   return (
-    <ControlSection expanded={controlSectionExpanded}>
+    <ExploreControlSection expanded={controlSectionExpanded}>
       <TourElement<ExploreSpansTour>
         tourContext={ExploreSpansTourContext}
         id={ExploreSpansTour.TOOLBAR}
@@ -280,81 +167,119 @@ function SpanTabControlSection({
         position="right"
         margin={-8}
       >
-        <ExploreToolbar width={300} extras={toolbarExtras} />
+        {tourProps => (
+          <div {...tourProps}>
+            {controlSectionExpanded && (
+              <ExploreToolbar width={300} extras={toolbarExtras} />
+            )}
+          </div>
+        )}
       </TourElement>
-    </ControlSection>
+    </ExploreControlSection>
   );
 }
 
-interface SpanTabContentSectionProps {
+type SpanTabContentSectionProps = {
   controlSectionExpanded: boolean;
-  maxPickableDays: PickableDays['maxPickableDays'];
   setControlSectionExpanded: (expanded: boolean) => void;
-}
+};
 
-function SpanTabContentSection({
-  maxPickableDays,
+function SpanTabContentSectionInner({
   controlSectionExpanded,
   setControlSectionExpanded,
 }: SpanTabContentSectionProps) {
-  const {selection} = usePageFilters();
-  const mode = useExploreMode();
-  const visualizes = useExploreVisualizes();
-  const setVisualizes = useSetExploreVisualizes();
-  const [samplesTab, setSamplesTab] = useTab();
+  const {isReady, selection} = usePageFilters();
+  const selectedProjects = useSelectedProjectsForLLMContext();
+  const query = useQueryParamsQuery();
+  const visualizes = useQueryParamsVisualizes();
+  const setVisualizes = useSetQueryParamsVisualizes();
+  const extrapolate = useQueryParamsExtrapolate();
+  const id = useQueryParamsId();
+  const [tab, setTab] = useTab();
+  const [caseInsensitive] = useCaseInsensitivity();
+  const organization = useOrganization();
+  const crossEventDatasetAvailability = useCrossEventDatasetAvailability(organization);
+  const crossEventQueries = useCrossEventQueries(crossEventDatasetAvailability);
+  const sortBys = useQueryParamsSortBys();
+  const aggregateSortBys = useQueryParamsAggregateSortBys();
+  const groupBys = useQueryParamsGroupBys();
 
-  const query = useExploreQuery();
+  // In aggregate mode the table is driven by aggregateSortBys, not the
+  // samples sort (which falls back to `-timestamp`), so pick accordingly.
+  const activeSortBys = tab === Mode.AGGREGATE ? aggregateSortBys : sortBys;
 
-  const queryType: 'aggregate' | 'samples' | 'traces' =
-    mode === Mode.AGGREGATE
+  // Push page state into the LLM context tree for Seer Explorer.
+  useLLMContext({
+    contextHint:
+      'Sentry traces explorer page. Users search spans/traces by attributes and view samples, aggregates, or breakdowns. ' +
+      'You can search live telemetry for spans/traces/errors/logs/metrics, get a trace waterfall by trace ID, ' +
+      'list telemetry index nodes by keyword to discover span/function types, and query node dependencies for upstream/downstream call graphs. ' +
+      'projectSelectionInstruction describes the page-filter project scope (explicit pins vs My/All Projects). ' +
+      'When projectIds/projectSlugs are empty, that is expected for My/All Projects — follow projectSelectionInstruction.',
+    searchQuery: query,
+    activeTab: tab,
+    visualizes: visualizes.map(v => v.yAxis),
+    groupBys: groupBys.filter(g => g !== ''),
+    sortBys: activeSortBys.map(s => (s.kind === 'desc' ? `-${s.field}` : s.field)),
+    currentSelectedDateRange: selection.datetime,
+    ...toLLMContextProjectFields(selectedProjects),
+  });
+
+  const queryType =
+    tab === Mode.AGGREGATE
       ? 'aggregate'
-      : samplesTab === Tab.TRACE
+      : tab === Tab.TRACE
         ? 'traces'
-        : 'samples';
+        : tab === Tab.ATTRIBUTE_BREAKDOWNS
+          ? 'attribute_breakdowns'
+          : 'samples';
 
-  const limit = 50;
-
-  const isAllowedSelection = useMemo(
-    () => checkIsAllowedSelection(selection, maxPickableDays),
-    [selection, maxPickableDays]
-  );
+  const rawSpanCounts = useRawCounts({dataset: DiscoverDatasets.SPANS});
 
   const aggregatesTableResult = useExploreAggregatesTable({
     query,
-    limit,
-    enabled: isAllowedSelection && queryType === 'aggregate',
+    limit: SPANS_TABLE_LIMIT,
+    enabled: isReady && queryType === 'aggregate',
+    queryExtras: {
+      caseInsensitive,
+      ...crossEventQueries,
+    },
   });
   const spansTableResult = useExploreSpansTable({
     query,
-    limit,
-    enabled: isAllowedSelection && queryType === 'samples',
+    limit: SPANS_TABLE_LIMIT,
+    enabled: isReady && queryType === 'samples',
+    queryExtras: {
+      caseInsensitive,
+      ...crossEventQueries,
+    },
   });
-  const tracesTableResult = useExploreTracesTable({
-    query,
-    limit,
-    enabled: isAllowedSelection && queryType === 'traces',
+  const tracesTableQuery = useQuery({
+    ...useExploreTracesTableApiOptions({
+      query,
+      limit: SPANS_TABLE_LIMIT,
+      queryExtras: {
+        caseInsensitive,
+        ...crossEventQueries,
+      },
+    }),
+    select: selectJsonWithHeaders,
+    enabled: isReady && queryType === 'traces',
   });
+  const tracesTableResult = {
+    result: tracesTableQuery,
+    error: parseError(tracesTableQuery.error),
+  } satisfies TracesTableResult;
 
-  const {
-    result: timeseriesResult,
-    canUsePreviousResults,
-    samplingMode: timeseriesSamplingMode,
-  } = useExploreTimeseries({
-    query,
-    enabled: isAllowedSelection,
-  });
-
-  const confidences = useMemo(
-    () =>
-      visualizes.map(visualize => {
-        const dedupedYAxes = [visualize.yAxis];
-        const series = dedupedYAxes
-          .flatMap(yAxis => timeseriesResult.data[yAxis])
-          .filter(defined);
-        return combineConfidenceForSeries(series);
-      }),
-    [timeseriesResult.data, visualizes]
-  );
+  const {result: timeseriesResult, samplingMode: timeseriesSamplingMode} =
+    useExploreTimeseries({
+      query,
+      enabled: isReady,
+      queryExtras: {
+        caseInsensitive,
+        ...crossEventQueries,
+      },
+    });
 
   const [interval] = useChartInterval();
 
@@ -365,55 +290,54 @@ function SpanTabContentSection({
     tracesTableResult,
     timeseriesResult,
     interval,
+    crossEventQueries,
   });
-
-  const resultsLength =
-    {
-      aggregate: aggregatesTableResult.result.data?.length,
-      samples: spansTableResult.result.data?.length,
-      traces: tracesTableResult.result.data?.data?.length,
-    }[queryType] ?? 0;
-
-  const hasResults = !!resultsLength;
-
-  const resultsLoading =
-    queryType === 'aggregate'
-      ? aggregatesTableResult.result.isPending
-      : queryType === 'samples'
-        ? spansTableResult.result.isPending
-        : tracesTableResult.result.isPending;
 
   const error = defined(timeseriesResult.error)
     ? null // if the timeseries errors, we prefer to show that error in the chart
     : queryType === 'samples'
       ? spansTableResult.result.error
       : queryType === 'traces'
-        ? tracesTableResult.result.error
+        ? tracesTableResult.error
         : queryType === 'aggregate'
           ? aggregatesTableResult.result.error
           : null;
 
   return (
-    <ContentSection expanded={controlSectionExpanded}>
-      <ChevronButton
-        aria-label={controlSectionExpanded ? t('Collapse sidebar') : t('Expand sidebar')}
-        expanded={controlSectionExpanded}
-        size="xs"
-        icon={
-          <IconChevron
-            isDouble
-            direction={controlSectionExpanded ? 'left' : 'right'}
-            size="xs"
+    <ExploreContentSection gap="md">
+      <OverChartButtonGroup>
+        <ChevronButton
+          aria-label={
+            controlSectionExpanded ? t('Collapse sidebar') : t('Expand sidebar')
+          }
+          expanded={controlSectionExpanded}
+          size="xs"
+          icon={
+            <IconChevron
+              isDouble
+              direction={controlSectionExpanded ? 'left' : 'right'}
+              size="xs"
+            />
+          }
+          onClick={() => setControlSectionExpanded(!controlSectionExpanded)}
+        >
+          {controlSectionExpanded ? null : t('Advanced')}
+        </ChevronButton>
+        <Flex gap="xs">
+          <TracesExportModalButton
+            aggregatesTableResult={aggregatesTableResult}
+            spansTableResult={spansTableResult}
+            rawSpanCounts={rawSpanCounts}
           />
-        }
-        onClick={() => setControlSectionExpanded(!controlSectionExpanded)}
-      />
-      {!resultsLoading && !hasResults && <QuotaExceededAlert referrer="explore" />}
+          <SettingsDropdown />
+        </Flex>
+      </OverChartButtonGroup>
+      {defined(id) && <DroppedFieldsAlert />}
+      <QuotaExceededAlert referrer="spans-explore" traceItemDataset="spans" />
+      <ExtrapolationEnabledAlert />
       {defined(error) && (
         <Alert.Container>
-          <Alert type="error" showIcon>
-            {error.message}
-          </Alert>
+          <Alert variant="danger">{error.message}</Alert>
         </Alert.Container>
       )}
       <TourElement<ExploreSpansTour>
@@ -426,166 +350,71 @@ function SpanTabContentSection({
         position="top"
         margin={-8}
       >
-        <ExploreCharts
-          canUsePreviousResults={canUsePreviousResults}
-          confidences={confidences}
-          query={query}
-          timeseriesResult={timeseriesResult}
-          visualizes={visualizes}
-          setVisualizes={setVisualizes}
-          samplingMode={timeseriesSamplingMode}
-        />
-        <ExploreTables
-          aggregatesTableResult={aggregatesTableResult}
-          spansTableResult={spansTableResult}
-          tracesTableResult={tracesTableResult}
-          confidences={confidences}
-          samplesTab={samplesTab}
-          setSamplesTab={setSamplesTab}
-        />
+        {props => (
+          <div {...props}>
+            <ExploreCharts
+              query={query}
+              extrapolate={extrapolate}
+              timeseriesResult={timeseriesResult}
+              visualizes={visualizes}
+              setVisualizes={setVisualizes}
+              samplingMode={timeseriesSamplingMode}
+              rawSpanCounts={rawSpanCounts}
+            />
+            <ExploreTables
+              aggregatesTableResult={aggregatesTableResult}
+              spansTableResult={spansTableResult}
+              tracesTableResult={tracesTableResult}
+              tab={tab}
+              setTab={(newTab, reason) => {
+                if (newTab === Mode.AGGREGATE) {
+                  setControlSectionExpanded(true);
+                }
+
+                if (reason === 'click') {
+                  trackAnalytics('trace.explorer.table_tab_changed', {
+                    organization,
+                    tab: newTab,
+                  });
+                }
+
+                setTab(newTab);
+              }}
+            />
+          </div>
+        )}
       </TourElement>
-    </ContentSection>
+    </ExploreContentSection>
   );
 }
 
-function checkIsAllowedSelection(
-  selection: PageFilters,
-  maxPickableDays: PickableDays['maxPickableDays']
-) {
-  const maxPickableMinutes = maxPickableDays * 24 * 60;
-  const selectedMinutes = getDiffInMinutes(selection.datetime);
-  return selectedMinutes <= maxPickableMinutes;
-}
-
-const BodySearch = styled(Layout.Body)`
-  flex-grow: 0;
-  border-bottom: 1px solid ${p => p.theme.border};
-  padding-bottom: ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    padding-bottom: ${space(2)};
-  }
-`;
-
-const BodyContent = styled('div')`
-  background-color: ${p => p.theme.background};
-  flex-grow: 1;
-
-  display: flex;
-  flex-direction: column;
-  padding: 0px;
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    display: flex;
-    flex-direction: row;
-    padding: 0px;
-    gap: 0px;
-  }
-`;
-
-const ControlSection = styled('aside')<{expanded: boolean}>`
-  padding: ${space(1)} ${space(2)};
-  border-bottom: 1px solid ${p => p.theme.border};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    border-bottom: none;
-    ${p =>
-      p.expanded
-        ? css`
-            width: 343px; /* 300px for the toolbar + padding */
-            padding: ${space(2)} ${space(1.5)} ${space(1)} ${space(4)};
-            border-right: 1px solid ${p.theme.border};
-          `
-        : css`
-            overflow: hidden;
-            width: 0px;
-            padding: 0px;
-            border-right: none;
-          `}
-  }
-`;
-
-const ContentSection = styled('section')<{expanded: boolean}>`
-  background-color: ${p => p.theme.backgroundSecondary};
-  flex: 1 1 auto;
-  min-width: 0;
-
-  padding: ${space(1)} ${space(2)} ${space(3)} ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    ${p =>
-      p.expanded
-        ? css`
-            padding: ${space(1)} ${space(4)} ${space(3)} ${space(1.5)};
-          `
-        : css`
-            padding: ${space(1)} ${space(4)} ${space(3)} ${space(4)};
-          `}
-  }
-`;
-
-const FilterSection = styled('div')`
-  display: grid;
-  gap: ${space(1)};
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: minmax(300px, auto) 1fr;
-  }
-`;
-
-const StyledPageFilterBar = styled(PageFilterBar)`
-  width: auto;
-`;
+const SpanTabContentSection = registerLLMContext(
+  'traces-explorer',
+  SpanTabContentSectionInner
+);
 
 const OnboardingContentSection = styled('section')`
   grid-column: 1/3;
 `;
 
-const ChevronButton = withChonk(
-  styled(Button)<{expanded: boolean}>`
-    width: 28px;
-    border-left-color: ${p => p.theme.background};
-    border-top-left-radius: 0px;
-    border-bottom-left-radius: 0px;
-    margin-bottom: ${space(1)};
-    display: none;
+export const ChevronButton = styled(Button)<{expanded: boolean}>`
+  display: none;
 
-    @media (min-width: ${p => p.theme.breakpoints.medium}) {
-      display: block;
-    }
-
-    ${p =>
-      p.expanded
-        ? css`
-            margin-left: -13px;
-          `
-        : css`
-            margin-left: -31px;
-          `}
-  `,
-  chonkStyled(Button)<{expanded: boolean}>`
-    margin-bottom: ${space(1)};
-    display: none;
-    margin-left: ${p => (p.expanded ? '-13px' : '-31px')};
-
-    @media (min-width: ${p => p.theme.breakpoints.medium}) {
-      display: inline-flex;
-    }
-
-    &::after {
-      border-left-color: ${p => p.theme.background};
-      border-top-left-radius: 0px;
-      border-bottom-left-radius: 0px;
-    }
-  `
-);
-
-const StyledSchemaHintsSection = styled(SchemaHintsSection)`
-  margin-top: ${space(1)};
-  margin-bottom: 0px;
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    margin-top: ${space(1)};
-    margin-bottom: 0px;
+  @media (min-width: ${p => p.theme.breakpoints.md}) {
+    display: inline-flex;
   }
+
+  ${p =>
+    p.expanded &&
+    css`
+      margin-left: -17px;
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+
+      &::after {
+        border-left-color: ${p.theme.tokens.border.primary};
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+      }
+    `}
 `;

@@ -1,7 +1,6 @@
+import functools
 from collections.abc import Sequence
 from datetime import timedelta
-
-import sentry_sdk
 
 from sentry.discover.arithmetic import categorize_columns
 from sentry.exceptions import InvalidSearchQuery
@@ -12,7 +11,8 @@ from sentry.snuba.dataset import Dataset
 from sentry.snuba.discover import transform_tips, zerofill
 from sentry.snuba.metrics.extraction import MetricSpecType
 from sentry.snuba.query_sources import QuerySource
-from sentry.utils.snuba import SnubaTSResult, bulk_snuba_queries
+from sentry.utils.snuba import SnubaTSResult, bulk_snuba_queries, get_snuba_column_name
+from sentry.utils.tracing import start_span
 
 
 def query(
@@ -23,7 +23,6 @@ def query(
     orderby=None,
     offset=None,
     limit=50,
-    referrer=None,
     auto_fields=False,
     auto_aggregations=False,
     include_equation_fields=False,
@@ -34,13 +33,13 @@ def query(
     transform_alias_to_input_format=False,
     sample=None,
     has_metrics=False,
-    use_metrics_layer=False,
     skip_tag_resolution=False,
     on_demand_metrics_enabled=False,
     on_demand_metrics_type: MetricSpecType | None = None,
     fallback_to_transactions=False,
     query_source: QuerySource | None = None,
-    debug: bool = False,
+    *,
+    referrer: str,
 ) -> EventsResponse:
     """
     High-level API for doing arbitrary user queries against events.
@@ -101,8 +100,8 @@ def query(
     if conditions is not None:
         builder.add_conditions(conditions)
     result = builder.process_results(builder.run_query(referrer, query_source=query_source))
-    if debug:
-        result["meta"]["query"] = str(builder.get_snql_query().query)
+    if snuba_params.debug:
+        result["meta"]["debug_info"] = {"query": str(builder.get_snql_query().query)}
     result["meta"]["tips"] = transform_tips(builder.tips)
     return result
 
@@ -112,18 +111,18 @@ def timeseries_query(
     query: str,
     snuba_params: SnubaParams,
     rollup: int,
-    referrer: str | None = None,
     zerofill_results: bool = True,
     comparison_delta: timedelta | None = None,
     functions_acl: list[str] | None = None,
     allow_metric_aggregates=False,
     has_metrics=False,
-    use_metrics_layer=False,
     on_demand_metrics_enabled=False,
     on_demand_metrics_type: MetricSpecType | None = None,
     query_source: QuerySource | None = None,
     fallback_to_transactions: bool = False,
     transform_alias_to_input_format: bool = False,
+    *,
+    referrer: str,
 ):
     """
     High-level API for doing arbitrary user timeseries queries against events.
@@ -149,8 +148,11 @@ def timeseries_query(
     allow_metric_aggregates (bool) Ignored here, only used in metric enhanced performance
     """
 
-    with sentry_sdk.start_span(op="issueplatform", name="timeseries.filter_transform"):
+    with start_span(op="issueplatform", name="timeseries.filter_transform"):
         equations, columns = categorize_columns(selected_columns)
+
+        column_resolver = functools.partial(get_snuba_column_name, dataset=Dataset.IssuePlatform)
+
         base_builder = IssuePlatformTimeseriesQueryBuilder(
             Dataset.IssuePlatform,
             {},
@@ -163,6 +165,7 @@ def timeseries_query(
                 functions_acl=functions_acl,
                 has_metrics=has_metrics,
                 transform_alias_to_input_format=transform_alias_to_input_format,
+                column_resolver=column_resolver,
             ),
         )
         query_list = [base_builder]
@@ -182,6 +185,7 @@ def timeseries_query(
                 query=query,
                 selected_columns=columns,
                 equations=equations,
+                config=QueryBuilderConfig(column_resolver=column_resolver),
             )
             query_list.append(comparison_builder)
 
@@ -189,7 +193,7 @@ def timeseries_query(
             [query.get_snql_query() for query in query_list], referrer, query_source=query_source
         )
 
-    with sentry_sdk.start_span(op="issueplatform", name="timeseries.transform_results"):
+    with start_span(op="issueplatform", name="timeseries.transform_results"):
         results = []
         for snql_query, result in zip(query_list, query_results):
             assert snql_query.params.start is not None

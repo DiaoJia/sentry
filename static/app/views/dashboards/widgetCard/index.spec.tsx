@@ -1,7 +1,6 @@
 import {DashboardFixture} from 'sentry-fixture/dashboard';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {WidgetFixture} from 'sentry-fixture/widget';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
@@ -13,39 +12,50 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 
 import * as modal from 'sentry/actionCreators/modal';
-import * as LineChart from 'sentry/components/charts/lineChart';
-import SimpleTableChart from 'sentry/components/charts/simpleTableChart';
-import {DatasetSource} from 'sentry/utils/discover/types';
-import {MINUTE, SECOND} from 'sentry/utils/formatters';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {FieldKind} from 'sentry/utils/fields';
 import {MEPSettingProvider} from 'sentry/utils/performance/contexts/metricsEnhancedSetting';
-import type {Widget} from 'sentry/views/dashboards/types';
-import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
+import type {DashboardFilters, Widget} from 'sentry/views/dashboards/types';
+import {
+  DashboardFilterKeys,
+  DisplayType,
+  WidgetType,
+} from 'sentry/views/dashboards/types';
 import WidgetCard from 'sentry/views/dashboards/widgetCard';
-import ReleaseWidgetQueries from 'sentry/views/dashboards/widgetCard/releaseWidgetQueries';
-import WidgetLegendSelectionState from 'sentry/views/dashboards/widgetLegendSelectionState';
+import {ReleaseWidgetQueries} from 'sentry/views/dashboards/widgetCard/releaseWidgetQueries';
+import {WidgetLegendSelectionState} from 'sentry/views/dashboards/widgetLegendSelectionState';
+import {TableWidgetVisualization} from 'sentry/views/dashboards/widgets/tableWidget/tableWidgetVisualization';
 
 import {DashboardsMEPProvider} from './dashboardsMEPContext';
 
-jest.mock('sentry/components/charts/simpleTableChart', () => jest.fn(() => <div />));
+jest.mock('sentry/views/dashboards/widgets/tableWidget/tableWidgetVisualization', () => ({
+  TableWidgetVisualization: jest.fn(() => <div />),
+}));
 jest.mock('sentry/views/dashboards/widgetCard/releaseWidgetQueries');
 
-describe('Dashboards > WidgetCard', function () {
-  const {router, organization} = initializeOrg({
+describe('Dashboards > WidgetCard', () => {
+  const {organization} = initializeOrg({
     organization: OrganizationFixture({
       features: ['dashboards-edit', 'discover-basic'],
     }),
-    router: {orgId: 'orgId'},
-  } as Parameters<typeof initializeOrg>[0]);
+  });
 
-  const renderWithProviders = (component: React.ReactNode) =>
+  const renderWithProviders = (component: React.ReactNode, features: string[] = []) =>
     render(
       <DashboardsMEPProvider>
         <MEPSettingProvider forceTransactions={false}>{component}</MEPSettingProvider>
       </DashboardsMEPProvider>,
       {
-        organization,
-        router,
-        deprecatedRouterMocks: true,
+        organization: {
+          ...organization,
+          features: [...organization.features, ...features],
+        },
+        initialRouterConfig: {
+          route: '/organizations/:orgId/dashboard/:dashboardId/',
+          location: {
+            pathname: '/organizations/org-slug/dashboard/42/',
+          },
+        },
       }
     );
 
@@ -74,6 +84,36 @@ describe('Dashboards > WidgetCard', function () {
       },
     ],
   };
+
+  const transactionQueryWidget: Widget = {
+    title: 'Transactions',
+    description: 'Valid widget description',
+    interval: '5m',
+    displayType: DisplayType.LINE,
+    widgetType: WidgetType.TRANSACTIONS,
+    queries: [
+      {
+        conditions: 'event.type:transaction',
+        fields: ['count()', 'failure_count()'],
+        aggregates: ['count()', 'failure_count()'],
+        columns: [],
+        name: 'transactions',
+        orderby: '',
+      },
+      {
+        conditions: '',
+        fields: ['count()', 'failure_count()'],
+        aggregates: ['count()', 'failure_count()'],
+        columns: [],
+        name: 'default',
+        orderby: '',
+      },
+    ],
+    exploreUrls: [
+      '/organizations/org-slug/explore/traces/results1',
+      '/organizations/org-slug/explore/traces/results2',
+    ],
+  };
   const selection = {
     projects: [1],
     environments: ['prod'],
@@ -95,7 +135,9 @@ describe('Dashboards > WidgetCard', function () {
     navigate: jest.fn(),
   });
 
-  beforeEach(function () {
+  beforeEach(() => {
+    PageFiltersStore.init();
+    PageFiltersStore.onInitializeUrlState(selection);
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/events-stats/',
       body: {meta: {isMetricsData: false}},
@@ -113,22 +155,20 @@ describe('Dashboards > WidgetCard', function () {
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders with Open in Discover button and opens the Query Selector Modal when clicked', async function () {
+  it('renders with Open in Discover button and opens the Query Selector Modal when clicked', async () => {
     const spy = jest.spyOn(modal, 'openDashboardWidgetQuerySelectorModal');
     renderWithProviders(
       <WidgetCard
         api={api}
         widget={multipleQueryWidget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -138,23 +178,20 @@ describe('Dashboards > WidgetCard', function () {
     await userEvent.click(await screen.findByLabelText('Widget actions'));
     await userEvent.click(screen.getByRole('menuitemradio', {name: 'Open in Discover'}));
     expect(spy).toHaveBeenCalledWith({
-      isMetricsData: false,
       organization,
       widget: multipleQueryWidget,
     });
   });
 
-  it('renders with Open in Discover button', async function () {
+  it('renders with Open in Discover button', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
         widget={{...multipleQueryWidget, queries: [multipleQueryWidget.queries[0]!]}}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -164,21 +201,19 @@ describe('Dashboards > WidgetCard', function () {
     await userEvent.click(await screen.findByLabelText('Widget actions'));
     expect(screen.getByRole('menuitemradio', {name: 'Open in Discover'})).toHaveAttribute(
       'href',
-      '/organizations/org-slug/discover/results/?environment=prod&field=count%28%29&field=failure_count%28%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=count%28%29&yAxis=failure_count%28%29'
+      '/organizations/org-slug/explore/discover/results/?environment=prod&field=count%28%29&field=failure_count%28%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=count%28%29&yAxis=failure_count%28%29'
     );
   });
 
-  it('renders widget description in dashboard', async function () {
+  it('renders widget description in dashboard', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
         widget={multipleQueryWidget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -189,7 +224,7 @@ describe('Dashboards > WidgetCard', function () {
     expect(await screen.findByText('Valid widget description')).toBeInTheDocument();
   });
 
-  it('renders Discover button with prepended fields pulled from equations', async function () {
+  it('renders Discover button with prepended fields pulled from equations', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
@@ -209,11 +244,9 @@ describe('Dashboards > WidgetCard', function () {
           ],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -223,11 +256,11 @@ describe('Dashboards > WidgetCard', function () {
     await userEvent.click(await screen.findByLabelText('Widget actions'));
     expect(screen.getByRole('menuitemradio', {name: 'Open in Discover'})).toHaveAttribute(
       'href',
-      '/organizations/org-slug/discover/results/?environment=prod&field=count_if%28transaction.duration%2Cequals%2C300%29&field=failure_count%28%29&field=count%28%29&field=equation%7C%28count%28%29%20%2B%20failure_count%28%29%29%20%2F%20count_if%28transaction.duration%2Cequals%2C300%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=equation%7C%28count%28%29%20%2B%20failure_count%28%29%29%20%2F%20count_if%28transaction.duration%2Cequals%2C300%29'
+      '/organizations/org-slug/explore/discover/results/?environment=prod&field=count_if%28transaction.duration%2Cequals%2C300%29&field=failure_count%28%29&field=count%28%29&field=equation%7C%28count%28%29%20%2B%20failure_count%28%29%29%20%2F%20count_if%28transaction.duration%2Cequals%2C300%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=equation%7C%28count%28%29%20%2B%20failure_count%28%29%29%20%2F%20count_if%28transaction.duration%2Cequals%2C300%29'
     );
   });
 
-  it('renders button to open Discover with Top N', async function () {
+  it('renders button to open Discover with Top N', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
@@ -244,11 +277,9 @@ describe('Dashboards > WidgetCard', function () {
           ],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -256,13 +287,14 @@ describe('Dashboards > WidgetCard', function () {
     );
 
     await userEvent.click(await screen.findByLabelText('Widget actions'));
+    // TOP_N is converted to AREA, so the discover URL no longer has display=top5
     expect(screen.getByRole('menuitemradio', {name: 'Open in Discover'})).toHaveAttribute(
       'href',
-      '/organizations/org-slug/discover/results/?display=top5&environment=prod&field=transaction&field=count%28%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=count%28%29'
+      '/organizations/org-slug/explore/discover/results/?environment=prod&field=transaction&field=count%28%29&name=Errors&project=1&query=event.type%3Aerror&queryDataset=error-events&statsPeriod=14d&yAxis=count%28%29'
     );
   });
 
-  it('allows Open in Discover when the widget contains custom measurements', async function () {
+  it('allows Open in Discover when the widget contains custom measurements', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
@@ -280,11 +312,9 @@ describe('Dashboards > WidgetCard', function () {
           ],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -294,11 +324,11 @@ describe('Dashboards > WidgetCard', function () {
     await userEvent.click(await screen.findByLabelText('Widget actions'));
     expect(screen.getByRole('menuitemradio', {name: 'Open in Discover'})).toHaveAttribute(
       'href',
-      '/organizations/org-slug/discover/results/?environment=prod&field=p99%28measurements.custom.measurement%29&name=Errors&project=1&query=&queryDataset=error-events&statsPeriod=14d&yAxis=p99%28measurements.custom.measurement%29'
+      '/organizations/org-slug/explore/discover/results/?environment=prod&field=p99%28measurements.custom.measurement%29&name=Errors&project=1&query=&queryDataset=error-events&statsPeriod=14d&yAxis=p99%28measurements.custom.measurement%29'
     );
   });
 
-  it('calls onDuplicate when Duplicate Widget is clicked', async function () {
+  it('calls onDuplicate when Duplicate Widget is clicked', async () => {
     const mock = jest.fn();
     renderWithProviders(
       <WidgetCard
@@ -309,11 +339,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
         onDuplicate={mock}
-        renderErrorMessage={() => undefined}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -325,7 +353,7 @@ describe('Dashboards > WidgetCard', function () {
     expect(mock).toHaveBeenCalledTimes(1);
   });
 
-  it('does not add duplicate widgets if max widget is reached', async function () {
+  it('does not add duplicate widgets if max widget is reached', async () => {
     const mock = jest.fn();
     renderWithProviders(
       <WidgetCard
@@ -336,11 +364,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
         onDuplicate={mock}
-        renderErrorMessage={() => undefined}
         showContextMenu
         widgetLegendState={widgetLegendState}
         widgetLimitReached
@@ -352,7 +378,7 @@ describe('Dashboards > WidgetCard', function () {
     expect(mock).toHaveBeenCalledTimes(0);
   });
 
-  it('calls onEdit when Edit Widget is clicked', async function () {
+  it('calls onEdit when Edit Widget is clicked', async () => {
     const mock = jest.fn();
     renderWithProviders(
       <WidgetCard
@@ -363,11 +389,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
+        onDelete={() => {}}
         onEdit={mock}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -379,7 +403,7 @@ describe('Dashboards > WidgetCard', function () {
     expect(mock).toHaveBeenCalledTimes(1);
   });
 
-  it('renders delete widget option', async function () {
+  it('renders delete widget option', async () => {
     const mock = jest.fn();
     renderWithProviders(
       <WidgetCard
@@ -390,11 +414,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
         onDelete={mock}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -412,7 +434,7 @@ describe('Dashboards > WidgetCard', function () {
     expect(mock).toHaveBeenCalled();
   });
 
-  it('calls events with a limit of 20 items', async function () {
+  it('calls events with a limit of 20 items', async () => {
     const mock = jest.fn();
 
     renderWithProviders(
@@ -424,11 +446,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
         onDelete={mock}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         tableItemLimit={20}
@@ -448,7 +468,7 @@ describe('Dashboards > WidgetCard', function () {
     });
   });
 
-  it('calls events with a default limit of 5 items', async function () {
+  it('calls events with a default limit of 5 items', async () => {
     const mock = jest.fn();
     renderWithProviders(
       <WidgetCard
@@ -459,11 +479,9 @@ describe('Dashboards > WidgetCard', function () {
           queries: [{...multipleQueryWidget.queries[0]!, fields: ['count()']}],
         }}
         selection={selection}
-        isEditingDashboard={false}
         onDelete={mock}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
@@ -482,7 +500,7 @@ describe('Dashboards > WidgetCard', function () {
     });
   });
 
-  it('has sticky table headers', async function () {
+  it('has sticky table headers and scroll', async () => {
     const tableWidget: Widget = {
       title: 'Table Widget',
       interval: '5m',
@@ -505,11 +523,9 @@ describe('Dashboards > WidgetCard', function () {
         api={api}
         widget={tableWidget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         tableItemLimit={20}
@@ -520,13 +536,14 @@ describe('Dashboards > WidgetCard', function () {
     await waitFor(() => expect(eventsMock).toHaveBeenCalled());
 
     await waitFor(() =>
-      expect((SimpleTableChart as jest.Mock).mock.calls[0][0]).toEqual(
-        expect.objectContaining({stickyHeaders: true})
+      expect(TableWidgetVisualization).toHaveBeenCalledWith(
+        expect.objectContaining({scrollable: true}),
+        undefined
       )
     );
   });
 
-  it('calls release queries', function () {
+  it('calls release queries', () => {
     const widget: Widget = {
       title: 'Release Widget',
       interval: '5m',
@@ -535,9 +552,9 @@ describe('Dashboards > WidgetCard', function () {
       queries: [
         {
           conditions: '',
-          fields: [],
+          fields: ['count()'],
           columns: [],
-          aggregates: [],
+          aggregates: ['count()'],
           name: '',
           orderby: '',
         },
@@ -548,11 +565,9 @@ describe('Dashboards > WidgetCard', function () {
         api={api}
         widget={widget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         tableItemLimit={20}
@@ -572,24 +587,23 @@ describe('Dashboards > WidgetCard', function () {
       queries: [
         {
           conditions: '',
-          fields: [],
+          fields: ['count()'],
           columns: [],
-          aggregates: [],
+          aggregates: ['count()'],
           name: '',
           orderby: '',
         },
       ],
     };
-    renderWithProviders(
+
+    const {router} = renderWithProviders(
       <WidgetCard
         api={api}
         widget={widget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         index="10"
@@ -599,242 +613,192 @@ describe('Dashboards > WidgetCard', function () {
     );
 
     await userEvent.click(await screen.findByLabelText('Open Full-Screen View'));
-    expect(router.push).toHaveBeenCalledWith(
-      expect.objectContaining({pathname: '/mock-pathname/widget/10/'})
+    expect(router.location.pathname).toBe(
+      '/organizations/org-slug/dashboard/42/widget/10/'
     );
   });
 
-  it('renders chart using axis and tooltip formatters from custom measurement meta', async function () {
-    const spy = jest.spyOn(LineChart, 'LineChart');
-    const eventsStatsMock = MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/events-stats/',
-      body: {
-        data: [
-          [
-            1658262600,
-            [
-              {
-                count: 24,
-              },
-            ],
-          ],
-        ],
-        meta: {
-          fields: {
-            time: 'date',
-            p95_measurements_custom: 'duration',
-          },
-          units: {
-            time: null,
-            p95_measurements_custom: 'millisecond',
-          },
-          isMetricsData: true,
-          tips: {},
-        },
-      },
-    });
-
+  it('does not render description for text display type widgets', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
-        organization={organization}
         widget={{
-          title: '',
-          interval: '5m',
-          widgetType: WidgetType.DISCOVER,
-          displayType: DisplayType.LINE,
-          queries: [
-            {
-              conditions: '',
-              name: '',
-              fields: [],
-              columns: [],
-              aggregates: ['p95(measurements.custom)'],
-              orderby: '',
-            },
-          ],
+          ...multipleQueryWidget,
+          displayType: DisplayType.TEXT,
+          description: 'Valid widget description',
         }}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         widgetLegendState={widgetLegendState}
       />
     );
-    await waitFor(function () {
-      expect(eventsStatsMock).toHaveBeenCalled();
-    });
 
-    await waitFor(() => {
-      const mockCall = spy.mock.calls?.at(-1)?.[0];
-      expect(mockCall?.tooltip).toBeDefined();
-    });
-    const mockCall = spy.mock.calls?.at(-1)?.[0];
-    // @ts-expect-error TODO: Fix this type
-    expect(mockCall?.yAxis.axisLabel.formatter(24, 'p95(measurements.custom)')).toBe(
-      '24ms'
-    );
+    // Wait for the widget to render by checking for the actions button
+    await screen.findByLabelText('Widget actions');
+    expect(screen.queryByLabelText('Widget description')).not.toBeInTheDocument();
   });
 
-  it('renders label in seconds when there is a transition from seconds to minutes in the y axis', async function () {
-    const spy = jest.spyOn(LineChart, 'LineChart');
-    const eventsStatsMock = MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/events-stats/',
-      body: {
-        data: [
-          [
-            1658262600,
-            [
-              {
-                count: 40 * SECOND,
-              },
-            ],
-          ],
-          [
-            1658262601,
-            [
-              {
-                count: 50 * SECOND,
-              },
-            ],
-          ],
-          [
-            1658262602,
-            [
-              {
-                count: MINUTE,
-              },
-            ],
-          ],
-          [
-            1658262603,
-            [
-              {
-                count: 1.3 * MINUTE,
-              },
-            ],
-          ],
-        ],
-        meta: {
-          fields: {
-            time: 'date',
-            p50_transaction_duration: 'duration',
-          },
-          units: {
-            time: null,
-            p50_transaction_duration: 'millisecond',
-          },
-          isMetricsData: false,
-          tips: {},
-        },
-      },
-    });
-
+  it('displays the transaction deprecation warning and explore links for transaction widgets', async () => {
     renderWithProviders(
       <WidgetCard
         api={api}
-        organization={organization}
-        widget={{
-          title: '',
-          interval: '5m',
-          widgetType: WidgetType.DISCOVER,
-          displayType: DisplayType.LINE,
-          queries: [
-            {
-              conditions: '',
-              name: '',
-              fields: [],
-              columns: [],
-              aggregates: ['p50(transaction.duration)'],
-              orderby: '',
-            },
-          ],
-        }}
+        widget={transactionQueryWidget}
         selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
-        showContextMenu
-        widgetLimitReached={false}
-        widgetLegendState={widgetLegendState}
-      />
-    );
-    await waitFor(function () {
-      expect(eventsStatsMock).toHaveBeenCalled();
-    });
-    await waitFor(() => {
-      const mockCall = spy.mock.calls?.at(-1)?.[0];
-      expect(mockCall?.yAxis).toBeDefined();
-    });
-    const mockCall = spy.mock.calls?.at(-1)?.[0];
-    expect(
-      // @ts-expect-error TODO: Fix this type
-      mockCall?.yAxis.axisLabel.formatter(60000, 'p50(transaction.duration)')
-    ).toBe('60s');
-    // @ts-expect-error TODO: Fix this type
-    expect(mockCall?.yAxis?.minInterval).toEqual(SECOND);
-  });
-
-  it('displays indexed badge in preview mode', async function () {
-    renderWithProviders(
-      <WidgetCard
-        api={api}
-        organization={{
-          ...organization,
-          features: [...organization.features, 'dashboards-mep'],
-        }}
-        widget={multipleQueryWidget}
-        selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
+        onDelete={() => {}}
+        onEdit={() => {}}
+        onDuplicate={() => {}}
         showContextMenu
         widgetLimitReached={false}
         isPreview
         widgetLegendState={widgetLegendState}
-      />
+      />,
+      ['performance-transaction-deprecation-banner']
     );
 
-    expect(await screen.findByText('Indexed')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Widget warnings')).toBeInTheDocument();
   });
 
-  it('displays the discover split warning icon when the dataset source is forced', async function () {
-    const testWidget = {
-      ...WidgetFixture(),
-      datasetSource: DatasetSource.FORCED,
-      widgetType: WidgetType.ERRORS,
+  describe('Open in Explore visibility', () => {
+    const spansWidget: Widget = {
+      title: 'Cache Miss Rate',
+      description: '',
+      interval: '5m',
+      displayType: DisplayType.LINE,
+      widgetType: WidgetType.SPANS,
+      queries: [
+        {
+          conditions: 'span.op:[cache.get,cache.get_item]',
+          fields: ['count()'],
+          aggregates: ['count()'],
+          columns: [],
+          name: '',
+          orderby: '',
+        },
+      ],
     };
 
-    renderWithProviders(
-      <WidgetCard
-        api={api}
-        organization={organization}
-        widget={testWidget}
-        selection={selection}
-        isEditingDashboard={false}
-        onDelete={() => undefined}
-        onEdit={() => undefined}
-        onDuplicate={() => undefined}
-        renderErrorMessage={() => undefined}
-        showContextMenu
-        widgetLimitReached={false}
-        isPreview
-        widgetLegendState={widgetLegendState}
-      />
-    );
+    it('does not show Open in Explore for spans widget without visibility-explore-view', async () => {
+      renderWithProviders(
+        <WidgetCard
+          api={api}
+          widget={spansWidget}
+          selection={selection}
+          onDelete={() => {}}
+          onEdit={() => {}}
+          onDuplicate={() => {}}
+          showContextMenu
+          widgetLimitReached={false}
+          widgetLegendState={widgetLegendState}
+        />
+      );
 
-    await userEvent.hover(screen.getByLabelText('Widget warnings'));
+      await userEvent.click(await screen.findByLabelText('Widget actions'));
+      expect(screen.queryByText('Open in Explore')).not.toBeInTheDocument();
+    });
 
-    expect(
-      await screen.findByText(/We're splitting our datasets up/)
-    ).toBeInTheDocument();
+    it('shows Open in Explore for spans widget with visibility-explore-view', async () => {
+      renderWithProviders(
+        <WidgetCard
+          api={api}
+          widget={spansWidget}
+          selection={selection}
+          onDelete={() => {}}
+          onEdit={() => {}}
+          onDuplicate={() => {}}
+          showContextMenu
+          widgetLimitReached={false}
+          widgetLegendState={widgetLegendState}
+        />,
+        ['visibility-explore-view']
+      );
+
+      await userEvent.click(await screen.findByLabelText('Widget actions'));
+      expect(screen.getByText('Open in Explore')).toBeInTheDocument();
+    });
+  });
+
+  describe('conflicting filter warning', () => {
+    const spanWidget: Widget = {
+      title: 'Span Operations',
+      description: '',
+      interval: '5m',
+      displayType: DisplayType.TABLE,
+      widgetType: WidgetType.SPANS,
+      queries: [
+        {
+          conditions: 'span.op:[http.client,db]',
+          fields: ['span.op', 'count()'],
+          aggregates: ['count()'],
+          columns: ['span.op'],
+          name: '',
+          orderby: '',
+        },
+      ],
+    };
+
+    function renderWithDashboardFilters(dashboardFilters: DashboardFilters) {
+      renderWithProviders(
+        <WidgetCard
+          api={api}
+          widget={spanWidget}
+          selection={selection}
+          onDelete={() => {}}
+          onEdit={() => {}}
+          onDuplicate={() => {}}
+          showContextMenu
+          widgetLimitReached={false}
+          widgetLegendState={widgetLegendState}
+          dashboardFilters={dashboardFilters}
+        />
+      );
+    }
+
+    it('does not show conflict warning when global filter has empty value', async () => {
+      renderWithDashboardFilters({
+        [DashboardFilterKeys.GLOBAL_FILTER]: [
+          {
+            dataset: WidgetType.SPANS,
+            tag: {key: 'span.op', name: 'span.op', kind: FieldKind.TAG},
+            value: '',
+          },
+        ],
+      });
+
+      await screen.findByLabelText('Widget actions');
+      expect(screen.queryByLabelText('Widget warnings')).not.toBeInTheDocument();
+    });
+
+    it('shows conflict warning when global filter has non-empty value overlapping widget condition', async () => {
+      renderWithDashboardFilters({
+        [DashboardFilterKeys.GLOBAL_FILTER]: [
+          {
+            dataset: WidgetType.SPANS,
+            tag: {key: 'span.op', name: 'span.op', kind: FieldKind.TAG},
+            value: 'span.op:http.client',
+          },
+        ],
+      });
+
+      expect(await screen.findByLabelText('Widget warnings')).toBeInTheDocument();
+    });
+
+    it('does not show conflict warning when global filter key does not overlap widget conditions', async () => {
+      renderWithDashboardFilters({
+        [DashboardFilterKeys.GLOBAL_FILTER]: [
+          {
+            dataset: WidgetType.SPANS,
+            tag: {key: 'os.name', name: 'os.name', kind: FieldKind.TAG},
+            value: 'os.name:android',
+          },
+        ],
+      });
+
+      await screen.findByLabelText('Widget actions');
+      expect(screen.queryByLabelText('Widget warnings')).not.toBeInTheDocument();
+    });
   });
 });

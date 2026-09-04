@@ -14,6 +14,7 @@ from sentry.hybridcloud.services.organization_mapping import organization_mappin
 from sentry.integrations.models.integration_feature import IntegrationFeature, IntegrationTypes
 from sentry.models.apiapplication import ApiApplication
 from sentry.organizations.services.organization import organization_service
+from sentry.organizations.services.organization.model import RpcUserOrganizationContext
 from sentry.sentry_apps.api.serializers.sentry_app_avatar import (
     SentryAppAvatarSerializer as ResponseSentryAppAvatarSerializer,
 )
@@ -25,6 +26,20 @@ from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.service import user_service
 
 
+def mask_webhook_header_values(headers: Sequence[str]) -> list[str]:
+    """Replace each header's value with MASKED_VALUE, preserving the header name.
+
+    Webhook header values may carry secrets (e.g. bearer tokens), so they are masked
+    for viewers without elevated access. The name is kept visible so the form can
+    still render which headers are set.
+    """
+    masked = []
+    for header in headers:
+        name, separator, _value = header.partition(":")
+        masked.append(f"{name}: {MASKED_VALUE}" if separator else MASKED_VALUE)
+    return masked
+
+
 class OwnerResponseField(TypedDict):
     id: int
     slug: str
@@ -33,7 +48,12 @@ class OwnerResponseField(TypedDict):
 class SentryAppSerializerResponse(TypedDict):
     allowedOrigins: list[str]
     avatars: list[SentryAppAvatarSerializerResponse]
+    # Webhook subscriptions were originally to whole resources ("issue") but can
+    # now also be to individual events ("issue.resolved"). `events` keeps the
+    # original resource-level view by consolidating the stored events;
+    # `webhookEvents` is the exact stored list.
     events: set[str]
+    webhookEvents: list[str]
     featureData: list[str]
     isAlertable: bool
     metadata: str
@@ -44,8 +64,11 @@ class SentryAppSerializerResponse(TypedDict):
     status: str
     uuid: str
     verifyInstall: bool
+    # Header values are masked unless the viewer is allowed to see secrets.
+    webhookHeaders: list[str]
 
     # Optional fields
+    isDisabled: NotRequired[bool]
     author: NotRequired[str | None]
     overview: NotRequired[str | None]
     popularity: NotRequired[int | None]
@@ -83,13 +106,27 @@ class SentryAppSerializer(Serializer):
         user_orgs = user_service.get_organizations(user_id=user.id)
         user_org_ids = {uo.id for uo in user_orgs}
 
+        # Fetch organization contexts for unique owner_ids where user is a member.
+        # This deduplicates the calls - typically all items share the same owner_id
+        # (e.g., OrganizationSentryAppsEndpoint filters by single org), so this
+        # reduces N calls to 1.
+        owner_contexts: dict[int, RpcUserOrganizationContext] = {}
+        unique_owner_ids = {i.owner_id for i in item_list if i.owner_id in user_org_ids}
+        for owner_id in unique_owner_ids:
+            owner_context = organization_service.get_organization_by_id(
+                id=owner_id, user_id=user.id
+            )
+            if owner_context:
+                owner_contexts[owner_id] = owner_context
+
         return {
             item: {
                 "features": app_feature_attrs.get(item.id, set()),
-                "avatars": app_avatar_attrs.get(item.id, set()),
+                "avatars": app_avatar_attrs.get(item.id, []),
                 "owner": organizations.get(item.owner_id, None),
                 "application": applications.get(item.application_id, None),
                 "user_org_ids": user_org_ids,
+                "owner_context": owner_contexts.get(item.owner_id, None),
             }
             for item in item_list
         }
@@ -109,13 +146,15 @@ class SentryAppSerializer(Serializer):
             allowedOrigins=application.get_allowed_origins(),
             author=obj.author,
             avatars=serialize(
-                objects=attrs.get("avatars"),
+                objects=attrs["avatars"],
                 user=user,
                 serializer=ResponseSentryAppAvatarSerializer(),
             ),
             events=consolidate_events(obj.events),
+            webhookEvents=sorted(obj.events),
             featureData=[],
             isAlertable=obj.is_alertable,
+            isDisabled=obj.is_disabled,
             metadata=obj.metadata,
             name=obj.name,
             overview=obj.overview,
@@ -128,6 +167,9 @@ class SentryAppSerializer(Serializer):
             uuid=obj.uuid,
             verifyInstall=obj.verify_install,
             webhookUrl=obj.webhook_url,
+            # Header values are write-only after save; masked values can still be
+            # resubmitted unchanged because the updater preserves stored values.
+            webhookHeaders=mask_webhook_header_values(obj.webhook_headers),
         )
 
         if obj.status != SentryAppStatus.INTERNAL:
@@ -138,6 +180,7 @@ class SentryAppSerializer(Serializer):
 
         owner = attrs["owner"]
         user_org_ids = attrs["user_org_ids"]
+        owner_context = attrs["owner_context"]
 
         if owner:
             # TODO(schew2381): Check if superuser needs this for Sentry Apps in the UI.
@@ -147,11 +190,7 @@ class SentryAppSerializer(Serializer):
             if elevated_user or owner.id in user_org_ids:
                 is_secret_visible = obj.date_added > timezone.now() - timedelta(minutes=5)
 
-                owner_context = organization_service.get_organization_by_id(
-                    id=owner.id, user_id=user.id
-                )
-
-                assert obj.application, "Sentry App must have an associated ApiApplication"
+                assert application, "Sentry App must have an associated ApiApplication"
 
                 client_secret = MASKED_VALUE
                 if elevated_user or (
@@ -160,11 +199,11 @@ class SentryAppSerializer(Serializer):
                     and "org:write" in owner_context.member.scopes
                     and obj.show_auth_info(owner_context.member)
                 ):
-                    client_secret = obj.application.client_secret
+                    client_secret = application.client_secret
 
                 data.update(
                     {
-                        "clientId": obj.application.client_id,
+                        "clientId": application.client_id,
                         "clientSecret": client_secret if is_secret_visible else None,
                         "owner": {"id": owner.id, "slug": owner.slug},
                     }

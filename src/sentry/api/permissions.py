@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from django.conf import settings
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated  # noqa: S012
 from rest_framework.request import Request
 
 from sentry.api.exceptions import (
+    INSUFFICIENT_SCOPE_ATTR,
     MemberDisabledOverLimit,
     SsoRequired,
     SuperuserRequired,
@@ -24,12 +27,25 @@ from sentry.organizations.services.organization import (
     RpcUserOrganizationContext,
     organization_service,
 )
+from sentry.seer import agent_token
 from sentry.utils import auth
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from rest_framework.views import APIView
 
     from sentry.models.organization import Organization
+
+
+def _least_privileged_scope(allowed_scopes: set[str]) -> str | None:
+    """Choose the weakest user-grantable scope; break unrelated ties deterministically."""
+    grantable_scopes = allowed_scopes - settings.SENTRY_TOKEN_ONLY_SCOPES
+    for scope in sorted(grantable_scopes):
+        implied = set(settings.SENTRY_SCOPE_HIERARCHY_MAPPING.get(scope, ()))
+        if not implied.intersection(grantable_scopes - {scope}):
+            return scope
+    return min(grantable_scopes) if grantable_scopes else None
 
 
 class RelayPermission(BasePermission):
@@ -118,7 +134,23 @@ class ScopedPermission(BasePermission):
         assert request.method is not None
         allowed_scopes = set(self.scope_map.get(request.method, []))
         current_scopes = request.auth.get_scopes()
-        return any(s in allowed_scopes for s in current_scopes)
+        if any(s in allowed_scopes for s in current_scopes):
+            return True
+        if allowed_scopes:
+            # Token-authorized (request.auth is set) but under-scoped. Record the required
+            # scopes so permission_denied can advertise them via RFC 6750 insufficient_scope;
+            # has_permission itself stays a plain bool. (Skipped when no scope could satisfy
+            # the method, e.g. an unset scope_map entry, to avoid an empty challenge.)
+            unsatisfied_scopes = allowed_scopes
+            if agent_token.is_agent_auth(request.auth):
+                required_scope = _least_privileged_scope(allowed_scopes)
+                if required_scope is None:
+                    unsatisfied_scopes = set()
+                else:
+                    unsatisfied_scopes = {required_scope}
+            if unsatisfied_scopes:
+                setattr(request, INSUFFICIENT_SCOPE_ATTR, unsatisfied_scopes)
+        return False
 
     def has_object_permission(self, request: Request, view: APIView, obj: Any) -> bool:
         return False
@@ -153,6 +185,8 @@ class SentryPermission(ScopedPermission):
         from sentry.api.base import logger
 
         user_id = request.user.id if request.user else None
+        agent_auth = request.auth if agent_token.is_agent_auth(request.auth) else None
+
         org_context: RpcUserOrganizationContext | None
         if isinstance(organization, RpcUserOrganizationContext):
             org_context = organization
@@ -168,13 +202,19 @@ class SentryPermission(ScopedPermission):
         extra = {"organization_id": organization.id, "user_id": user_id}
 
         if request.auth:
-            if request.user and request.user.is_authenticated:
+            if agent_auth is not None:
+                request.access = access.from_rpc_auth(
+                    auth=agent_auth, rpc_user_org_context=org_context
+                )
+            elif request.user and request.user.is_authenticated:
                 request.access = access.from_request_org_and_scopes(
                     request=request,
                     rpc_user_org_context=org_context,
                     scopes=request.auth.get_scopes(),
                 )
             else:
+                # Userless credential (org token, or agent token acting on behalf of a
+                # member). from_rpc_auth dispatches the agent to member-derived access.
                 request.access = access.from_rpc_auth(
                     auth=request.auth, rpc_user_org_context=org_context
                 )
@@ -200,9 +240,10 @@ class SentryPermission(ScopedPermission):
             rpc_user_org_context=org_context,
         )
 
-        if auth.is_user_signed_request(request):
-            # if the user comes from a signed request
-            # we let them pass if sso is enabled
+        if auth.is_user_signed_request(request) or auth.is_user_from_viewer_context(request):
+            # Signed requests and viewer-context-authenticated service
+            # callbacks already carry a trusted assertion of user identity, so
+            # they should not depend on browser-session SSO completion.
             logger.info(
                 "access.signed-sso-passthrough",
                 extra=extra,
@@ -345,9 +386,44 @@ class DemoSafePermission(SentryPermission):
         return super().has_object_permission(request, view, obj)
 
 
+class DisallowImpersonatedTokenCreation(BasePermission):
+    """
+    Blocks non-safe requests (POST, PUT, DELETE) during impersonation sessions.
+    Prevents creating/modifying/revoking tokens as another user.
+    """
+
+    def has_permission(self, request: Request, view: object) -> bool:
+        if request.method in SAFE_METHODS:
+            return True
+        actual_user = getattr(request, "actual_user", None)
+        if actual_user is not None:
+            logger.warning(
+                "impersonation.token_creation_blocked",
+                extra={
+                    "actual_user_id": actual_user.id,
+                    "impersonated_user_id": request.user.id,
+                    "method": request.method,
+                    "path": request.path,
+                },
+            )
+            return False
+        return True
+
+
+class DisallowAgentToken(BasePermission):
+    def has_permission(self, request: Request, view: object) -> bool:
+        return not agent_token.is_agent_auth(request.auth)
+
+
 class SentryIsAuthenticated(IsAuthenticated):
     """
     Used to deny access for demo users in both view and object permission checks.
+
+    WARNING: Setting ``permission_classes = (SentryIsAuthenticated,)`` on an endpoint grants
+    access to ANY authenticated user, regardless of the endpoint's base class. For example,
+    an endpoint that extends ``OrganizationEndpoint`` will NOT enforce organization membership
+    or scoped access — any logged-in user can call it. Only use this permission class on
+    endpoints that are intentionally open to all authenticated users.
     """
 
     def has_permission(self, request: Request, view: APIView) -> bool:

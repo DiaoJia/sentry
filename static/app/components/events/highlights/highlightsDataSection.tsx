@@ -1,61 +1,60 @@
-import {useCallback, useMemo, useRef} from 'react';
+import {useMemo, useRef} from 'react';
 import {css, type Theme, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {openModal} from 'sentry/actionCreators/modal';
+import {Button} from '@sentry/scraps/button';
+import {Flex, Grid} from '@sentry/scraps/layout';
+import {useModal} from '@sentry/scraps/modal';
+
 import {hasEveryAccess} from 'sentry/components/acl/access';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import ErrorBoundary from 'sentry/components/errorBoundary';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import {ContextCardContent} from 'sentry/components/events/contexts/contextCard';
 import {getContextMeta} from 'sentry/components/events/contexts/utils';
 import {
   TreeColumn,
   TreeContainer,
 } from 'sentry/components/events/eventTags/eventTagsTree';
-import EventTagsTreeRow from 'sentry/components/events/eventTags/eventTagsTreeRow';
+import {EventTagsTreeRow} from 'sentry/components/events/eventTags/eventTagsTreeRow';
 import {useIssueDetailsColumnCount} from 'sentry/components/events/eventTags/util';
-import EditHighlightsModal from 'sentry/components/events/highlights/editHighlightsModal';
+import {EditHighlightsModal} from 'sentry/components/events/highlights/editHighlightsModal';
 import {
   EMPTY_HIGHLIGHT_DEFAULT,
   getHighlightContextData,
   getHighlightTagData,
-  HIGHLIGHT_DOCS_LINK,
 } from 'sentry/components/events/highlights/util';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {Placeholder} from 'sentry/components/placeholder';
 import {IconEdit} from 'sentry/icons';
-import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
-import type {Project} from 'sentry/types/project';
+import type {DetailedProject, Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useReplayData from 'sentry/utils/replays/hooks/useReplayData';
-import {useDetailedProject} from 'sentry/utils/useDetailedProject';
+import {useDetailedProject} from 'sentry/utils/project/useDetailedProject';
+import {useReplayData} from 'sentry/utils/replays/hooks/useReplayData';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 interface HighlightsDataSectionProps {
   event: Event;
   project: Project;
-  viewAllRef?: React.RefObject<HTMLElement | null>;
 }
 
 function useOpenEditHighlightsModal({
-  detailedProject,
+  highlightsProject,
   event,
 }: {
   event: Event;
-  detailedProject?: Project;
+  highlightsProject?: DetailedProject;
 }) {
+  const {openModal} = useModal();
+
   const theme = useTheme();
   const organization = useOrganization();
   const isProjectAdmin = hasEveryAccess(['project:admin'], {
     organization,
-    project: detailedProject,
+    project: highlightsProject,
   });
 
   const editProps = useMemo(
@@ -66,34 +65,39 @@ function useOpenEditHighlightsModal({
     [isProjectAdmin]
   );
 
-  const openEditHighlightsModal = useCallback(() => {
+  const openEditHighlightsModal = () => {
+    if (!highlightsProject) {
+      return;
+    }
+
     trackAnalytics('highlights.issue_details.edit_clicked', {organization});
     openModal(
       deps => (
         <EditHighlightsModal
           event={event}
-          highlightContext={detailedProject?.highlightContext ?? {}}
-          highlightTags={detailedProject?.highlightTags ?? []}
-          highlightPreset={detailedProject?.highlightPreset}
-          project={detailedProject!}
+          highlightContext={highlightsProject.highlightContext ?? {}}
+          highlightTags={highlightsProject.highlightTags ?? []}
+          highlightPreset={highlightsProject.highlightPreset}
+          project={highlightsProject}
           {...deps}
         />
       ),
       {modalCss: highlightModalCss(theme)}
     );
-  }, [organization, detailedProject, event, theme]);
+  };
 
   return {openEditHighlightsModal, editProps};
 }
 
-function EditHighlightsButton({project, event}: {event: Event; project: Project}) {
-  const organization = useOrganization();
-  const {isPending, data: detailedProject} = useDetailedProject({
-    orgSlug: organization.slug,
-    projectSlug: project.slug,
-  });
+function EditHighlightsButton({
+  highlightsProject,
+  event,
+}: {
+  event: Event;
+  highlightsProject?: DetailedProject;
+}) {
   const {openEditHighlightsModal, editProps} = useOpenEditHighlightsModal({
-    detailedProject,
+    highlightsProject,
     event,
   });
   return (
@@ -101,38 +105,37 @@ function EditHighlightsButton({project, event}: {event: Event; project: Project}
       size="xs"
       icon={<IconEdit />}
       onClick={openEditHighlightsModal}
-      title={editProps.title}
-      disabled={isPending || editProps.disabled}
+      tooltipProps={{title: editProps.title}}
+      disabled={!highlightsProject || editProps.disabled}
     >
       {t('Edit')}
     </Button>
   );
 }
 
-function HighlightsData({
-  event,
-  project,
-}: Pick<HighlightsDataSectionProps, 'event' | 'project'>) {
+interface HighlightsDataProps {
+  event: Event;
+  highlightsProject: DetailedProject;
+  project: Project;
+}
+
+function HighlightsData({highlightsProject, event, project}: HighlightsDataProps) {
   const organization = useOrganization();
   const location = useLocation();
   const containerRef = useRef<HTMLDivElement>(null);
   const columnCount = useIssueDetailsColumnCount(containerRef);
-  const {isPending, data: detailedProject} = useDetailedProject({
-    orgSlug: organization.slug,
-    projectSlug: project.slug,
-  });
   const {openEditHighlightsModal, editProps} = useOpenEditHighlightsModal({
-    detailedProject,
+    highlightsProject,
     event,
   });
 
   const highlightContext = useMemo(
-    () => detailedProject?.highlightContext ?? project?.highlightContext ?? {},
-    [detailedProject, project]
+    () => highlightsProject.highlightContext ?? {},
+    [highlightsProject]
   );
   const highlightTags = useMemo(
-    () => detailedProject?.highlightTags ?? project?.highlightTags ?? [],
-    [detailedProject, project]
+    () => highlightsProject.highlightTags ?? [],
+    [highlightsProject]
   );
 
   // The API will return default values for tags/context. The only way to have none is to set it to
@@ -204,7 +207,7 @@ function HighlightsData({
       content={content}
       event={event}
       tagKey={content.originalTag.key}
-      project={detailedProject ?? project}
+      project={highlightsProject}
       config={{
         disableActions: content.value === EMPTY_HIGHLIGHT_DEFAULT,
         disableRichValue: content.value === EMPTY_HIGHLIGHT_DEFAULT,
@@ -226,12 +229,8 @@ function HighlightsData({
 
   return (
     <HighlightContainer columnCount={columnCount} ref={containerRef}>
-      {isPending ? (
-        <EmptyHighlights>
-          <HighlightsLoadingIndicator size={50} />
-        </EmptyHighlights>
-      ) : hasDisabledHighlights ? (
-        <EmptyHighlights>
+      {hasDisabledHighlights ? (
+        <EmptyHighlights align="center" justify="center">
           <EmptyHighlightsContent>
             {t("There's nothing here...")}
             <AddHighlightsButton
@@ -250,102 +249,145 @@ function HighlightsData({
   );
 }
 
-export default function HighlightsDataSection({
-  viewAllRef,
-  event,
-  project,
-}: HighlightsDataSectionProps) {
+export function HighlightsDataSection({event, project}: HighlightsDataSectionProps) {
   const organization = useOrganization();
-  const hasStreamlinedUI = useHasStreamlinedUI();
-
-  const viewAllButton =
-    !hasStreamlinedUI && viewAllRef ? (
-      <Button
-        onClick={() => {
-          trackAnalytics('highlights.issue_details.view_all_clicked', {organization});
-          viewAllRef?.current?.scrollIntoView({behavior: 'smooth'});
-        }}
-        size="xs"
-      >
-        {t('View All')}
-      </Button>
-    ) : null;
+  const {
+    data: highlightsProject,
+    isError,
+    refetch,
+  } = useDetailedProject({
+    orgSlug: organization.slug,
+    projectSlug: project.slug,
+  });
 
   return (
-    <InterimSection
-      key="event-highlights"
-      type={SectionKey.HIGHLIGHTS}
-      title={hasStreamlinedUI ? t('Highlights') : t('Event Highlights')}
-      help={tct(
-        'Promoted tags and context items saved for this project. [link:Learn more]',
-        {
-          link: <ExternalLink openInNewTab href={HIGHLIGHT_DOCS_LINK} />,
-        }
-      )}
-      isHelpHoverable
-      data-test-id="event-highlights"
+    <FoldSection
+      sectionKey={SectionKey.HIGHLIGHTS}
+      title={t('Highlights')}
       actions={
         <ErrorBoundary mini>
-          <ButtonBar gap={1}>
-            {viewAllButton}
-            <EditHighlightsButton project={project} event={event} />
-          </ButtonBar>
+          <EditHighlightsButton highlightsProject={highlightsProject} event={event} />
         </ErrorBoundary>
       }
     >
       <ErrorBoundary mini message={t('There was an error loading event highlights')}>
-        <HighlightsData event={event} project={project} />
+        {isError ? (
+          <LoadingError onRetry={refetch} />
+        ) : highlightsProject ? (
+          <HighlightsData
+            event={event}
+            project={project}
+            highlightsProject={highlightsProject}
+          />
+        ) : (
+          <HighlightsDataLoading />
+        )}
       </ErrorBoundary>
-    </InterimSection>
+    </FoldSection>
+  );
+}
+
+function HighlightsDataLoading() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const columnCount = useIssueDetailsColumnCount(containerRef);
+
+  return (
+    <HighlightContainer
+      columnCount={columnCount}
+      ref={containerRef}
+      data-test-id="highlights-loading"
+    >
+      {Array.from({length: columnCount}, (_, columnIndex) => (
+        <HighlightColumn key={columnIndex}>
+          {Array.from({length: 4}, (_row, rowIndex) => (
+            <HighlightLoadingRow key={rowIndex} align="center" columns="subgrid">
+              <HighlightLoadingKey>
+                <HighlightKeyPlaceholder
+                  height="14px"
+                  width={rowIndex % 2 === 0 ? '64%' : '48%'}
+                />
+              </HighlightLoadingKey>
+              <HighlightLoadingValue align="center" columns="1fr">
+                <HighlightValuePlaceholder
+                  height="14px"
+                  width={rowIndex % 2 === 0 ? '82%' : '58%'}
+                />
+              </HighlightLoadingValue>
+            </HighlightLoadingRow>
+          ))}
+        </HighlightColumn>
+      ))}
+    </HighlightContainer>
   );
 }
 
 const HighlightContainer = styled(TreeContainer)<{columnCount: number}>`
   margin-top: 0;
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
-const EmptyHighlights = styled('div')`
-  padding: ${space(2)} ${space(1)};
-  border-radius: ${p => p.theme.borderRadius};
-  border: 1px dashed ${p => p.theme.translucentBorder};
-  background: ${p => p.theme.bodyBackground};
+const EmptyHighlights = styled(Flex)`
+  padding: ${p => p.theme.space.xl} ${p => p.theme.space.md};
+  border-radius: ${p => p.theme.radius.md};
+  border: 1px dashed ${p => p.theme.tokens.border.transparent.neutral.muted};
+  background: ${p => p.theme.tokens.background.secondary};
   grid-column: 1 / -1;
-  display: flex;
   text-align: center;
-  justify-content: center;
-  align-items: center;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const EmptyHighlightsContent = styled('div')`
   text-align: center;
 `;
 
-const HighlightsLoadingIndicator = styled(LoadingIndicator)`
-  margin: 0 auto;
-`;
-
 const AddHighlightsButton = styled(Button)`
   display: block;
-  margin: ${space(1)} auto 0;
+  margin: ${p => p.theme.space.md} auto 0;
 `;
 
 const HighlightColumn = styled(TreeColumn)`
   grid-column: span 1;
 `;
 
+const HighlightLoadingRow = styled(Grid)`
+  border-radius: ${p => p.theme.space.xs};
+  padding-left: ${p => p.theme.space.md};
+  grid-column: span 2;
+  column-gap: ${p => p.theme.space.lg};
+  min-height: 24px;
+
+  :nth-child(odd) {
+    background-color: ${p => p.theme.tokens.background.secondary};
+  }
+`;
+
+const HighlightLoadingKey = styled('div')`
+  grid-column: 1 / 2;
+`;
+
+const HighlightLoadingValue = styled(Grid)`
+  grid-column: 2 / 3;
+`;
+
+const HighlightKeyPlaceholder = styled(Placeholder)`
+  align-self: center;
+`;
+
+const HighlightValuePlaceholder = styled(Placeholder)`
+  align-self: center;
+`;
+
 const HighlightContextContent = styled(ContextCardContent)`
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const highlightModalCss = (theme: Theme) => css`
   width: 850px;
-  padding: 0 ${space(2)};
-  margin: ${space(2)} 0;
+  padding: 0 ${theme.space.xl};
+  margin: ${theme.space.xl} 0;
   /* Disable overriding margins with breakpoint on default modal */
-  @media (min-width: ${theme.breakpoints.medium}) {
-    margin: ${space(2)} 0;
-    padding: 0 ${space(2)};
+  @media (min-width: ${theme.breakpoints.md}) {
+    margin: ${theme.space.xl} 0;
+    padding: 0 ${theme.space.xl};
   }
 `;

@@ -1,20 +1,22 @@
 import {useLayoutEffect} from 'react';
 import * as Sentry from '@sentry/react';
+import {queryOptions, skipToken, useQuery} from '@tanstack/react-query';
 
 import {setActiveOrganization} from 'sentry/actionCreators/organizations';
-import {type ApiResult, Client} from 'sentry/api';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {Client} from 'sentry/api';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {TeamStore} from 'sentry/stores/teamStore';
+import type {ApiResult} from 'sentry/types/api';
 import type {Organization, Team} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import FeatureFlagOverrides from 'sentry/utils/featureFlagOverrides';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {FeatureFlagOverrides} from 'sentry/utils/featureFlagOverrides';
 import {
   addOrganizationFeaturesHandler,
   buildSentryFeaturesHandler,
 } from 'sentry/utils/featureFlags';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
-import {queryOptions, skipToken, useQuery} from 'sentry/utils/queryClient';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
 
 // 30 second stale time
 // Stale time decides if the query should be refetched
@@ -46,6 +48,10 @@ export function useBootstrapOrganizationQuery(orgSlug: string | null) {
       const scope = Sentry.getCurrentScope();
       scope.setTag('organization', organization.id);
       scope.setTag('organization.slug', organization.slug);
+      scope.setAttributes({
+        organization: organization.id,
+        'organization.slug': organization.slug,
+      });
       scope.setContext('organization', {
         id: organization.id,
         slug: organization.slug,
@@ -105,7 +111,9 @@ export function getBootstrapOrganizationQueryOptions(orgSlug: string | null) {
 
           const uncancelableApi = new Client();
           const [org] = await uncancelableApi.requestPromise(
-            `/organizations/${orgSlug}/`,
+            getApiUrl('/organizations/$organizationIdOrSlug/', {
+              path: {organizationIdOrSlug: orgSlug},
+            }),
             {
               includeAllArgs: true,
               query: {detailed: 0, include_feature_flags: 1},
@@ -158,7 +166,9 @@ export function getBoostrapTeamsQueryOptions(orgSlug: string | null) {
 
           const uncancelableApi = new Client();
           const teamsApiResponse = await uncancelableApi.requestPromise(
-            `/organizations/${orgSlug}/teams/`,
+            getApiUrl('/organizations/$organizationIdOrSlug/teams/', {
+              path: {organizationIdOrSlug: orgSlug},
+            }),
             {
               includeAllArgs: true,
             }
@@ -190,7 +200,9 @@ export function getBootstrapProjectsQueryOptions(orgSlug: string | null) {
 
           const uncancelableApi = new Client();
           const [projects] = await uncancelableApi.requestPromise(
-            `/organizations/${orgSlug}/projects/`,
+            getApiUrl('/organizations/$organizationIdOrSlug/projects/', {
+              path: {organizationIdOrSlug: orgSlug},
+            }),
             {
               includeAllArgs: true,
               query: {

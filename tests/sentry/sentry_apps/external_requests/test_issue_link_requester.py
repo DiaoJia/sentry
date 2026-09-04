@@ -1,16 +1,21 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import responses
 from requests import HTTPError
 
 from sentry.integrations.types import EventLifecycleOutcome
+from sentry.sentry_apps.event_types import SentryAppEventType
 from sentry.sentry_apps.external_requests.issue_link_requester import (
     FAILURE_REASON_BASE,
     IssueLinkRequester,
     IssueRequestActionType,
 )
-from sentry.sentry_apps.metrics import SentryAppEventType, SentryAppExternalRequestHaltReason
+from sentry.sentry_apps.metrics import (
+    SentryAppExternalRequestFailureReason,
+    SentryAppExternalRequestHaltReason,
+)
+from sentry.sentry_apps.models.sentry_app import SentryApp
 from sentry.sentry_apps.services.app import app_service
 from sentry.sentry_apps.utils.errors import SentryAppIntegratorError
 from sentry.testutils.asserts import (
@@ -20,13 +25,14 @@ from sentry.testutils.asserts import (
     assert_success_metric,
 )
 from sentry.testutils.cases import TestCase
+from sentry.testutils.silo import assume_test_silo_mode_of
 from sentry.users.services.user.serial import serialize_rpc_user
 from sentry.utils import json
 from sentry.utils.sentry_apps import SentryAppWebhookRequestsBuffer
 
 
 class TestIssueLinkRequester(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.user = self.create_user(name="foo")
@@ -45,8 +51,38 @@ class TestIssueLinkRequester(TestCase):
         self.install = app_service.get_many(filter=dict(installation_ids=[self.orm_install.id]))[0]
 
     @responses.activate
+    def test_sends_custom_headers(self) -> None:
+        with assume_test_silo_mode_of(SentryApp):
+            self.sentry_app.update(webhook_headers=["Authorization: Bearer secret-token"])
+        self.install = app_service.get_many(filter=dict(installation_ids=[self.orm_install.id]))[0]
+
+        responses.add(
+            method=responses.POST,
+            url="https://example.com/link-issue",
+            json={
+                "project": "ProjectName",
+                "webUrl": "https://example.com/project/issue-id",
+                "identifier": "issue-1",
+            },
+            status=200,
+            content_type="application/json",
+        )
+
+        IssueLinkRequester(
+            install=self.install,
+            group=self.group,
+            uri="/link-issue",
+            fields={},
+            user=self.rpc_user,
+            action=IssueRequestActionType("create"),
+        ).run()
+
+        request = responses.calls[0].request
+        assert request.headers["Authorization"] == "Bearer secret-token"
+
+    @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_request(self, mock_record):
+    def test_makes_request(self, mock_record: MagicMock) -> None:
         fields = {"title": "An Issue", "description": "a bug was found", "assignee": "user-1"}
 
         responses.add(
@@ -109,7 +145,7 @@ class TestIssueLinkRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_invalid_response_format(self, mock_record):
+    def test_invalid_response_format(self, mock_record: MagicMock) -> None:
         # missing 'identifier'
         invalid_format = {
             "project": "ProjectName",
@@ -163,7 +199,7 @@ class TestIssueLinkRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_500_response(self, mock_record):
+    def test_500_response(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/link-issue",
@@ -213,7 +249,33 @@ class TestIssueLinkRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_invalid_json_response(self, mock_record):
+    def test_integrator_4xx_surfaces_message_and_status(self, mock_record: MagicMock) -> None:
+        responses.add(
+            method=responses.POST,
+            url="https://example.com/link-issue",
+            json={"message": "Team is required"},
+            status=400,
+        )
+
+        with pytest.raises(SentryAppIntegratorError) as exception_info:
+            IssueLinkRequester(
+                install=self.install,
+                group=self.group,
+                uri="/link-issue",
+                fields={},
+                user=self.rpc_user,
+                action=IssueRequestActionType("create"),
+            ).run()
+
+        error = exception_info.value
+        assert error.status_code == 400
+        assert error.message == "Team is required"
+        # The integrator's message is shown to the user but never logged.
+        assert "Team is required" not in str(error.webhook_context)
+
+    @responses.activate
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_invalid_json_response(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/link-issue",
@@ -263,6 +325,67 @@ class TestIssueLinkRequester(TestCase):
         )
         assert_count_of_metric(
             mock_record=mock_record, outcome=EventLifecycleOutcome.SUCCESS, outcome_count=1
+        )
+        assert_count_of_metric(
+            mock_record=mock_record, outcome=EventLifecycleOutcome.HALTED, outcome_count=1
+        )
+
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_rejects_uri_with_userinfo_injection(self, mock_record: MagicMock) -> None:
+        with pytest.raises(SentryAppIntegratorError) as exc_info:
+            IssueLinkRequester(
+                install=self.install,
+                group=self.group,
+                uri="@attacker.example/path",
+                fields={},
+                user=self.rpc_user,
+                action=IssueRequestActionType("create"),
+            ).run()
+        assert exc_info.value.message == "URI must not alter the webhook host"
+
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_rejects_uri_with_protocol_relative(self, mock_record: MagicMock) -> None:
+        with pytest.raises(SentryAppIntegratorError) as exc_info:
+            IssueLinkRequester(
+                install=self.install,
+                group=self.group,
+                uri="//attacker.example/path",
+                fields={},
+                user=self.rpc_user,
+                action=IssueRequestActionType("create"),
+            ).run()
+        assert exc_info.value.message == "URI must not alter the webhook host"
+
+    @responses.activate
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_no_webhook_url_configured_response(self, mock_record: MagicMock) -> None:
+        with assume_test_silo_mode_of(SentryApp):
+            self.sentry_app.webhook_url = ""
+            self.sentry_app.save()
+
+        # Refresh install to ensure webhook_url is propagated correctly
+        self.install = app_service.get_many(filter=dict(installation_ids=[self.orm_install.id]))[0]
+        with pytest.raises(SentryAppIntegratorError) as exception_info:
+            IssueLinkRequester(
+                install=self.install,
+                group=self.group,
+                uri="/link-issue",
+                fields={},
+                user=self.rpc_user,
+                action=IssueRequestActionType("create"),
+            ).run()
+        assert exception_info.value.message == "Sentry app webhook_url is not configured"
+        assert exception_info.value.webhook_context == {
+            "error_type": FAILURE_REASON_BASE.format(
+                SentryAppExternalRequestFailureReason.MISSING_URL
+            ),
+            "uri": "/link-issue",
+            "sentry_app_slug": self.sentry_app.slug,
+        }
+
+        # SLO assertions
+        assert_count_of_metric(
+            mock_record=mock_record, outcome=EventLifecycleOutcome.STARTED, outcome_count=1
         )
         assert_count_of_metric(
             mock_record=mock_record, outcome=EventLifecycleOutcome.HALTED, outcome_count=1

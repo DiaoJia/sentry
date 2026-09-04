@@ -1,26 +1,32 @@
-import {Fragment, useMemo, useRef} from 'react';
+import {Fragment, useContext, useMemo, useRef} from 'react';
 import styled from '@emotion/styled';
 import type {AriaOptionProps} from '@react-aria/listbox';
 import {useOption} from '@react-aria/listbox';
+import {mergeRefs} from '@react-aria/utils';
 import type {ListState} from '@react-stately/list';
 import type {Node} from '@react-types/shared';
 
-import {Checkbox} from 'sentry/components/core/checkbox';
-import {CheckWrap} from 'sentry/components/core/compactSelect/styles';
-import {InnerWrap, MenuListItem} from 'sentry/components/core/menuListItem';
-import {IconCheckmark} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
-import type {FormSize} from 'sentry/utils/theme';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {ControlContext, HighlightText, LeadWrap} from '@sentry/scraps/compactSelect';
+import {
+  InnerWrap,
+  MenuListItem,
+  type MenuListItemProps,
+} from '@sentry/scraps/menuListItem';
 
-interface ListBoxOptionProps extends AriaOptionProps {
+import {IconCheckmark} from 'sentry/icons';
+
+export interface ListBoxOptionProps extends AriaOptionProps {
   item: Node<any>;
   listState: ListState<any>;
-  size: FormSize;
+  size: MenuListItemProps['size'];
+  'data-index'?: number;
+  ref?: React.Ref<HTMLLIElement>;
   showDetails?: boolean;
 }
 
 /**
- * A <li /> element with accessibile behaviors & attributes.
+ * A <li /> element with accessible behaviors & attributes.
  * https://react-spectrum.adobe.com/react-aria/useListBox.html
  */
 export function ListBoxOption({
@@ -28,12 +34,13 @@ export function ListBoxOption({
   listState,
   size,
   showDetails = true,
+  ref: refProp,
+  'data-index': dataIndex,
 }: ListBoxOptionProps) {
   const ref = useRef<HTMLLIElement>(null);
   const {
     label,
     details,
-    leadingItems,
     trailingItems,
     priority,
     hideCheck,
@@ -49,12 +56,16 @@ export function ListBoxOption({
   const {optionProps, labelProps, isSelected, isFocused, isDisabled, isPressed} =
     useOption({key: item.key, 'aria-label': item['aria-label']}, listState, ref);
 
-  const optionPropsMemo = useMemo(
-    () => optionProps,
-    // Only update optionProps when a relevant state (selection/focus/disable) changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isSelected, isFocused, isDisabled]
-  );
+  const {search, highlightSearch} = useContext(ControlContext);
+  const renderedLabel =
+    highlightSearch && search && typeof label === 'string' ? (
+      <HighlightText text={label} query={search} />
+    ) : (
+      label
+    );
+
+  // Not memoized: optionProps contains press event handlers from useOption/usePress
+  // that capture the current selection state and must stay up-to-date.
 
   const labelPropsMemo = useMemo(
     () => ({...labelProps, as: typeof label === 'string' ? 'p' : 'div'}) as const,
@@ -62,40 +73,45 @@ export function ListBoxOption({
     [labelProps.id, label]
   );
 
+  const leadingItems = (item.props as MenuListItemProps).leadingItems;
   const leadingItemsMemo = useMemo(() => {
     const checkboxSize = size === 'xs' ? 'xs' : 'sm';
 
-    if (hideCheck && !leadingItems) {
-      return null;
+    const leading =
+      typeof leadingItems === 'function'
+        ? leadingItems({disabled: isDisabled, isFocused, isSelected})
+        : leadingItems;
+
+    if (hideCheck) {
+      return leading;
     }
 
     return (
       <Fragment>
-        {!hideCheck && (
-          <CheckWrap multiple={multiple} isSelected={isSelected} aria-hidden="true">
-            {multiple ? (
-              <Checkbox
-                size={checkboxSize}
-                checked={isSelected}
-                disabled={isDisabled}
-                readOnly
-              />
-            ) : (
-              isSelected && <IconCheckmark size={checkboxSize} />
-            )}
-          </CheckWrap>
-        )}
-        {leadingItems}
+        <LeadWrap aria-hidden="true">
+          {multiple ? (
+            <Checkbox
+              size={checkboxSize}
+              checked={isSelected}
+              disabled={isDisabled}
+              readOnly
+            />
+          ) : (
+            isSelected && <IconCheckmark size={checkboxSize} />
+          )}
+        </LeadWrap>
+        {leading ? <LeadWrap aria-hidden="true">{leading}</LeadWrap> : null}
       </Fragment>
     );
-  }, [multiple, isSelected, isDisabled, size, leadingItems, hideCheck]);
+  }, [size, leadingItems, isDisabled, isFocused, isSelected, hideCheck, multiple]);
 
   return (
     <StyledMenuListItem
-      {...optionPropsMemo}
-      ref={ref}
+      {...optionProps}
+      data-index={dataIndex}
+      ref={mergeRefs(ref, refProp)}
       size={size}
-      label={label}
+      label={renderedLabel}
       details={showDetails ? details : null}
       disabled={isDisabled}
       isPressed={isPressed}
@@ -115,6 +131,6 @@ export function ListBoxOption({
 
 const StyledMenuListItem = styled(MenuListItem)`
   > ${InnerWrap} {
-    padding-left: ${space(1)};
+    padding-left: ${p => p.theme.space.md};
   }
 `;

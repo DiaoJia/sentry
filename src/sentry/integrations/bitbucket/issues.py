@@ -6,21 +6,24 @@ from typing import Any, NoReturn
 from django.urls import reverse
 
 from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
+from sentry.integrations.types import IntegrationIssueConfigField
 from sentry.models.group import Group
 from sentry.organizations.services.organization.service import organization_service
 from sentry.shared_integrations.exceptions import (
     ApiError,
+    IntegrationConfigurationError,
     IntegrationFormError,
-    IntegrationInstallationConfigurationError,
 )
 from sentry.silo.base import all_silo_function
 from sentry.users.models.identity import Identity
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
+from sentry.utils.strings import truncatechars
 
 # Generated based on the response from the Bitbucket API
 # Example: {"type": "error", "error": {"message": "Repository has no issue tracker."}}
 BITBUCKET_HALT_ERROR_CODES = ["Repository has no issue tracker.", "Resource not found"]
+BITBUCKET_MAX_TITLE_LENGTH = 255
 
 
 ISSUE_TYPES = (
@@ -50,7 +53,7 @@ class BitbucketIssuesSpec(SourceCodeIssueIntegration):
     @all_silo_function
     def get_create_issue_config(
         self, group: Group | None, user: User | RpcUser, **kwargs
-    ) -> list[dict[str, Any]]:
+    ) -> list[IntegrationIssueConfigField]:
         kwargs["link_referrer"] = "bitbucket_integration"
 
         if group:
@@ -66,11 +69,18 @@ class BitbucketIssuesSpec(SourceCodeIssueIntegration):
             org = org_context.organization
 
         params = kwargs.pop("params", {})
-        default_repo, repo_choices = self.get_repository_choices(group, params, **kwargs)
+        default_repo, repo_choices = self.get_repository_choices(group, params)
 
         autocomplete_url = reverse(
             "sentry-extensions-bitbucket-search", args=[org.slug, self.model.id]
         )
+
+        title_field = next((field for field in fields if field["name"] == "title"), None)
+        if title_field:
+            title_field["maxLength"] = BITBUCKET_MAX_TITLE_LENGTH
+            title_field["default"] = truncatechars(
+                title_field["default"], BITBUCKET_MAX_TITLE_LENGTH
+            )
 
         return [
             {
@@ -102,7 +112,7 @@ class BitbucketIssuesSpec(SourceCodeIssueIntegration):
 
     def get_link_issue_config(self, group: Group, **kwargs) -> list[dict[str, Any]]:
         params = kwargs.pop("params", {})
-        default_repo, repo_choices = self.get_repository_choices(group, params, **kwargs)
+        default_repo, repo_choices = self.get_repository_choices(group, params)
 
         org = group.organization
         autocomplete_url = reverse(
@@ -134,16 +144,14 @@ class BitbucketIssuesSpec(SourceCodeIssueIntegration):
                 "default": "",
                 "type": "textarea",
                 "required": False,
-                "help": (
-                    "Leave blank if you don't want to " "add a comment to the Bitbucket issue."
-                ),
+                "help": ("Leave blank if you don't want to add a comment to the Bitbucket issue."),
             },
         ]
 
     def raise_error(self, exc: Exception, identity: Identity | None = None) -> NoReturn:
         if isinstance(exc, ApiError) and exc.json:
             if (message := exc.json.get("error", {}).get("message")) in BITBUCKET_HALT_ERROR_CODES:
-                raise IntegrationInstallationConfigurationError(message)
+                raise IntegrationConfigurationError(message)
         super().raise_error(exc, identity)
 
     def create_issue(self, data, **kwargs):

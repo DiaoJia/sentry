@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from django.db import models
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import BoundedBigIntegerField, Model, region_silo_model, sane_repr
+from sentry.db.models import BoundedBigIntegerField, Model, cell_silo_model, sane_repr
 from sentry.db.models.manager.base import BaseManager
 
 if TYPE_CHECKING:
@@ -24,14 +24,26 @@ class CommitAuthorManager(BaseManager["CommitAuthor"]):
         return super().get_or_create(defaults=defaults, email=email, **kwargs)
 
 
-@region_silo_model
+@cell_silo_model
 class CommitAuthor(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
     organization_id = BoundedBigIntegerField(db_index=True)
+    # display name
     name = models.CharField(max_length=128, null=True)
     email = models.CharField(max_length=200)
+
+    # Format varies by provider:
+    # - GitHub/GitHub Enterprise: "github:username", "github_enterprise:username"
+    # - Other providers: null
+    # - Legacy data(?): integer (rare)
     external_id = models.CharField(max_length=164, null=True)
+
+    # Last time we queried the author's public profile email from the SCM API
+    # (e.g. GitHub) in an attempt to create an ExternalActor mapping. Null means
+    # never queried. Used to rate-limit these expensive lookups so we only retry
+    # stale authors. See sentry.integrations.github.tasks.query_commit_author_public_emails.
+    public_email_queried_at = models.DateTimeField(null=True)
 
     objects: ClassVar[CommitAuthorManager] = CommitAuthorManager()
 
@@ -62,3 +74,13 @@ class CommitAuthor(Model):
             ).values_list("user_id", flat=True)
         )
         return [u for u in users if u.id in org_member_user_ids]
+
+    def get_username_from_external_id(self) -> str | None:
+        """
+        Note: only works for GitHub and GitHub Enterprise
+        """
+        return (
+            self.external_id.split(":", 1)[1]
+            if self.external_id and ":" in self.external_id
+            else None
+        )

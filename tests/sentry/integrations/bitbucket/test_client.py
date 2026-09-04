@@ -26,7 +26,7 @@ BITBUCKET_CODEOWNERS = {
 
 @control_silo_test
 class BitbucketApiClientTest(TestCase, BaseTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.integration = self.create_integration(
             organization=self.organization,
@@ -48,7 +48,7 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
         self.install = install
         self.bitbucket_client: BitbucketApiClient = self.install.get_client()
 
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.repo = Repository.objects.create(
                 provider="bitbucket",
                 name="sentryuser/newsdiffs",
@@ -58,7 +58,7 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
             )
 
     @freeze_time("2023-01-01 01:01:01")
-    def test_finalize_request(self):
+    def test_finalize_request(self) -> None:
         method = "GET"
         username = self.integration.metadata["uuid"]
         path = BitbucketAPIPath.repositories.format(username=username)
@@ -67,11 +67,14 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
             method=method, url=f"{self.bitbucket_client.base_url}{path}", params=params
         ).prepare()
         self.bitbucket_client.finalize_request(prepared_request=prepared_request)
-        raw_jwt = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJ0ZXN0c2VydmVyLmJpdGJ1Y2tldCIsImlhdCI6MTY3MjUzNDg2MSwiZXhwIjoxNjcyNTM1MTYxLCJxc2giOiJiMGQxYzk0NjRhZGZhOWZlYzg5ZjRmMGM3YjY5MzAxMmZhYTdmN2EyMDRkNzU5NjJkY2FjZGRhM2M2MjY4NzViIiwic3ViIjoiY29ubmVjdGlvbjoxMjMifQ.E3xU7-AgZ2sM-s_yoGAiOGmFZQg63IJJ76YrDwk2qBw"
-        assert prepared_request.headers["Authorization"] == f"JWT {raw_jwt}"
+
+        # Extract JWT from Authorization header
+        auth_header = prepared_request.headers["Authorization"]
+        assert auth_header.startswith("JWT ")
+        actual_jwt = auth_header.split(" ", 1)[1]
 
         decoded_jwt = jwt.decode(
-            raw_jwt,
+            actual_jwt,
             key=self.integration.metadata["shared_secret"],
             algorithms=["HS256"],
         )
@@ -84,7 +87,7 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
         }
 
     @responses.activate
-    def test_check_file(self):
+    def test_check_file(self) -> None:
         path = "src/sentry/integrations/bitbucket/client.py"
         version = "master"
         url = f"https://api.bitbucket.org/2.0/repositories/{self.repo.name}/src/{version}/{path}"
@@ -100,7 +103,7 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
         assert resp.status_code == 200
 
     @responses.activate
-    def test_check_no_file(self):
+    def test_check_no_file(self) -> None:
         path = "src/santry/integrations/bitbucket/client.py"
         version = "master"
         url = f"https://api.bitbucket.org/2.0/repositories/{self.repo.name}/src/{version}/{path}"
@@ -111,7 +114,7 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
             self.bitbucket_client.check_file(self.repo, path, version)
 
     @responses.activate
-    def test_get_stacktrace_link(self):
+    def test_get_stacktrace_link(self) -> None:
         path = "/src/sentry/integrations/bitbucket/client.py"
         version = "master"
         url = f"https://api.bitbucket.org/2.0/repositories/{self.repo.name}/src/{version}/{path.lstrip('/')}"
@@ -129,14 +132,14 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
         )
 
     @responses.activate
-    def test_get_codeowner_file(self):
+    def test_get_codeowner_file(self) -> None:
         self.config = self.create_code_mapping(
             repo=self.repo,
             project=self.project,
         )
 
         path = ".bitbucket/CODEOWNERS"
-        url = f"https://api.bitbucket.org/2.0/repositories/{self.config.repository.name}/src/{self.config.default_branch}/{path}"
+        url = f"https://api.bitbucket.org/2.0/repositories/{self.config.project_repository.repository.name}/src/{self.config.default_branch}/{path}"
 
         responses.add(
             method=responses.HEAD,
@@ -151,6 +154,6 @@ class BitbucketApiClientTest(TestCase, BaseTestCase):
         )
 
         result = self.install.get_codeowner_file(
-            self.config.repository, ref=self.config.default_branch
+            self.config.project_repository.repository, ref=self.config.default_branch
         )
         assert result == BITBUCKET_CODEOWNERS

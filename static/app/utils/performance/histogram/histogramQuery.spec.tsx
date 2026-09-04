@@ -2,8 +2,8 @@ import {Fragment} from 'react';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import EventView from 'sentry/utils/discover/eventView';
-import HistogramQuery from 'sentry/utils/performance/histogram/histogramQuery';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {HistogramQuery} from 'sentry/utils/performance/histogram/histogramQuery';
 
 function renderHistogram({isLoading, error, histograms}: any) {
   if (isLoading) {
@@ -28,9 +28,9 @@ function renderHistogram({isLoading, error, histograms}: any) {
   );
 }
 
-describe('HistogramQuery', function () {
+describe('HistogramQuery', () => {
   let eventView: any, location: any;
-  beforeEach(function () {
+  beforeEach(() => {
     location = {
       pathname: '/',
       query: {},
@@ -45,11 +45,11 @@ describe('HistogramQuery', function () {
     });
   });
 
-  it('fetches data on mount', async function () {
+  it('fetches data on mount', async () => {
     const getMock = MockApiClient.addMockResponse({
       url: '/organizations/test-org/events-histogram/',
       body: {
-        'measurements.fp': new Array(10)
+        'measurements.fp': Array.from({length: 10})
           .fill(null)
           .map((_, i) => ({bin: i * 1000, count: i})),
       },

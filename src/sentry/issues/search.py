@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import functools
-import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from copy import deepcopy
-from typing import Any, Optional, Protocol, TypedDict
+from typing import Any, Optional, Protocol, TypedDict, TypeGuard
 
 from sentry.api.event_search import SearchFilter, SearchKey, SearchValue
 from sentry.issues import grouptype
 from sentry.issues.grouptype import (
+    PERFORMANCE_ISSUE_CATEGORIES,
     GroupCategory,
-    GroupType,
     get_all_group_type_ids,
     get_group_type_by_type_id,
 )
@@ -54,7 +53,7 @@ GroupSearchStrategy = Callable[
         SearchQueryPartial,
         Sequence[Any],
         Sequence[Any],
-        int,
+        Organization,
         list[int],
         Optional[Sequence[str]],
         Optional[Sequence[int]],
@@ -70,6 +69,27 @@ class MergeableRow(TypedDict, total=False):
     group_id: int
 
 
+class _IssueSearchFilterValue(Protocol):
+    """constrained via sentry.issues.issue_search"""
+
+    @property
+    def raw_value(self) -> Sequence[int]: ...
+
+
+class _IssueSearchFilter(Protocol):
+    @property
+    def key(self) -> SearchKey: ...
+    @property
+    def is_negation(self) -> bool: ...
+    @property
+    def value(self) -> _IssueSearchFilterValue: ...
+
+
+def _is_issue_type_filter(search_filter: SearchFilter) -> TypeGuard[_IssueSearchFilter]:
+    # via sentry.issues.issue_search
+    return search_filter.key.name in ("issue.category", "issue.type")
+
+
 def group_categories_from(
     search_filters: Sequence[SearchFilter] | None,
 ) -> set[int]:
@@ -82,7 +102,7 @@ def group_categories_from(
     # determine which dataset to fan-out to based on the search filter criteria provided
     # if its unspecified, we have to query all datasources
     for search_filter in search_filters or ():
-        if search_filter.key.name in ("issue.category", "issue.type"):
+        if _is_issue_type_filter(search_filter):
             if search_filter.is_negation:
                 # get all group categories except the ones in the negation filter
                 group_categories.update(
@@ -109,7 +129,7 @@ def group_types_from(
     # if no relevant filters, return none to signify we should query all group types
     if not any(sf.key.name in ("issue.category", "issue.type") for sf in search_filters or ()):
         # Filters some types from the default search
-        all_group_type_objs: list[GroupType] = [
+        all_group_type_objs = [
             GT_REGISTRY.get_by_type_id(id) for id in GT_REGISTRY.get_all_group_type_ids()
         ]
         return {gt.type_id for gt in all_group_type_objs if gt.in_default_search}
@@ -118,7 +138,7 @@ def group_types_from(
     include_group_types = set(get_all_group_type_ids())
     for search_filter in search_filters or ():
         # note that for issue.category, the raw value becomes the full list of group type ids mapped from the category
-        if search_filter.key.name in ("issue.category", "issue.type"):
+        if _is_issue_type_filter(search_filter):
             if search_filter.is_negation:
                 include_group_types -= set(search_filter.value.raw_value)
             else:
@@ -130,7 +150,7 @@ def _query_params_for_error(
     query_partial: SearchQueryPartial,
     selected_columns: Sequence[Any],
     aggregations: Sequence[Any],
-    organization_id: int,
+    organization: Organization,
     project_ids: list[int],
     environments: Sequence[str] | None,
     group_ids: Sequence[int] | None,
@@ -144,7 +164,7 @@ def _query_params_for_error(
         "event.type",
         "!=",
         "transaction",
-        organization_id,
+        organization.id,
         project_ids,
         environments,
         conditions,
@@ -166,58 +186,56 @@ def _query_params_for_generic(
     query_partial: SearchQueryPartial,
     selected_columns: Sequence[Any],
     aggregations: Sequence[Any],
-    organization_id: int,
+    organization: Organization,
     project_ids: list[int],
     environments: Sequence[str] | None,
     group_ids: Sequence[int] | None,
     filters: Mapping[str, Sequence[int]],
     conditions: Sequence[Any],
     actor: Any | None = None,
-    categories: Sequence[GroupCategory] | None = None,
+    *,
+    categories: Sequence[GroupCategory],
+    visible_group_type_ids: Collection[int],
 ) -> SnubaQueryParams | None:
-    organization = Organization.objects.filter(id=organization_id).first()
-    if organization:
-        if categories is None:
-            logging.error("Category is required in _query_params_for_generic")
-            return None
+    group_types = {
+        type_id
+        for category in categories
+        for type_id in grouptype.registry.get_by_category(category.value)
+        if type_id in visible_group_type_ids
+    }
+    if not group_types:
+        return None
 
-        category_ids = {gc.value for gc in categories}
-        group_types = {
-            gt.type_id
-            for gt in grouptype.registry.get_visible(organization, actor)
-            if gt.category in category_ids
-        }
-        if not group_types:
-            return None
+    filters = {"occurrence_type_id": list(group_types), **filters}
+    if group_ids:
+        filters["group_id"] = sorted(group_ids)
 
-        filters = {"occurrence_type_id": list(group_types), **filters}
-        if group_ids:
-            filters["group_id"] = sorted(group_ids)
+    params = query_partial(
+        dataset=Dataset.IssuePlatform,
+        selected_columns=selected_columns,
+        filter_keys=filters,
+        conditions=conditions,
+        aggregations=aggregations,
+        condition_resolver=functools.partial(
+            snuba.get_snuba_column_name, dataset=Dataset.IssuePlatform
+        ),
+    )
 
-        params = query_partial(
-            dataset=Dataset.IssuePlatform,
-            selected_columns=selected_columns,
-            filter_keys=filters,
-            conditions=conditions,
-            aggregations=aggregations,
-            condition_resolver=functools.partial(
-                snuba.get_snuba_column_name, dataset=Dataset.IssuePlatform
-            ),
-        )
-
-        return SnubaQueryParams(**params)
-    return None
+    return SnubaQueryParams(**params)
 
 
-def get_search_strategies() -> dict[int, GroupSearchStrategy]:
-    strategies: dict[int, GroupSearchStrategy] = {}
-    for group_category in GroupCategory:
-        if group_category == GroupCategory.ERROR:
-            strategy = _query_params_for_error
-        else:
-            strategy = functools.partial(_query_params_for_generic, categories=[group_category])
-        strategies[group_category.value] = strategy
-    return strategies
+def get_search_strategy(
+    group_categories: Sequence[GroupCategory],
+    visible_group_type_ids: Collection[int],
+) -> GroupSearchStrategy:
+    if len(group_categories) == 1 and group_categories[0] == GroupCategory.ERROR:
+        return _query_params_for_error
+    assert GroupCategory.ERROR not in group_categories
+    return functools.partial(
+        _query_params_for_generic,
+        categories=group_categories,
+        visible_group_type_ids=visible_group_type_ids,
+    )
 
 
 def _update_profiling_search_filters(
@@ -239,12 +257,10 @@ def _update_profiling_search_filters(
 
 
 SEARCH_FILTER_UPDATERS: Mapping[int, GroupSearchFilterUpdater] = {
-    GroupCategory.PERFORMANCE.value: lambda search_filters: [
-        # need to remove this search filter, so we don't constrain the returned transactions
-        sf
-        for sf in _update_profiling_search_filters(search_filters)
-        if sf.key.name != "message"
-    ],
+    **{
+        category.value: _update_profiling_search_filters
+        for category in PERFORMANCE_ISSUE_CATEGORIES
+    },
     GroupCategory.PROFILE.value: _update_profiling_search_filters,
 }
 

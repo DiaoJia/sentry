@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import responses
+from django.core.cache import cache
 from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory
 from django.urls import reverse
@@ -10,16 +11,16 @@ from sentry.middleware.integrations.classifications import IntegrationClassifica
 from sentry.middleware.integrations.parsers.vsts import VstsRequestParser
 from sentry.testutils.cases import TestCase
 from sentry.testutils.outbox import assert_no_webhook_payloads, assert_webhook_payloads_for_mailbox
-from sentry.testutils.silo import control_silo_test, create_test_regions
+from sentry.testutils.silo import control_silo_test, create_test_cells
 
 
-@control_silo_test(regions=create_test_regions("us"))
+@control_silo_test(cells=create_test_cells("us"))
 class VstsRequestParserTest(TestCase):
     factory = RequestFactory()
     shared_secret = "1234567890"
     path = f"{IntegrationClassification.integration_prefix}vsts/issue-updated/"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user()
         self.organization = self.create_organization(owner=self.user)
@@ -39,7 +40,7 @@ class VstsRequestParserTest(TestCase):
         return HttpResponse(status=200, content="passthrough")
 
     @responses.activate
-    def test_routing_work_item_webhook(self):
+    def test_routing_work_item_webhook(self) -> None:
         # No integration found for request...
         data = deepcopy(WORK_ITEM_UPDATED)
         data["resourceContainers"]["collection"]["id"] = "non-existant"
@@ -71,11 +72,11 @@ class VstsRequestParserTest(TestCase):
         assert_webhook_payloads_for_mailbox(
             request=request,
             mailbox_name=f"vsts:{self.integration.id}",
-            region_names=["us"],
+            cell_names=["us"],
         )
 
     @responses.activate
-    def test_routing_control_paths(self):
+    def test_routing_control_paths(self) -> None:
         config_request = self.factory.get(
             reverse("vsts-extension-configuration"),
             data={"targetId": "1", "targetName": "foo"},
@@ -100,10 +101,10 @@ class VstsRequestParserTest(TestCase):
         assert len(responses.calls) == 0
         assert_no_webhook_payloads()
 
-    def test_get_integration_from_request(self):
-        region_silo_payloads = [WORK_ITEM_UNASSIGNED, WORK_ITEM_UPDATED, WORK_ITEM_UPDATED_STATUS]
+    def test_get_integration_from_request(self) -> None:
+        cell_silo_payloads = [WORK_ITEM_UNASSIGNED, WORK_ITEM_UPDATED, WORK_ITEM_UPDATED_STATUS]
 
-        for payload in region_silo_payloads:
+        for payload in cell_silo_payloads:
             request = self.factory.post(
                 self.path,
                 HTTP_SHARED_SECRET=self.shared_secret,
@@ -125,7 +126,7 @@ class VstsRequestParserTest(TestCase):
         integration = parser.get_integration_from_request()
         assert integration is None
 
-    def test_webhook_outbox_creation(self):
+    def test_webhook_outbox_creation(self) -> None:
         request = self.factory.post(
             self.path,
             data=WORK_ITEM_UPDATED,
@@ -139,5 +140,43 @@ class VstsRequestParserTest(TestCase):
         assert_webhook_payloads_for_mailbox(
             request=request,
             mailbox_name=f"vsts:{self.integration.id}",
-            region_names=["us"],
+            cell_names=["us"],
         )
+
+    def test_webhook_outbox_creation_bucketed(self) -> None:
+        use_buckets_key = f"webhookpayload:vsts:{self.integration.id}:use_buckets"
+        cache.set(use_buckets_key, 1)
+        request = self.factory.post(
+            self.path,
+            data=WORK_ITEM_UPDATED,
+            content_type="application/json",
+            HTTP_SHARED_SECRET=self.shared_secret,
+        )
+        parser = VstsRequestParser(request=request, response_handler=self.get_response)
+
+        assert_no_webhook_payloads()
+        parser.get_response()
+
+        cache.delete(use_buckets_key)
+        assert_webhook_payloads_for_mailbox(
+            request=request,
+            # workItemId 31 % 10
+            mailbox_name=f"vsts:{self.integration.id}:1",
+            cell_names=["us"],
+        )
+
+    def test_mailbox_bucket_id(self) -> None:
+        request = self.factory.post(
+            self.path,
+            data=WORK_ITEM_UPDATED,
+            content_type="application/json",
+            HTTP_SHARED_SECRET=self.shared_secret,
+        )
+        parser = VstsRequestParser(request=request, response_handler=self.get_response)
+
+        assert parser.mailbox_bucket_id(WORK_ITEM_UPDATED) == 31
+        assert parser.mailbox_bucket_id({"resource": {"workItemId": "31"}}) == 31
+        assert parser.mailbox_bucket_id({}) is None
+        assert parser.mailbox_bucket_id({"resource": {}}) is None
+        assert parser.mailbox_bucket_id({"resource": "31"}) is None
+        assert parser.mailbox_bucket_id({"resource": {"workItemId": "abc"}}) is None

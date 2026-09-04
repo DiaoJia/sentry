@@ -3,8 +3,15 @@ from datetime import timedelta
 from django.test import RequestFactory
 from django.utils import timezone
 
+from sentry.hybridcloud.mailbox import MailboxName
 from sentry.hybridcloud.models import WebhookPayload
-from sentry.hybridcloud.models.webhookpayload import BACKOFF_INTERVAL, BACKOFF_RATE, MAX_ATTEMPTS
+from sentry.hybridcloud.models.webhookpayload import (
+    BACKOFF_INTERVAL,
+    BACKOFF_RATE,
+    MAX_ATTEMPTS,
+    DestinationType,
+)
+from sentry.hybridcloud.webhook_event_types import event_type_from_mailbox
 from sentry.testutils.cases import TestCase
 from sentry.testutils.silo import control_silo_test
 
@@ -19,13 +26,12 @@ class WebhookPayloadTest(TestCase):
             content_type="application/json",
         )
         hook = WebhookPayload.create_from_request(
-            region="us",
-            provider="github",
-            identifier=123,
+            destination_type=DestinationType.SENTRY_CELL,
+            mailbox=MailboxName("github", "123", cell="us"),
             request=request,
             integration_id=123,
         )
-        assert hook.mailbox_name == "github:123"
+        assert hook.mailbox_name == "github:us:123"
         assert hook.provider == "github"
         assert hook.request_method == request.method
         assert hook.request_path == request.get_full_path()
@@ -34,6 +40,23 @@ class WebhookPayloadTest(TestCase):
             == '{"Cookie":"","Content-Length":"36","Content-Type":"application/json"}'
         )
         assert hook.request_body == '{"installation": {"id": "github:1"}}'
+
+    def test_create_from_request_cell_scoped(self) -> None:
+        factory = RequestFactory()
+        request = factory.post(
+            "/extensions/github/webhook/",
+            data={"installation": {"id": "github:1"}},
+            content_type="application/json",
+        )
+        hook = WebhookPayload.create_from_request(
+            destination_type=DestinationType.SENTRY_CELL,
+            mailbox=MailboxName("github", "123", cell="us", event_type="check_run", bucket=45),
+            request=request,
+            integration_id=123,
+        )
+        assert hook.mailbox_name == "github:us:123:45:check_run"
+        assert hook.cell_name == "us"
+        assert event_type_from_mailbox("github", hook.mailbox_name) == "check_run"
 
     def test_schedule_next_attempt_moves_forward(self) -> None:
         hook = self.create_webhook_payload("jira:123", "us")
@@ -53,6 +76,6 @@ class WebhookPayloadTest(TestCase):
 
             new_delta = hook.schedule_for.replace(microsecond=0) - start
             assert new_delta <= timedelta(hours=1, minutes=27)
-            assert round(expected_deltas[hook.attempts]) == round(
-                new_delta.total_seconds() / 60
-            ), f"{expected_deltas} attempt: {hook.attempts}"
+            assert round(expected_deltas[hook.attempts]) == round(new_delta.total_seconds() / 60), (
+                f"{expected_deltas} attempt: {hook.attempts}"
+            )

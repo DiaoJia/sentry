@@ -1,128 +1,164 @@
-import {Fragment, useCallback, useMemo} from 'react';
+import {Fragment, useMemo} from 'react';
 import styled from '@emotion/styled';
 import type {LocationDescriptorObject} from 'history';
 
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+
 import Feature from 'sentry/components/acl/feature';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import NotFound from 'sentry/components/errors/notFound';
-import HookOrDefault from 'sentry/components/hookOrDefault';
+import {NotFound} from 'sentry/components/errors/notFound';
 import {SdkDocumentation} from 'sentry/components/onboarding/gettingStartedDoc/sdkDocumentation';
-import type {ProductSolution} from 'sentry/components/onboarding/gettingStartedDoc/types';
+import type {
+  DocsFlow,
+  ProductSolution,
+} from 'sentry/components/onboarding/gettingStartedDoc/types';
 import {platformProductAvailability} from 'sentry/components/onboarding/productSelection';
-import {setPageFiltersStorage} from 'sentry/components/organizations/pageFilters/persistence';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
+import {setPageFiltersStorage} from 'sentry/components/pageFilters/persistence';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
 import {performance as performancePlatforms} from 'sentry/data/platformCategories';
-import type {Platform} from 'sentry/data/platformPickerCategories';
 import {t} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import {space} from 'sentry/styles/space';
-import type {PlatformIntegration, PlatformKey, Project} from 'sentry/types/project';
+import {ConfigStore} from 'sentry/stores/configStore';
+import type {PlatformIntegration, Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {decodeList} from 'sentry/utils/queryString';
+import type {ProjectCreationVariant} from 'sentry/utils/analytics/projectCreationAnalyticsEvents';
+import {decodeList, decodeScalar} from 'sentry/utils/queryString';
+import {useRouteAnalyticsEventNames} from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 import {OtherPlatformsInfo} from './otherPlatformsInfo';
 import {PlatformDocHeader} from './platformDocHeader';
+import {useScmCreateProjectProductSync} from './scmCreateProjectSession';
 
-const ProductUnavailableCTAHook = HookOrDefault({
-  hookName: 'component:product-unavailable-cta',
+const ProductUnavailableCTA = OverrideOrDefault({
+  overrideName: 'component:product-unavailable-cta',
 });
 
 type Props = {
-  currentPlatformKey: PlatformKey;
   platform: PlatformIntegration | undefined;
   project: Project;
 };
 
-export function ProjectInstallPlatform({
-  project,
-  currentPlatformKey,
-  platform: currentPlatform,
-}: Props) {
+type ProjectCreationGettingStartedAnalyticsProps = {
+  platform: string;
+  products: ProductSolution[];
+  projectId: string;
+  variant: ProjectCreationVariant;
+};
+
+function ProjectCreationGettingStartedAnalytics({
+  platform,
+  products,
+  projectId,
+  variant,
+}: ProjectCreationGettingStartedAnalyticsProps) {
+  useRouteAnalyticsEventNames(
+    'project_creation.getting_started_viewed',
+    'Project Creation: Getting Started Viewed'
+  );
+  useRouteAnalyticsParams({platform, products, project_id: projectId, variant});
+
+  return null;
+}
+
+export function ProjectInstallPlatform({project, platform}: Props) {
   const organization = useOrganization();
   const location = useLocation();
   const navigate = useNavigate();
+  const variantQuery = decodeScalar(location.query.projectCreationVariant);
+  const projectCreationVariant =
+    variantQuery === 'scm' || variantQuery === 'legacy' ? variantQuery : undefined;
 
   const isSelfHosted = ConfigStore.get('isSelfHosted');
+
+  const onProductSelectionSync = useScmCreateProjectProductSync(project);
+
+  // Attribute setup-docs analytics from the flow that actually created this
+  // project. Experiment enrollment alone is insufficient: users can visit
+  // getting-started for older or unrelated projects while still enrolled.
+  const docsFlow: DocsFlow | undefined =
+    projectCreationVariant === 'scm'
+      ? 'project-creation-scm'
+      : projectCreationVariant === 'legacy'
+        ? 'project-creation'
+        : undefined;
 
   const products = useMemo(
     () => decodeList(location.query.product ?? []) as ProductSolution[],
     [location.query.product]
   );
 
-  const platform: Platform = {
-    key: currentPlatformKey,
-    id: currentPlatform?.id,
-    name: currentPlatform?.name,
-    link: currentPlatform?.link,
+  const redirectWithProjectSelection = (to: LocationDescriptorObject) => {
+    if (!project?.id) {
+      return;
+    }
+    // We need to persist and pin the project filter
+    // so the selection does not reset on further navigation
+    PageFiltersStore.updateProjects([Number(project?.id)], null);
+    PageFiltersStore.pin('projects', true);
+    setPageFiltersStorage(organization.slug, new Set(['projects']));
+
+    navigate({
+      ...to,
+      query: {
+        ...to.query,
+        project: project?.id,
+      },
+    });
   };
 
-  const redirectWithProjectSelection = useCallback(
-    (to: LocationDescriptorObject) => {
-      if (!project?.id) {
-        return;
-      }
-      // We need to persist and pin the project filter
-      // so the selection does not reset on further navigation
-      PageFiltersStore.updateProjects([Number(project?.id)], null);
-      PageFiltersStore.pin('projects', true);
-      setPageFiltersStorage(organization.slug, new Set(['projects']));
-
-      navigate({
-        ...to,
-        query: {
-          ...to.query,
-          project: project?.id,
-        },
-      });
-    },
-    [navigate, organization.slug, project?.id]
-  );
-
-  if (!platform.id && platform.key !== 'other') {
+  if (!platform) {
     return <NotFound />;
   }
 
-  // because we fall back to 'other' this will always be defined
-  if (!currentPlatform) {
-    return null;
-  }
-
   const issueStreamLink = `/organizations/${organization.slug}/issues/`;
-  const showPerformancePrompt = performancePlatforms.includes(platform.id as PlatformKey);
+  const showPerformancePrompt = performancePlatforms.includes(platform.id);
   const isGettingStarted = window.location.href.indexOf('getting-started') > 0;
   const showDocsWithProductSelection =
-    (platformProductAvailability[platform.key] ?? []).length > 0;
+    (platformProductAvailability[platform.id] ?? []).length > 0;
 
   return (
     <Fragment>
-      {!isSelfHosted && showDocsWithProductSelection && (
-        <ProductUnavailableCTAHook organization={organization} />
+      {projectCreationVariant && (
+        <ProjectCreationGettingStartedAnalytics
+          platform={platform.name ?? 'unknown'}
+          products={products}
+          projectId={project.id}
+          variant={projectCreationVariant}
+        />
       )}
-      <PlatformDocHeader projectSlug={project.slug} platform={platform} />
-      {platform.key === 'other' ? (
+      {!isSelfHosted && showDocsWithProductSelection && (
+        <ProductUnavailableCTA organization={organization} />
+      )}
+      <PlatformDocHeader
+        projectSlug={project.slug}
+        platform={platform}
+        projectCreationVariant={projectCreationVariant}
+      />
+      {platform.id === 'other' ? (
         <OtherPlatformsInfo
           projectSlug={project.slug}
           platform={platform.name ?? 'other'}
         />
       ) : (
         <SdkDocumentation
-          platform={currentPlatform}
+          platform={platform}
           organization={organization}
-          projectSlug={project.slug}
-          projectId={project.id}
+          project={project}
           activeProductSelection={products}
+          onProductSelectionSync={onProductSelectionSync}
+          docsFlow={docsFlow}
         />
       )}
       <div>
         {isGettingStarted && showPerformancePrompt && (
           <Feature
             features="performance-view"
-            hookName="feature-disabled:performance-new-project"
+            overrideName="feature-disabled:performance-new-project"
           >
             {({hasFeature}) => {
               if (hasFeature) {
@@ -130,9 +166,9 @@ export function ProjectInstallPlatform({
               }
               return (
                 <Alert.Container>
-                  <StyledAlert type="info" showIcon>
+                  <StyledAlert variant="info">
                     {t(
-                      `Your selected platform supports performance, but your organization does not have performance enabled.`
+                      'Your selected platform supports performance, but your organization does not have performance enabled.'
                     )}
                   </StyledAlert>
                 </Alert.Container>
@@ -140,16 +176,30 @@ export function ProjectInstallPlatform({
             }}
           </Feature>
         )}
-        <StyledButtonBar gap={1}>
+        <Grid
+          flow={{zero: 'row', xl: 'column'}}
+          align="center"
+          gap="md"
+          marginTop="2xl"
+          width={{zero: 'auto', xl: 'max-content'}}
+        >
           <Button
-            priority="primary"
+            variant="primary"
             onClick={() => {
-              trackAnalytics('onboarding.take_me_to_issues_clicked', {
+              const analyticsParams = {
                 organization,
                 platform: platform.name ?? 'unknown',
                 project_id: project.id,
                 products,
-              });
+              };
+              if (projectCreationVariant) {
+                trackAnalytics('project_creation.take_me_to_issues_clicked', {
+                  ...analyticsParams,
+                  variant: projectCreationVariant,
+                });
+              } else {
+                trackAnalytics('onboarding.take_me_to_issues_clicked', analyticsParams);
+              }
               redirectWithProjectSelection({
                 pathname: issueStreamLink,
               });
@@ -157,23 +207,12 @@ export function ProjectInstallPlatform({
           >
             {t('Take me to Issues')}
           </Button>
-        </StyledButtonBar>
+        </Grid>
       </div>
     </Fragment>
   );
 }
 
-const StyledButtonBar = styled(ButtonBar)`
-  margin-top: ${space(3)};
-  width: max-content;
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    width: auto;
-    grid-row-gap: ${space(1)};
-    grid-auto-flow: row;
-  }
-`;
-
 const StyledAlert = styled(Alert)`
-  margin-top: ${space(2)};
+  margin-top: ${p => p.theme.space.xl};
 `;

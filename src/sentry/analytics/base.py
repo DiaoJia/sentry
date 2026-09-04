@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-__all__ = ("Analytics",)
-
 import abc
-from typing import Any
 
-from sentry.analytics.event import Event
+from sentry.analytics.event import Event, EventEnvelope
 from sentry.utils.services import Service
 
 from .event_manager import default_manager
+
+__all__ = ("Analytics",)
 
 
 class Analytics(Service, abc.ABC):
@@ -16,18 +15,20 @@ class Analytics(Service, abc.ABC):
 
     event_manager = default_manager
 
-    def record(
-        self, event_or_event_type: str | Event | Any, instance: Any | None = None, **kwargs: Any
-    ) -> None:
-        if isinstance(event_or_event_type, str):
-            event = self.event_manager.get(event_or_event_type).from_instance(instance, **kwargs)
-        elif isinstance(event_or_event_type, Event):
-            event = event_or_event_type.from_instance(instance, **kwargs)
-        else:
-            return
-        self.record_event(event)
+    def record(self, event: Event) -> None:
+        """
+        Record an event. Must be an instance of a subclass of `Event`.
 
-    def record_event(self, event: Event) -> None:
+        >>> analytics.record(
+        ...     MyEvent(
+        ...         some_id=123,
+        ...         some_prop="abc"
+        ...     )
+        ... )
+        """
+        self.record_event_envelope(EventEnvelope(event=event))
+
+    def record_event_envelope(self, envelope: EventEnvelope) -> None:
         pass
 
     def setup(self) -> None:

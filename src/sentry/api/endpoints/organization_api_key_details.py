@@ -1,3 +1,5 @@
+from typing import Any
+
 from rest_framework import serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -12,7 +14,10 @@ from sentry.api.bases.organization import (
 )
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.serializers import serialize
+from sentry.api.utils import to_valid_int_id
+from sentry.conf.server import SENTRY_SCOPES
 from sentry.models.apikey import ApiKey
+from sentry.organizations.services.organization.model import RpcOrganization
 
 
 class ApiKeySerializer(serializers.ModelSerializer):
@@ -20,10 +25,18 @@ class ApiKeySerializer(serializers.ModelSerializer):
         model = ApiKey
         fields = ("label", "scope_list", "allowed_origins")
 
+    def validate_scope_list(self, value):
+        invalid_scopes = set(value) - SENTRY_SCOPES
+        if invalid_scopes:
+            raise serializers.ValidationError(
+                f"Invalid scopes: {', '.join(sorted(invalid_scopes))}"
+            )
+        return value
+
 
 @control_silo_endpoint
 class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
-    owner = ApiOwner.ECOSYSTEM
+    owner = ApiOwner.FOUNDATIONS
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
         "GET": ApiPublishStatus.PRIVATE,
@@ -31,7 +44,22 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
     }
     permission_classes = (OrganizationAdminPermission,)
 
-    def get(self, request: Request, organization_context, organization, api_key_id) -> Response:
+    def convert_args(
+        self, request: Request, api_key_id: str, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        args, kwargs = super().convert_args(request, *args, **kwargs)
+        organization = kwargs["organization"]
+        validated_api_key_id = to_valid_int_id("api_key_id", api_key_id, raise_404=True)
+        try:
+            kwargs["api_key"] = ApiKey.objects.get(
+                id=validated_api_key_id, organization_id=organization.id
+            )
+        except ApiKey.DoesNotExist:
+            raise ResourceDoesNotExist
+
+        return (args, kwargs)
+
+    def get(self, request: Request, api_key: ApiKey, **kwargs) -> Response:
         """
         Retrieves API Key details
         `````````````````````````
@@ -41,14 +69,11 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
         :pparam string api_key_id: the ID of the api key to delete
         :auth: required
         """
-        try:
-            api_key = ApiKey.objects.get(id=api_key_id, organization_id=organization.id)
-        except ApiKey.DoesNotExist:
-            raise ResourceDoesNotExist
-
         return Response(serialize(api_key, request.user))
 
-    def put(self, request: Request, organization_context, organization, api_key_id) -> Response:
+    def put(
+        self, request: Request, api_key: ApiKey, organization: RpcOrganization, **kwargs
+    ) -> Response:
         """
         Update an API Key
         `````````````````
@@ -61,12 +86,6 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
         :param string allowed_origins: list of allowed origins
         :auth: required
         """
-
-        try:
-            api_key = ApiKey.objects.get(id=api_key_id, organization_id=organization.id)
-        except ApiKey.DoesNotExist:
-            raise ResourceDoesNotExist
-
         serializer = ApiKeySerializer(api_key, data=request.data, partial=True)
 
         if serializer.is_valid():
@@ -75,7 +94,7 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
             self.create_audit_entry(
                 request=request,
                 organization=organization,
-                target_object=api_key_id,
+                target_object=api_key.id,
                 event=audit_log.get_event_id("APIKEY_EDIT"),
                 data=api_key.get_audit_log_data(),
             )
@@ -84,7 +103,9 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def delete(self, request: Request, organization_context, organization, api_key_id) -> Response:
+    def delete(
+        self, request: Request, api_key: ApiKey, organization: RpcOrganization, **kwargs
+    ) -> Response:
         """
         Deletes an API Key
         ``````````````````
@@ -94,11 +115,7 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
         :pparam string api_key_id: the ID of the api key to delete
         :auth: required
         """
-        try:
-            api_key = ApiKey.objects.get(id=api_key_id, organization_id=organization.id)
-        except ApiKey.DoesNotExist:
-            raise ResourceDoesNotExist
-
+        api_key_id = api_key.id
         audit_data = api_key.get_audit_log_data()
 
         api_key.delete()
@@ -106,7 +123,7 @@ class OrganizationApiKeyDetailsEndpoint(ControlSiloOrganizationEndpoint):
         self.create_audit_entry(
             request,
             organization=organization,
-            target_object=api_key.id,
+            target_object=api_key_id,
             event=audit_log.get_event_id("APIKEY_REMOVE"),
             data=audit_data,
         )

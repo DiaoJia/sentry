@@ -3,14 +3,15 @@ import uniqBy from 'lodash/uniqBy';
 
 import {fetchUserTeams} from 'sentry/actionCreators/teams';
 import type {Client} from 'sentry/api';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
 import type {Team} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
 
 type State = {
   /**
@@ -84,7 +85,6 @@ type Options = {
 
 type FetchTeamOptions = {
   cursor?: State['nextCursor'];
-  ids?: string[];
   lastSearch?: State['lastSearch'];
   limit?: Options['limit'];
   search?: State['lastSearch'];
@@ -98,7 +98,7 @@ type FetchTeamOptions = {
 async function fetchTeams(
   api: Client,
   orgId: string,
-  {slugs, ids, search, limit, lastSearch, cursor}: FetchTeamOptions = {}
+  {slugs, search, limit, lastSearch, cursor}: FetchTeamOptions = {}
 ) {
   const query: {
     cursor?: typeof cursor;
@@ -108,10 +108,6 @@ async function fetchTeams(
 
   if (slugs !== undefined && slugs.length > 0) {
     query.query = slugs.map(slug => `slug:${slug}`).join(' ');
-  }
-
-  if (ids !== undefined && ids.length > 0) {
-    query.query = ids.map(id => `id:${id}`).join(' ');
   }
 
   if (search) {
@@ -130,10 +126,15 @@ async function fetchTeams(
 
   let hasMore: null | boolean = false;
   let nextCursor: null | string = null;
-  const [data, , resp] = await api.requestPromise(`/organizations/${orgId}/teams/`, {
-    includeAllArgs: true,
-    query,
-  });
+  const [data, , resp] = await api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/teams/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
+    {
+      includeAllArgs: true,
+      query,
+    }
+  );
 
   const pageLinks = resp?.getResponseHeader('Link');
   if (pageLinks) {
@@ -196,71 +197,65 @@ export function useTeams({limit, slugs, provideUserTeams}: Options = {}) {
     fetchError: null,
   });
 
-  const loadUserTeams = useCallback(
-    async function () {
-      if (orgId === undefined) {
-        return;
-      }
+  const loadUserTeams = useCallback(async () => {
+    if (orgId === undefined) {
+      return;
+    }
 
-      setState(prev => ({...prev, fetching: true}));
-      try {
-        await fetchUserTeams(api, {orgId});
+    setState(prev => ({...prev, fetching: true}));
+    try {
+      await fetchUserTeams(api, {orgId});
 
-        setState(prev => ({...prev, fetching: false, initiallyLoaded: true}));
-      } catch (err) {
-        console.error(err); // eslint-disable-line no-console
+      setState(prev => ({...prev, fetching: false, initiallyLoaded: true}));
+    } catch (err) {
+      console.error(err); // eslint-disable-line no-console
 
-        setState(prev => ({
-          ...prev,
-          fetching: false,
-          initiallyLoaded: true,
-          fetchError: err,
-        }));
-      }
-    },
-    [api, orgId]
-  );
+      setState(prev => ({
+        ...prev,
+        fetching: false,
+        initiallyLoaded: true,
+        fetchError: err as RequestError,
+      }));
+    }
+  }, [api, orgId]);
 
-  const loadTeamsByQuery = useCallback(
-    async function () {
-      if (orgId === undefined) {
-        return;
-      }
+  const loadTeamsByQuery = useCallback(async () => {
+    if (orgId === undefined) {
+      return;
+    }
 
-      setState(prev => ({...prev, fetching: true}));
-      try {
-        const {results, hasMore, nextCursor} = await fetchTeams(api, orgId, {
-          slugs: slugsToLoad,
-          limit,
-        });
+    setState(prev => ({...prev, fetching: true}));
+    try {
+      const {results, hasMore, nextCursor} = await fetchTeams(api, orgId, {
+        slugs: slugsToLoad,
+        limit,
+      });
 
-        // Unique by `id` to avoid duplicates due to renames and state store data
-        const fetchedTeams = uniqBy<Team>([...results, ...store.teams], ({id}) => id);
-        TeamStore.loadInitialData(fetchedTeams);
+      // Unique by `id` to avoid duplicates due to renames and state store data
+      const fetchedTeams = uniqBy<Team>([...results, ...store.teams], ({id}) => id);
+      TeamStore.loadInitialData(fetchedTeams);
 
-        setState(prev => ({
-          ...prev,
-          hasMore,
-          fetching: false,
-          initiallyLoaded: true,
-          nextCursor,
-        }));
-      } catch (err) {
-        console.error(err); // eslint-disable-line no-console
+      setState(prev => ({
+        ...prev,
+        hasMore,
+        fetching: false,
+        initiallyLoaded: true,
+        nextCursor,
+      }));
+    } catch (err) {
+      console.error(err); // eslint-disable-line no-console
 
-        setState(prev => ({
-          ...prev,
-          fetching: false,
-          initiallyLoaded: true,
-          fetchError: err,
-        }));
-      }
-    },
-    [api, limit, orgId, slugsToLoad, store.teams]
-  );
+      setState(prev => ({
+        ...prev,
+        fetching: false,
+        initiallyLoaded: true,
+        fetchError: err as RequestError,
+      }));
+    }
+  }, [api, limit, orgId, slugsToLoad, store.teams]);
 
   const handleFetchAdditionalTeams = useCallback(
-    async function (search?: string) {
+    async (search?: string) => {
       const lastSearch = state.lastSearch;
       // Use the store cursor if there is no search keyword provided
       const cursor = search ? state.nextCursor : store.cursor;
@@ -306,7 +301,7 @@ export function useTeams({limit, slugs, provideUserTeams}: Options = {}) {
       } catch (err) {
         console.error(err); // eslint-disable-line no-console
 
-        setState(prev => ({...prev, fetching: false, fetchError: err}));
+        setState(prev => ({...prev, fetching: false, fetchError: err as RequestError}));
       }
     },
     [
@@ -322,7 +317,7 @@ export function useTeams({limit, slugs, provideUserTeams}: Options = {}) {
   );
 
   const handleSearch = useCallback(
-    function (search: string) {
+    (search: string) => {
       if (search !== '') {
         return handleFetchAdditionalTeams(search);
       }

@@ -1,17 +1,19 @@
-import {LinkButton} from 'sentry/components/core/button/linkButton';
+import {LinkButton} from '@sentry/scraps/button';
+
 import {SpanEvidenceTraceView} from 'sentry/components/events/interfaces/performance/spanEvidenceTraceView';
 import {IconSettings} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {EventTransaction} from 'sentry/types/event';
 import {
+  AI_DETECTED_ISSUE_TYPES,
   getIssueTypeFromOccurrenceType,
   isOccurrenceBased,
   isTransactionBased,
 } from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import {sanitizeQuerySelector} from 'sentry/utils/sanitizeQuerySelector';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 import {SpanEvidenceKeyValueList} from './spanEvidenceKeyValueList';
 
@@ -21,7 +23,7 @@ interface Props {
   projectSlug: string;
 }
 
-function SpanEvidenceInteriumSection({
+function SpanEvidenceFoldSection({
   children,
   event,
   organization,
@@ -30,16 +32,16 @@ function SpanEvidenceInteriumSection({
   const typeId = event.occurrence?.type;
   const issueType = getIssueTypeFromOccurrenceType(typeId);
   const issueTitle = event.occurrence?.issueTitle;
-  const sanitizedIssueTitle = issueTitle && sanitizeQuerySelector(issueTitle);
-  const hasSetting = isTransactionBased(typeId) && isOccurrenceBased(typeId);
+  const isAiDetected = issueType !== null && AI_DETECTED_ISSUE_TYPES.has(issueType);
+  const hasSetting =
+    (isTransactionBased(typeId) && isOccurrenceBased(typeId)) || isAiDetected;
+  const hashTitle = isAiDetected ? 'AI Detected' : issueTitle;
+  const sanitizedHash = hashTitle && sanitizeQuerySelector(hashTitle);
 
   return (
-    <InterimSection
-      type={SectionKey.SPAN_EVIDENCE}
+    <FoldSection
+      sectionKey={SectionKey.SPAN_EVIDENCE}
       title={t('Span Evidence')}
-      help={t(
-        'Span Evidence identifies the root cause of this issue, found in other similar events within the same issue.'
-      )}
       actions={
         issueType &&
         hasSetting && (
@@ -48,18 +50,24 @@ function SpanEvidenceInteriumSection({
             to={{
               pathname: `/settings/${organization.slug}/projects/${projectSlug}/performance/`,
               query: {issueType},
-              hash: sanitizedIssueTitle,
+              hash: sanitizedHash,
             }}
             size="xs"
             icon={<IconSettings />}
+            tooltipProps={{title: t('Disable detector or adjust thresholds')}}
+            analyticsEventName="Issue Details: Detector Settings Clicked"
+            analyticsEventKey="issue_details.detector_settings_clicked"
+            analyticsParams={{
+              type: issueType,
+            }}
           >
-            {t('Threshold Settings')}
+            {t('Detector Settings')}
           </LinkButton>
         )
       }
     >
       {children}
-    </InterimSection>
+    </FoldSection>
   );
 }
 
@@ -70,7 +78,7 @@ export function SpanEvidenceSection({event, organization, projectSlug}: Props) {
 
   const traceId = event.contexts.trace?.trace_id;
   return (
-    <SpanEvidenceInteriumSection
+    <SpanEvidenceFoldSection
       event={event}
       organization={organization}
       projectSlug={projectSlug}
@@ -83,6 +91,6 @@ export function SpanEvidenceSection({event, organization, projectSlug}: Props) {
           traceId={traceId}
         />
       )}
-    </SpanEvidenceInteriumSection>
+    </SpanEvidenceFoldSection>
   );
 }

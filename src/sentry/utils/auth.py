@@ -4,7 +4,7 @@ import logging
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
@@ -28,11 +28,29 @@ from sentry.users.services.user.service import user_service
 from sentry.utils import metrics
 from sentry.utils.http import absolute_uri
 
+if TYPE_CHECKING:
+    from django.utils.functional import _StrPromise
+
 logger = logging.getLogger("sentry.auth")
 
 _LOGIN_URL: str | None = None
+# Path suffixes that are static assets, not app destinations
+_STATIC_LOGIN_REDIRECT_SUFFIXES = frozenset({".js", ".css", ".map"})
 
 MFA_SESSION_KEY = "mfa"
+REACT_AUTH_COOKIE = "sentry_react_auth"
+
+SUSPENDED_USER_REJECTED_METRIC = "auth.suspended_user.rejected"
+
+
+def record_suspended_user_rejection(path: str) -> None:
+    metrics.incr(
+        SUSPENDED_USER_REJECTED_METRIC,
+        tags={"path": path},
+        skip_internal=True,
+        sample_rate=1.0,
+    )
+
 
 DISABLE_SSO_CHECK_FOR_LOCAL_DEV = getattr(settings, "DISABLE_SSO_CHECK_FOR_LOCAL_DEV", False)
 
@@ -123,17 +141,18 @@ def get_login_url(reset: bool = False) -> str:
     if _LOGIN_URL is None or reset:
         # if LOGIN_URL resolves force login_required to it instead of our own
         # XXX: this must be done as late as possible to avoid idempotent requirements
+        value: str | _StrPromise | None
         try:
             resolve(settings.LOGIN_URL)
         except Exception:
-            _LOGIN_URL = settings.SENTRY_LOGIN_URL
+            value = settings.SENTRY_LOGIN_URL
         else:
-            _LOGIN_URL = settings.LOGIN_URL
+            value = settings.LOGIN_URL
 
-        if _LOGIN_URL is None:
-            _LOGIN_URL = reverse("sentry-login")
+        if value is None:
+            value = reverse("sentry-login")
         # ensure type is coerced to string (to avoid lazy proxies)
-        _LOGIN_URL = str(_LOGIN_URL)
+        _LOGIN_URL = str(value)
     return _LOGIN_URL
 
 
@@ -141,8 +160,8 @@ def initiate_login(
     request: HttpRequest, next_url: str | None = None, referrer: str | None = None
 ) -> None:
     """
-    initiate_login simply clears session cache
-    if provided a `next_url` will append to the session after clearing previous keys
+    Clears existing login state and initializes a new login flow.
+    Optionally sets the post-login redirect destination and referrer.
     """
     for key in ("_next", "_after_2fa", "_pending_2fa", "_referrer"):
         try:
@@ -174,6 +193,8 @@ def _get_login_redirect(request: HttpRequest, default: str | None = None) -> str
     # If there is a pending 2fa authentication bound to the session then
     # we need to go to the 2fa dialog.
     if has_pending_2fa(request):
+        if request.COOKIES.get(REACT_AUTH_COOKIE) == "1":
+            return reverse("sentry-login")
         return reverse("sentry-2fa-dialog")
 
     # If we have a different URL to go after the 2fa flow we want to go to
@@ -194,11 +215,28 @@ def _get_login_redirect(request: HttpRequest, default: str | None = None) -> str
 
 def get_login_redirect(request: HttpRequest, default: str | None = None) -> str:
     login_redirect = _get_login_redirect(request, default)
-    url_prefix = None
     if hasattr(request, "subdomain") and request.subdomain:
         url_prefix = generate_organization_url(request.subdomain)
         return absolute_uri(login_redirect, url_prefix=url_prefix)
     return login_redirect
+
+
+def _path_is_static_asset_redirect(path: str) -> bool:
+    """True if path is a static/asset URL that should never be a redirect destination."""
+    # Strip trailing slashes so `/foo.js.map/` still matches suffixes.
+    normalized = path.lower().rstrip("/") or "/"
+    basename = normalized.rsplit("/", 1)[-1]
+
+    static_prefixes = settings.ANONYMOUS_STATIC_PREFIXES
+    for prefix in static_prefixes:
+        prefix_norm = prefix.lower()
+        prefix_root = prefix_norm.rstrip("/")
+        if normalized == prefix_root or normalized.startswith(prefix_norm):
+            return True
+
+    last_dot = basename.rfind(".")
+    extension = basename[last_dot:] if last_dot != -1 else ""
+    return extension in _STATIC_LOGIN_REDIRECT_SUFFIXES
 
 
 def is_valid_redirect(url: str, allowed_hosts: Iterable[str] | None = None) -> bool:
@@ -207,8 +245,10 @@ def is_valid_redirect(url: str, allowed_hosts: Iterable[str] | None = None) -> b
     if url.startswith(get_login_url()):
         return False
     parsed_url = urlparse(url)
+    if _path_is_static_asset_redirect(parsed_url.path or ""):
+        return False
     url_host = parsed_url.netloc
-    base_hostname = options.get("system.base-hostname")
+    base_hostname = settings.SENTRY_BASE_HOSTNAME
     if url_host.endswith(f".{base_hostname}"):
         if allowed_hosts is None:
             allowed_hosts = {url_host}
@@ -216,6 +256,14 @@ def is_valid_redirect(url: str, allowed_hosts: Iterable[str] | None = None) -> b
             allowed_hosts = set(allowed_hosts)
             allowed_hosts.add(url_host)
     return url_has_allowed_host_and_scheme(url, allowed_hosts=allowed_hosts)
+
+
+def is_valid_relative_redirect(url: object) -> bool:
+    return (
+        isinstance(url, str)
+        and url.startswith("/")
+        and url_has_allowed_host_and_scheme(url, allowed_hosts=set())
+    )
 
 
 def mark_sso_complete(request: HttpRequest, organization_id: int) -> None:
@@ -308,8 +356,17 @@ def login(
     Optionally `after_2fa` can be set to a URL which will be used to override
     the regular session redirect target directly after the 2fa flow.
 
+    `organization_id` identifies the organization whose SSO authentication is
+    being completed. It is preserved through 2FA and marks SSO complete for the
+    organization after login. It must not be used only to select a post-login
+    organization or redirect destination.
+
     Returns boolean indicating if the user was logged in.
     """
+    if getattr(user, "is_suspended", False):
+        record_suspended_user_rejection("session_login")
+        return False
+
     if passed_2fa is None:
         passed_2fa = request.session.get(MFA_SESSION_KEY, "") == str(user.id)
 
@@ -385,7 +442,7 @@ def log_auth_failure(request: HttpRequest, username: str | None = None) -> None:
 
 
 def has_user_registration() -> bool:
-    from sentry import features, options
+    from sentry import features
 
     return features.has("auth:register") and options.get("auth.allow-registration")
 
@@ -400,11 +457,23 @@ def is_user_signed_request(request: Request) -> bool:
         return False
 
 
+def is_user_from_viewer_context(request: Request) -> bool:
+    """
+    This function returns True if the request was authenticated via viewer context.
+    """
+    return bool(getattr(request, "user_from_viewer_context", False))
+
+
 def set_active_org(request: HttpRequest, org_slug: str) -> None:
     # even if the value being set is the same this will trigger a session
     # modification and reset the users expiry, so check if they are different first.
     if hasattr(request, "session") and request.session.get("activeorg") != org_slug:
         request.session["activeorg"] = org_slug
+
+
+def clear_active_org(request: HttpRequest) -> None:
+    if hasattr(request, "session"):
+        request.session.pop("activeorg", None)
 
 
 class EmailAuthBackend(ModelBackend):
@@ -441,7 +510,11 @@ class EmailAuthBackend(ModelBackend):
         return True
 
     def get_user(self, user_id: int) -> RpcUser | None:  # type: ignore[override]  # XXX: HC "pretends" to be the user model
-        return user_service.get_user(user_id=user_id)
+        user = user_service.get_user(user_id=user_id)
+        if user is not None and user.is_suspended:
+            record_suspended_user_rejection("session_get_user")
+            return None
+        return user
 
 
 def construct_link_with_query(path: str, query_params: Mapping[str, str | None]) -> str:

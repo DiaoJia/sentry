@@ -7,8 +7,10 @@ import {
 
 import ApiApplicationDetails from 'sentry/views/settings/account/apiApplications/details';
 
-describe('ApiApplications', function () {
-  it('renders basic details for newly created App', async function () {
+describe('ApiApplicationDetails', () => {
+  const oauthBaseUrl = 'https://sentry-jest-tests.example.com/oauth';
+
+  it('renders basic details for confidential client', async () => {
     MockApiClient.addMockResponse({
       url: '/api-applications/abcd/',
       body: {
@@ -17,6 +19,7 @@ describe('ApiApplications', function () {
         clientSecret: '1234',
         homepageUrl: 'http://example.com/homepage',
         id: 'abcd',
+        isPublic: false,
         name: 'Example App Name',
         privacyUrl: 'http://example.com/privacy',
         redirectUris: ['http://example.com/redirect'],
@@ -25,19 +28,15 @@ describe('ApiApplications', function () {
     });
 
     render(<ApiApplicationDetails />, {
-      router: {
-        params: {
-          appId: 'abcd',
+      initialRouterConfig: {
+        route: '/settings/account/api-applications/:appId/',
+        location: {
+          pathname: '/settings/account/api-applications/abcd/',
         },
       },
-
-      deprecatedRouterMocks: true,
     });
 
-    expect(
-      await screen.findByRole('heading', {name: 'Application Details'})
-    ).toBeInTheDocument();
-    expect(screen.getByDisplayValue('http://example.com')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('http://example.com')).toBeInTheDocument();
     expect(screen.getByDisplayValue('http://example.com/redirect')).toBeInTheDocument();
     expect(screen.getByDisplayValue('http://example.com/privacy')).toBeInTheDocument();
     expect(screen.getByDisplayValue('http://example.com/terms')).toBeInTheDocument();
@@ -55,9 +54,13 @@ describe('ApiApplications', function () {
     expect(screen.getByLabelText('Client Secret')).toBeInTheDocument();
     expect(screen.getByLabelText('Authorization URL')).toBeInTheDocument();
     expect(screen.getByLabelText('Token URL')).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/authorize/`)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/token/`)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Device Authorization URL')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Device Verification URL')).not.toBeInTheDocument();
   });
 
-  it('handles client secret rotation', async function () {
+  it('handles client secret rotation', async () => {
     MockApiClient.addMockResponse({
       url: '/api-applications/abcd/',
       body: {
@@ -66,6 +69,7 @@ describe('ApiApplications', function () {
         clientSecret: null,
         homepageUrl: 'http://example.com/homepage',
         id: 'abcd',
+        isPublic: false,
         name: 'Example App Name',
         privacyUrl: 'http://example.com/privacy',
         redirectUris: ['http://example.com/redirect'],
@@ -81,13 +85,12 @@ describe('ApiApplications', function () {
     });
 
     render(<ApiApplicationDetails />, {
-      router: {
-        params: {
-          appId: 'abcd',
+      initialRouterConfig: {
+        route: '/settings/account/api-applications/:appId/',
+        location: {
+          pathname: '/settings/account/api-applications/abcd/',
         },
       },
-
-      deprecatedRouterMocks: true,
     });
     renderGlobalModal();
 
@@ -108,5 +111,97 @@ describe('ApiApplications', function () {
     );
 
     expect(rotateSecretApiCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders public client without client secret section', async () => {
+    MockApiClient.addMockResponse({
+      url: '/api-applications/public-app/',
+      body: {
+        allowedOrigins: ['http://example.com'],
+        clientID: 'public-app',
+        clientSecret: null,
+        homepageUrl: 'http://example.com/homepage',
+        id: 'public-app',
+        isPublic: true,
+        name: 'Public CLI App',
+        privacyUrl: 'http://example.com/privacy',
+        redirectUris: ['http://example.com/redirect'],
+        termsUrl: ['http://example.com/terms'],
+      },
+    });
+
+    render(<ApiApplicationDetails />, {
+      initialRouterConfig: {
+        route: '/settings/account/api-applications/:appId/',
+        location: {
+          pathname: '/settings/account/api-applications/public-app/',
+        },
+      },
+    });
+
+    // Should show public client tag
+    expect(await screen.findByText('Public Client')).toBeInTheDocument();
+
+    // Should show info alert about public clients
+    expect(
+      screen.getByText(/This is a public client, designed for CLIs/)
+    ).toBeInTheDocument();
+
+    // Should NOT show client secret field
+    expect(screen.queryByLabelText('Client Secret')).not.toBeInTheDocument();
+
+    // Should NOT show rotate button
+    expect(
+      screen.queryByRole('button', {name: 'Rotate client secret'})
+    ).not.toBeInTheDocument();
+
+    // Should still show other fields
+    expect(screen.getByLabelText('Client ID')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('public-app')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Public CLI App')).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/authorize/`)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/token/`)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/device/code/`)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(`${oauthBaseUrl}/device/`)).toBeInTheDocument();
+  });
+
+  it('renders confidential client with client secret section', async () => {
+    MockApiClient.addMockResponse({
+      url: '/api-applications/conf-app/',
+      body: {
+        allowedOrigins: ['http://example.com'],
+        clientID: 'conf-app',
+        clientSecret: 'secret123',
+        homepageUrl: 'http://example.com/homepage',
+        id: 'conf-app',
+        isPublic: false,
+        name: 'Confidential App',
+        privacyUrl: 'http://example.com/privacy',
+        redirectUris: ['http://example.com/redirect'],
+        termsUrl: ['http://example.com/terms'],
+      },
+    });
+
+    render(<ApiApplicationDetails />, {
+      initialRouterConfig: {
+        route: '/settings/account/api-applications/:appId/',
+        location: {
+          pathname: '/settings/account/api-applications/conf-app/',
+        },
+      },
+    });
+
+    // Should show confidential client tag
+    expect(await screen.findByText('Confidential Client')).toBeInTheDocument();
+
+    // Should show client secret field
+    expect(screen.getByLabelText('Client Secret')).toBeInTheDocument();
+
+    // Should NOT show info alert about public clients
+    expect(
+      screen.queryByText(/This is a public client, designed for CLIs/)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Device Authorization URL')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Device Verification URL')).not.toBeInTheDocument();
   });
 });

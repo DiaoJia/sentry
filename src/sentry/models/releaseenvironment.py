@@ -1,5 +1,3 @@
-from datetime import timedelta
-
 from django.db import models
 from django.utils import timezone
 
@@ -8,14 +6,15 @@ from sentry.db.models import (
     BoundedBigIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.utils import metrics
 from sentry.utils.cache import cache
+from sentry.utils.last_seen import try_bump_last_seen
 
 
-@region_silo_model
+@cell_silo_model
 class ReleaseEnvironment(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -35,7 +34,7 @@ class ReleaseEnvironment(Model):
     __repr__ = sane_repr("organization_id", "release_id", "environment_id")
 
     @classmethod
-    def get_cache_key(cls, organization_id, release_id, environment_id):
+    def get_cache_key(cls, organization_id, release_id, environment_id) -> str:
         return f"releaseenv:2:{organization_id}:{release_id}:{environment_id}"
 
     @classmethod
@@ -63,16 +62,15 @@ class ReleaseEnvironment(Model):
 
         metric_tags["created"] = "true" if created else "false"
 
-        # TODO(dcramer): this would be good to buffer, but until then we minimize
-        # updates to once a minute, and allow Postgres to optimistically skip
-        # it even if we can't
-        if not created and instance.last_seen < datetime - timedelta(seconds=60):
-            metric_tags["bumped"] = "true"
-            cls.objects.filter(
-                id=instance.id, last_seen__lt=datetime - timedelta(seconds=60)
-            ).update(last_seen=datetime)
-            instance.last_seen = datetime
-            cache.set(cache_key, instance, 3600)
+        if not created:
+            try_bump_last_seen(
+                model_class=cls,
+                instance=instance,
+                datetime=datetime,
+                bump_key=f"releaseenv_bump:{instance.id}",
+                cache_key=cache_key,
+                metrics_tags=metric_tags,
+            )
         else:
             metric_tags["bumped"] = "false"
 

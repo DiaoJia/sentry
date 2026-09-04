@@ -4,14 +4,15 @@ import {TeamFixture} from 'sentry-fixture/team';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import ConfigStore from 'sentry/stores/configStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 
-describe('NoProjectMessage', function () {
-  beforeEach(function () {
+describe('NoProjectMessage', () => {
+  beforeEach(() => {
     ProjectsStore.reset();
+    ConfigStore.set('user', {...ConfigStore.get('user'), isSuperuser: false});
   });
 
   const org = OrganizationFixture();
@@ -21,7 +22,7 @@ describe('NoProjectMessage', function () {
     allowMemberProjectCreation: false,
   });
 
-  it('renders', function () {
+  it('renders', () => {
     const organization = OrganizationFixture({slug: 'org-slug'});
     ProjectsStore.loadInitialData([]);
 
@@ -35,7 +36,7 @@ describe('NoProjectMessage', function () {
     expect(screen.queryByTestId('child')).not.toBeInTheDocument();
   });
 
-  it('shows "Create Project" button when there are no projects', function () {
+  it('shows "Create Project" button when there are no projects', () => {
     const organization = OrganizationFixture({
       slug: 'org-slug',
       features: ['team-roles'],
@@ -47,7 +48,7 @@ describe('NoProjectMessage', function () {
     expect(screen.getByRole('button', {name: 'Create project'})).toBeEnabled();
   });
 
-  it('enable "Create Project" when user is team admin', function () {
+  it('enable "Create Project" when user is team admin', () => {
     ProjectsStore.loadInitialData([]);
     TeamStore.loadInitialData([
       TeamFixture({
@@ -65,7 +66,7 @@ describe('NoProjectMessage', function () {
     expect(screen.getByRole('button', {name: 'Create project'})).toBeEnabled();
   });
 
-  it('disable "Create Project" when user is not team admin', function () {
+  it('disable "Create Project" when user is not team admin', () => {
     ProjectsStore.loadInitialData([]);
     TeamStore.loadInitialData([
       TeamFixture({
@@ -86,7 +87,7 @@ describe('NoProjectMessage', function () {
     );
   });
 
-  it('shows "Create Project" button when user has team-level access', function () {
+  it('shows "Create Project" button when user has team-level access', () => {
     ProjectsStore.loadInitialData([]);
     TeamStore.loadInitialData([
       {...TeamFixture(), access: ['team:admin', 'team:write', 'team:read']},
@@ -106,7 +107,7 @@ describe('NoProjectMessage', function () {
     expect(screen.getByRole('button', {name: 'Create project'})).toBeEnabled();
   });
 
-  it('has no "Join a Team" button when projects are missing', function () {
+  it('has no "Join a Team" button when projects are missing', () => {
     ProjectsStore.loadInitialData([]);
 
     render(<NoProjectMessage organization={org} />);
@@ -115,7 +116,7 @@ describe('NoProjectMessage', function () {
     expect(screen.getByRole('button', {name: 'Create project'})).toBeEnabled();
   });
 
-  it('has a "Join a Team" button when no projects but org has projects', function () {
+  it('has a "Join a Team" button when no projects but org has projects', () => {
     ProjectsStore.loadInitialData([ProjectFixture({hasAccess: false})]);
 
     render(<NoProjectMessage organization={org} />);
@@ -123,7 +124,7 @@ describe('NoProjectMessage', function () {
     expect(screen.getByRole('button', {name: 'Join a Team'})).toBeInTheDocument();
   });
 
-  it('has a disabled "Join a Team" button if no access to `team:read`', function () {
+  it('has a disabled "Join a Team" button if no access to `team:read`', () => {
     ProjectsStore.loadInitialData([ProjectFixture({hasAccess: false})]);
 
     render(<NoProjectMessage organization={{...org, access: []}} />);
@@ -134,7 +135,51 @@ describe('NoProjectMessage', function () {
     );
   });
 
-  it('shows empty message to superusers that are not members', function () {
+  it('renders children when the user has access without project membership', () => {
+    ProjectsStore.loadInitialData([ProjectFixture({hasAccess: true, isMember: false})]);
+
+    render(
+      <NoProjectMessage organization={org}>
+        <div data-test-id="child">Test</div>
+      </NoProjectMessage>
+    );
+
+    expect(screen.getByTestId('child')).toBeInTheDocument();
+    expect(
+      screen.queryByText('You need at least one project to use this view')
+    ).not.toBeInTheDocument();
+  });
+
+  it('renders children for non-superusers when superuserNeedsToBeProjectMember', () => {
+    ProjectsStore.loadInitialData([ProjectFixture({hasAccess: true, isMember: false})]);
+
+    render(
+      <NoProjectMessage organization={org} superuserNeedsToBeProjectMember>
+        <div data-test-id="child">Test</div>
+      </NoProjectMessage>
+    );
+
+    expect(screen.getByTestId('child')).toBeInTheDocument();
+    expect(
+      screen.queryByText('You need at least one project to use this view')
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows empty message to non-members when requireProjectMembership', () => {
+    ProjectsStore.loadInitialData([ProjectFixture({hasAccess: true, isMember: false})]);
+
+    render(
+      <NoProjectMessage organization={org} requireProjectMembership>
+        {null}
+      </NoProjectMessage>
+    );
+
+    expect(
+      screen.getByText('You need at least one project to use this view')
+    ).toBeInTheDocument();
+  });
+
+  it('shows empty message to superusers that are not members', () => {
     ProjectsStore.loadInitialData([ProjectFixture({hasAccess: true, isMember: false})]);
 
     ConfigStore.set('user', {...ConfigStore.get('user'), isSuperuser: true});

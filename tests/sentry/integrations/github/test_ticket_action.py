@@ -5,15 +5,22 @@ import responses
 from django.urls import reverse
 from rest_framework.test import APITestCase as BaseAPITestCase
 
-from sentry.eventstore.models import GroupEvent
 from sentry.integrations.github import client
 from sentry.integrations.github.actions.create_ticket import GitHubCreateTicketAction
 from sentry.integrations.github.integration import GitHubIntegration
 from sentry.integrations.models.external_issue import ExternalIssue
+from sentry.issues.action_log.types import SYSTEM_ACTOR, ActionSource, CreateExternalIssueAction
+from sentry.models.activity import Activity
+from sentry.models.repository import Repository
 from sentry.models.rule import Rule
+from sentry.services.eventstore.models import GroupEvent
+from sentry.silo.base import SiloMode
 from sentry.testutils.cases import RuleTestCase
+from sentry.testutils.helpers.action_log import capture_action_log
 from sentry.testutils.helpers.integrations import get_installation_of_type
+from sentry.testutils.silo import assume_test_silo_mode
 from sentry.testutils.skips import requires_snuba
+from sentry.types.activity import ActivityType
 from sentry.types.rules import RuleFuture
 
 pytestmark = [requires_snuba]
@@ -26,7 +33,7 @@ class GitHubTicketRulesTestCase(RuleTestCase, BaseAPITestCase):
     labels = ["bug", "invalid"]
     issue_num = 1
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.integration = self.create_integration(
             organization=self.organization,
@@ -34,6 +41,7 @@ class GitHubTicketRulesTestCase(RuleTestCase, BaseAPITestCase):
             name="Github",
             external_id="1",
             metadata={
+                "domain_name": "github.com/foo",
                 "verify_ssl": True,
             },
         )
@@ -71,10 +79,18 @@ class GitHubTicketRulesTestCase(RuleTestCase, BaseAPITestCase):
         )[0]
 
     @responses.activate()
-    def test_ticket_rules(self):
+    def test_ticket_rules(self) -> None:
         title = "sample title"
         sample_description = "sample bug report"
         html_url = f"https://github.com/foo/bar/issues/{self.issue_num}"
+
+        with assume_test_silo_mode(SiloMode.CELL):
+            Repository.objects.create(
+                name=self.repo,
+                provider="integrations:github",
+                organization_id=self.organization.id,
+                integration_id=self.integration.id,
+            )
 
         responses.add(
             method=responses.POST,
@@ -135,13 +151,36 @@ class GitHubTicketRulesTestCase(RuleTestCase, BaseAPITestCase):
         event = self.get_group_event()
 
         # Trigger its `after`
-        self.trigger(event, rule_object)
+        with capture_action_log() as action_log:
+            self.trigger(event, rule_object)
+
+        action_log.assert_logged(
+            CreateExternalIssueAction,
+            group_id=event.group_id,
+            source=ActionSource.SYSTEM,
+            actor=SYSTEM_ACTOR,
+            provider="github",
+        )
 
         # assert ticket created in DB
         key = self.get_key(event)
         assert key == f"{self.repo}#{self.issue_num}"
+        external_issue = ExternalIssue.objects.get(key=key)
         external_issue_count = len(ExternalIssue.objects.filter(key=key))
         assert external_issue_count == 1
+
+        activity = Activity.objects.get(
+            group_id=event.group_id, type=ActivityType.CREATE_ISSUE.value
+        )
+        assert activity.project_id == event.project_id
+        assert activity.user_id is None
+        assert activity.data == {
+            "title": external_issue.title,
+            "provider": self.installation.model.get_provider().name,
+            "location": self.installation.get_issue_url(external_issue.key),
+            "label": self.installation.get_issue_display_name(external_issue) or external_issue.key,
+            "new": True,
+        }
 
         # assert ticket created in GitHub
         data = self.installation.get_issue(
@@ -154,9 +193,15 @@ class GitHubTicketRulesTestCase(RuleTestCase, BaseAPITestCase):
 
         # assert new ticket NOT created in DB
         assert ExternalIssue.objects.count() == external_issue_count
+        assert (
+            Activity.objects.filter(
+                group_id=event.group_id, type=ActivityType.CREATE_ISSUE.value
+            ).count()
+            == 1
+        )
 
     @responses.activate()
-    def test_fails_validation(self):
+    def test_fails_validation(self) -> None:
         """
         Test that the absence of dynamic_form_fields in the action fails validation
         """

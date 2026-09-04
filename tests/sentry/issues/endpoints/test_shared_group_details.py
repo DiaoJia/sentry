@@ -11,13 +11,8 @@ pytestmark = [requires_snuba]
 class SharedGroupDetailsTest(APITestCase):
     def _get_path_functions(
         self,
-    ) -> tuple[Callable[[str], str], Callable[[str], str], Callable[[str], str]]:
-        # The urls for shared group details are supported both with an org slug and without.
-        # We test both as long as we support both.
-        # Because removing old urls takes time and consideration of the cost of breaking lingering references, a
-        # decision to permanently remove either path schema is a TODO.
+    ) -> tuple[Callable[[str], str], Callable[[str], str]]:
         return (
-            lambda share_id: f"/api/0/shared/issues/{share_id}/",
             lambda share_id: f"/api/0/organizations/{self.organization.slug}/shared/issues/{share_id}/",
             lambda share_id: f"/api/0/organizations/{self.organization.id}/shared/issues/{share_id}/",
         )
@@ -113,12 +108,4 @@ class SharedGroupDetailsTest(APITestCase):
             response = self.client.get(path, format="json")
 
             assert response.status_code == 200, response.content
-            assert not response.data["permalink"]  # not show permalink when not logged in
-
-        self.login_as(user=self.user)
-        for path_func in self._get_path_functions():
-            path = path_func(share_id)
-            response = self.client.get(path, format="json")
-
-            assert response.status_code == 200, response.content
-            assert response.data["permalink"]  # show permalink when logged in
+            assert response.data["permalink"]

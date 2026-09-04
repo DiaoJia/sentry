@@ -7,17 +7,20 @@ from typing import Any, override
 import sentry_sdk
 
 from sentry import analytics
-from sentry.eventstore.models import GroupEvent
+from sentry.analytics.events.alert_sent import AlertSentEvent
 from sentry.integrations.services.integration import (
     RpcIntegration,
     RpcOrganizationIntegration,
     integration_service,
 )
+from sentry.mail.analytics import EmailNotificationSent
 from sentry.models.organization import OrganizationStatus
 from sentry.models.rule import Rule
 from sentry.rules.actions import EventAction
 from sentry.rules.base import CallbackFuture
+from sentry.services.eventstore.models import GroupEvent
 from sentry.types.rules import RuleFuture
+from sentry.utils.tracing import start_span
 
 INTEGRATION_KEY = "integration"
 
@@ -48,7 +51,7 @@ class IntegrationEventAction(EventAction, abc.ABC):
         **kwargs: Any,
     ) -> CallbackFuture:
         def wrapped_callback(event: GroupEvent, futures: Sequence[RuleFuture]) -> None:
-            with sentry_sdk.start_span(
+            with start_span(
                 op="IntegrationEventAction.future",
                 name=type(self).__name__,
             ):
@@ -110,23 +113,48 @@ class IntegrationEventAction(EventAction, abc.ABC):
         rule: Rule | None = None,
         notification_uuid: str | None = None,
     ) -> None:
+        from sentry.integrations.discord.analytics import DiscordIntegrationNotificationSent
+        from sentry.integrations.msteams.analytics import MSTeamsIntegrationNotificationSent
+        from sentry.integrations.opsgenie.analytics import OpsgenieIntegrationNotificationSent
+        from sentry.integrations.pagerduty.analytics import PagerdutyIntegrationNotificationSent
+        from sentry.integrations.slack.analytics import SlackIntegrationNotificationSent
+
         # Currently these actions can only be triggered by issue alerts
-        analytics.record(
-            f"integrations.{self.provider}.notification_sent",
-            category="issue_alert",
-            organization_id=event.organization.id,
-            project_id=event.project_id,
-            group_id=event.group_id,
-            notification_uuid=notification_uuid if notification_uuid else "",
-            alert_id=rule.id if rule else None,
-        )
-        analytics.record(
-            "alert.sent",
-            provider=self.provider,
-            alert_id=rule.id if rule else "",
-            alert_type="issue_alert",
-            organization_id=event.organization.id,
-            project_id=event.project_id,
-            external_id=external_id,
-            notification_uuid=notification_uuid if notification_uuid else "",
-        )
+
+        PROVIDER_TO_EVENT_CLASS = {
+            "discord": DiscordIntegrationNotificationSent,
+            "msteams": MSTeamsIntegrationNotificationSent,
+            "opsgenie": OpsgenieIntegrationNotificationSent,
+            "pagerduty": PagerdutyIntegrationNotificationSent,
+            "slack": SlackIntegrationNotificationSent,
+            "email": EmailNotificationSent,
+        }
+        try:
+            if event_class := PROVIDER_TO_EVENT_CLASS.get(self.provider):
+                analytics.record(
+                    event_class(
+                        organization_id=event.organization.id,
+                        project_id=event.project_id,
+                        group_id=event.group_id,
+                        notification_uuid=notification_uuid if notification_uuid else "",
+                        alert_id=rule.id if rule else None,
+                        category="issue_alert",
+                    )
+                )
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+
+        try:
+            analytics.record(
+                AlertSentEvent(
+                    provider=self.provider,
+                    alert_id=rule.id if rule else "",
+                    alert_type="issue_alert",
+                    organization_id=event.organization.id,
+                    project_id=event.project_id,
+                    external_id=external_id,
+                    notification_uuid=notification_uuid if notification_uuid else "",
+                )
+            )
+        except Exception as e:
+            sentry_sdk.capture_exception(e)

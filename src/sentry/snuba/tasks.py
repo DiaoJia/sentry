@@ -2,31 +2,32 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 import orjson
-import sentry_sdk
 from django.utils import timezone
 from sentry_protos.snuba.v1.endpoint_create_subscription_pb2 import CreateSubscriptionRequest
 from sentry_protos.snuba.v1.endpoint_time_series_pb2 import TimeSeriesRequest
+from snuba_sdk import Request
+from taskbroker_client.retry import Retry
 
-from sentry import features, options
 from sentry.exceptions import IncompatibleMetricsQuery, InvalidSearchQuery
 from sentry.snuba.dataset import Dataset, EntityKey
 from sentry.snuba.entity_subscription import (
+    BaseEntitySubscription,
     get_entity_key_from_query_builder,
     get_entity_key_from_request,
     get_entity_key_from_snuba_query,
     get_entity_subscription,
     get_entity_subscription_from_snuba_query,
 )
-from sentry.snuba.models import QuerySubscription, SnubaQuery
+from sentry.snuba.models import ExtrapolationMode, QuerySubscription, SnubaQuery
 from sentry.snuba.utils import build_query_strings
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import alerts_tasks
-from sentry.taskworker.retry import Retry
 from sentry.utils import metrics, snuba_rpc
 from sentry.utils.snuba import SNUBA_INFO, SnubaError, _snuba_pool
+from sentry.utils.tracing import set_span_data, set_span_tag, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +41,10 @@ class SubscriptionError(Exception):
 
 @instrumented_task(
     name="sentry.snuba.tasks.create_subscription_in_snuba",
-    queue="subscriptions",
-    default_retry_delay=5,
-    max_retries=5,
-    taskworker_config=TaskworkerConfig(
-        namespace=alerts_tasks,
-        retry=Retry(
-            times=5,
-            delay=5,
-        ),
-    ),
+    namespace=alerts_tasks,
+    retry=Retry(times=5, delay=5),
 )
-def create_subscription_in_snuba(query_subscription_id, **kwargs):
+def create_subscription_in_snuba(query_subscription_id: int, **kwargs: Any) -> None:
     """
     Task to create a corresponding subscription in Snuba from a `QuerySubscription` in
     Sentry. We store the snuba subscription id locally on success.
@@ -72,9 +65,14 @@ def create_subscription_in_snuba(query_subscription_id, **kwargs):
         # into this state. Just attempt to delete the existing subscription and then
         # create a new one.
         query_dataset = Dataset(subscription.snuba_query.dataset)
-        entity_key = get_entity_key_from_snuba_query(
-            subscription.snuba_query, subscription.project.organization_id, subscription.project_id
-        )
+        try:
+            entity_key = get_entity_key_from_snuba_query(
+                subscription.snuba_query,
+                subscription.project.organization_id,
+                subscription.project_id,
+            )
+        except (InvalidSearchQuery, IncompatibleMetricsQuery) as e:
+            raise SubscriptionError(e)
         try:
             _delete_from_snuba(
                 query_dataset,
@@ -92,25 +90,17 @@ def create_subscription_in_snuba(query_subscription_id, **kwargs):
 
 @instrumented_task(
     name="sentry.snuba.tasks.update_subscription_in_snuba",
-    queue="subscriptions",
-    default_retry_delay=5,
-    max_retries=5,
-    taskworker_config=TaskworkerConfig(
-        namespace=alerts_tasks,
-        retry=Retry(
-            times=5,
-            delay=5,
-        ),
-    ),
+    namespace=alerts_tasks,
+    retry=Retry(times=5, delay=5),
 )
 def update_subscription_in_snuba(
-    query_subscription_id,
-    old_query_type=None,
-    old_dataset=None,
-    old_aggregate=None,
-    old_query=None,
-    **kwargs,
-):
+    query_subscription_id: int,
+    old_query_type: int | None = None,
+    old_dataset: str | None = None,
+    old_aggregate: str | None = None,
+    old_query: str | None = None,
+    **kwargs: Any,
+) -> None:
     """
     Task to update a corresponding subscription in Snuba from a `QuerySubscription` in
     Sentry. Updating in Snuba means deleting the existing subscription, then creating a
@@ -145,23 +135,23 @@ def update_subscription_in_snuba(
             extra_fields={
                 "org_id": subscription.project.organization_id,
                 "event_types": subscription.snuba_query.event_types,
+                "extrapolation_mode": ExtrapolationMode(
+                    subscription.snuba_query.extrapolation_mode
+                ),
             },
         )
-        if dataset == Dataset.EventsAnalyticsPlatform and options.get("alerts.spans.use-eap-items"):
-            old_entity_key = EntityKey.EAPItems
-        else:
-            old_entity_key = (
-                EntityKey.EAPItemsSpan
-                if dataset == Dataset.EventsAnalyticsPlatform
-                else get_entity_key_from_query_builder(
-                    old_entity_subscription.build_query_builder(
-                        query,
-                        [subscription.project_id],
-                        None,
-                        {"organization_id": subscription.project.organization_id},
-                    ),
-                )
+        old_entity_key = (
+            EntityKey.EAPItems
+            if dataset == Dataset.EventsAnalyticsPlatform
+            else get_entity_key_from_query_builder(
+                old_entity_subscription.build_query_builder(
+                    query,
+                    [subscription.project_id],
+                    None,
+                    {"organization_id": subscription.project.organization_id},
+                ),
             )
+        )
         _delete_from_snuba(
             Dataset(dataset),
             subscription.subscription_id,
@@ -176,18 +166,10 @@ def update_subscription_in_snuba(
 
 @instrumented_task(
     name="sentry.snuba.tasks.delete_subscription_from_snuba",
-    queue="subscriptions",
-    default_retry_delay=5,
-    max_retries=5,
-    taskworker_config=TaskworkerConfig(
-        namespace=alerts_tasks,
-        retry=Retry(
-            times=5,
-            delay=5,
-        ),
-    ),
+    namespace=alerts_tasks,
+    retry=Retry(times=5, delay=5),
 )
-def delete_subscription_from_snuba(query_subscription_id, **kwargs):
+def delete_subscription_from_snuba(query_subscription_id: int, **kwargs: Any) -> None:
     """
     Task to delete a corresponding subscription in Snuba from a `QuerySubscription` in
     Sentry.
@@ -211,12 +193,15 @@ def delete_subscription_from_snuba(query_subscription_id, **kwargs):
 
     if subscription.subscription_id is not None and subscription.snuba_query is not None:
         query_dataset = Dataset(subscription.snuba_query.dataset)
-        entity_key = get_entity_key_from_snuba_query(
-            subscription.snuba_query,
-            subscription.project.organization_id,
-            subscription.project_id,
-            skip_field_validation_for_entity_subscription_deletion=True,
-        )
+        try:
+            entity_key = get_entity_key_from_snuba_query(
+                subscription.snuba_query,
+                subscription.project.organization_id,
+                subscription.project_id,
+                skip_field_validation_for_entity_subscription_deletion=True,
+            )
+        except (InvalidSearchQuery, IncompatibleMetricsQuery) as e:
+            raise SubscriptionError(e)
         _delete_from_snuba(
             query_dataset,
             subscription.subscription_id,
@@ -239,12 +224,8 @@ def delete_subscription_from_snuba(query_subscription_id, **kwargs):
 
 
 def _create_in_snuba(subscription: QuerySubscription) -> str:
-    with sentry_sdk.start_span(op="snuba.tasks", name="create_in_snuba") as span:
-        span.set_tag(
-            "uses_metrics_layer",
-            features.has("organizations:use-metrics-layer", subscription.project.organization),
-        )
-        span.set_tag("dataset", subscription.snuba_query.dataset)
+    with start_span(op="snuba.tasks", name="create_in_snuba") as span:
+        set_span_tag(span, "dataset", subscription.snuba_query.dataset)
 
         snuba_query = subscription.snuba_query
         entity_subscription = get_entity_subscription_from_snuba_query(
@@ -287,7 +268,12 @@ def _create_in_snuba(subscription: QuerySubscription) -> str:
 
 # This indirection function only exists such that snql queries can be rewritten
 # by sentry.utils.pytest.metrics
-def _create_snql_in_snuba(subscription, snuba_query, snql_query, entity_subscription):
+def _create_snql_in_snuba(
+    subscription: QuerySubscription,
+    snuba_query: SnubaQuery,
+    snql_query: Request,
+    entity_subscription: BaseEntitySubscription,
+) -> str:
     body = {
         "project_id": subscription.project_id,
         "query": str(snql_query.query),
@@ -298,7 +284,7 @@ def _create_snql_in_snuba(subscription, snuba_query, snql_query, entity_subscrip
     if SNUBA_INFO:
         import pprint
 
-        print(  # NOQA: only prints when an env variable is set
+        print(  # noqa: S002, T201 -- only prints when an env variable is set
             f"subscription.body:\n {pprint.pformat(body)}"
         )
 
@@ -318,8 +304,11 @@ def _create_snql_in_snuba(subscription, snuba_query, snql_query, entity_subscrip
 
 
 def _create_rpc_in_snuba(
-    subscription, snuba_query, rpc_time_series_request: TimeSeriesRequest, entity_subscription
-):
+    subscription: QuerySubscription,
+    snuba_query: SnubaQuery,
+    rpc_time_series_request: TimeSeriesRequest,
+    entity_subscription: BaseEntitySubscription,
+) -> str:
     subscription_request = CreateSubscriptionRequest(
         time_series_request=rpc_time_series_request,
         time_window_secs=snuba_query.time_window,
@@ -345,10 +334,9 @@ def _delete_from_snuba(dataset: Dataset, subscription_id: str, entity_key: Entit
 
 @instrumented_task(
     name="sentry.snuba.tasks.subscription_checker",
-    queue="subscriptions",
-    taskworker_config=TaskworkerConfig(namespace=alerts_tasks),
+    namespace=alerts_tasks,
 )
-def subscription_checker(**kwargs):
+def subscription_checker(**kwargs: Any) -> None:
     """
     Checks for subscriptions stuck in a transition status and attempts to repair them
     """
@@ -361,9 +349,9 @@ def subscription_checker(**kwargs):
         ),
         date_updated__lt=timezone.now() - SUBSCRIPTION_STATUS_MAX_AGE,
     ):
-        with sentry_sdk.start_span(op="repair_subscription") as span:
-            span.set_data("subscription_id", subscription.id)
-            span.set_data("status", subscription.status)
+        with start_span(op="repair_subscription", name="repair_subscription") as span:
+            set_span_data(span, "subscription_id", subscription.id)
+            set_span_data(span, "status", subscription.status)
             count += 1
             if subscription.status == QuerySubscription.Status.CREATING.value:
                 create_subscription_in_snuba.delay(query_subscription_id=subscription.id)

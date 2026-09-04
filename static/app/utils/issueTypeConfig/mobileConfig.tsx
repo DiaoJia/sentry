@@ -3,13 +3,12 @@ import {IssueType} from 'sentry/types/group';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const mobileConfig: IssueCategoryConfigMapping = {
+export const mobileConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
       delete: {
-        enabled: false,
-        disabledReason: t('Not yet supported for mobile issues'),
+        enabled: true,
       },
       deleteAndDiscard: {
         enabled: false,
@@ -140,5 +139,3 @@ const mobileConfig: IssueCategoryConfigMapping = {
     },
   },
 };
-
-export default mobileConfig;

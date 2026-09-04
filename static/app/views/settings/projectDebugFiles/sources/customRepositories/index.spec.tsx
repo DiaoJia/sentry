@@ -1,15 +1,16 @@
 import {Fragment} from 'react';
+import {LocationFixture} from 'sentry-fixture/locationFixture';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import GlobalModal from 'sentry/components/globalModal';
+import {GlobalModal} from '@sentry/scraps/modal';
+
 import {DEBUG_SOURCE_TYPES} from 'sentry/data/debugFileSources';
-import ModalStore from 'sentry/stores/modalStore';
 import type {CustomRepo, CustomRepoHttp} from 'sentry/types/debugFiles';
 import {CustomRepoType} from 'sentry/types/debugFiles';
-import CustomRepositories from 'sentry/views/settings/projectDebugFiles/sources/customRepositories';
+import {CustomRepositories} from 'sentry/views/settings/projectDebugFiles/sources/customRepositories';
 
 function TestComponent({
   organization,
@@ -31,21 +32,18 @@ function TestComponent({
 }
 
 function getProps(props?: Parameters<typeof initializeOrg>[0]) {
-  const {organization, router, project} = initializeOrg({
+  const {organization, project} = initializeOrg({
     router: props?.router,
   });
 
   return {
-    api: new MockApiClient(),
     organization,
     project,
-    router,
-    isLoading: false,
-    location: router.location,
+    location: LocationFixture(props?.router?.location),
   };
 }
 
-describe('Custom Repositories', function () {
+describe('Custom Repositories', () => {
   const httpRepository: CustomRepo = {
     id: '7ebdb871-eb65-0183-8001-ea7df90613a7',
     layout: {type: 'native', casing: 'default'},
@@ -56,17 +54,13 @@ describe('Custom Repositories', function () {
     username: 'admin',
   };
 
-  beforeEach(() => {
-    ModalStore.reset();
-  });
-
-  beforeAll(async function () {
+  beforeAll(async () => {
     // TODO: figure out why this transpile is so slow
     // transpile the modal upfront so the test runs fast
     await import('sentry/components/modals/debugFileCustomRepository');
   });
 
-  it('renders with custom-symbol-sources feature enabled', async function () {
+  it('renders with custom-symbol-sources feature enabled', async () => {
     const props = getProps();
     const newOrganization = {...props.organization, features: ['custom-symbol-sources']};
 

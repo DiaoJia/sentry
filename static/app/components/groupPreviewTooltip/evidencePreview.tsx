@@ -1,15 +1,16 @@
 import {useEffect} from 'react';
 import styled from '@emotion/styled';
 
-import KeyValueList from 'sentry/components/events/interfaces/keyValueList';
+import {Container} from '@sentry/scraps/layout';
+
+import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
 import {GroupPreviewHovercard} from 'sentry/components/groupPreviewTooltip/groupPreviewHovercard';
 import {
   useDelayedLoadingState,
   usePreviewEvent,
 } from 'sentry/components/groupPreviewTooltip/utils';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 type SpanEvidencePreviewProps = {
   children: React.ReactNode;
@@ -60,7 +61,7 @@ function SpanEvidencePreviewBody({
 
   if (evidenceDisplay?.length) {
     return (
-      <SpanEvidencePreviewWrapper data-test-id="evidence-preview-body">
+      <Container padding="lg lg 0 lg" width="700px" data-test-id="evidence-preview-body">
         <KeyValueList
           data={evidenceDisplay.map(item => ({
             key: item.name,
@@ -69,7 +70,7 @@ function SpanEvidencePreviewBody({
           }))}
           shouldSort={false}
         />
-      </SpanEvidencePreviewWrapper>
+      </Container>
     );
   }
 
@@ -101,16 +102,11 @@ export function EvidencePreview({children, groupId, query}: SpanEvidencePreviewP
 }
 
 const EmptyWrapper = styled('div')`
-  color: ${p => p.theme.subText};
-  padding: ${space(1.5)};
-  font-size: ${p => p.theme.fontSize.md};
+  color: ${p => p.theme.tokens.content.secondary};
+  padding: ${p => p.theme.space.lg};
+  font-size: ${p => p.theme.font.size.md};
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 56px;
-`;
-
-const SpanEvidencePreviewWrapper = styled('div')`
-  width: 700px;
-  padding: ${space(1.5)} ${space(1.5)} 0 ${space(1.5)};
 `;

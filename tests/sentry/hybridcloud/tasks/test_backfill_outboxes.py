@@ -3,10 +3,12 @@ from typing import Any
 from unittest.mock import patch
 
 from django.apps import apps
+from django.db import router, transaction
 from django.test.utils import override_settings
 
 from sentry.db.models import BaseModel
-from sentry.hybridcloud.models.outbox import ControlOutbox, RegionOutbox, outbox_context
+from sentry.hybridcloud.models.apitokenreplica import ApiTokenReplica
+from sentry.hybridcloud.models.outbox import CellOutbox, ControlOutbox, outbox_context
 from sentry.hybridcloud.outbox.base import run_outbox_replications_for_self_hosted
 from sentry.hybridcloud.tasks.backfill_outboxes import (
     backfill_outboxes_for,
@@ -14,6 +16,7 @@ from sentry.hybridcloud.tasks.backfill_outboxes import (
     get_processing_state,
     process_outbox_backfill_batch,
 )
+from sentry.models.apitoken import ApiToken
 from sentry.models.authidentity import AuthIdentity
 from sentry.models.authidentityreplica import AuthIdentityReplica
 from sentry.models.authprovider import AuthProvider
@@ -25,7 +28,12 @@ from sentry.testutils.factories import Factories
 from sentry.testutils.helpers import override_options
 from sentry.testutils.outbox import outbox_runner
 from sentry.testutils.pytest.fixtures import django_db_all
-from sentry.testutils.silo import assume_test_silo_mode, control_silo_test, no_silo_test
+from sentry.testutils.silo import (
+    assume_test_silo_mode,
+    control_silo_test,
+    create_test_cells,
+    no_silo_test,
+)
 from sentry.utils import redis
 
 
@@ -52,35 +60,35 @@ def test_processing_awaits_options() -> None:
     ):
         assert backfill_outboxes_for(SiloMode.CONTROL, 0, 1)
 
-    assert not backfill_outboxes_for(SiloMode.REGION, 0, 1)
+    assert not backfill_outboxes_for(SiloMode.CELL, 0, 1)
     with override_options(
         {
             "outbox_replication.sentry_organization.replication_version": Organization.replication_version
         }
     ):
-        assert backfill_outboxes_for(SiloMode.REGION, 0, 1)
+        assert backfill_outboxes_for(SiloMode.CELL, 0, 1)
 
 
 @django_db_all
-def test_region_processing(task_runner: Callable[..., Any]) -> None:
+def test_cell_processing(task_runner: Callable[..., Any]) -> None:
     with outbox_context(flush=False):
         for i in range(5):
             Factories.create_organization()
-    RegionOutbox.objects.all().delete()
+    CellOutbox.objects.all().delete()
 
     with outbox_runner(), task_runner():
-        while backfill_outboxes_for(SiloMode.REGION, 0, 1, force_synchronous=True):
+        while backfill_outboxes_for(SiloMode.CELL, 0, 1, force_synchronous=True):
             pass
-        assert RegionOutbox.objects.all().count() == 5
+        assert CellOutbox.objects.all().count() == 5
 
-    assert RegionOutbox.objects.all().count() == 0
+    assert CellOutbox.objects.all().count() == 0
     with assume_test_silo_mode(SiloMode.CONTROL):
         assert OrganizationMapping.objects.all().count() == 5
 
 
 @django_db_all
 @control_silo_test
-def test_control_processing(task_runner: Callable[..., Any]) -> None:
+def test_control_processing_auth(task_runner: Callable[..., Any]) -> None:
     reset_processing_state()
 
     org = Factories.create_organization()
@@ -94,7 +102,7 @@ def test_control_processing(task_runner: Callable[..., Any]) -> None:
     ControlOutbox.objects.all().delete()
 
     assert not ControlOutbox.objects.all().exists()
-    with assume_test_silo_mode(SiloMode.REGION):
+    with assume_test_silo_mode(SiloMode.CELL):
         assert not AuthProviderReplica.objects.filter(auth_provider_id=ap.id).exists()
         assert not AuthIdentityReplica.objects.filter(auth_provider_id=ap.id).exists()
 
@@ -113,11 +121,11 @@ def test_control_processing(task_runner: Callable[..., Any]) -> None:
 
     with outbox_runner():
         assert ControlOutbox.objects.all().count() == 6
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             assert not AuthProviderReplica.objects.filter(auth_provider_id=ap.id).exists()
             assert not AuthIdentityReplica.objects.filter(auth_provider_id=ap.id).exists()
 
-    with assume_test_silo_mode(SiloMode.REGION):
+    with assume_test_silo_mode(SiloMode.CELL):
         assert AuthProviderReplica.objects.filter(auth_provider_id=ap.id).exists()
         assert AuthIdentityReplica.objects.filter(auth_provider_id=ap.id).count() == 5
 
@@ -131,7 +139,7 @@ def test_control_processing(task_runner: Callable[..., Any]) -> None:
     # Clear again
     ControlOutbox.objects.all().delete()
 
-    with assume_test_silo_mode(SiloMode.REGION):
+    with assume_test_silo_mode(SiloMode.CELL):
         assert AuthIdentityReplica.objects.filter(auth_provider_id=ap2.id).count() == 0
 
     with outbox_runner(), task_runner():
@@ -143,7 +151,7 @@ def test_control_processing(task_runner: Callable[..., Any]) -> None:
     # No new outboxes as replication version hasn't changed.
     assert ControlOutbox.objects.all().count() == 0
     # Does not process these new objects since we already completed all available work for this version.
-    with assume_test_silo_mode(SiloMode.REGION):
+    with assume_test_silo_mode(SiloMode.CELL):
         assert AuthIdentityReplica.objects.filter(auth_provider_id=ap2.id).count() == 0
         AuthIdentityReplica.objects.all().delete()
 
@@ -157,12 +165,58 @@ def test_control_processing(task_runner: Callable[..., Any]) -> None:
             assert ControlOutbox.objects.all().count() == 10
 
         # Replicates it now that the version has bumped, and outboxes run by outbox_runner
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             assert AuthIdentityReplica.objects.all().count() == 10
             assert AuthIdentityReplica.objects.filter(auth_provider_id=ap2.id).count() == 5
             assert AuthIdentityReplica.objects.filter(auth_provider_id=ap.id).count() == 5
 
         assert get_processing_state(AuthIdentity._meta.db_table)[1] == 10001
+
+
+@django_db_all
+@control_silo_test(cells=create_test_cells("us", "de"))
+@override_options({"outbox_replication.sentry_apitoken.backfill.target_cells": ["us"]})
+def test_control_processing_target_cells(task_runner: Callable[..., Any]) -> None:
+    reset_processing_state()
+
+    user = Factories.create_user()
+
+    # Monkeypatch ApiToken.default_flush because it is a option driven attribute
+    with (
+        patch.object(ApiToken, "default_flush", False),
+        outbox_context(transaction.atomic(using=router.db_for_write(ApiToken)), flush=False),
+    ):
+        first_token = Factories.create_user_auth_token(user)
+        second_token = Factories.create_user_auth_token(user)
+
+    # Clear existing outboxes, force replication by hand
+    ControlOutbox.objects.all().delete()
+
+    assert not ControlOutbox.objects.all().exists()
+    with assume_test_silo_mode(SiloMode.CELL):
+        assert not ApiTokenReplica.objects.filter(user_id=user.id).exists()
+
+    def run_for_model(model: type[BaseModel]) -> None:
+        while True:
+            if process_outbox_backfill_batch(model, 1, force_synchronous=True) is None:
+                break
+
+    with task_runner():
+        run_for_model(ApiToken)
+
+    assert get_processing_state(ApiToken._meta.db_table)[1] == ApiToken.replication_version + 1
+
+    with outbox_runner():
+        assert ControlOutbox.objects.all().count() == 2
+        assert ControlOutbox.objects.filter(cell_name="us").count() == 2
+        assert ControlOutbox.objects.filter(cell_name="de").count() == 0
+        with assume_test_silo_mode(SiloMode.CELL):
+            assert not ApiTokenReplica.objects.filter(user_id=user.id).exists()
+
+    with assume_test_silo_mode(SiloMode.CELL):
+        # After outbox_runner() is complete replication should complete.
+        assert ApiTokenReplica.objects.filter(apitoken_id=first_token.id).exists()
+        assert ApiTokenReplica.objects.filter(apitoken_id=second_token.id).exists()
 
 
 @django_db_all
@@ -175,7 +229,7 @@ def test_run_outbox_replications_for_self_hosted() -> None:
         AuthProvider.objects.create(organization_id=org.id, provider="meethub", config={})
 
     ControlOutbox.objects.all().delete()
-    RegionOutbox.objects.all().delete()
+    CellOutbox.objects.all().delete()
 
     with override_settings(SENTRY_SELF_HOSTED=True):
         run_outbox_replications_for_self_hosted()

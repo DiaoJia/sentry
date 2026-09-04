@@ -1,10 +1,10 @@
 import {useCallback, useState} from 'react';
 import styled from '@emotion/styled';
 
-import FieldFromConfig from 'sentry/components/forms/fieldFromConfig';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
+import {FieldFromConfig} from 'sentry/components/forms/fieldFromConfig';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
 import {IconChevron} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Scope} from 'sentry/types/core';
@@ -18,7 +18,6 @@ export interface FormPanelProps {
    */
   fields: FieldObject[];
   access?: Set<Scope>;
-  additionalFieldProps?: Record<string, any>;
   /**
    * Can the PanelBody be hidden with a click?
    */
@@ -27,7 +26,9 @@ export interface FormPanelProps {
    * Disables the entire form
    */
   disabled?: boolean;
+
   features?: Record<string, any>;
+
   /**
    * The name of the field that should be highlighted
    */
@@ -47,8 +48,7 @@ export interface FormPanelProps {
   title?: React.ReactNode;
 }
 
-function FormPanel({
-  additionalFieldProps = {},
+export function FormPanel({
   title,
   fields,
   access,
@@ -116,7 +116,6 @@ function FormPanel({
               disabled={disabled}
               key={field.name}
               {...otherProps}
-              {...additionalFieldProps}
               field={fieldConfig}
               highlighted={otherProps.highlighted === `#${field.name}`}
             />
@@ -127,8 +126,6 @@ function FormPanel({
     </Panel>
   );
 }
-
-export default FormPanel;
 
 const Collapse = styled('span')`
   cursor: pointer;

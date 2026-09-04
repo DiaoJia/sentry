@@ -1,14 +1,12 @@
-import {LocationFixture} from 'sentry-fixture/locationFixture';
-
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {Config} from 'sentry/types/system';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 
-describe('normalizeUrl', function () {
+describe('normalizeUrl', () => {
   let configState: Config;
   let result: any;
 
-  beforeEach(function () {
+  beforeEach(() => {
     configState = ConfigStore.getState();
     ConfigStore.loadInitialData({
       ...configState,
@@ -20,12 +18,11 @@ describe('normalizeUrl', function () {
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     ConfigStore.loadInitialData(configState);
   });
 
-  it('replaces paths in strings', function () {
-    const location = LocationFixture();
+  it('replaces paths in strings', () => {
     const cases = [
       // input, expected
       ['/settings/', '/settings/'],
@@ -74,10 +71,17 @@ describe('normalizeUrl', function () {
       ['/settings/stats/issues/', '/settings/stats/issues/'],
       ['/settings/stats/health/', '/settings/stats/health/'],
 
+      // Seer org settings: strip org slug but keep /settings/seer/... paths
+      ['/settings/acme/seer/', '/settings/seer/'],
+      ['/settings/acme/seer/repos/', '/settings/seer/repos/'],
+      ['/settings/seer/repos/', '/settings/seer/repos/'],
+
       ['/join-request/acme', '/join-request/'],
       ['/join-request/acme/', '/join-request/'],
       ['/onboarding/acme/', '/onboarding/'],
       ['/onboarding/acme/project/', '/onboarding/project/'],
+      ['/checkout/acme/', '/checkout/'],
+      ['/checkout/acme/?query=value', '/checkout/?query=value'],
 
       ['/organizations/new/', '/organizations/new/'],
       ['/organizations/albertos-organizations/issues/', '/issues/'],
@@ -106,26 +110,12 @@ describe('normalizeUrl', function () {
       ],
       // Team settings links in breadcrumbs can be pre-normalized from breadcrumbs
       ['/settings/teams/peeps/', '/settings/teams/peeps/'],
-      [
-        '/settings/billing/checkout/?_q=all#hash',
-        '/settings/billing/checkout/?_q=all#hash',
-      ],
-      [
-        '/settings/billing/bundle-checkout/?_q=all#hash',
-        '/settings/billing/bundle-checkout/?_q=all#hash',
-      ],
     ];
     for (const [input, expected] of cases) {
       result = normalizeUrl(input!);
       expect(result).toEqual(expected);
 
-      result = normalizeUrl(input!, location);
-      expect(result).toEqual(expected);
-
       result = normalizeUrl(input!, {forceCustomerDomain: false});
-      expect(result).toEqual(expected);
-
-      result = normalizeUrl(input!, location, {forceCustomerDomain: false});
       expect(result).toEqual(expected);
     }
 
@@ -134,60 +124,56 @@ describe('normalizeUrl', function () {
     for (const [input, expected] of cases) {
       result = normalizeUrl(input!, {forceCustomerDomain: true});
       expect(result).toEqual(expected);
-
-      result = normalizeUrl(input!, location, {forceCustomerDomain: true});
-      expect(result).toEqual(expected);
     }
 
     ConfigStore.set('customerDomain', null);
     for (const [input, _expected] of cases) {
       result = normalizeUrl(input!);
       expect(result).toEqual(input);
-
-      result = normalizeUrl(input!, location);
-      expect(result).toEqual(input);
     }
   });
 
-  it('replaces pathname in objects', function () {
-    const location = LocationFixture();
-    result = normalizeUrl({pathname: '/settings/acme/'}, location);
+  it('replaces pathname in objects', () => {
+    result = normalizeUrl({pathname: '/settings/acme/'});
     expect(result.pathname).toBe('/settings/organization/');
 
-    result = normalizeUrl({pathname: '/settings/acme/'}, location, {
-      forceCustomerDomain: false,
-    });
+    result = normalizeUrl(
+      {pathname: '/settings/acme/'},
+      {
+        forceCustomerDomain: false,
+      }
+    );
     expect(result.pathname).toBe('/settings/organization/');
 
-    result = normalizeUrl({pathname: '/settings/sentry/members'}, location);
+    result = normalizeUrl({pathname: '/settings/sentry/members'});
     expect(result.pathname).toBe('/settings/members');
 
-    result = normalizeUrl({pathname: '/organizations/albertos-apples/issues'}, location);
+    result = normalizeUrl({pathname: '/settings/acme/seer/repos/'});
+    expect(result.pathname).toBe('/settings/seer/repos/');
+
+    result = normalizeUrl({pathname: '/organizations/albertos-apples/issues'});
     expect(result.pathname).toBe('/issues');
 
-    result = normalizeUrl(
-      {
-        pathname: '/organizations/sentry/profiling/profile/sentry/abc123/',
-        query: {sorting: 'call order'},
-      },
-      location
-    );
+    result = normalizeUrl({
+      pathname: '/organizations/sentry/profiling/profile/sentry/abc123/',
+      query: {sorting: 'call order'},
+    });
     expect(result.pathname).toBe('/profiling/profile/sentry/abc123/');
 
-    result = normalizeUrl(
-      {
-        pathname: '/organizations/albertos-apples/issues',
-        query: {q: 'all'},
-      },
-      location
-    );
+    result = normalizeUrl({
+      pathname: '/organizations/albertos-apples/issues',
+      query: {q: 'all'},
+    });
     expect(result.pathname).toBe('/issues');
 
     // Normalizes urls if options.customerDomain is true and orgslug.sentry.io isn't being used
     ConfigStore.set('customerDomain', null);
-    result = normalizeUrl({pathname: '/settings/acme/'}, location, {
-      forceCustomerDomain: true,
-    });
+    result = normalizeUrl(
+      {pathname: '/settings/acme/'},
+      {
+        forceCustomerDomain: true,
+      }
+    );
     expect(result.pathname).toBe('/settings/organization/');
 
     result = normalizeUrl(
@@ -195,7 +181,6 @@ describe('normalizeUrl', function () {
         pathname: '/organizations/albertos-apples/issues',
         query: {q: 'all'},
       },
-      location,
       {
         forceCustomerDomain: true,
       }

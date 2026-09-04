@@ -1,19 +1,17 @@
 import {Fragment, useEffect} from 'react';
 import styled from '@emotion/styled';
 
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
 import {IconBusiness} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
 
-import type {Plan} from 'getsentry/types';
-import {displayPlanName} from 'getsentry/utils/billing';
-import trackGetsentryAnalytics from 'getsentry/utils/trackGetsentryAnalytics';
+import {trackGetsentryAnalytics} from 'getsentry/utils/trackGetsentryAnalytics';
 
-import DashboardBackground from './illustrations/dashboardsBackground';
+import {DashboardBackground} from './illustrations/dashboardsBackground';
 import PageUpsellOverlay from './pageUpsellOverlay';
-import PlanFeature from './planFeature';
 
 type Props = React.PropsWithChildren<{
   features: string[];
@@ -30,24 +28,11 @@ function DisabledDashboardPage({
   features,
   ...props
 }: Props) {
-  const renderPlan = ({plan}: {plan: Plan | null}) => (
-    <strong>{t('%s Plan', displayPlanName(plan))}</strong>
-  );
+  // Custom dashboards should be available on all AM1+ plans, so only MM1 & MM2 plans need to be upsold
+  // to upgrade to the newer Performance Plans
   const requiredPlan = tct(
-    `Upgrade to our [basicPlan] to view Dashboards and to our [advancedPlan]
-     to build and customize your own.`,
-    {
-      basicPlan: (
-        <PlanFeature organization={organization} features={['dashboards-basic']}>
-          {renderPlan}
-        </PlanFeature>
-      ),
-      advancedPlan: (
-        <PlanFeature organization={organization} features={['dashboards-edit']}>
-          {renderPlan}
-        </PlanFeature>
-      ),
-    }
+    'Upgrade to our newer [strong: Performance Plans] to build and customize your own dashboards.',
+    {strong: <strong />}
   );
 
   const description = (
@@ -64,7 +49,11 @@ function DisabledDashboardPage({
         <ListItem>{t('Build and share dashboards')}</ListItem>
         <ListItem>{t('Easily customize widgets')}</ListItem>
         <ListItem>{t('Manage dashboards')}</ListItem>
-        <ListItem>{t('Open widgets in Discover')}</ListItem>
+        <ListItem>
+          {getDiscoverDeprecation(organization)
+            ? t('Open widgets in Explore')
+            : t('Open widgets in Discover')}
+        </ListItem>
       </FeatureList>
     </Fragment>
   );
@@ -86,7 +75,6 @@ function DisabledDashboardPage({
       requiredPlan={requiredPlan}
       features={features}
       background={DashboardBackground}
-      defaultUpsellSelection="custom-dashboards"
       customWrapper={TextWrapper}
       positioningStrategy={({mainRect, anchorRect, wrapperRect}) => {
         // Center within the anchor on the x axis, until the wrapper is larger

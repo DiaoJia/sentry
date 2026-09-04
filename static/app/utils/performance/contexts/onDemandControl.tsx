@@ -1,17 +1,11 @@
 import type {ReactNode} from 'react';
-import {useCallback, useState} from 'react';
+import {createContext, useCallback, useContext, useState} from 'react';
 import type {Location} from 'history';
 
-import {Switch} from 'sentry/components/core/switch';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import {FlexContainer} from 'sentry/utils/discover/styles';
 import {isOnDemandQueryString} from 'sentry/utils/onDemandMetrics';
 import {hasOnDemandMetricWidgetFeature} from 'sentry/utils/onDemandMetrics/features';
-import {createDefinedContext} from 'sentry/utils/performance/contexts/utils';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import type {Widget} from 'sentry/views/dashboards/types';
 import {WidgetType} from 'sentry/views/dashboards/types';
 
@@ -21,14 +15,13 @@ export interface OnDemandControlContext {
   isControlEnabled?: boolean;
 }
 
-const [_OnDemandControlProvider, _useOnDemandControl, _context] =
-  createDefinedContext<OnDemandControlContext>({
-    name: 'OnDemandControlContext',
-    strict: false,
-  });
+const OnDemandControlContext = createContext<OnDemandControlContext | undefined>(
+  undefined
+);
 
-export const OnDemandControlConsumer = _context.Consumer;
-export const useOnDemandControl = _useOnDemandControl;
+export function useOnDemandControl(): OnDemandControlContext | undefined {
+  return useContext(OnDemandControlContext);
+}
 
 export function OnDemandControlProvider({
   children,
@@ -44,28 +37,32 @@ export function OnDemandControlProvider({
       : _forceOnDemandQuery === 'false'
         ? false
         : undefined;
+  const navigate = useNavigate();
   const [isControlEnabled, setIsControlEnabled] = useState(_forceOnDemand !== undefined);
   const [forceOnDemand, _setForceOnDemand] = useState(_forceOnDemand || false);
 
   const setForceOnDemand = useCallback(
     (value: boolean) => {
-      browserHistory.replace({
-        pathname: location.pathname,
-        query: {
-          ...location.query,
-          forceOnDemand: value,
+      navigate(
+        {
+          pathname: location.pathname,
+          query: {
+            ...location.query,
+            forceOnDemand: value,
+          },
         },
-      });
+        {replace: true}
+      );
       _setForceOnDemand(value);
       setIsControlEnabled(true);
     },
-    [setIsControlEnabled, _setForceOnDemand, location]
+    [navigate, setIsControlEnabled, _setForceOnDemand, location]
   );
 
   return (
-    <_OnDemandControlProvider value={{setForceOnDemand, isControlEnabled, forceOnDemand}}>
+    <OnDemandControlContext value={{setForceOnDemand, isControlEnabled, forceOnDemand}}>
       {children}
-    </_OnDemandControlProvider>
+    </OnDemandControlContext>
   );
 }
 /**
@@ -133,32 +130,3 @@ export const shouldUseOnDemandMetrics = (
 
   return isOnDemandMetricWidget(widget);
 };
-
-export function ToggleOnDemand() {
-  const org = useOrganization();
-  const onDemand = _useOnDemandControl();
-
-  const toggle = useCallback(() => {
-    onDemand.setForceOnDemand(!onDemand.forceOnDemand);
-  }, [onDemand]);
-
-  if (!onDemand) {
-    return null;
-  }
-
-  if (!org.features.includes('on-demand-metrics-extraction-experimental')) {
-    return null;
-  }
-
-  return (
-    <FlexContainer
-      style={{
-        opacity: onDemand.isControlEnabled ? 1.0 : 0.5,
-        gap: space(1),
-      }}
-    >
-      {t('On-demand metrics')}
-      <Switch checked={onDemand.forceOnDemand} size="sm" onChange={toggle} />
-    </FlexContainer>
-  );
-}

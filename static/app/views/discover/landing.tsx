@@ -1,35 +1,39 @@
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
+
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Grid, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import type {SelectValue} from '@sentry/scraps/select';
+import {Switch} from '@sentry/scraps/switch';
 
 import Feature from 'sentry/components/acl/feature';
 import {Breadcrumbs} from 'sentry/components/breadcrumbs';
-import {Alert} from 'sentry/components/core/alert';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import {Switch} from 'sentry/components/core/switch';
 import * as Layout from 'sentry/components/layouts/thirds';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import SearchBar from 'sentry/components/searchBar';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {SelectValue} from 'sentry/types/core';
-import type {NewQuery, SavedQuery} from 'sentry/types/organization';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t, tct} from 'sentry/locale';
+import type {SavedQuery} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import EventView from 'sentry/utils/discover/eventView';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {EventView} from 'sentry/utils/discover/eventView';
 import {getDiscoverLandingUrl} from 'sentry/utils/discover/urls';
-import {useApiQuery} from 'sentry/utils/queryClient';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {useLocalStorageState} from 'sentry/utils/useLocalStorageState';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import useRouter from 'sentry/utils/useRouter';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {makeDiscoverPathname} from 'sentry/views/discover/pathnames';
 import {getSavedQueryWithDataset} from 'sentry/views/discover/savedQuery/utils';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 import QueryList from './queryList';
-import {getPrebuiltQueries} from './utils';
+import {getDiscoverDeprecation, getPrebuiltQueries} from './utils';
 
 const SORT_OPTIONS = [
   {label: t('My Queries'), value: 'myqueries'},
@@ -44,11 +48,13 @@ const SORT_OPTIONS = [
 
 function NoAccess() {
   return (
-    <Layout.Page withPadding>
+    <Stack flex={1} padding="2xl 3xl">
       <Alert.Container>
-        <Alert type="warning">{t("You don't have access to this feature")}</Alert>
+        <Alert variant="warning" showIcon={false}>
+          {t("You don't have access to this feature")}
+        </Alert>
       </Alert.Container>
-    </Layout.Page>
+    </Stack>
   );
 }
 
@@ -81,7 +87,7 @@ const useDiscoverLandingQuery = (renderPrebuilt: boolean) => {
       const needleSearch = searchQuery.toLowerCase();
 
       const numOfPrebuiltQueries = views.reduce((sum, view) => {
-        const newQuery = getSavedQueryWithDataset(view) as NewQuery;
+        const newQuery = getSavedQueryWithDataset(view)!;
         const eventView = EventView.fromNewQueryWithLocation(newQuery, location);
 
         // if a search is performed on the list of queries, we filter
@@ -109,25 +115,25 @@ const useDiscoverLandingQuery = (renderPrebuilt: boolean) => {
     delete queryParams.cursor;
   }
 
-  return useApiQuery<SavedQuery[]>(
-    [
-      `/organizations/${organization.slug}/discover/saved/`,
+  return useQuery({
+    ...apiOptions.as<SavedQuery[]>()(
+      '/organizations/$organizationIdOrSlug/discover/saved/',
       {
+        path: {organizationIdOrSlug: organization.slug},
         query: queryParams,
-      },
-    ],
-    {
-      staleTime: 0,
-    }
-  );
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+  });
 };
 
 const RENDER_PREBUILT_KEY = 'discover-render-prebuilt';
 
 function DiscoverLanding() {
+  const navigate = useNavigate();
   const organization = useOrganization();
   const location = useLocation();
-  const router = useRouter();
   const activeSort = useActiveSort();
   const savedSearchQuery = useSavedSearchQuery();
 
@@ -139,20 +145,21 @@ function DiscoverLanding() {
   const {
     status,
     error,
-    data: savedQueries = [],
-    getResponseHeader,
+    data: savedQueriesResponse,
+    refetch: refreshSavedQueries,
   } = useDiscoverLandingQuery(renderPrebuilt);
 
-  const savedQueriesPageLinks = getResponseHeader?.('Link');
+  const savedQueries = savedQueriesResponse?.json ?? [];
+  const savedQueriesPageLinks = savedQueriesResponse?.headers.Link;
 
   const to = makeDiscoverPathname({
-    path: `/homepage/`,
+    path: '/homepage/',
     organization,
   });
 
   const handleSortChange = (value: string) => {
     trackAnalytics('discover_v2.change_sort', {organization, sort: value});
-    browserHistory.push({
+    navigate({
       pathname: location.pathname,
       query: {
         ...location.query,
@@ -163,7 +170,7 @@ function DiscoverLanding() {
   };
 
   const handleSearchQuery = (searchQuery: string) => {
-    browserHistory.push({
+    navigate({
       pathname: location.pathname,
       query: {
         ...location.query,
@@ -179,43 +186,35 @@ function DiscoverLanding() {
       features="discover-query"
       renderDisabled={() => <NoAccess />}
     >
-      <SentryDocumentTitle title={t('Discover')} orgSlug={organization.slug}>
-        <Layout.Page>
-          <Layout.Header>
-            <Layout.HeaderContent>
-              <Breadcrumbs
-                crumbs={[
-                  {
-                    key: 'discover-homepage',
-                    label: t('Discover'),
-                    to: getDiscoverLandingUrl(organization),
-                  },
-                  {
-                    key: 'discover-saved-queries',
-                    label: t('Saved Queries'),
-                  },
-                ]}
-              />
-            </Layout.HeaderContent>
-            <Layout.HeaderActions>
-              <LinkButton
-                data-test-id="build-new-query"
-                to={to}
-                size="sm"
-                priority="primary"
-                onClick={() => {
-                  trackAnalytics('discover_v2.build_new_query', {
-                    organization,
-                  });
-                }}
-              >
-                {t('Build a new query')}
-              </LinkButton>
-            </Layout.HeaderActions>
-          </Layout.Header>
+      <SentryDocumentTitle
+        title={getDiscoverDeprecation(organization) ? t('Errors') : t('Discover')}
+        orgSlug={organization.slug}
+      >
+        <Stack flex={1}>
+          <TopBar.Slot name="title">
+            <Breadcrumbs
+              crumbs={[
+                {
+                  label: getDiscoverDeprecation(organization)
+                    ? t('Errors')
+                    : t('Discover'),
+                  to: getDiscoverLandingUrl(organization),
+                },
+                {label: t('Saved Queries')},
+              ]}
+            />
+          </TopBar.Slot>
           <Layout.Body>
-            <Layout.Main fullWidth>
-              <StyledActions>
+            <Layout.Main width="full">
+              <Grid
+                columns={{
+                  zero: 'auto',
+                  xl: 'auto max-content min-content max-content',
+                }}
+                gap="xl"
+                align="center"
+                marginBottom="xl"
+              >
                 <StyledSearchBar
                   defaultQuery=""
                   query={savedSearchQuery}
@@ -232,31 +231,79 @@ function DiscoverLanding() {
                   />
                 </PrebuiltSwitch>
                 <CompactSelect
-                  triggerProps={{prefix: t('Sort By')}}
+                  trigger={triggerProps => (
+                    <OverlayTrigger.Button {...triggerProps} prefix={t('Sort By')} />
+                  )}
                   value={activeSort.value}
                   options={SORT_OPTIONS}
                   onChange={opt => handleSortChange(opt.value)}
                   position="bottom-end"
                 />
-              </StyledActions>
+                <LinkButton
+                  data-test-id="build-new-query"
+                  to={to}
+                  variant="primary"
+                  onClick={() => {
+                    trackAnalytics('discover_v2.build_new_query', {
+                      organization,
+                    });
+                  }}
+                >
+                  {t('Build a new query')}
+                </LinkButton>
+              </Grid>
               {status === 'pending' ? (
                 <LoadingIndicator />
               ) : status === 'error' ? (
                 <LoadingError message={error.message} />
               ) : (
-                <QueryList
-                  pageLinks={savedQueriesPageLinks ?? ''}
-                  savedQueries={savedQueries}
-                  savedQuerySearchQuery={savedSearchQuery}
-                  renderPrebuilt={renderPrebuilt}
-                  location={location}
-                  organization={organization}
-                  router={router}
-                />
+                <QueriesContainer>
+                  {organization.features.includes('expose-migrated-discover-queries') &&
+                    (getDiscoverDeprecation(organization) ? (
+                      <Alert variant="info">
+                        {tct(
+                          'Your saved transactions queries are no longer available in this UI. Try them out in the [exploreLink:Explore Queries] page instead.',
+                          {
+                            exploreLink: (
+                              <Link
+                                to={`/organizations/${organization.slug}/explore/saved-queries/`}
+                              />
+                            ),
+                          }
+                        )}
+                      </Alert>
+                    ) : (
+                      organization.features.includes(
+                        'expose-migrated-discover-queries'
+                      ) && (
+                        <Alert variant="info">
+                          {tct(
+                            'Your saved transactions queries are also available in the new Explore UI. Try them out in [exploreLink:Explore] instead.',
+                            {
+                              exploreLink: (
+                                <Link
+                                  to={`/organizations/${organization.slug}/explore/saved-queries/`}
+                                />
+                              ),
+                            }
+                          )}
+                        </Alert>
+                      )
+                    ))}
+                  <QueryList
+                    pageLinks={savedQueriesPageLinks ?? ''}
+                    savedQueries={savedQueries}
+                    savedQuerySearchQuery={savedSearchQuery}
+                    renderPrebuilt={renderPrebuilt}
+                    location={location}
+                    organization={organization}
+                    refetchSavedQueries={refreshSavedQueries}
+                  />
+                </QueriesContainer>
               )}
             </Layout.Main>
           </Layout.Body>
-        </Layout.Page>
+        </Stack>
       </SentryDocumentTitle>
     </Feature>
   );
@@ -265,8 +312,8 @@ function DiscoverLanding() {
 const PrebuiltSwitch = styled('label')`
   display: flex;
   align-items: center;
-  gap: ${space(1.5)};
-  font-weight: ${p => p.theme.fontWeightNormal};
+  gap: ${p => p.theme.space.lg};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   margin: 0;
 `;
 
@@ -274,16 +321,10 @@ const StyledSearchBar = styled(SearchBar)`
   flex-grow: 1;
 `;
 
-const StyledActions = styled('div')`
-  display: grid;
-  gap: ${space(2)};
-  grid-template-columns: auto max-content min-content;
-  align-items: center;
-  margin-bottom: ${space(2)};
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: auto;
-  }
+const QueriesContainer = styled('div')`
+  display: flex;
+  flex-direction: column;
+  gap: ${p => p.theme.space.xl};
 `;
 
 export default DiscoverLanding;

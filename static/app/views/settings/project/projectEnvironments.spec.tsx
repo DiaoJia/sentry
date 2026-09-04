@@ -2,194 +2,181 @@ import {
   EnvironmentsFixture,
   HiddenEnvironmentsFixture,
 } from 'sentry-fixture/environments';
-import {LocationFixture} from 'sentry-fixture/locationFixture';
-import {ProjectFixture} from 'sentry-fixture/project';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
-import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+import {
+  render,
+  screen,
+  userEvent,
+  waitFor,
+  within,
+} from 'sentry-test/reactTestingLibrary';
 
-import recreateRoute from 'sentry/utils/recreateRoute';
 import ProjectEnvironments from 'sentry/views/settings/project/projectEnvironments';
 
-jest.mock('sentry/utils/recreateRoute');
-jest
-  .mocked(recreateRoute)
-  .mockReturnValue('/org-slug/project-slug/settings/environments/');
-
 function renderComponent(isHidden: boolean) {
-  const {organization, project, routerProps} = initializeOrg();
-  const pathname = isHidden ? 'environments/hidden/' : 'environments/';
+  const {organization, project} = initializeOrg();
+  const pathname = isHidden
+    ? `/settings/${organization.slug}/projects/${project.slug}/environments/hidden/`
+    : `/settings/${organization.slug}/projects/${project.slug}/environments/`;
+  const route = isHidden
+    ? '/settings/:orgId/projects/:projectId/environments/hidden/'
+    : '/settings/:orgId/projects/:projectId/environments/';
 
-  return render(
-    <ProjectEnvironments
-      {...routerProps}
-      params={{projectId: project.slug}}
-      location={LocationFixture({pathname})}
-      organization={organization}
-      project={project}
-    />
+  return render(<ProjectEnvironments />, {
+    organization,
+    outletContext: {project},
+    initialRouterConfig: {
+      location: {pathname},
+      route,
+    },
+  });
+}
+
+function getEnvironmentRow(name: string) {
+  const row = screen.getByText(name).closest('[role="row"]');
+
+  if (!(row instanceof HTMLElement)) {
+    throw new Error(`Unable to find row for environment: ${name}`);
+  }
+
+  return row;
+}
+
+async function clickEnvironmentAction(name: string, action: string) {
+  await screen.findByText(name);
+  await userEvent.click(
+    within(getEnvironmentRow(name)).getByRole('button', {name: action})
   );
 }
 
-describe('ProjectEnvironments', function () {
-  const project = ProjectFixture({
-    defaultEnvironment: 'production',
-  });
-
-  beforeEach(function () {
+describe('ProjectEnvironments', () => {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
-      url: '/projects/org-slug/project-slug/',
-      body: project,
+      url: '/projects/org-slug/project-slug/tags/environment/values/',
+      body: [],
     });
   });
 
-  afterEach(function () {
-    MockApiClient.clearMockResponses();
+  it.each([
+    ['active', false, "You don't have any environments yet."],
+    ['hidden', true, "You don't have any hidden environments."],
+  ])('renders the %s empty state', async (_label, isHidden, message) => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: [],
+    });
+
+    renderComponent(isHidden);
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
   });
 
-  describe('render active', function () {
-    it('renders empty message', function () {
-      MockApiClient.addMockResponse({
-        url: '/projects/org-slug/project-slug/environments/',
-        body: [],
-      });
-
-      renderComponent(false);
-
-      expect(
-        screen.getByText("You don't have any environments yet.")
-      ).toBeInTheDocument();
+  it('renders active environments', async () => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: EnvironmentsFixture(),
     });
 
-    it('renders environment list', function () {
-      MockApiClient.addMockResponse({
-        url: '/projects/org-slug/project-slug/environments/',
-        body: EnvironmentsFixture(),
-      });
-      renderComponent(false);
+    renderComponent(false);
 
-      expect(screen.getByText('production')).toBeInTheDocument();
-      expect(screen.getAllByRole('button', {name: 'Hide'})).toHaveLength(3);
-    });
+    expect(await screen.findByText('production')).toBeInTheDocument();
+    expect(screen.getByText('All Environments')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', {name: 'Hide'})).toHaveLength(3);
   });
 
-  describe('render hidden', function () {
-    it('renders empty message', function () {
-      MockApiClient.addMockResponse({
-        url: '/projects/org-slug/project-slug/environments/',
-        body: [],
-      });
-
-      renderComponent(true);
-
-      expect(
-        screen.getByText("You don't have any hidden environments.")
-      ).toBeInTheDocument();
+  it('shows event counts per environment', async () => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: EnvironmentsFixture(),
+    });
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/tags/environment/values/',
+      body: [
+        {value: 'production', name: 'production', count: 12345},
+        {value: 'staging', name: 'staging', count: 678},
+        {value: 'STAGING', name: 'STAGING', count: 99},
+      ],
     });
 
-    it('renders environment list', function () {
-      MockApiClient.addMockResponse({
-        url: '/projects/org-slug/project-slug/environments/',
-        body: HiddenEnvironmentsFixture(),
-      });
-      renderComponent(true);
+    renderComponent(false);
 
-      // Hidden buttons should not have "Set as default"
-      expect(screen.getByRole('button', {name: 'Show'})).toBeInTheDocument();
-    });
+    expect(await screen.findByText('12K')).toBeInTheDocument();
+    expect(screen.getByText('678')).toBeInTheDocument();
+    expect(screen.getByText('13K')).toBeInTheDocument();
   });
 
-  describe('toggle', function () {
-    let hideMock: jest.Mock;
-    let showMock: jest.Mock;
-    const baseUrl = '/projects/org-slug/project-slug/environments/';
-    beforeEach(function () {
-      hideMock = MockApiClient.addMockResponse({
-        url: `${baseUrl}production/`,
-        method: 'PUT',
-      });
-      showMock = MockApiClient.addMockResponse({
-        url: `${baseUrl}zzz/`,
-        method: 'PUT',
-      });
-
-      MockApiClient.addMockResponse({
-        url: baseUrl,
-      });
+  it('filters environments and persists the search query', async () => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: EnvironmentsFixture(),
     });
 
-    it('hides', async function () {
-      MockApiClient.addMockResponse({
-        url: baseUrl,
-        body: EnvironmentsFixture(),
-      });
+    const {router} = renderComponent(false);
 
-      renderComponent(false);
+    const searchInput = await screen.findByRole('textbox', {
+      name: 'Search environments',
+    });
+    await userEvent.type(searchInput, 'pdct');
 
-      // Click first row 'hide' (production)
-      //
-      // XXX(epurkhiser): In the future we should improve the accessability of
-      // lists, because right now there's no way to associate the hide button
-      // with its environment
-      await userEvent.click(screen.getAllByRole('button', {name: 'Hide'})[0]!);
+    await waitFor(() => {
+      expect(router.location.query.query).toBe('pdct');
+      expect(screen.queryByText('staging')).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('production')).toBeInTheDocument();
+    expect(screen.queryByText('All Environments')).not.toBeInTheDocument();
 
-      expect(hideMock).toHaveBeenCalledWith(
-        `${baseUrl}production/`,
-        expect.objectContaining({
-          data: expect.objectContaining({isHidden: true}),
-        })
-      );
+    await userEvent.click(screen.getByRole('button', {name: 'Clear'}));
+
+    expect(await screen.findByText('staging')).toBeInTheDocument();
+    expect(router.location.query.query).toBeUndefined();
+  });
+
+  it.each([
+    ['%app_env%', '%2525app_env%2525'],
+    ['us%2Feast', 'us%25252Feast'],
+  ])('double-encodes environment path params for %s', async (name, encodedName) => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: [{id: '1', name}],
+    });
+    const hideMock = MockApiClient.addMockResponse({
+      url: `/projects/org-slug/project-slug/environments/${encodedName}/`,
+      method: 'PUT',
     });
 
-    it('hides names requiring encoding', async function () {
-      MockApiClient.addMockResponse({
-        url: baseUrl,
-        body: [{id: '1', name: '%app_env%', isHidden: false}],
-      });
+    renderComponent(false);
 
-      hideMock = MockApiClient.addMockResponse({
-        url: `${baseUrl}%2525app_env%2525/`,
-        method: 'PUT',
-      });
+    await clickEnvironmentAction(name, 'Hide');
 
-      renderComponent(false);
+    expect(hideMock).toHaveBeenCalledWith(
+      `/projects/org-slug/project-slug/environments/${encodedName}/`,
+      expect.objectContaining({
+        data: expect.objectContaining({isHidden: true}),
+      })
+    );
+  });
 
-      await userEvent.click(screen.getByRole('button', {name: 'Hide'}));
-
-      expect(hideMock).toHaveBeenCalledWith(
-        `${baseUrl}%2525app_env%2525/`,
-        expect.objectContaining({
-          data: expect.objectContaining({isHidden: true}),
-        })
-      );
+  it('renders hidden environments and unhides them', async () => {
+    MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/',
+      body: HiddenEnvironmentsFixture(),
+    });
+    const showMock = MockApiClient.addMockResponse({
+      url: '/projects/org-slug/project-slug/environments/zzz/',
+      method: 'PUT',
     });
 
-    it('shows', async function () {
-      MockApiClient.addMockResponse({
-        url: baseUrl,
-        body: HiddenEnvironmentsFixture(),
-      });
+    renderComponent(true);
 
-      renderComponent(true);
+    await clickEnvironmentAction('zzz', 'Show');
 
-      await userEvent.click(screen.getByRole('button', {name: 'Show'}));
-
-      expect(showMock).toHaveBeenCalledWith(
-        `${baseUrl}zzz/`,
-        expect.objectContaining({
-          data: expect.objectContaining({isHidden: false}),
-        })
-      );
-    });
-
-    it('does not have "All Environments" rows', function () {
-      MockApiClient.addMockResponse({
-        url: baseUrl,
-        body: HiddenEnvironmentsFixture(),
-      });
-
-      renderComponent(true);
-      expect(screen.queryByText('All Environments')).not.toBeInTheDocument();
-    });
+    expect(screen.queryByText('All Environments')).not.toBeInTheDocument();
+    expect(showMock).toHaveBeenCalledWith(
+      '/projects/org-slug/project-slug/environments/zzz/',
+      expect.objectContaining({
+        data: expect.objectContaining({isHidden: false}),
+      })
+    );
   });
 });

@@ -2,113 +2,26 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {MetricHistoryFixture} from 'getsentry-test/fixtures/metricHistory';
 import {PlanDetailsLookupFixture} from 'getsentry-test/fixtures/planDetailsLookup';
-import {
-  DynamicSamplingReservedBudgetFixture,
-  PendingReservedBudgetFixture,
-  ReservedBudgetFixture,
-  ReservedBudgetMetricHistoryFixture,
-  SeerReservedBudgetFixture,
-} from 'getsentry-test/fixtures/reservedBudget';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
 
 import {DataCategory} from 'sentry/types/core';
 
+import {UNLIMITED_RESERVED} from 'getsentry/constants';
+import {MILLISECONDS_IN_HOUR} from 'getsentry/utils/billing';
 import {
+  calculateSeerUserSpend,
+  formatCategoryQuantityWithDisplayName,
   getPlanCategoryName,
-  getReservedBudgetDisplayName,
-  hasCategoryFeature,
-  isSeer,
-  listDisplayNames,
+  getSingularCategoryName,
+  isByteCategory,
+  isEmergeCategory,
   sortCategories,
   sortCategoriesWithKeys,
 } from 'getsentry/utils/dataCategory';
 
-describe('hasCategoryFeature', function () {
+describe('sortCategories', () => {
   const organization = OrganizationFixture();
-  const subscription = SubscriptionFixture({organization, plan: 'mm2_b_100k'});
-
-  it('returns am1 plan categories', function () {
-    const sub = SubscriptionFixture({organization, plan: 'am1_team'});
-    expect(hasCategoryFeature(DataCategory.ERRORS, sub, organization)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, sub, organization)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, sub, organization)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, sub, organization)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.MONITOR_SEATS, sub, organization)).toBe(true);
-  });
-
-  it('returns mm2 plan categories', function () {
-    expect(hasCategoryFeature(DataCategory.ERRORS, subscription, organization)).toBe(
-      true
-    );
-    expect(
-      hasCategoryFeature(DataCategory.TRANSACTIONS, subscription, organization)
-    ).toBe(false);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, subscription, organization)).toBe(
-      false
-    );
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, organization)).toBe(
-      false
-    );
-    expect(
-      hasCategoryFeature(DataCategory.MONITOR_SEATS, subscription, organization)
-    ).toBe(false);
-  });
-
-  it('returns mm1 plan categories', function () {
-    const sub = SubscriptionFixture({organization, plan: 's1'});
-    expect(hasCategoryFeature(DataCategory.ERRORS, sub, organization)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, sub, organization)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, sub, organization)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, organization)).toBe(
-      false
-    );
-    expect(
-      hasCategoryFeature(DataCategory.MONITOR_SEATS, subscription, organization)
-    ).toBe(false);
-  });
-
-  it('returns org has transactions feature', function () {
-    const org = {...organization, features: ['performance-view']};
-    expect(hasCategoryFeature(DataCategory.ERRORS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.MONITOR_SEATS, subscription, org)).toBe(false);
-  });
-
-  it('returns org has attachments feature', function () {
-    const org = {...organization, features: ['event-attachments']};
-    expect(hasCategoryFeature(DataCategory.ERRORS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.MONITOR_SEATS, subscription, org)).toBe(false);
-  });
-
-  it('returns org has replays feature', function () {
-    const org = {...organization, features: ['session-replay']};
-    expect(hasCategoryFeature(DataCategory.ERRORS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.MONITOR_SEATS, subscription, org)).toBe(false);
-  });
-
-  it('returns org has transactions and attachments features', function () {
-    const org = {...organization, features: ['performance-view', 'event-attachments']};
-    expect(hasCategoryFeature(DataCategory.ERRORS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.TRANSACTIONS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.ATTACHMENTS, subscription, org)).toBe(true);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, org)).toBe(false);
-    expect(hasCategoryFeature(DataCategory.REPLAYS, subscription, org)).toBe(false);
-  });
-
-  it('returns org does not have unknown feature', function () {
-    const org = {...organization, features: []};
-    expect(hasCategoryFeature('unknown' as DataCategory, subscription, org)).toBe(false);
-  });
-
-  it('returns sorted categories', function () {
+  it('returns sorted categories', () => {
     const sub = SubscriptionFixture({organization, plan: 'am1_team'});
     expect(sortCategories(sub.categories)).toStrictEqual([
       MetricHistoryFixture({
@@ -159,10 +72,28 @@ describe('hasCategoryFeature', function () {
         prepaid: 0,
         order: 15,
       }),
+      MetricHistoryFixture({
+        category: DataCategory.SEER_USER,
+        reserved: 0,
+        prepaid: 0,
+        order: 16,
+      }),
+      MetricHistoryFixture({
+        category: DataCategory.SIZE_ANALYSIS,
+        reserved: 100,
+        prepaid: 100,
+        order: 17,
+      }),
+      MetricHistoryFixture({
+        category: DataCategory.INSTALLABLE_BUILD,
+        reserved: 25000,
+        prepaid: 25000,
+        order: 18,
+      }),
     ]);
   });
 
-  it('returns sorted categories with keys', function () {
+  it('returns sorted categories with keys', () => {
     const sub = SubscriptionFixture({organization, plan: 'am1_team'});
     expect(sortCategoriesWithKeys(sub.categories)).toStrictEqual([
       [
@@ -237,14 +168,41 @@ describe('hasCategoryFeature', function () {
           order: 15,
         }),
       ],
+      [
+        'seerUsers',
+        MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: 0,
+          prepaid: 0,
+          order: 16,
+        }),
+      ],
+      [
+        'sizeAnalyses',
+        MetricHistoryFixture({
+          category: DataCategory.SIZE_ANALYSIS,
+          reserved: 100,
+          prepaid: 100,
+          order: 17,
+        }),
+      ],
+      [
+        'installableBuilds',
+        MetricHistoryFixture({
+          category: DataCategory.INSTALLABLE_BUILD,
+          reserved: 25000,
+          prepaid: 25000,
+          order: 18,
+        }),
+      ],
     ]);
   });
 });
 
-describe('getPlanCategoryName', function () {
+describe('getPlanCategoryName', () => {
   const plan = PlanDetailsLookupFixture('am3_team');
 
-  it('should capitalize category', function () {
+  it('should capitalize category', () => {
     expect(getPlanCategoryName({plan, category: DataCategory.TRANSACTIONS})).toBe(
       'Transactions'
     );
@@ -259,7 +217,16 @@ describe('getPlanCategoryName', function () {
     );
   });
 
-  it('should display spans as accepted spans for DS', function () {
+  it('should title case category if specified', () => {
+    expect(
+      getPlanCategoryName({plan, category: DataCategory.MONITOR_SEATS, title: true})
+    ).toBe('Cron Monitors');
+    expect(getPlanCategoryName({plan, category: DataCategory.ERRORS, title: true})).toBe(
+      'Errors'
+    );
+  });
+
+  it('should display spans as accepted spans for DS', () => {
     expect(
       getPlanCategoryName({
         plan,
@@ -270,145 +237,251 @@ describe('getPlanCategoryName', function () {
   });
 });
 
-describe('getReservedBudgetDisplayName', function () {
-  const am3DsPlan = PlanDetailsLookupFixture('am3_business_ent_ds_auf');
+describe('getSingularCategoryName', () => {
+  const plan = PlanDetailsLookupFixture('am3_team');
 
-  it('should use the reserved budget name if it exists', function () {
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        reservedBudget: DynamicSamplingReservedBudgetFixture({}),
-      })
-    ).toBe('spans budget');
-
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        reservedBudget: SeerReservedBudgetFixture({}),
-        shouldTitleCase: true,
-      })
-    ).toBe('Seer Budget');
-  });
-
-  it('should try to find the reserved budget name if it does not exist', function () {
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        pendingReservedBudget: PendingReservedBudgetFixture({
-          categories: {
-            [DataCategory.SPANS]: true,
-            [DataCategory.SPANS_INDEXED]: true,
-          },
-          reservedBudget: 1000,
-        }),
-      })
-    ).toBe('spans budget');
-  });
-
-  it('should oxfordize the budget categories if no name exists or can be found', function () {
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        pendingReservedBudget: PendingReservedBudgetFixture({
-          categories: {
-            [DataCategory.SPANS_INDEXED]: true,
-          },
-          reservedBudget: 1000,
-        }),
-      })
-    ).toBe('stored spans budget');
-
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        reservedBudget: ReservedBudgetFixture({
-          categories: {
-            [DataCategory.REPLAYS]: ReservedBudgetMetricHistoryFixture({}),
-          },
-          dataCategories: [DataCategory.REPLAYS],
-        }),
-      })
-    ).toBe('replays budget');
-
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        pendingReservedBudget: PendingReservedBudgetFixture({
-          categories: {
-            [DataCategory.ERRORS]: true,
-            [DataCategory.SPANS]: true,
-            [DataCategory.REPLAYS]: true,
-            [DataCategory.MONITOR_SEATS]: true,
-          },
-          reservedBudget: 1000,
-        }),
-      })
-    ).toBe('cron monitors, errors, replays, and spans budget'); // alphabetically sorted
-
-    expect(
-      getReservedBudgetDisplayName({
-        plan: am3DsPlan,
-        reservedBudget: ReservedBudgetFixture({
-          categories: {
-            [DataCategory.ATTACHMENTS]: ReservedBudgetMetricHistoryFixture({}),
-            [DataCategory.UPTIME]: ReservedBudgetMetricHistoryFixture({}),
-          },
-          dataCategories: [DataCategory.ATTACHMENTS, DataCategory.UPTIME],
-        }),
-      })
-    ).toBe('attachments and uptime monitors budget');
-  });
-});
-
-describe('listDisplayNames', function () {
-  const plan = PlanDetailsLookupFixture('am3_business_ent_ds_auf');
-
-  it('should list categories in order given', function () {
-    expect(
-      listDisplayNames({
-        plan: plan!,
-        categories: [
-          DataCategory.SPANS,
-          DataCategory.TRANSACTIONS,
-          DataCategory.ERRORS,
-          DataCategory.REPLAYS,
-          DataCategory.MONITOR_SEATS,
-          DataCategory.ATTACHMENTS,
-        ],
-      })
-    ).toBe('spans, transactions, errors, replays, cron monitors, and attachments');
-  });
-
-  it('should hide stored spans for no DS', function () {
-    expect(
-      listDisplayNames({
-        plan: plan!,
-        categories: plan!.checkoutCategories,
-        hadCustomDynamicSampling: false,
-      })
-    ).toBe('errors, replays, attachments, cron monitors, spans, and uptime monitors');
-  });
-
-  it('should include stored spans and use accepted spans for DS', function () {
-    expect(
-      listDisplayNames({
-        plan: plan!,
-        categories: plan!.checkoutCategories,
-        hadCustomDynamicSampling: true,
-      })
-    ).toBe(
-      'errors, replays, attachments, cron monitors, accepted spans, uptime monitors, and stored spans'
+  it('should capitalize category', () => {
+    expect(getSingularCategoryName({plan, category: DataCategory.TRANSACTIONS})).toBe(
+      'Transaction'
+    );
+    expect(getSingularCategoryName({plan, category: DataCategory.PROFILE_DURATION})).toBe(
+      'Continuous profile hour'
+    );
+    expect(getSingularCategoryName({plan, category: DataCategory.MONITOR_SEATS})).toBe(
+      'Cron monitor'
     );
   });
+
+  it('should title case category if specified', () => {
+    expect(
+      getSingularCategoryName({plan, category: DataCategory.MONITOR_SEATS, title: true})
+    ).toBe('Cron Monitor');
+    expect(
+      getSingularCategoryName({plan, category: DataCategory.ERRORS, title: true})
+    ).toBe('Error');
+  });
+
+  it('should display spans as accepted spans for DS', () => {
+    expect(
+      getPlanCategoryName({
+        plan,
+        category: DataCategory.SPANS,
+        hadCustomDynamicSampling: true,
+      })
+    ).toBe('Accepted spans');
+  });
 });
 
-describe('isSeer', () => {
-  it.each([
-    [DataCategory.SEER_AUTOFIX, true],
-    [DataCategory.SEER_SCANNER, true],
-    [DataCategory.ERRORS, false],
-    [DataCategory.TRANSACTIONS, false],
-  ])('returns %s for category %s', (category, expected) => {
-    expect(isSeer(category)).toBe(expected);
+describe('isByteCategory', () => {
+  it('verifies isByteCategory function handles ATTACHMENTS, LOG_BYTE, and TRACE_METRIC_BYTE', () => {
+    expect(isByteCategory(DataCategory.ATTACHMENTS)).toBe(true);
+    expect(isByteCategory(DataCategory.LOG_BYTE)).toBe(true);
+    expect(isByteCategory(DataCategory.TRACE_METRIC_BYTE)).toBe(true);
+    expect(isByteCategory(DataCategory.ERRORS)).toBe(false);
+    expect(isByteCategory(DataCategory.TRANSACTIONS)).toBe(false);
+  });
+});
+
+describe('isEmergeCategory', () => {
+  it('returns true for SIZE_ANALYSIS and INSTALLABLE_BUILD', () => {
+    expect(isEmergeCategory(DataCategory.SIZE_ANALYSIS)).toBe(true);
+    expect(isEmergeCategory(DataCategory.INSTALLABLE_BUILD)).toBe(true);
+  });
+
+  it('returns false for other categories', () => {
+    expect(isEmergeCategory(DataCategory.ERRORS)).toBe(false);
+    expect(isEmergeCategory(DataCategory.TRANSACTIONS)).toBe(false);
+    expect(isEmergeCategory(DataCategory.ATTACHMENTS)).toBe(false);
+    expect(isEmergeCategory(DataCategory.REPLAYS)).toBe(false);
+  });
+});
+
+describe('formatCategoryQuantityWithDisplayName', () => {
+  const organization = OrganizationFixture();
+  const subscription = SubscriptionFixture({organization, plan: 'am3_team'});
+
+  it('formats profiling categories with hours', () => {
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.PROFILE_DURATION,
+        quantity: MILLISECONDS_IN_HOUR,
+        formattedQuantity: '1',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('1 hour');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.PROFILE_DURATION,
+        quantity: MILLISECONDS_IN_HOUR * 2,
+        formattedQuantity: '2',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('2 hours');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.PROFILE_DURATION,
+        quantity: MILLISECONDS_IN_HOUR * 1.5,
+        formattedQuantity: '1.5',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('1.5 hours');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.PROFILE_DURATION,
+        quantity: MILLISECONDS_IN_HOUR * 2,
+        formattedQuantity: '2',
+        subscription,
+        options: {
+          title: true,
+        },
+      })
+    ).toBe('2 Hours');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.PROFILE_DURATION,
+        quantity: UNLIMITED_RESERVED,
+        formattedQuantity: 'Unlimited',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('Unlimited hours');
+  });
+
+  it('formats other categories with display names', () => {
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.SEER_USER,
+        quantity: 1,
+        formattedQuantity: '1',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('1 active contributor');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.SEER_USER,
+        quantity: 2,
+        formattedQuantity: '2',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('2 active contributors');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.SEER_USER,
+        quantity: 2,
+        formattedQuantity: '2',
+        subscription,
+        options: {
+          capitalize: true,
+        },
+      })
+    ).toBe('2 Active contributors');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.SEER_USER,
+        quantity: 2,
+        formattedQuantity: '2',
+        subscription,
+        options: {
+          title: true,
+        },
+      })
+    ).toBe('2 Active Contributors');
+
+    expect(
+      formatCategoryQuantityWithDisplayName({
+        dataCategory: DataCategory.SEER_USER,
+        quantity: UNLIMITED_RESERVED,
+        formattedQuantity: 'Unlimited',
+        subscription,
+        options: {
+          capitalize: false,
+        },
+      })
+    ).toBe('Unlimited active contributors');
+  });
+});
+
+describe('calculateSeerUserSpend', () => {
+  it('returns 0 if the category is not SEER_USER', () => {
+    expect(
+      calculateSeerUserSpend(
+        MetricHistoryFixture({
+          category: DataCategory.ERRORS,
+          reserved: 0,
+          usage: 100,
+          prepaid: 0,
+        })
+      )
+    ).toBe(0);
+  });
+
+  it('returns 0 if the reserved is not 0', () => {
+    expect(
+      calculateSeerUserSpend(
+        MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: 100,
+          usage: 100,
+          prepaid: 100,
+        })
+      )
+    ).toBe(0);
+    expect(
+      calculateSeerUserSpend(
+        MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: UNLIMITED_RESERVED,
+          usage: 100,
+          prepaid: UNLIMITED_RESERVED,
+        })
+      )
+    ).toBe(0);
+  });
+
+  it('returns the spend if the reserved is 0', () => {
+    expect(
+      calculateSeerUserSpend(
+        MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: 0,
+          usage: 100,
+          prepaid: 0,
+        })
+      )
+    ).toBe(4000_00);
+    expect(
+      calculateSeerUserSpend(
+        MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: 0,
+          usage: 100,
+          prepaid: 50,
+        })
+      )
+    ).toBe(2000_00);
   });
 });

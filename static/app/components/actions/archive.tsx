@@ -1,20 +1,21 @@
 import styled from '@emotion/styled';
 
+import {Button, ButtonBar} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import type {SelectValue} from '@sentry/scraps/select';
+
 import {openModal} from 'sentry/actionCreators/modal';
 import {openConfirmModal} from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import CustomIgnoreCountModal from 'sentry/components/customIgnoreCountModal';
-import CustomIgnoreDurationModal from 'sentry/components/customIgnoreDurationModal';
+import {CustomIgnoreCountModal} from 'sentry/components/customIgnoreCountModal';
+import {CustomIgnoreDurationModal} from 'sentry/components/customIgnoreDurationModal';
 import type {MenuItemProps} from 'sentry/components/dropdownMenu';
 import {DropdownMenu} from 'sentry/components/dropdownMenu';
-import ExternalLink from 'sentry/components/links/externalLink';
 import {IconChevron} from 'sentry/icons';
 import {t, tct, tn} from 'sentry/locale';
-import type {SelectValue} from 'sentry/types/core';
 import type {GroupStatusResolution, IgnoredStatusDetails} from 'sentry/types/group';
 import {GroupStatus, GroupSubstatus} from 'sentry/types/group';
-import getDuration from 'sentry/utils/duration/getDuration';
+import {getDuration} from 'sentry/utils/duration/getDuration';
 
 const ONE_HOUR = 60;
 
@@ -67,7 +68,7 @@ type GetArchiveActionsProps = Pick<
   disableArchiveUntilOccurrence?: boolean;
 };
 
-export function getArchiveActions({
+function getArchiveActions({
   shouldConfirm,
   confirmLabel,
   confirmMessage,
@@ -160,7 +161,7 @@ export function getArchiveActions({
     {
       key: 'for',
       label: t('For\u2026'),
-      isSubmenu: true,
+      submenu: true,
       children: [
         ...IGNORE_DURATIONS.map(duration => ({
           key: `for-${duration}`,
@@ -177,7 +178,7 @@ export function getArchiveActions({
     {
       key: 'until-reoccur',
       label: t('Until this occurs again\u2026'),
-      isSubmenu: true,
+      submenu: true,
       children: [
         ...IGNORE_COUNTS.map(count => ({
           key: `until-reoccur-${count}-times`,
@@ -185,7 +186,7 @@ export function getArchiveActions({
             count === 1
               ? t('one time\u2026') // This is intentional as unbalanced string formatters are problematic
               : tn('%s time\u2026', '%s times\u2026', count),
-          isSubmenu: true,
+          submenu: true,
           children: [
             {
               key: `until-reoccur-${count}-times-from-now`,
@@ -213,7 +214,7 @@ export function getArchiveActions({
     {
       key: 'until-affect',
       label: t('Until this affects an additional\u2026'),
-      isSubmenu: true,
+      submenu: true,
       children: [
         ...IGNORE_COUNTS.map(count => ({
           key: `until-affect-${count}-users`,
@@ -221,7 +222,7 @@ export function getArchiveActions({
             count === 1
               ? t('one user\u2026') // This is intentional as unbalanced string formatters are problematic
               : tn('%s user\u2026', '%s users\u2026', count),
-          isSubmenu: true,
+          submenu: true,
           children: [
             {
               key: `until-affect-${count}-users-from-now`,
@@ -259,7 +260,7 @@ export function getArchiveActions({
   };
 }
 
-function ArchiveActions({
+export function ArchiveActions({
   size = 'xs',
   disabled,
   disableArchiveUntilOccurrence,
@@ -273,9 +274,9 @@ function ArchiveActions({
   if (isArchived) {
     return (
       <Button
-        priority="primary"
+        variant="primary"
         size="xs"
-        title={t('Change status to unresolved')}
+        tooltipProps={{title: t('Change status to unresolved')}}
         onClick={() =>
           onUpdate({
             status: GroupStatus.UNRESOLVED,
@@ -297,46 +298,50 @@ function ArchiveActions({
   });
 
   return (
-    <ButtonBar merged>
-      <ArchiveButton
+    <ButtonBar>
+      <Button
         size={size}
         className={className}
-        tooltipProps={{delay: 1000, disabled, isHoverable: true}}
-        title={tct(
-          'We’ll nag you with a notification if the issue gets worse. All archived issues can be found in the Archived tab. [docs:Read the docs]',
-          {
-            docs: (
-              <ExternalLink href="https://docs.sentry.io/product/issues/states-triage/#archive" />
-            ),
-          }
-        )}
+        tooltipProps={{
+          delay: 1000,
+          disabled,
+          isHoverable: true,
+          title: tct(
+            'We’ll nag you with a notification if the issue gets worse. All archived issues can be found in the Archived tab. [docs:Read the docs]',
+            {
+              docs: (
+                <ExternalLink href="https://docs.sentry.io/product/issues/states-triage/#archive" />
+              ),
+            }
+          ),
+        }}
         onClick={() => onArchive(ARCHIVE_UNTIL_ESCALATING)}
         disabled={disabled}
       >
         {t('Archive')}
-      </ArchiveButton>
+      </Button>
       <DropdownMenu
         size="sm"
         className={className}
         minMenuWidth={270}
         trigger={(triggerProps, isOpen) => (
-          <DropdownTrigger
+          <Button
             {...triggerProps}
             aria-label={t('Archive options')}
             size={size}
             icon={
-              <IconChevron color="subText" direction={isOpen ? 'up' : 'down'} size="xs" />
+              <IconChevron variant="muted" direction={isOpen ? 'up' : 'down'} size="xs" />
             }
             disabled={disabled}
           />
         )}
         menuTitle={
-          <MenuWrapper>
+          <Flex justify="between" align="center">
             {t('Archive')}
             <StyledExternalLink href="https://docs.sentry.io/product/issues/states-triage/#archive">
               {t('Read the docs')}
             </StyledExternalLink>
-          </MenuWrapper>
+          </Flex>
         }
         items={dropdownItems}
         isDisabled={disabled}
@@ -345,25 +350,6 @@ function ArchiveActions({
   );
 }
 
-export default ArchiveActions;
-
-const ArchiveButton = styled(Button)`
-  box-shadow: none;
-  border-radius: ${p => p.theme.borderRadius} 0 0 ${p => p.theme.borderRadius};
-`;
-
-const DropdownTrigger = styled(Button)`
-  box-shadow: none;
-  border-radius: 0 ${p => p.theme.borderRadius} ${p => p.theme.borderRadius} 0;
-  border-left: none;
-`;
-
-const MenuWrapper = styled('div')`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-`;
-
 const StyledExternalLink = styled(ExternalLink)`
-  font-weight: ${p => p.theme.fontWeightNormal};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
 `;

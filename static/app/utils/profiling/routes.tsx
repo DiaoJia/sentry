@@ -8,17 +8,11 @@ import {
   isContinuousProfileReference,
   isTransactionProfileReference,
 } from 'sentry/utils/profiling/guards/profile';
-import {prefersStackedNav} from 'sentry/views/nav/prefersStackedNav';
 
-const LEGACY_PROFILING_BASE_PATHNAME = 'profiling';
-const PROFILING_BASE_PATHNAME = 'explore/profiling';
+const PROFILING_BASE_PATHNAME = 'explore/profiles';
 
 function generateProfilingRoute({organization}: {organization: Organization}): Path {
-  if (prefersStackedNav(organization)) {
-    return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/`;
-  }
-
-  return `/organizations/${organization.slug}/${LEGACY_PROFILING_BASE_PATHNAME}/`;
+  return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/`;
 }
 
 export function generateProfileFlamechartRoute({
@@ -30,11 +24,7 @@ export function generateProfileFlamechartRoute({
   profileId: Trace['id'];
   projectSlug: Project['slug'];
 }): string {
-  if (prefersStackedNav(organization)) {
-    return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/profile/${projectSlug}/${profileId}/flamegraph/`;
-  }
-
-  return `/organizations/${organization.slug}/${LEGACY_PROFILING_BASE_PATHNAME}/profile/${projectSlug}/${profileId}/flamegraph/`;
+  return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/profile/${projectSlug}/${profileId}/flamegraph/`;
 }
 
 function generateContinuousProfileFlamechartRoute({
@@ -44,55 +34,7 @@ function generateContinuousProfileFlamechartRoute({
   organization: Organization;
   projectSlug: Project['slug'];
 }): string {
-  if (prefersStackedNav(organization)) {
-    return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/profile/${projectSlug}/flamegraph/`;
-  }
-
-  return `/organizations/${organization.slug}/${LEGACY_PROFILING_BASE_PATHNAME}/profile/${projectSlug}/flamegraph/`;
-}
-
-function generateProfileDifferentialFlamegraphRoute({
-  organization,
-  projectSlug,
-}: {
-  organization: Organization;
-  projectSlug: Project['slug'];
-}): string {
-  if (prefersStackedNav(organization)) {
-    return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/profile/${projectSlug}/differential-flamegraph/`;
-  }
-
-  return `/organizations/${organization.slug}/${LEGACY_PROFILING_BASE_PATHNAME}/profile/${projectSlug}/differential-flamegraph/`;
-}
-
-export function generateProfileDifferentialFlamegraphRouteWithQuery({
-  organization,
-  projectSlug,
-  query,
-  fingerprint,
-  transaction,
-  breakpoint,
-}: {
-  breakpoint: number;
-  fingerprint: number;
-  organization: Organization;
-  projectSlug: Project['slug'];
-  transaction: string;
-  query?: Location['query'];
-}): LocationDescriptor {
-  const pathname = generateProfileDifferentialFlamegraphRoute({
-    organization,
-    projectSlug,
-  });
-  return {
-    pathname,
-    query: {
-      ...query,
-      transaction,
-      fingerprint,
-      breakpoint,
-    },
-  };
+  return `/organizations/${organization.slug}/${PROFILING_BASE_PATHNAME}/profile/${projectSlug}/flamegraph/`;
 }
 
 export function generateProfilingRouteWithQuery({
@@ -201,14 +143,12 @@ export function generateProfileRouteFromProfileReference({
   frameName,
   framePackage,
   reference,
-  query,
 }: {
   organization: Organization;
   projectSlug: Project['slug'];
   reference: Profiling.BaseProfileReference | Profiling.ProfileReference;
   frameName?: string;
   framePackage?: string;
-  query?: Location['query'];
 }): LocationDescriptor {
   if (typeof reference === 'string') {
     return generateProfileFlamechartRouteWithQuery({
@@ -216,7 +156,6 @@ export function generateProfileRouteFromProfileReference({
       projectSlug,
       profileId: reference,
       query: {
-        ...query,
         frameName,
         framePackage,
       },
@@ -232,14 +171,15 @@ export function generateProfileRouteFromProfileReference({
       profilerId: reference.profiler_id,
       frameName,
       framePackage,
-      start: new Date(reference.start * 1e3).toISOString(),
-      end: new Date(reference.end * 1e3).toISOString(),
+      // when converting to a timestamp, we round the start timestamp down and round
+      // the end timestamp up to the millisecond to ensure we capture the full profile
+      start: new Date(Math.floor(reference.start * 1e3)).toISOString(),
+      end: new Date(Math.ceil(reference.end * 1e3)).toISOString(),
       query: dropUndefinedKeys({
-        ...query,
         frameName,
         framePackage,
         eventId,
-        tid: reference.thread_id as unknown as string,
+        tid: reference.thread_id,
       }),
     });
   }
@@ -249,7 +189,7 @@ export function generateProfileRouteFromProfileReference({
       organization,
       projectSlug,
       profileId: reference.profile_id,
-      query: dropUndefinedKeys({...query, frameName, framePackage}),
+      query: dropUndefinedKeys({frameName, framePackage}),
     });
   }
 

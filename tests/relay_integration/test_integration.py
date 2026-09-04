@@ -1,8 +1,12 @@
+from datetime import timedelta
 from io import BytesIO
 from unittest import mock
 from uuid import uuid4
 
 import pytest
+import requests
+from django.utils import timezone
+from sentry_relay.auth import SecretKey, generate_key_pair
 
 from sentry.models.eventattachment import EventAttachment
 from sentry.tasks.relay import invalidate_project_config
@@ -10,18 +14,59 @@ from sentry.testutils.cases import TransactionTestCase
 from sentry.testutils.helpers.datetime import before_now
 from sentry.testutils.relay import RelayStoreHelper
 from sentry.testutils.skips import requires_kafka
+from sentry.testutils.thread_leaks.pytest import thread_leak_allowlist
 
 pytestmark = [requires_kafka]
 
 
+def create_trusted_relay_signature(secret_key: SecretKey) -> str | bytes:
+    """
+    Mimics how the trusted relay signature is built so we can test communication.
+    """
+    from sentry_relay._lowlevel import lib
+    from sentry_relay.utils import decode_str, make_buf, rustcall
+
+    data_buf = make_buf(b"")
+    signature = decode_str(
+        rustcall(lib.relay_secretkey_sign, secret_key._get_objptr(), data_buf), free=True
+    )
+
+    return signature
+
+
+@thread_leak_allowlist(reason="kafka testutils", issue=97046)
 class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
+    def setup_for_trusted_relay_signature(self) -> tuple[str, SecretKey]:
+        """
+        sets up project config settings and returns the relay_id and the secret key which
+        can be used to create the signature if required.
+        """
+        secret_key, public_key = generate_key_pair()
+        relay_id = str(uuid4())
+
+        self.project.organization.update_option(
+            "sentry:trusted-relays",
+            [{"public_key": str(public_key), "name": "test-trusted-relay"}],
+        )
+
+        self.project.organization.update_option(
+            "sentry:ingest-through-trusted-relays-only", "enabled"
+        )
+
+        # Invalidate project config cache to ensure Relay gets updated configuration
+        invalidate_project_config(
+            public_key=self.projectkey.public_key, trigger="trusted_relay_test"
+        )
+
+        return relay_id, secret_key
+
     # used to be test_ungzipped_data
-    def test_simple_data(self):
+    def test_simple_data(self) -> None:
         event_data = {"message": "hello", "timestamp": before_now(seconds=1).isoformat()}
         event = self.post_and_retrieve_event(event_data)
         assert event.message == "hello"
 
-    def test_csp(self):
+    def test_csp(self) -> None:
         event_data = {
             "csp-report": {
                 "document-uri": "https://example.com/foo/bar",
@@ -35,85 +80,19 @@ class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
         event = self.post_and_retrieve_security_report(event_data)
         assert event.message == "Blocked 'default-src' from 'evilhackerscripts.com'"
 
-    def test_hpkp(self):
-        event_data = {
-            "date-time": "2014-04-06T13:00:50Z",
-            "hostname": "www.example.com",
-            "port": 443,
-            "effective-expiration-date": "2014-05-01T12:40:50Z",
-            "include-subdomains": False,
-            "served-certificate-chain": [
-                "-----BEGIN CERTIFICATE-----\n MIIEBDCCAuygBQUAMEIxCzAJBgNVBAYTAlVT\n -----END CERTIFICATE-----"
-            ],
-            "validated-certificate-chain": [
-                "-----BEGIN CERTIFICATE-----\n MIIEBDCCAuygAwIBAgIDCzAJBgNVBAYTAlVT\n -----END CERTIFICATE-----"
-            ],
-            "known-pins": [
-                'pin-sha256="d6qzRu9zOECb90Uez27xWltNsj0e1Md7GkYYkVoZWmM="',
-                'pin-sha256="E9CZ9INDbd+2eRQozYqqbQ2yXLVKB9+xcprMF+44U1g="',
-            ],
-        }
-
-        event = self.post_and_retrieve_security_report(event_data)
-        assert event.message == "Public key pinning validation failed for 'www.example.com'"
-        assert event.group.title == "Public key pinning validation failed for 'www.example.com'"
-
-    def test_expect_ct(self):
-        event_data = {
-            "expect-ct-report": {
-                "date-time": "2014-04-06T13:00:50Z",
-                "hostname": "www.example.com",
-                "port": 443,
-                "effective-expiration-date": "2014-05-01T12:40:50Z",
-                "served-certificate-chain": [
-                    "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----"
-                ],
-                "validated-certificate-chain": [
-                    "-----BEGIN CERTIFICATE-----\nCDE\n-----END CERTIFICATE-----"
-                ],
-                "scts": [
-                    {
-                        "version": 1,
-                        "status": "invalid",
-                        "source": "embedded",
-                        "serialized_sct": "ABCD==",
-                    }
-                ],
-            }
-        }
-
-        event = self.post_and_retrieve_security_report(event_data)
-        assert event.message == "Expect-CT failed for 'www.example.com'"
-        assert event.group.title == "Expect-CT failed for 'www.example.com'"
-
-    def test_expect_staple(self):
-        event_data = {
-            "expect-staple-report": {
-                "date-time": "2014-04-06T13:00:50Z",
-                "hostname": "www.example.com",
-                "port": 443,
-                "response-status": "ERROR_RESPONSE",
-                "cert-status": "REVOKED",
-                "effective-expiration-date": "2014-05-01T12:40:50Z",
-                "served-certificate-chain": [
-                    "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----"
-                ],
-                "validated-certificate-chain": [
-                    "-----BEGIN CERTIFICATE-----\nCDE\n-----END CERTIFICATE-----"
-                ],
-            }
-        }
-
-        event = self.post_and_retrieve_security_report(event_data)
-        assert event.message == "Expect-Staple failed for 'www.example.com'"
-        assert event.group.title == "Expect-Staple failed for 'www.example.com'"
-
-    def test_standalone_attachment(self):
+    def test_standalone_attachment(self) -> None:
         event_id = uuid4().hex
+        retention_days = 66
 
-        # First, ingest the attachment and ensure it is saved
-        files = {"some_file": ("hello.txt", BytesIO(b"Hello World!"))}
-        self.post_and_retrieve_attachment(event_id, files)
+        with mock.patch(
+            "sentry.relay.config.quotas.backend.get_event_retention",
+            return_value=retention_days,
+        ):
+            now = timezone.now()
+
+            # First, ingest the attachment and ensure it is saved
+            files = {"some_file": ("hello.txt", BytesIO(b"Hello World!"))}
+            self.post_and_retrieve_attachment(event_id, files)
 
         # Next, ingest an error event
         event = self.post_and_retrieve_event({"event_id": event_id, "message": "my error"})
@@ -123,8 +102,10 @@ class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
         # Finally, fetch the updated attachment and compare the group id
         attachment = EventAttachment.objects.get(project_id=self.project.id, event_id=event_id)
         assert attachment.group_id == event.group_id
+        delta = attachment.date_expires - (now + timedelta(days=retention_days))
+        assert abs(delta.total_seconds()) < 3600
 
-    def test_blob_only_attachment(self):
+    def test_blob_only_attachment(self) -> None:
         event_id = uuid4().hex
 
         files = {"some_file": ("hello.txt", BytesIO(b"Hello World! default"))}
@@ -138,7 +119,7 @@ class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
             assert blob.read() == b"Hello World! default"
         assert attachment.blob_path is not None
 
-    def test_transaction(self):
+    def test_transaction(self) -> None:
         event_data = {
             "event_id": "d2132d31b39445f1938d7e21b6bf0ec4",
             "type": "transaction",
@@ -221,11 +202,11 @@ class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
     # run in monolith mode by default, but began failing during CI for unclear reasons
     # when the global default was switched to region mode. (See
     # get_default_silo_mode_for_test_cases in sentry/testutils/pytest/sentry.py.) Note
-    # that this case was marked as @region_silo_test when it was passing, so there was
+    # that this case was marked as @cell_silo_test when it was passing, so there was
     # no change in the silo mode in which *this* case is run. The probable explanation
     # is that the test is sensitive to side effects (possibly in Redis?) of other test
     # cases, which *did* have their silo mode changed.
-    def test_project_config_compression(self):
+    def test_project_config_compression(self) -> None:
         # Populate redis cache with compressed config:
         invalidate_project_config(public_key=self.projectkey, trigger="test")
 
@@ -237,3 +218,224 @@ class SentryRemoteTest(RelayStoreHelper, TransactionTestCase):
             event_data = {"message": "hello", "timestamp": before_now(seconds=1)}
             event = self.post_and_retrieve_event(event_data)
             assert event.message == "hello"
+
+    def test_accepted_with_valid_signature(self) -> None:
+        """
+        Tests that events are properly received and processed through Relay if the signature
+        can be verified by a stored public key in the "trustedRelays" project config field.
+        """
+        relay_id, secret_key = self.setup_for_trusted_relay_signature()
+
+        event_data = {
+            "message": "should be accepted with signature",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        signature = create_trusted_relay_signature(secret_key)
+
+        event = self.post_and_try_retrieve_event(
+            event_data,
+            headers={
+                "x-sentry-auth": self.auth_header,
+                "x-sentry-relay-signature": signature,
+                "content-type": "application/json",
+                "x-sentry-relay-id": relay_id,
+            },
+        )
+
+        assert event is not None
+        assert event.message == "should be accepted with signature"
+
+    def test_not_trusted_relay(self) -> None:
+        """
+        Tests that the event is dropped because the relay was not in the list of trusted relays.
+        The signature itself is properly generated and valid for the given key pair, but since
+        the receiving Relay does not know about it, it will reject it
+        """
+        secret_key, public_key = generate_key_pair()
+        relay_id = str(uuid4())
+
+        self.project.organization.update_option(
+            "sentry:ingest-through-trusted-relays-only", "enabled"
+        )
+
+        # Invalidate project config cache to ensure Relay gets updated configuration
+        invalidate_project_config(
+            public_key=self.projectkey.public_key, trigger="trusted_relay_test"
+        )
+
+        signature = create_trusted_relay_signature(secret_key)
+
+        event_data = {
+            "message": "should be rejected because not trusted",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        headers = {
+            "x-sentry-auth": self.auth_header,
+            "x-sentry-relay-signature": signature,
+            "content-type": "application/json",
+            "x-sentry-relay-id": relay_id,
+        }
+
+        event = self.post_and_try_retrieve_event(event_data, headers=headers)
+        assert event is None
+
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=event_data,
+        )
+        # Once the project config is fetched it gets rejected in the hot path
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "event submission rejected with_reason: InvalidSignature"}
+
+    def test_expired_signature(self) -> None:
+        """
+        Tests that the event is dropped if the signature is expired.
+        """
+        relay_id, _ = self.setup_for_trusted_relay_signature()
+
+        event_data = {
+            "message": "should not be accepted because expired signature",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        headers = {
+            "x-sentry-auth": self.auth_header,
+            "content-type": "application/json",
+            # This signature is expired, but the relay lib does not expose a method to create expired
+            # signatures. Taken from a relay test:
+            # https://github.com/getsentry/relay/blob/master/tests/integration/test_trusted_relay.py#L93
+            "x-sentry-relay-signature": "Jho91xVt8SEc_yvwKaPtIOCeCr-6zdnrIFa-KVfKoKcpAXInVe_QGE5JGEoZxAa4cP9Imbl5vb8nyNQ54vRvBQ.eyJ0IjoiMjAyNS0wNi0wNFQxMzoyMToyNi41NzIxNzVaIn0",
+            "x-sentry-relay-id": relay_id,
+        }
+
+        event = self.post_and_try_retrieve_event(event_data, headers=headers)
+        assert event is None
+
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=event_data,
+        )
+        # Once the project config is fetched it gets rejected in the hot path
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "event submission rejected with_reason: InvalidSignature"}
+
+    def test_invalid_signature(self) -> None:
+        """
+        Tests that the event is dropped if the signature is invalid.
+        """
+        relay_id, _ = self.setup_for_trusted_relay_signature()
+
+        event_data = {
+            "message": "event with invalid signature",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        headers = {
+            "x-sentry-auth": self.auth_header,
+            "content-type": "application/json",
+            "x-sentry-relay-signature": "invalid signature",
+            "x-sentry-relay-id": relay_id,
+        }
+
+        event = self.post_and_try_retrieve_event(
+            event_data,
+            headers=headers,
+        )
+        assert event is None
+
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=event_data,
+        )
+        # Once the project config is fetched it gets rejected in the hot path
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "event submission rejected with_reason: InvalidSignature"}
+
+    def test_missing_signature(self) -> None:
+        """
+        Tests that the event is dropped if the signature is missing.
+        """
+        relay_id, _ = self.setup_for_trusted_relay_signature()
+
+        event_data = {
+            "message": "event with missing signature",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        headers = {
+            "x-sentry-auth": self.auth_header,
+            "content-type": "application/json",
+            "x-sentry-relay-id": relay_id,
+        }
+
+        event = self.post_and_try_retrieve_event(
+            event_data,
+            headers=headers,
+        )
+        assert event is None
+
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=event_data,
+        )
+        # Once the project config is fetched it gets rejected in the hot path
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "event submission rejected with_reason: MissingSignature"}
+
+    def test_signature_header_is_none(self) -> None:
+        """
+        Tests that the event is dropped if the signature is set to None.
+        """
+        relay_id, _ = self.setup_for_trusted_relay_signature()
+
+        event_data = {
+            "message": "event with missing signature",
+            "timestamp": before_now(seconds=1).isoformat(),
+        }
+
+        headers = {
+            "x-sentry-auth": self.auth_header,
+            "content-type": "application/json",
+            "x-sentry-relay-signature": None,
+            "x-sentry-relay-id": relay_id,
+        }
+
+        event = self.post_and_try_retrieve_event(
+            event_data,
+            headers=headers,
+        )
+        assert event is None
+
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=event_data,
+        )
+        # Once the project config is fetched it gets rejected in the hot path
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "event submission rejected with_reason: MissingSignature"}
+
+    def test_signature_with_invalid_characters(self) -> None:
+        url = self.get_relay_store_url(self.project.id)
+        resp = requests.post(
+            url,
+            headers={
+                "x-sentry-auth": self.auth_header,
+                "content-type": "application/json",
+                "x-sentry-relay-signature": "\xff\xff\xff\xff",
+            },
+            json={"message": "hello"},
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "bad x-sentry-relay-signature header"}

@@ -1,39 +1,41 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
+import {setWindowLocation} from 'sentry-test/utils';
 
-import ConfigStore from 'sentry/stores/configStore';
+import {CUSTOM_REFERRER_KEY} from 'sentry/constants';
+import {ConfigStore} from 'sentry/stores/configStore';
 import {uniqueId} from 'sentry/utils/guid';
-import sessionStorage from 'sentry/utils/sessionStorage';
+import {sessionStorageWrapper} from 'sentry/utils/sessionStorage';
 
-import rawTrackAnalyticsEvent from 'getsentry/utils/rawTrackAnalyticsEvent';
-import trackAmplitudeEvent from 'getsentry/utils/trackAmplitudeEvent';
-import trackMarketingEvent from 'getsentry/utils/trackMarketingEvent';
-import trackReloadEvent from 'getsentry/utils/trackReloadEvent';
+import {rawTrackAnalyticsEvent} from 'getsentry/utils/rawTrackAnalyticsEvent';
+import {trackAmplitudeEvent} from 'getsentry/utils/trackAmplitudeEvent';
+import {trackMarketingEvent} from 'getsentry/utils/trackMarketingEvent';
+import {trackReloadEvent} from 'getsentry/utils/trackReloadEvent';
 
 jest.mock('sentry/utils/guid');
 jest.mock('getsentry/utils/trackAmplitudeEvent');
 jest.mock('getsentry/utils/trackReloadEvent');
 jest.mock('getsentry/utils/trackMarketingEvent');
 
-describe('rawTrackAnalyticsEvent', function () {
+describe('rawTrackAnalyticsEvent', () => {
   const user = ConfigStore.get('user');
   const organization = OrganizationFixture({orgRole: 'owner'});
   const subscription = SubscriptionFixture({organization, plan: 'am1_f'});
   const org_id = Number(organization.id);
 
-  beforeEach(function () {
-    (uniqueId as jest.MockedFunction<typeof uniqueId>).mockReturnValue('345');
+  beforeEach(() => {
+    jest.mocked(uniqueId).mockReturnValue('345');
   });
 
-  afterEach(function () {
-    (trackReloadEvent as jest.Mock).mockClear();
-    (trackAmplitudeEvent as jest.Mock).mockClear();
-    (trackMarketingEvent as jest.Mock).mockClear();
-    (uniqueId as jest.Mock).mockClear();
+  afterEach(() => {
+    jest.mocked(trackReloadEvent).mockClear();
+    jest.mocked(trackAmplitudeEvent).mockClear();
+    jest.mocked(trackMarketingEvent).mockClear();
+    jest.mocked(uniqueId).mockClear();
   });
 
-  it('tracks in reload but not amplitude with undefined organization', function () {
+  it('tracks in reload but not amplitude with undefined organization', () => {
     rawTrackAnalyticsEvent({
       // @ts-expect-error: We're explicitly testing a case with organization=undefined
       organization: undefined,
@@ -53,8 +55,54 @@ describe('rawTrackAnalyticsEvent', function () {
     expect(trackAmplitudeEvent).not.toHaveBeenCalled();
   });
 
-  it('coerces organization_id and project_id and honor existing analytics sessions', function () {
-    sessionStorage.setItem('ANALYTICS_SESSION', '789');
+  it('does not track in Reload without an event key', () => {
+    rawTrackAnalyticsEvent({
+      eventName: null,
+      eventKey: undefined,
+      organization,
+      someProp: 'value',
+    });
+
+    expect(trackReloadEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not consume the custom referrer without an event', () => {
+    sessionStorageWrapper.setItem(CUSTOM_REFERRER_KEY, JSON.stringify('batman'));
+
+    rawTrackAnalyticsEvent({
+      eventName: null,
+      eventKey: undefined,
+      organization,
+    });
+
+    expect(sessionStorageWrapper.getItem(CUSTOM_REFERRER_KEY)).toBe(
+      JSON.stringify('batman')
+    );
+    expect(trackReloadEvent).not.toHaveBeenCalled();
+    expect(trackAmplitudeEvent).not.toHaveBeenCalled();
+
+    sessionStorageWrapper.removeItem(CUSTOM_REFERRER_KEY);
+  });
+
+  it('tracks named events without a Reload event key', () => {
+    rawTrackAnalyticsEvent({
+      eventName: 'Test Event',
+      eventKey: undefined,
+      organization,
+      someProp: 'value',
+    });
+
+    expect(trackReloadEvent).not.toHaveBeenCalled();
+    expect(trackAmplitudeEvent).toHaveBeenCalledWith(
+      'Test Event',
+      org_id,
+      expect.objectContaining({someProp: 'value'}),
+      {time: undefined}
+    );
+  });
+
+  it('coerces organization_id and project_id and honor existing analytics sessions', () => {
+    sessionStorageWrapper.setItem('ANALYTICS_SESSION', '789');
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -88,12 +136,12 @@ describe('rawTrackAnalyticsEvent', function () {
       {time: undefined}
     );
     expect(uniqueId).not.toHaveBeenCalled();
-    sessionStorage.removeItem('ANALYTICS_SESSION');
+    sessionStorageWrapper.removeItem('ANALYTICS_SESSION');
     expect(trackMarketingEvent).not.toHaveBeenCalled();
   });
 
-  it('allows null organization and set analytics session if missing', function () {
-    sessionStorage.removeItem('ANALYTICS_SESSION');
+  it('allows null organization and set analytics session if missing', () => {
+    sessionStorageWrapper.removeItem('ANALYTICS_SESSION');
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -119,7 +167,7 @@ describe('rawTrackAnalyticsEvent', function () {
     expect(uniqueId).toHaveBeenCalledWith();
   });
 
-  it('allows string for organization', function () {
+  it('allows string for organization', () => {
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -143,7 +191,7 @@ describe('rawTrackAnalyticsEvent', function () {
     );
   });
 
-  it('if organization is a non number string then use undefined as value', function () {
+  it('if organization is a non number string then use undefined as value', () => {
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -162,8 +210,8 @@ describe('rawTrackAnalyticsEvent', function () {
     expect(trackAmplitudeEvent).not.toHaveBeenCalled();
   });
 
-  it('pass custom referrer', function () {
-    window.location.search = '?referrer=test';
+  it('pass custom referrer', () => {
+    setWindowLocation('http:/localhost/?referrer=test');
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -181,9 +229,34 @@ describe('rawTrackAnalyticsEvent', function () {
       expect.objectContaining({custom_referrer: 'test'}),
       {time: undefined}
     );
-    window.location.search = '';
+    setWindowLocation('http:/localhost/');
   });
-  it('start analytics session', function () {
+
+  it('sets custom_referrer if found in local storage', () => {
+    sessionStorageWrapper.setItem(CUSTOM_REFERRER_KEY, JSON.stringify('batman'));
+    setWindowLocation('http:/localhost');
+    rawTrackAnalyticsEvent({
+      eventKey: 'test_event',
+      eventName: 'Test Event',
+      organization,
+    });
+
+    expect(trackReloadEvent).toHaveBeenCalledWith(
+      'test_event',
+      expect.objectContaining({custom_referrer: 'batman'})
+    );
+
+    expect(trackAmplitudeEvent).toHaveBeenCalledWith(
+      'Test Event',
+      org_id,
+      expect.objectContaining({custom_referrer: 'batman'}),
+      {time: undefined}
+    );
+    setWindowLocation('http:/localhost/');
+    expect(sessionStorageWrapper.getItem(CUSTOM_REFERRER_KEY)).toBeNull();
+  });
+
+  it('start analytics session', () => {
     rawTrackAnalyticsEvent(
       {
         eventKey: 'test_event',
@@ -206,7 +279,7 @@ describe('rawTrackAnalyticsEvent', function () {
     );
     expect(uniqueId).toHaveBeenCalledWith();
   });
-  it('accepts subscription and sets plan', function () {
+  it('accepts subscription and sets plan', () => {
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -226,7 +299,7 @@ describe('rawTrackAnalyticsEvent', function () {
       {time: undefined}
     );
   });
-  it('applys mapValuesFn', function () {
+  it('applys mapValuesFn', () => {
     rawTrackAnalyticsEvent(
       {
         eventKey: 'test_event',
@@ -250,7 +323,8 @@ describe('rawTrackAnalyticsEvent', function () {
       {time: undefined}
     );
   });
-  it('send to marketing', function () {
+
+  it('send to marketing', () => {
     rawTrackAnalyticsEvent({
       eventKey: 'growth.onboarding_clicked_need_help',
       eventName: 'Growth: Onboarding Clicked Need Help',
@@ -275,8 +349,8 @@ describe('rawTrackAnalyticsEvent', function () {
       {plan: 'am1_f'}
     );
   });
-  it('sets previous_referrer', function () {
-    sessionStorage.setItem('previous_referrer', 'something');
+  it('sets previous_referrer', () => {
+    sessionStorageWrapper.setItem('previous_referrer', 'something');
     rawTrackAnalyticsEvent({
       eventKey: 'test_event',
       eventName: 'Test Event',
@@ -289,9 +363,9 @@ describe('rawTrackAnalyticsEvent', function () {
       expect.objectContaining({previous_referrer: 'something'}),
       {time: undefined}
     );
-    sessionStorage.removeItem('previous_referrer');
+    sessionStorageWrapper.removeItem('previous_referrer');
   });
-  it('pass in timestamp', function () {
+  it('pass in timestamp', () => {
     rawTrackAnalyticsEvent(
       {
         eventKey: 'test_event',

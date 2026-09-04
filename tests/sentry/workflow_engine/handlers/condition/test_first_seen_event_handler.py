@@ -1,4 +1,5 @@
 from dataclasses import replace
+from typing import Any, Mapping
 
 import pytest
 from jsonschema import ValidationError
@@ -12,12 +13,13 @@ from tests.sentry.workflow_engine.handlers.condition.test_base import ConditionT
 
 class TestFirstSeenEventCondition(ConditionTestCase):
     condition = Condition.FIRST_SEEN_EVENT
-    payload = {"id": FirstSeenEventCondition.id}
+    payload: Mapping[str, Any] = {"id": FirstSeenEventCondition.id}
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.event_data = WorkflowEventData(
             event=self.group_event,
+            group=self.group_event.group,
             group_state=GroupState(
                 {
                     "id": 1,
@@ -34,7 +36,7 @@ class TestFirstSeenEventCondition(ConditionTestCase):
             condition_result=True,
         )
 
-    def test_dual_write(self):
+    def test_dual_write(self) -> None:
         dcg = self.create_data_condition_group()
         dc = self.translate_to_data_condition(self.payload, dcg)
 
@@ -43,7 +45,7 @@ class TestFirstSeenEventCondition(ConditionTestCase):
         assert dc.condition_result is True
         assert dc.condition_group == dcg
 
-    def test_json_schema(self):
+    def test_json_schema(self) -> None:
         dc = self.create_data_condition(
             type=self.condition,
             comparison=True,
@@ -61,14 +63,14 @@ class TestFirstSeenEventCondition(ConditionTestCase):
         with pytest.raises(ValidationError):
             dc.save()
 
-    def test(self):
+    def test(self) -> None:
         self.assert_passes(self.dc, self.event_data)
 
         assert self.event_data.group_state
         self.event_data.group_state["is_new"] = False
         self.assert_does_not_pass(self.dc, self.event_data)
 
-    def test_with_environment(self):
+    def test_with_environment(self) -> None:
         self.event_data = replace(self.event_data, workflow_env=self.environment)
         assert self.event_data.group_state
 

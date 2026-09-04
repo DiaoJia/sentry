@@ -1,36 +1,33 @@
-import type {CSSProperties} from 'react';
 import styled from '@emotion/styled';
 
-import {ActorAvatar} from 'sentry/components/core/avatar/actorAvatar';
-import {Checkbox} from 'sentry/components/core/checkbox';
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
-import {Flex} from 'sentry/components/core/layout';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import IssueTrackingSignals from 'sentry/components/feedback/list/issueTrackingSignals';
+import {ActorAvatar} from '@sentry/scraps/avatar';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {IssueTrackingSignals} from 'sentry/components/feedback/list/issueTrackingSignals';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import Link from 'sentry/components/links/link';
-import TextOverflow from 'sentry/components/textOverflow';
-import TimeSince from 'sentry/components/timeSince';
-import {IconChat, IconFatal, IconImage, IconPlay} from 'sentry/icons';
+import {TextOverflow} from 'sentry/components/textOverflow';
+import {TimeSince} from 'sentry/components/timeSince';
+import {IconChat, IconFatal, IconPlay} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Group} from 'sentry/types/group';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import feedbackHasLinkedError from 'sentry/utils/feedback/hasLinkedError';
+import {feedbackHasLinkedError} from 'sentry/utils/feedback/hasLinkedError';
 import {type FeedbackIssueListItem} from 'sentry/utils/feedback/types';
+import {useListItemCheckboxContext} from 'sentry/utils/list/useListItemCheckboxState';
 import {decodeScalar} from 'sentry/utils/queryString';
-import useReplayCountForFeedbacks from 'sentry/utils/replayCount/useReplayCountForFeedbacks';
-import useLocationQuery from 'sentry/utils/url/useLocationQuery';
+import {useReplayCountForFeedbacks} from 'sentry/utils/replayCount/useReplayCountForFeedbacks';
+import {useLocationQuery} from 'sentry/utils/url/useLocationQuery';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import {makeFeedbackPathname} from 'sentry/views/userFeedback/pathnames';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeFeedbackPathname} from 'sentry/views/feedback/pathnames';
 
 interface Props {
   feedbackItem: FeedbackIssueListItem;
-  isSelected: 'all-selected' | boolean;
-  onSelect: (isSelected: boolean) => void;
-  ref?: React.Ref<HTMLDivElement>;
-  style?: CSSProperties;
+  onItemSelect: () => void;
 }
 
 function useIsSelectedFeedback({feedbackItem}: {feedbackItem: FeedbackIssueListItem}) {
@@ -41,7 +38,9 @@ function useIsSelectedFeedback({feedbackItem}: {feedbackItem: FeedbackIssueListI
   return feedbackId === feedbackItem.id;
 }
 
-function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Props) {
+export function FeedbackListItem({feedbackItem, onItemSelect}: Props) {
+  const {isSelected, toggleSelected} = useListItemCheckboxContext();
+
   const organization = useOrganization();
   const isOpen = useIsSelectedFeedback({feedbackItem});
   const {feedbackHasReplay} = useReplayCountForFeedbacks();
@@ -49,11 +48,10 @@ function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Prop
   const location = useLocation();
 
   const hasLinkedError = feedbackHasLinkedError(feedbackItem);
-  const hasAttachments = feedbackItem.latestEventHasAttachments;
   const hasComments = feedbackItem.numComments > 0;
 
   return (
-    <CardSpacing ref={ref} style={style}>
+    <CardSpacing>
       <LinkedFeedbackCard
         data-selected={isOpen}
         to={{
@@ -69,21 +67,22 @@ function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Prop
         }}
         onClick={() => {
           trackAnalytics('feedback.list-item-selected', {organization});
+          onItemSelect();
         }}
       >
         <InteractionStateLayer />
 
         <Row
-          style={{gridArea: 'checkbox'}}
+          area="checkbox"
           onClick={e => {
             e.stopPropagation();
           }}
         >
           <Checkbox
-            disabled={isSelected === 'all-selected'}
-            checked={isSelected !== false}
-            onChange={e => {
-              onSelect(e.target.checked);
+            disabled={isSelected(feedbackItem.id) === 'all-selected'}
+            checked={isSelected(feedbackItem.id) !== false}
+            onChange={() => {
+              toggleSelected(feedbackItem.id);
             }}
           />
         </Row>
@@ -97,25 +96,19 @@ function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Prop
         <StyledTimeSince date={feedbackItem.firstSeen} />
 
         {feedbackItem.hasSeen ? null : (
-          <DotRow style={{gridArea: 'unread'}}>
+          <DotRow area="unread">
             <Tooltip title={t('Unread')} skipWrapper>
               <UnreadIndicator />
             </Tooltip>
           </DotRow>
         )}
 
-        <PreviewRow
-          align="flex-start"
-          justify="flex-start"
-          style={{
-            gridArea: 'message',
-          }}
-        >
+        <PreviewRow align="start" justify="start" area="message">
           <StyledTextOverflow>{feedbackItem.metadata.message}</StyledTextOverflow>
         </PreviewRow>
 
         <BottomGrid style={{gridArea: 'bottom'}}>
-          <Row justify="flex-start" gap={space(0.75)}>
+          <Row justify="start" gap="sm">
             {feedbackItem.project ? (
               <StyledProjectBadge
                 disableLink
@@ -128,30 +121,24 @@ function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Prop
             <ShortId>{feedbackItem.shortId}</ShortId>
           </Row>
 
-          <Row justify="flex-end" gap={space(1)}>
+          <Row justify="end" gap="md">
             <IssueTrackingSignals group={feedbackItem as unknown as Group} />
 
             {hasComments && (
               <Tooltip title={t('Has Activity')} containerDisplayMode="flex">
-                <IconChat color="gray500" size="sm" />
+                <IconChat variant="muted" size="xs" />
               </Tooltip>
             )}
 
             {hasLinkedError && (
               <Tooltip title={t('Linked Error')} containerDisplayMode="flex">
-                <IconFatal color="red400" size="xs" />
+                <IconFatal variant="danger" size="xs" />
               </Tooltip>
             )}
 
             {hasReplayId && (
               <Tooltip title={t('Linked Replay')} containerDisplayMode="flex">
-                <IconPlay size="xs" />
-              </Tooltip>
-            )}
-
-            {hasAttachments && (
-              <Tooltip title={t('Has Screenshot')} containerDisplayMode="flex">
-                <IconImage size="xs" />
+                <IconPlay size="xs" variant="muted" />
               </Tooltip>
             )}
 
@@ -169,23 +156,23 @@ function FeedbackListItem({feedbackItem, isSelected, onSelect, style, ref}: Prop
   );
 }
 
-export default FeedbackListItem;
-
 const LinkedFeedbackCard = styled(Link)`
   position: relative;
-  padding: ${space(1)} ${space(3)} ${space(1)} ${space(1.5)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space['2xl']} ${p => p.theme.space.md}
+    ${p => p.theme.space.lg};
   border: 1px solid transparent;
-  border-radius: ${space(0.75)};
+  border-radius: ${p => p.theme.radius.md};
 
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   &:hover {
-    color: ${p => p.theme.textColor};
+    color: ${p => p.theme.tokens.content.primary};
   }
   &[data-selected='true'] {
-    background: ${p => p.theme.purple100};
-    border: 1px solid ${p => p.theme.purple200};
-    border-radius: ${space(0.75)};
-    color: ${p => p.theme.purple300};
+    background: ${p =>
+      p.theme.tokens.interactive.transparent.accent.selected.background.rest};
+    border: 1px solid ${p => p.theme.tokens.border.transparent.accent.muted};
+    border-radius: ${p => p.theme.radius.md};
+    color: ${p => p.theme.tokens.interactive.transparent.accent.content.primary};
   }
 
   display: grid;
@@ -195,7 +182,7 @@ const LinkedFeedbackCard = styled(Link)`
     'checkbox user time'
     'unread message message'
     '. bottom bottom';
-  gap: ${space(0.5)} ${space(1)};
+  gap: ${p => p.theme.space.xs} ${p => p.theme.space.md};
   place-items: stretch;
   align-items: center;
 `;
@@ -207,7 +194,7 @@ const Row = styled(Flex)`
 const BottomGrid = styled('div')`
   display: grid;
   grid-template-columns: auto max-content;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 
   overflow: hidden;
 `;
@@ -220,8 +207,8 @@ const StyledProjectBadge = styled(ProjectBadge)`
 
 const PreviewRow = styled(Row)`
   align-items: flex-start;
-  font-size: ${p => p.theme.fontSize.sm};
-  padding-bottom: ${space(0.75)};
+  font-size: ${p => p.theme.font.size.sm};
+  padding-bottom: ${p => p.theme.space.sm};
 `;
 
 const DotRow = styled(Row)`
@@ -233,7 +220,7 @@ const DotRow = styled(Row)`
 const UnreadIndicator = styled('div')`
   width: 8px;
   height: 8px;
-  background-color: ${p => p.theme.purple400};
+  background-color: ${p => p.theme.tokens.graphics.accent.vibrant};
   border-radius: 50%;
 `;
 
@@ -243,25 +230,25 @@ const StyledTextOverflow = styled(TextOverflow)`
   -webkit-line-clamp: 1;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  line-height: ${p => p.theme.text.lineHeightBody};
+  line-height: ${p => p.theme.font.lineHeight.comfortable};
 `;
 
 const ContactRow = styled(TextOverflow)`
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
   grid-area: 'user';
   font-weight: bold;
 `;
 
 const ShortId = styled(TextOverflow)`
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledTimeSince = styled(TimeSince)`
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
   grid-area: 'time';
 `;
 
 const CardSpacing = styled('div')`
-  padding: ${space(0.5)} ${space(0.5)} 0 ${space(0.5)};
+  padding: ${p => p.theme.space.xs} ${p => p.theme.space.xs} 0 ${p => p.theme.space.xs};
 `;

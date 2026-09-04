@@ -1,31 +1,30 @@
 from collections.abc import Sequence
 
 from sentry.deletions.base import BaseRelation, ModelDeletionTask, ModelRelation
+from sentry.deletions.defaults.alertrule import AlertRuleDetectorDeletionTask
 from sentry.models.rule import Rule
-from sentry.workflow_engine.models import Workflow
 
 
 class RuleDeletionTask(ModelDeletionTask[Rule]):
     def get_child_relations(self, instance: Rule) -> list[BaseRelation]:
         from sentry.models.grouprulestatus import GroupRuleStatus
         from sentry.models.rule import RuleActivity
-        from sentry.models.rulefirehistory import RuleFireHistory
         from sentry.workflow_engine.models import AlertRuleDetector, AlertRuleWorkflow
 
-        model_relations: list[BaseRelation] = [
+        # Workflows are org-scoped and must not be deleted when a project-scoped
+        # Rule is deleted. Workflow cleanup happens via the API (which schedules
+        # Workflow deletion explicitly) or OrganizationDeletionTask. We only
+        # clean up the link rows (AlertRuleWorkflow, AlertRuleDetector) here.
+        return [
             ModelRelation(GroupRuleStatus, {"rule_id": instance.id}),
-            ModelRelation(RuleFireHistory, {"rule_id": instance.id}),
             ModelRelation(RuleActivity, {"rule_id": instance.id}),
-            ModelRelation(AlertRuleDetector, {"rule_id": instance.id}),
+            ModelRelation(
+                AlertRuleDetector,
+                {"rule_id": instance.id},
+                task=AlertRuleDetectorDeletionTask,
+            ),
             ModelRelation(AlertRuleWorkflow, {"rule_id": instance.id}),
         ]
-
-        alert_rule_workflow = AlertRuleWorkflow.objects.filter(rule_id=instance.id).first()
-
-        if alert_rule_workflow:
-            model_relations.append(ModelRelation(Workflow, {"id": alert_rule_workflow.workflow.id}))
-
-        return model_relations
 
     def mark_deletion_in_progress(self, instance_list: Sequence[Rule]) -> None:
         from sentry.constants import ObjectStatus

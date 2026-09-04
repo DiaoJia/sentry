@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, NamedTuple, NotRequired, Optional, Self, TypedDict, TypeVar, cast
 
-import sentry_sdk
 from django.utils.functional import cached_property
 
-from sentry import features
 from sentry.api import event_search
 from sentry.api.event_search import (
     AggregateFilter,
@@ -29,7 +25,6 @@ from sentry.exceptions import InvalidSearchQuery
 from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.models.transaction_threshold import ProjectTransactionThreshold, TransactionMetric
-from sentry.options.rollout import in_random_rollout
 from sentry.relay.types import RuleCondition
 from sentry.search.events import fields
 from sentry.search.events.builder.discover import UnresolvedQuery
@@ -38,20 +33,12 @@ from sentry.snuba.dataset import Dataset
 from sentry.snuba.metrics.naming_layer.mri import ParsedMRI, parse_mri
 from sentry.snuba.metrics.utils import MetricOperationType
 from sentry.utils import metrics
-from sentry.utils.hashlib import md5_text
 from sentry.utils.snuba import is_measurement, is_span_op_breakdown, resolve_column
 
 logger = logging.getLogger(__name__)
 
-SPEC_VERSION_TWO_FLAG = "organizations:on-demand-metrics-query-spec-version-two"
-# Certain functions will only be supported with certain feature flags
-OPS_REQUIRE_FEAT_FLAG = {
-    "count_unique": SPEC_VERSION_TWO_FLAG,
-    "user_misery": SPEC_VERSION_TWO_FLAG,
-}
-
-# Splits the bulk cache for on-demand resolution into N chunks
-WIDGET_QUERY_CACHE_MAX_CHUNKS = 6
+# Functions that are not allowed for on-demand metric querying.
+OPS_DISALLOWED: set[str] = {"count_unique", "user_misery"}
 
 
 # This helps us control the different spec versions
@@ -87,10 +74,6 @@ class OnDemandMetricSpecVersioning:
 
     @classmethod
     def get_query_spec_version(cls: Any, organization_id: int) -> SpecVersion:
-        """Return spec version based on feature flag enabled for an organization."""
-        org = Organization.objects.get_from_cache(id=organization_id)
-        if features.has(SPEC_VERSION_TWO_FLAG, org):
-            return cls.spec_versions[1]
         return cls.spec_versions[0]
 
     @classmethod
@@ -104,7 +87,7 @@ class OnDemandMetricSpecVersioning:
 
 
 # Name component of MRIs used for custom alert metrics.
-CUSTOM_ALERT_METRIC_NAME = "transactions/on_demand"
+CUSTOM_ALERT_METRIC_NAME = "spans/on_demand"
 QUERY_HASH_KEY = "query_hash"
 
 # Comparison operators used by Relay.
@@ -572,55 +555,41 @@ def should_use_on_demand_metrics_for_querying(organization: Organization, **kwar
         return False
     function, _ = components
 
-    # This helps us control which functions are allowed to use the new spec version.
-    if function in OPS_REQUIRE_FEAT_FLAG:
-        if not organization:
-            # We need to let devs writting tests that if they intend to use a function that requires a feature flag
-            # that the organization needs to be included in the test.
-            if os.environ.get("PYTEST_CURRENT_TEST"):
-                logger.error("Pass the organization to create the spec for this function.")
-            sentry_sdk.capture_message(
-                f"Organization is required for {function} on-demand metrics."
-            )
-            return False
-        feat_flag = OPS_REQUIRE_FEAT_FLAG[function]
-        if not features.has(feat_flag, organization):
-            if os.environ.get("PYTEST_CURRENT_TEST"):
-                # This will show up in the logs and help the developer understand why the test is failing
-                logger.error("Add the feature flag to create the spec for this function.")
-            return False
+    if function in OPS_DISALLOWED:
+        return False
 
     return should_use_on_demand_metrics(**kwargs)
 
 
-def _should_use_on_demand_metrics(
+def _query_supported_by(
     dataset: str | Dataset | None,
     aggregate: str,
     query: str,
     groupbys: Sequence[str] | None = None,
     prefilling: bool = False,
-) -> bool:
+    prefilling_for_deprecation: bool = False,
+) -> SupportedBy:
     """On-demand metrics are used if the aggregate and query are supported by on-demand metrics but not standard"""
     groupbys = groupbys or []
     supported_datasets = [Dataset.PerformanceMetrics]
     # In case we are running a prefill, we want to support also transactions, since our goal is to start extracting
     # metrics that will be needed after a query is converted from using transactions to metrics.
-    if prefilling:
+    if prefilling or prefilling_for_deprecation:
         supported_datasets.append(Dataset.Transactions)
 
     if not dataset or Dataset(dataset) not in supported_datasets:
-        return False
+        return SupportedBy(standard_metrics=False, on_demand_metrics=False)
 
     components = _extract_aggregate_components(aggregate)
     if components is None:
-        return False
+        return SupportedBy(standard_metrics=False, on_demand_metrics=False)
 
     function, args = components
 
     mri_aggregate = _extract_mri(args)
     if mri_aggregate is not None:
         # For now, we do not support MRIs in on demand metrics.
-        return False
+        return SupportedBy(standard_metrics=True, on_demand_metrics=False)
 
     aggregate_supported_by = _get_aggregate_supported_by(function, args)
     query_supported_by = _get_query_supported_by(query)
@@ -629,6 +598,30 @@ def _should_use_on_demand_metrics(
     supported_by = SupportedBy.combine(
         aggregate_supported_by, query_supported_by, groupbys_supported_by
     )
+
+    return supported_by
+
+
+def _should_use_on_demand_metrics(
+    dataset: str | Dataset | None,
+    aggregate: str,
+    query: str,
+    groupbys: Sequence[str] | None = None,
+    prefilling: bool = False,
+    prefilling_for_deprecation: bool = False,
+) -> bool:
+    """On-demand metrics are used if the aggregate and query are supported by on-demand metrics but not standard"""
+    supported_by = _query_supported_by(
+        dataset,
+        aggregate,
+        query,
+        groupbys,
+        prefilling,
+        prefilling_for_deprecation=prefilling_for_deprecation,
+    )
+
+    if prefilling_for_deprecation:
+        return supported_by.on_demand_metrics
 
     return not supported_by.standard_metrics and supported_by.on_demand_metrics
 
@@ -640,39 +633,15 @@ def should_use_on_demand_metrics(
     query: str,
     groupbys: Sequence[str] | None = None,
     prefilling: bool = False,
-    organization_bulk_query_cache: dict[int, dict[str, bool]] | None = None,
+    prefilling_for_deprecation: bool = False,
 ) -> bool:
-    if in_random_rollout("on_demand_metrics.cache_should_use_on_demand"):
-        if organization_bulk_query_cache is None:
-            organization_bulk_query_cache = defaultdict(dict)
-
-        dataset_str = dataset.value if isinstance(dataset, Enum) else str(dataset or "")
-        groupbys_str = ",".join(sorted(groupbys)) if groupbys else ""
-        local_cache_md5 = md5_text(
-            f"{dataset_str}-{aggregate}-{query or ''}-{groupbys_str}-prefilling={prefilling}"
-        )
-        local_cache_digest_chunk = local_cache_md5.digest()[0] % WIDGET_QUERY_CACHE_MAX_CHUNKS
-        local_cache_key = local_cache_md5.hexdigest()
-        cached_result = organization_bulk_query_cache.get(local_cache_digest_chunk, {}).get(
-            local_cache_key, None
-        )
-        if cached_result:
-            metrics.incr("on_demand_metrics.should_use_on_demand_metrics.cache_hit")
-            return cached_result
-        else:
-            result = _should_use_on_demand_metrics(
-                dataset=dataset,
-                aggregate=aggregate,
-                query=query,
-                groupbys=groupbys,
-                prefilling=prefilling,
-            )
-            metrics.incr("on_demand_metrics.should_use_on_demand_metrics.cache_miss")
-            organization_bulk_query_cache[local_cache_digest_chunk][local_cache_key] = result
-            return result
-
     return _should_use_on_demand_metrics(
-        dataset=dataset, aggregate=aggregate, query=query, groupbys=groupbys, prefilling=prefilling
+        dataset=dataset,
+        aggregate=aggregate,
+        query=query,
+        groupbys=groupbys,
+        prefilling=prefilling,
+        prefilling_for_deprecation=prefilling_for_deprecation,
     )
 
 
@@ -1175,6 +1144,10 @@ class MetricSpecType(Enum):
     DYNAMIC_QUERY = "dynamic_query"
 
 
+class OnDemandMetricSpecError(Exception):
+    pass
+
+
 @dataclass
 class OnDemandMetricSpec:
     """
@@ -1460,7 +1433,7 @@ class OnDemandMetricSpec:
             return None
 
         if len(parsed_field.arguments) == 0:
-            raise Exception(f"The operation {op} supports one or more parameters")
+            raise OnDemandMetricSpecError(f"The operation {op} supports one or more parameters")
 
         arguments = parsed_field.arguments
         return [_map_field_name(arguments[0])] if op not in _MULTIPLE_ARGS_METRICS else arguments
@@ -1478,7 +1451,7 @@ class OnDemandMetricSpec:
         if op is not None:
             return op
 
-        raise Exception(f"Unsupported aggregate function {function}")
+        raise OnDemandMetricSpecError(f"Unsupported aggregate function {function}")
 
     @staticmethod
     def _get_metric_type(function: str) -> str:
@@ -1486,7 +1459,7 @@ class OnDemandMetricSpec:
         if metric_type is not None:
             return metric_type
 
-        raise Exception(f"Unsupported aggregate function {function}")
+        raise OnDemandMetricSpecError(f"Unsupported aggregate function {function}")
 
     @staticmethod
     def _parse_field(value: str) -> FieldParsingResult:
@@ -1499,7 +1472,9 @@ class OnDemandMetricSpec:
             column = query_builder.resolve_column(value)
             return column
         except InvalidSearchQuery as e:
-            raise Exception(f"Unable to parse the field '{value}' in on demand spec: {e}")
+            raise OnDemandMetricSpecError(
+                f"Unable to parse the field '{value}' in on demand spec: {e}"
+            )
 
     @staticmethod
     def _parse_query(value: str) -> QueryParsingResult:
@@ -1515,7 +1490,7 @@ class OnDemandMetricSpec:
 
             return QueryParsingResult(conditions=conditions)
         except InvalidSearchQuery as e:
-            raise Exception(f"Invalid search query '{value}' in on demand spec: {e}")
+            raise OnDemandMetricSpecError(f"Invalid search query '{value}' in on demand spec: {e}")
 
 
 def fetch_on_demand_metric_spec(

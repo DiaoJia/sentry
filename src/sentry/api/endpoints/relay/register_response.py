@@ -10,11 +10,12 @@ from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.authentication import is_internal_relay, relay_from_id
-from sentry.api.base import Endpoint, region_silo_endpoint
+from sentry.api.base import Endpoint, internal_cell_silo_endpoint
 from sentry.api.endpoints.relay.constants import RELAY_AUTH_RATE_LIMITS
 from sentry.api.serializers import serialize
 from sentry.models.relay import Relay, RelayUsage
 from sentry.relay.utils import get_header_relay_id, get_header_relay_signature
+from sentry.tasks.process_buffer import buffer_incr
 
 from . import RelayIdSerializer
 
@@ -23,7 +24,7 @@ class RelayRegisterResponseSerializer(RelayIdSerializer):
     token = serializers.CharField(required=True)
 
 
-@region_silo_endpoint
+@internal_cell_silo_endpoint
 class RelayRegisterResponseEndpoint(Endpoint):
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
@@ -101,9 +102,12 @@ class RelayRegisterResponseEndpoint(Endpoint):
             except RelayUsage.DoesNotExist:
                 RelayUsage.objects.create(relay_id=relay_id, version=version, public_key=public_key)
             else:
-                relay_usage.last_seen = timezone.now()
-                relay_usage.public_key = public_key
-                relay_usage.save()
+                buffer_incr(
+                    model=RelayUsage,
+                    columns={},
+                    filters={"id": relay_usage.id},
+                    extra={"last_seen": timezone.now(), "public_key": public_key},
+                )
 
         assert relay is not None
         return Response(serialize({"relay_id": relay.relay_id}))

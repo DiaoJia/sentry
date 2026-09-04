@@ -1,18 +1,17 @@
 import {useCallback, useMemo} from 'react';
 
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import type {NewQuery} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
-import EventView from 'sentry/utils/discover/eventView';
+import {defined} from 'sentry/utils/defined';
+import {EventView} from 'sentry/utils/discover/eventView';
 import type {Sort} from 'sentry/utils/discover/fields';
 import {DiscoverDatasets} from 'sentry/utils/discover/types';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import usePageFilters from 'sentry/utils/usePageFilters';
 import {formatSort} from 'sentry/views/explore/contexts/pageParamsContext/sortBys';
 import type {AggregatesTableResult} from 'sentry/views/explore/hooks/useExploreAggregatesTable';
 import type {SpansTableResult} from 'sentry/views/explore/hooks/useExploreSpansTable';
 import {
-  type SpansRPCQueryExtras,
   useProgressiveQuery,
+  type RPCQueryExtras,
 } from 'sentry/views/explore/hooks/useProgressiveQuery';
 import {getFieldsForConstructedQuery} from 'sentry/views/explore/multiQueryMode/locationUtils';
 import {useSpansQuery} from 'sentry/views/insights/common/queries/useSpansQuery';
@@ -23,7 +22,7 @@ type Props = {
   query: string;
   sortBys: Sort[];
   yAxes: string[];
-  queryExtras?: SpansRPCQueryExtras;
+  queryExtras?: RPCQueryExtras;
 };
 
 export function useMultiQueryTableAggregateMode({
@@ -62,7 +61,7 @@ function useMultiQueryTableAggregateModeImpl({
   const {selection} = usePageFilters();
 
   const fields = useMemo(() => {
-    const allFields: Set<string> = new Set();
+    const allFields = new Set<string>();
 
     for (const groupBy of groupBys) {
       allFields.add(groupBy);
@@ -75,21 +74,14 @@ function useMultiQueryTableAggregateModeImpl({
   }, [groupBys, yAxes]);
 
   const eventView = useMemo(() => {
-    const search = new MutableSearch(query);
-
-    // Filtering out all spans with op like 'ui.interaction*' which aren't
-    // embedded under transactions. The trace view does not support rendering
-    // such spans yet.
-    search.addFilterValues('!transaction.span_id', ['00']);
-
     const discoverQuery: NewQuery = {
       id: undefined,
       name: 'Multi Query Mode - Span Aggregates',
       fields,
       orderby: sortBys.map(formatSort),
-      query: search.formatString(),
+      query,
       version: 2,
-      dataset: DiscoverDatasets.SPANS_EAP_RPC,
+      dataset: DiscoverDatasets.SPANS,
     };
 
     return EventView.fromNewQueryWithPageFilters(discoverQuery, selection);
@@ -108,7 +100,13 @@ function useMultiQueryTableAggregateModeImpl({
   return {eventView, fields, result};
 }
 
-export function useMultiQueryTableSampleMode({query, yAxes, sortBys, enabled}: Props) {
+export function useMultiQueryTableSampleMode({
+  query,
+  yAxes,
+  sortBys,
+  enabled,
+  queryExtras,
+}: Props) {
   const canTriggerHighAccuracy = useCallback(
     (results: ReturnType<typeof useSpansQuery<any[]>>) => {
       const canGoToHigherAccuracyTier = results.meta?.dataScanned === 'partial';
@@ -119,7 +117,7 @@ export function useMultiQueryTableSampleMode({query, yAxes, sortBys, enabled}: P
   );
   return useProgressiveQuery({
     queryHookImplementation: useMultiQueryTableSampleModeImpl,
-    queryHookArgs: {query, yAxes, sortBys, enabled},
+    queryHookArgs: {query, yAxes, sortBys, enabled, queryExtras},
     queryOptions: {
       canTriggerHighAccuracy,
     },
@@ -137,26 +135,24 @@ function useMultiQueryTableSampleModeImpl({
 
   const fields = useMemo(() => {
     const allFields: string[] = [];
-    allFields.push(...getFieldsForConstructedQuery(yAxes));
-    allFields.push(...['transaction.span_id', 'trace', 'project', 'timestamp']);
+    allFields.push(
+      ...getFieldsForConstructedQuery(yAxes),
+      'transaction.span_id',
+      'trace',
+      'project',
+      'timestamp'
+    );
     return allFields;
   }, [yAxes]);
   const eventView = useMemo(() => {
-    const search = new MutableSearch(query);
-
-    // Filtering out all spans with op like 'ui.interaction*' which aren't
-    // embedded under transactions. The trace view does not support rendering
-    // such spans yet.
-    search.addFilterValues('!transaction.span_id', ['00']);
-
     const discoverQuery: NewQuery = {
       id: undefined,
       name: 'Multi Query Mode - Samples',
       fields,
       orderby: sortBys.map(formatSort),
-      query: search.formatString(),
+      query,
       version: 2,
-      dataset: DiscoverDatasets.SPANS_EAP_RPC,
+      dataset: DiscoverDatasets.SPANS,
     };
 
     return EventView.fromNewQueryWithPageFilters(discoverQuery, selection);

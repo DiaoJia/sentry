@@ -8,17 +8,17 @@ from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 
 @control_silo_test
 class SharedGroupDetailsTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.group = self.create_group(project=self.project)
         self.org_domain = f"{self.organization.slug}.testserver"
 
-    def share_group(self):
-        with assume_test_silo_mode(SiloMode.REGION):
+    def share_group(self) -> GroupShare:
+        with assume_test_silo_mode(SiloMode.CELL):
             return GroupShare.objects.create(
                 project=self.project, group=self.group, user_id=self.user.id
             )
 
-    def assert_group_metadata_present(self, response: Any):
+    def assert_group_metadata_present(self, response: Any) -> None:
         response_body = response.content.decode("utf8")
         assert f'<meta property="og:title" content="{self.group.title}"' in response_body
         assert f'<meta property="og:description" content="{self.group.message}"' in response_body
@@ -28,7 +28,7 @@ class SharedGroupDetailsTest(TestCase):
             f'<meta property="twitter:description" content="{self.group.message}"' in response_body
         )
 
-    def assert_group_metadata_absent(self, response: Any):
+    def assert_group_metadata_absent(self, response: Any) -> None:
         response_body = response.content.decode("utf8")
         assert f'<meta property="og:title" content="{self.group.title}"' not in response_body
         assert (
@@ -41,28 +41,36 @@ class SharedGroupDetailsTest(TestCase):
             not in response_body
         )
 
-    def test_get_not_found(self):
+    def test_get_not_found(self) -> None:
         response = self.client.get("/share/issue/lolnope/", HTTP_HOST=self.org_domain)
         assert response.status_code == 200
         self.assert_group_metadata_absent(response)
 
-    def test_get_org_disable_sharing(self):
+    def test_get_org_disable_sharing(self) -> None:
         share = self.share_group()
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.organization.flags.disable_shared_issues = True
             self.organization.save()
         response = self.client.get(f"/share/issue/{share.uuid}/", HTTP_HOST=self.org_domain)
         assert response.status_code == 200
         self.assert_group_metadata_absent(response)
 
-    def test_get_no_subdomain(self):
+    def test_get_no_subdomain(self) -> None:
         share = self.share_group()
         response = self.client.get(f"/share/issue/{share.uuid}/")
         assert response.status_code == 200
         self.assert_group_metadata_present(response)
 
-    def test_get_success(self):
+    def test_get_success(self) -> None:
         share = self.share_group()
         response = self.client.get(f"/share/issue/{share.uuid}/", HTTP_HOST=self.org_domain)
+        assert response.status_code == 200
+        self.assert_group_metadata_present(response)
+
+    def test_get_org_prefixed_path_no_subdomain(self) -> None:
+        share = self.share_group()
+        response = self.client.get(
+            f"/organizations/{self.organization.slug}/share/issue/{share.uuid}/"
+        )
         assert response.status_code == 200
         self.assert_group_metadata_present(response)

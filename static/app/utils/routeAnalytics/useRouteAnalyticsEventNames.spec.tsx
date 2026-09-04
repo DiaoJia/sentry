@@ -2,15 +2,15 @@ import {render} from 'sentry-test/reactTestingLibrary';
 
 import {RouteAnalyticsContext} from 'sentry/views/routeAnalyticsContextProvider';
 
-import useRouteAnalyticsEventNames from './useRouteAnalyticsEventNames';
+import {useRouteAnalyticsEventNames} from './useRouteAnalyticsEventNames';
 
 function TestComponent({eventKey, eventName}: {eventKey: string; eventName: string}) {
   useRouteAnalyticsEventNames(eventKey, eventName);
   return <div>hi</div>;
 }
 
-describe('useRouteAnalyticsEventNames', function () {
-  it('disables analytics', function () {
+describe('useRouteAnalyticsEventNames', () => {
+  it('disables analytics', () => {
     const setEventNames = jest.fn();
     const getComponent = (
       eventKey: string,

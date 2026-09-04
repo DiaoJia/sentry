@@ -6,18 +6,14 @@ import {motion, useIsPresent} from 'framer-motion';
 
 import type {OverlayArrowProps} from 'sentry/components/overlayArrow';
 import {OverlayArrow} from 'sentry/components/overlayArrow';
-import {NODE_ENV} from 'sentry/constants';
-import {defined} from 'sentry/utils';
-import PanelProvider from 'sentry/utils/panelProvider';
-import testableTransition from 'sentry/utils/testableTransition';
-import {chonkStyled} from 'sentry/utils/theme/theme.chonk';
-import {withChonk} from 'sentry/utils/theme/withChonk';
+import {NODE_ENV} from 'sentry/constants/env';
+import {defined} from 'sentry/utils/defined';
+import {PanelProvider} from 'sentry/utils/panelProvider';
 
 type OriginPoint = Partial<{x: number; y: number}>;
 
-interface OverlayProps
-  extends HTMLMotionProps<'div'>,
-    React.RefAttributes<HTMLDivElement> {
+export interface OverlayProps
+  extends HTMLMotionProps<'div'>, React.RefAttributes<HTMLDivElement> {
   /**
    * Whether the overlay should animate in/out. If true, we'll also need
    * the `placement` and `originPoint` props.
@@ -51,16 +47,15 @@ const overlayAnimation: MotionProps = {
   animate: {
     opacity: 1,
     scale: 1,
-    transition: testableTransition({
-      type: 'linear',
-      ease: [0.5, 1, 0.89, 1],
+    transition: {
+      type: 'spring',
       duration: 0.2,
-    }),
+    },
   },
   exit: {
     opacity: 0,
     scale: 0.95,
-    transition: testableTransition({type: 'spring', delay: 0.1}),
+    transition: {type: 'spring', delay: 0.1},
   },
 };
 
@@ -87,7 +82,7 @@ function computeOriginFromArrow(
     case 'right':
       return {originX: 0, originY: y ? `${y}px` : '50%'};
     default:
-      return {originX: `50%`, originY: '50%'};
+      return {originX: '50%', originY: '50%'};
   }
 }
 
@@ -123,58 +118,41 @@ export function Overlay({
       : {style};
 
   return (
-    <OverlayInner {...props} {...animationProps} data-overlay ref={ref}>
+    <OverlayInner
+      {...props}
+      {...animationProps}
+      data-overlay
+      ref={ref}
+      placement={placement}
+    >
       {defined(arrowProps) && <OverlayArrow {...arrowProps} />}
       <PanelProvider>{children}</PanelProvider>
     </OverlayInner>
   );
 }
 
-const OverlayInner = withChonk(
-  styled(motion.div)<{
-    animated?: boolean;
-    overlayStyle?: React.CSSProperties | SerializedStyles;
-  }>`
-    position: relative;
-    border-radius: ${p => p.theme.borderRadius};
-    background: ${p => p.theme.backgroundElevated};
-    box-shadow:
-      0 0 0 1px ${p => p.theme.translucentBorder},
-      ${p => p.theme.dropShadowHeavy};
-    font-size: ${p => p.theme.fontSize.md};
+const OverlayInner = styled(motion.div)<{
+  overlayStyle?: React.CSSProperties | SerializedStyles;
+  placement?: OverlayProps['placement'];
+}>`
+  position: relative;
+  background: ${p => p.theme.tokens.background.overlay};
+  border-radius: ${p => p.theme.radius.md};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  box-shadow: 0 2px 0 ${p => p.theme.tokens.border.primary};
+  font-size: ${p => p.theme.font.size.md};
 
-    /* Override z-index from useOverlayPosition */
-    z-index: ${p => p.theme.zIndex.dropdown} !important;
-    ${p => p.animated && `will-change: transform, opacity;`}
+  /* Override z-index from useOverlayPosition */
+  z-index: ${p => p.theme.zIndex.dropdown} !important;
+  will-change: transform, opacity;
 
-    /* Specificity hack to allow override styles to have higher specificity than
+  /* Specificity hack to allow override styles to have higher specificity than
    * styles provided in any styled components which extend Overlay */
   :where(*) {
-      ${p => p.overlayStyle as any}
-    }
-  `,
-  chonkStyled(motion.div)<{
-    overlayStyle?: React.CSSProperties | SerializedStyles;
-  }>`
-    position: relative;
-    background: ${p => p.theme.colors.background.primary};
-    border-radius: ${p => p.theme.borderRadius};
-    border: 1px solid ${p => p.theme.colors.border.primary};
-    box-shadow:
-      0 2px 0 0 ${p => p.theme.colors.border.primary};
-    font-size: ${p => p.theme.fontSize.md};
-
-    /* Override z-index from useOverlayPosition */
-    z-index: ${p => p.theme.zIndex.dropdown} !important;
-    will-change: transform, opacity;
-
-    /* Specificity hack to allow override styles to have higher specificity than
-   * styles provided in any styled components which extend Overlay */
-    :where(*) {
-      ${p => p.overlayStyle as any}
-    }
-  `
-);
+    ${p => p.overlayStyle as any}
+  }
+`;
 
 interface PositionWrapperProps extends React.HTMLAttributes<HTMLDivElement> {
   /**

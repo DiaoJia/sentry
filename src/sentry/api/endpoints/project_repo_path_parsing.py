@@ -1,28 +1,61 @@
 from pathlib import PurePath, PureWindowsPath
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, TypedDict
+from urllib.parse import unquote, urlparse, urlunparse
 
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectPermission
 from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
+from sentry.apidocs.constants import (
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NOT_FOUND,
+    RESPONSE_UNAUTHORIZED,
+)
+from sentry.apidocs.parameters import GlobalParams
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.integrations.base import IntegrationFeatures
 from sentry.integrations.manager import default_manager as integrations
 from sentry.integrations.services.integration import RpcIntegration, integration_service
 from sentry.integrations.source_code_management.repository import RepositoryIntegration
 from sentry.issues.auto_source_code_config.code_mapping import find_roots
-from sentry.issues.auto_source_code_config.frame_info import FrameInfo
+from sentry.issues.auto_source_code_config.errors import (
+    UnexpectedPathException,
+    UnsupportedFrameInfo,
+)
+from sentry.issues.auto_source_code_config.frame_info import FrameInfo, create_frame_info
 from sentry.models.project import Project
 from sentry.models.repository import Repository
 
 
+class RepoPathParsingResponse(TypedDict):
+    # NOTE: API convention is to return identifiers as strings, but this endpoint has
+    # always returned these as integers. Typed to match the existing behavior.
+    integrationId: int
+    repositoryId: int
+    provider: str
+    stackRoot: str
+    sourceRoot: str
+    defaultBranch: str
+
+
+def unquote_source_url_path(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    return urlunparse(parsed._replace(path=unquote(parsed.path)))
+
+
 class PathMappingSerializer(CamelSnakeSerializer[dict[str, str]]):
-    stack_path = serializers.CharField()
-    source_url = serializers.URLField()
+    stack_path = serializers.CharField(
+        help_text="A file path as it appears in a stack trace frame."
+    )
+    source_url = serializers.URLField(
+        help_text="The URL of the same file in the connected source code repository."
+    )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -40,6 +73,10 @@ class PathMappingSerializer(CamelSnakeSerializer[dict[str, str]]):
         return self.context["organization_id"]
 
     def validate_source_url(self, source_url: str) -> str:
+        # URLs copied from a provider's UI can be percent-encoded, but stack trace
+        # paths are not, so decode before comparing or extracting paths
+        source_url = unquote_source_url_path(source_url)
+
         # first check to see if we are even looking at the same file
         stack_path = self.initial_data["stack_path"]
 
@@ -96,20 +133,33 @@ class ProjectRepoPathParsingEndpointLoosePermission(ProjectPermission):
     }
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Integrations"])
+@cell_silo_endpoint
 class ProjectRepoPathParsingEndpoint(ProjectEndpoint):
     publish_status = {
-        "POST": ApiPublishStatus.UNKNOWN,
+        "POST": ApiPublishStatus.PRIVATE,
     }
     permission_classes = (ProjectRepoPathParsingEndpointLoosePermission,)
-    """
-    Returns the parameters associated with the RepositoryProjectPathConfig
-    we would create based on a particular stack trace and source code URL.
-    Does validation to make sure we have an integration and repo
-    depending on the source code URL
-    """
 
-    def post(self, request: Request, project: Project) -> Response:
+    @extend_schema(
+        operation_id="Parse a Repository Path Mapping",
+        parameters=[GlobalParams.ORG_ID_OR_SLUG, GlobalParams.PROJECT_ID_OR_SLUG],
+        request=PathMappingSerializer,
+        responses={
+            200: inline_sentry_response_serializer("RepoPathParsing", RepoPathParsingResponse),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def post(self, request: Request, project: Project) -> Response[RepoPathParsingResponse]:
+        """
+        Derive the code-mapping parameters (stack root, source root, default branch) that
+        Sentry would create for a given stack trace frame and source code URL.
+
+        Validates that a matching integration and repository exist for the provided URL.
+        """
         serializer = PathMappingSerializer(
             context={"organization_id": project.organization_id},
             data=request.data,
@@ -119,7 +169,12 @@ class ProjectRepoPathParsingEndpoint(ProjectEndpoint):
 
         data = serializer.validated_data
         source_url = data["source_url"]
-        frame_info = get_frame_info_from_request(request)
+        try:
+            frame_info = get_frame_info_from_request(request)
+        except UnsupportedFrameInfo:
+            return self.respond(
+                {"detail": "Unsupported frame info"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         # validated by `serializer.is_valid()`
         assert serializer.repo is not None
@@ -136,7 +191,14 @@ class ProjectRepoPathParsingEndpoint(ProjectEndpoint):
 
         branch = installation.extract_branch_from_source_url(repo, source_url)
         source_path = installation.extract_source_path_from_source_url(repo, source_url)
-        stack_root, source_root = find_roots(frame_info, source_path)
+
+        try:
+            stack_root, source_root = find_roots(frame_info, source_path)
+        except UnexpectedPathException:
+            return self.respond(
+                {"detail": "Could not determine code mapping from provided paths"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return self.respond(
             {
@@ -156,4 +218,4 @@ def get_frame_info_from_request(request: Request) -> FrameInfo:
         "filename": request.data["stackPath"],
         "module": request.data.get("module"),
     }
-    return FrameInfo(frame, request.data.get("platform"))
+    return create_frame_info(frame, request.data.get("platform"))

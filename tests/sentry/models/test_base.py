@@ -22,14 +22,14 @@ class AvailableOnTest(TestCase):
     class ControlModel(TestModel):
         pass
 
-    @ModelSiloLimit(SiloMode.REGION)
+    @ModelSiloLimit(SiloMode.CELL)
     class RegionModel(TestModel):
         pass
 
     class ModelOnMonolith(TestModel):
         pass
 
-    def test_available_on_monolith_mode(self):
+    def test_available_on_monolith_mode(self) -> None:
         assert list(self.ModelOnMonolith.objects.all()) == []
         with raises(self.ModelOnMonolith.DoesNotExist):
             self.ModelOnMonolith.objects.get(id=1)
@@ -39,8 +39,8 @@ class AvailableOnTest(TestCase):
 
         self.ModelOnMonolith.objects.filter(id=1).delete()
 
-    @override_settings(SILO_MODE=SiloMode.REGION)
-    def test_available_on_same_mode(self):
+    @override_settings(SILO_MODE=SiloMode.CELL)
+    def test_available_on_same_mode(self) -> None:
         assert list(self.RegionModel.objects.all()) == []
         with raises(self.RegionModel.DoesNotExist):
             self.RegionModel.objects.get(id=1)
@@ -50,8 +50,8 @@ class AvailableOnTest(TestCase):
 
         self.RegionModel.objects.filter(id=1).delete()
 
-    @override_settings(SILO_MODE=SiloMode.REGION)
-    def test_unavailable_on_other_mode(self):
+    @override_settings(SILO_MODE=SiloMode.CELL)
+    def test_unavailable_on_other_mode(self) -> None:
         with raises(ModelSiloLimit.AvailabilityError):
             list(self.ControlModel.objects.all())
         with raises(ModelSiloLimit.AvailabilityError):
@@ -61,7 +61,7 @@ class AvailableOnTest(TestCase):
         with raises(ModelSiloLimit.AvailabilityError):
             self.ControlModel.objects.filter(id=1).delete()
 
-    def test_get_model_if_available(self):
+    def test_get_model_if_available(self) -> None:
         test_models = {
             m.__name__: m
             for m in (
@@ -73,19 +73,19 @@ class AvailableOnTest(TestCase):
         app_config = MagicMock()
         app_config.get_model.side_effect = test_models.get
 
-        with override_settings(SILO_MODE=SiloMode.REGION):
+        with override_settings(SILO_MODE=SiloMode.CELL):
             assert get_model_if_available(app_config, "ControlModel") is None
             assert get_model_if_available(app_config, "RegionModel") is self.RegionModel
             assert get_model_if_available(app_config, "ModelOnMonolith") is self.ModelOnMonolith
 
-    def test_get_model_with_nonexistent_name(self):
+    def test_get_model_with_nonexistent_name(self) -> None:
         app_config = MagicMock()
         app_config.get_model.side_effect = LookupError
         assert get_model_if_available(app_config, "BogusModel") is None
         app_config.get_model.assert_called_with("BogusModel")
 
 
-def test_model_index_location():
+def test_model_index_location() -> None:
     """
     Validates that we didn't misconfigure a model such that the index or
     constraints are defined on the model body itself.

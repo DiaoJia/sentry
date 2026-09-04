@@ -1,12 +1,8 @@
 from typing import Any, TypedDict
 
 import sentry.options
-from sentry.relay.config.ai_model_costs import AIModelCosts, ai_model_costs_config
+from sentry.relay.config.ai_model_costs import AIModelMetadataConfig, ai_model_metadata_config
 from sentry.relay.config.measurements import MeasurementsConfig, get_measurements_config
-from sentry.relay.config.metric_extraction import (
-    MetricExtractionGroups,
-    global_metric_extraction_groups,
-)
 from sentry.relay.types import GenericFiltersConfig, RuleCondition
 from sentry.utils import metrics
 
@@ -16,17 +12,14 @@ RELAY_OPTIONS: list[str] = [
     "profiling.profile_metrics.unsampled_profiles.sample_rate",
     "profiling.profile_metrics.unsampled_profiles.enabled",
     "relay.span-usage-metric",
-    "relay.cardinality-limiter.mode",
-    "relay.cardinality-limiter.error-sample-rate",
     "relay.metric-bucket-set-encodings",
     "relay.metric-bucket-distribution-encodings",
-    "relay.metric-stats.rollout-rate",
-    "relay.ourlogs-ingestion.sample-rate",
-    "relay.ourlogs-breadcrumb-extraction.sample-rate",
-    "relay.ourlogs-breadcrumb-extraction.max-breadcrumbs-converted",
-    "relay.span-extraction.sample-rate",
+    "relay.sessions-eap.rollout-rate",
     "relay.span-normalization.allowed_hosts",
     "relay.drop-transaction-attachments",
+    "relay.objectstore-attachments.sample-rate",
+    "relay.endpoint-fetch-config.enabled",
+    "relay.attachment-inline.limit",
 ]
 
 
@@ -41,8 +34,7 @@ class SpanOpDefaults(TypedDict):
 
 class GlobalConfig(TypedDict, total=False):
     measurements: MeasurementsConfig
-    aiModelCosts: AIModelCosts
-    metricExtraction: MetricExtractionGroups
+    aiModelMetadata: AIModelMetadataConfig | None
     filters: GenericFiltersConfig | None
     spanOpDefaults: SpanOpDefaults
     options: dict[str, Any]
@@ -75,13 +67,12 @@ def span_op_defaults() -> SpanOpDefaults:
 
 
 @metrics.wraps("relay.globalconfig.get")
-def get_global_config():
+def get_global_config() -> GlobalConfig:
     """Return the global configuration for Relay."""
 
     global_config: GlobalConfig = {
         "measurements": get_measurements_config(),
-        "aiModelCosts": ai_model_costs_config(),
-        "metricExtraction": global_metric_extraction_groups(),
+        "aiModelMetadata": ai_model_metadata_config(),
         "spanOpDefaults": span_op_defaults(),
     }
 

@@ -8,11 +8,13 @@ from urllib.parse import quote
 from requests import PreparedRequest
 from rest_framework.response import Response
 
+from sentry import options
 from sentry.constants import ObjectStatus
 from sentry.exceptions import InvalidIdentity
 from sentry.integrations.client import ApiClient
 from sentry.integrations.services.integration.service import integration_service
 from sentry.integrations.source_code_management.repository import RepositoryClient
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.models.repository import Repository
 from sentry.shared_integrations.client.proxy import IntegrationProxyClient
 from sentry.silo.base import control_silo_function
@@ -118,7 +120,7 @@ def _create_subscription_data(shared_secret: str) -> dict[str, Any]:
 
 
 class VstsSetupApiClient(ApiClient):
-    integration_name = "vsts"
+    integration_name = IntegrationProviderSlug.AZURE_DEVOPS.value
     api_version = "4.1"  # TODO: update api version
     api_version_preview = "-preview.1"
 
@@ -145,7 +147,7 @@ class VstsSetupApiClient(ApiClient):
 
 
 class VstsApiClient(IntegrationProxyClient, RepositoryClient):
-    integration_name = "vsts"
+    integration_name = IntegrationProviderSlug.AZURE_DEVOPS.value
     api_version = "4.1"  # TODO: update api version
     api_version_preview = "-preview.1"
     _identity: Identity | None = None
@@ -166,6 +168,8 @@ class VstsApiClient(IntegrationProxyClient, RepositoryClient):
     def identity(self):
         if self._identity:
             return self._identity
+        if self.identity_id is None:
+            raise ValueError("identity_id is not set")
         self._identity = Identity.objects.get(id=self.identity_id)
         return self._identity
 
@@ -195,7 +199,9 @@ class VstsApiClient(IntegrationProxyClient, RepositoryClient):
             from sentry.integrations.vsts.integration import VstsIntegrationProvider
 
             integration = integration_service.get_integration(
-                organization_integration_id=self.org_integration_id, status=ObjectStatus.ACTIVE
+                organization_integration_id=self.org_integration_id,
+                status=ObjectStatus.ACTIVE,
+                using_replica=options.get("integration_service.get_integration.using_replica"),
             )
             if integration is None:
                 return

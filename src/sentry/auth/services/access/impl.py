@@ -65,7 +65,7 @@ class ControlAccessService(AccessService):
                 organization_id=member.organization_id,
                 user__is_active=True,
             )
-            .exclude(id=member.id)
+            .exclude(organizationmember_id=member.id)
             .values_list("user_id")
         )
         return not AuthIdentity.objects.filter(
@@ -73,7 +73,7 @@ class ControlAccessService(AccessService):
         ).exists()
 
 
-class RegionAccessService(AccessService):
+class CellAccessService(AccessService):
     def get_auth_provider(self, organization_id: int) -> RpcAuthProvider | None:
         try:
             ap = AuthProviderReplica.objects.get(organization_id=organization_id)

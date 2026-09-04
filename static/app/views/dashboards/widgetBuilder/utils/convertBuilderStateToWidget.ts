@@ -1,16 +1,50 @@
-import {defined} from 'sentry/utils';
-import {generateFieldAsString, type Sort} from 'sentry/utils/discover/fields';
+import {defined} from 'sentry/utils/defined';
+import {
+  generateFieldAsString,
+  getEquation,
+  isEquation,
+} from 'sentry/utils/discover/fields';
 import {getDatasetConfig} from 'sentry/views/dashboards/datasetConfig/base';
 import {
   DisplayType,
+  WidgetType,
   type Widget,
   type WidgetQuery,
-  WidgetType,
 } from 'sentry/views/dashboards/types';
-import type {WidgetBuilderState} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
+import {getAxisRange} from 'sentry/views/dashboards/utils/axisRange';
+import {
+  serializeSorts,
+  type WidgetBuilderState,
+} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
 import {FieldValueKind} from 'sentry/views/discover/table/types';
 
+/**
+ * Resolves the selected aggregate index, defaulting to the last aggregate.
+ */
+export function getSelectedAggregateIndex(
+  selectedAggregate: number | undefined,
+  aggregateCount: number
+): number {
+  if (selectedAggregate === undefined) {
+    return aggregateCount > 0 ? aggregateCount - 1 : 0;
+  }
+  return Math.min(selectedAggregate, Math.max(0, aggregateCount - 1));
+}
+
 export function convertBuilderStateToWidget(state: WidgetBuilderState): Widget {
+  if (state.displayType === DisplayType.TEXT) {
+    return {
+      title: state.title ?? '',
+      description: state.textContent,
+      displayType: state.displayType,
+      interval: '1h', // TODO: allow this field to be blank
+      queries: [],
+      widgetType: undefined,
+      limit: undefined,
+      thresholds: undefined,
+      axisRange: undefined,
+    };
+  }
   const datasetConfig = getDatasetConfig(state.dataset ?? WidgetType.ERRORS);
   const defaultQuery = datasetConfig.defaultWidgetQuery;
 
@@ -19,35 +53,69 @@ export function convertBuilderStateToWidget(state: WidgetBuilderState): Widget {
     defined(state.legendAlias) && state.legendAlias.length > 0 ? state.legendAlias : [];
 
   const fieldAliases = state.fields?.map(field => field.alias ?? '');
-  const aggregates =
-    (state.yAxis?.length ?? 0) > 0
-      ? state.yAxis?.map(generateFieldAsString)
-      : state.fields
-          ?.filter(field =>
-            [FieldValueKind.FUNCTION, FieldValueKind.EQUATION].includes(
-              field.kind as FieldValueKind
-            )
+  let aggregates: string[];
+
+  if (state.yAxis?.length) {
+    aggregates =
+      state.yAxis
+        ?.map(generateFieldAsString)
+        .filter(f => !isEquation(f) || getEquation(f).trim() !== '') ?? [];
+  } else {
+    aggregates =
+      state.fields
+        ?.filter(field =>
+          [FieldValueKind.FUNCTION, FieldValueKind.EQUATION].includes(
+            field.kind as FieldValueKind
           )
-          .map(generateFieldAsString)
-          .filter(Boolean);
+        )
+        .map(generateFieldAsString)
+        .filter(f => f && (!isEquation(f) || getEquation(f).trim() !== '')) ?? [];
+  }
+
   const columns = state.fields
     ?.filter(field => field.kind === FieldValueKind.FIELD)
     .map(generateFieldAsString)
     .filter(Boolean);
 
   const fields =
-    state.displayType === DisplayType.TABLE
+    state.displayType === DisplayType.TABLE ||
+    state.displayType === DisplayType.DETAILS ||
+    state.displayType === DisplayType.BIG_NUMBER ||
+    state.displayType === DisplayType.HEATMAP
       ? state.fields?.map(generateFieldAsString)
       : [...(columns ?? []), ...(aggregates ?? [])];
 
-  // If there's no sort, use the first field as the default sort (this doesn't apply to release table widgets)
-  const defaultSort =
-    state.displayType === DisplayType.TABLE && state.dataset === WidgetType.RELEASE
-      ? ''
-      : (fields?.[0] ?? defaultQuery.orderby);
+  // If there's no sort, use a sensible default based on display type
+  const isReleaseTable =
+    state.displayType === DisplayType.TABLE && state.dataset === WidgetType.RELEASE;
+  const isCategoricalBar = state.displayType === DisplayType.CATEGORICAL_BAR;
+
+  let defaultSort = fields?.[0] ?? defaultQuery.orderby;
+  if (isReleaseTable) {
+    defaultSort = '';
+  } else if (isCategoricalBar) {
+    // Categorical bars should sort by the selected aggregate (last by default, matching Big Number).
+    // For equations, use the alias format (equation[N]) that the API expects, not the raw equation|... string
+    const selectedIndex = getSelectedAggregateIndex(
+      state.selectedAggregate,
+      aggregates.length
+    );
+    const selectedAggregate = aggregates[selectedIndex] ?? aggregates[0];
+    if (selectedAggregate) {
+      if (isEquation(selectedAggregate)) {
+        const equationIndex =
+          aggregates.slice(0, selectedIndex + 1).filter(isEquation).length - 1;
+        // Defensive: equationIndex should always be >= 0 since selectedAggregate
+        // is an equation, but Math.max guards against an empty filter result.
+        defaultSort = `-equation[${Math.max(0, equationIndex)}]`;
+      } else {
+        defaultSort = `-${selectedAggregate}`;
+      }
+    }
+  }
   const sort =
     defined(state.sort) && state.sort.length > 0
-      ? _formatSort(state.sort[0]!)
+      ? serializeSorts(state.dataset)(state.sort)[0]!
       : defaultSort;
 
   const widgetQueries: WidgetQuery[] = queries.map((query, index) => {
@@ -60,11 +128,22 @@ export function convertBuilderStateToWidget(state: WidgetBuilderState): Widget {
       fieldAliases: fieldAliases ?? [],
       name: legendAlias[index] ?? '',
       selectedAggregate: state.selectedAggregate,
-
-      // Big number widgets don't support sorting, so always ignore the sort state
-      orderby: state.displayType === DisplayType.BIG_NUMBER ? '' : sort,
+      linkedDashboards: state.linkedDashboards ?? [],
+      // Big number and heat map widgets don't support sorting, so always ignore
+      // the sort state
+      orderby:
+        state.displayType === DisplayType.BIG_NUMBER ||
+        state.displayType === DisplayType.HEATMAP
+          ? ''
+          : sort,
     };
   });
+
+  const limit = [DisplayType.BIG_NUMBER, DisplayType.TABLE, DisplayType.HEATMAP].includes(
+    state.displayType ?? DisplayType.TABLE
+  )
+    ? null
+    : state.limit;
 
   return {
     title: state.title ?? '',
@@ -73,12 +152,9 @@ export function convertBuilderStateToWidget(state: WidgetBuilderState): Widget {
     interval: '1h', // TODO: Not sure what to put here yet
     queries: widgetQueries,
     widgetType: state.dataset,
-    limit: state.limit,
+    limit,
+    legendType: state.legendType ?? null,
     thresholds: state.thresholds,
+    axisRange: getAxisRange(state.axisRange) ?? datasetConfig.axisRange,
   };
-}
-
-function _formatSort(sort: Sort): string {
-  const direction = sort.kind === 'desc' ? '-' : '';
-  return `${direction}${sort.field}`;
 }

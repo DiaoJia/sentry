@@ -1,12 +1,9 @@
-import {defined} from 'sentry/utils';
-import {
-  type ApiQueryKey,
-  useApiQuery,
-  type UseApiQueryOptions,
-  type UseApiQueryResult,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useOrganization from 'sentry/utils/useOrganization';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
+import {useApiQuery, type UseApiQueryResult} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import type {GroupTag} from 'sentry/views/issueDetails/groupTags/useGroupTags';
 
 interface FetchGroupFlagsParams {
@@ -22,13 +19,14 @@ const makeGroupFlagsQueryKey = ({
   environment,
   limit,
 }: FetchGroupFlagsParams): ApiQueryKey => [
-  `/organizations/${orgSlug}/issues/${groupId}/tags/`,
+  getApiUrl('/organizations/$organizationIdOrSlug/issues/$issueId/tags/', {
+    path: {organizationIdOrSlug: orgSlug, issueId: groupId},
+  }),
   {query: {environment, limit, useFlagsBackend: '1'}},
 ];
 
-export default function useGroupFeatureFlags(
-  parameters: Omit<FetchGroupFlagsParams, 'orgSlug'>,
-  {enabled = true, ...options}: Partial<UseApiQueryOptions<GroupTag[]>> = {}
+export function useGroupFeatureFlags(
+  parameters: Omit<FetchGroupFlagsParams, 'orgSlug'>
 ): UseApiQueryResult<GroupTag[], RequestError> {
   const organization = useOrganization();
   return useApiQuery<GroupTag[]>(
@@ -38,8 +36,7 @@ export default function useGroupFeatureFlags(
     }),
     {
       staleTime: 30000,
-      enabled: defined(parameters.groupId) && enabled,
-      ...options,
+      enabled: defined(parameters.groupId),
     }
   );
 }

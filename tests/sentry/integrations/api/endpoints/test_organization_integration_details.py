@@ -1,12 +1,15 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import responses
 
 from sentry import audit_log
+from sentry.constants import ObjectStatus
 from sentry.deletions.models.scheduleddeletion import ScheduledDeletion
-from sentry.integrations.base import IntegrationInstallation
+from sentry.integrations.gitlab.integration import GitlabIntegration
+from sentry.integrations.jira.integration import JiraIntegration
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
+from sentry.integrations.services.integration.model import RpcIntegration
 from sentry.models.auditlogentry import AuditLogEntry
 from sentry.models.repository import Repository
 from sentry.shared_integrations.exceptions import ApiError, IntegrationError
@@ -17,11 +20,13 @@ from sentry.testutils.helpers.features import with_feature
 from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 from sentry.users.models.identity import Identity
 
+EXPLICIT_MAPPING_REMOVALS_FEATURE = "organizations:jira-explicit-mapping-removals"
+
 
 class OrganizationIntegrationDetailsTest(APITestCase):
     endpoint = "sentry-api-0-organization-integration-details"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.login_as(user=self.user)
@@ -38,7 +43,7 @@ class OrganizationIntegrationDetailsTest(APITestCase):
             self.organization, self.user, default_auth_id=self.identity.id
         )
 
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.repo = Repository.objects.create(
                 provider="gitlab",
                 name="getsentry/sentry",
@@ -49,18 +54,23 @@ class OrganizationIntegrationDetailsTest(APITestCase):
 
 @control_silo_test
 class OrganizationIntegrationDetailsGetTest(OrganizationIntegrationDetailsTest):
-    def test_simple(self):
+    def test_simple(self) -> None:
         response = self.get_success_response(self.organization.slug, self.integration.id)
         assert response.data["id"] == str(self.integration.id)
+        assert response.data["configOrganization"]
+        assert response.data["configData"] == {"sync_status_forward": {}}
 
 
 @control_silo_test
 class OrganizationIntegrationDetailsPostTest(OrganizationIntegrationDetailsTest):
     method = "post"
 
-    def test_update_config(self):
+    def test_update_config(self) -> None:
         config = {"setting": "new_value", "setting2": "baz"}
-        self.get_success_response(self.organization.slug, self.integration.id, **config)
+        with patch(
+            "sentry.integrations.gitlab.integration.repository_service.schedule_update_gitlab_project_webhooks"
+        ):
+            self.get_success_response(self.organization.slug, self.integration.id, **config)
 
         org_integration = OrganizationIntegration.objects.get(
             integration=self.integration, organization_id=self.organization.id
@@ -75,28 +85,119 @@ class OrganizationIntegrationDetailsPostTest(OrganizationIntegrationDetailsTest)
             data={"provider": self.integration.provider, "name": "config"},
         ).exists()
 
-    @patch.object(IntegrationInstallation, "update_organization_config")
-    def test_update_config_error(self, mock_update_config):
+    @with_feature(EXPLICIT_MAPPING_REMOVALS_FEATURE)
+    def test_update_config_records_project_mapping_changes(self) -> None:
+        jira = self.create_provider_integration(provider="jira", name="Example Jira")
+        jira.add_organization(self.organization, self.user)
+        for external_id in ("1", "2"):
+            self.create_integration_external_project(
+                organization_id=self.organization.id,
+                integration_id=jira.id,
+                external_id=external_id,
+                resolved_status="done",
+                unresolved_status="in_progress",
+            )
+
+        self.get_success_response(
+            self.organization.slug, jira.id, **{"sync_status_forward": {"1": None, "2": None}}
+        )
+
+        entry = AuditLogEntry.objects.get(
+            organization_id=self.organization.id,
+            event=audit_log.get_event_id("INTEGRATION_PROJECT_MAPPINGS_UPDATE"),
+            target_object=jira.id,
+        )
+        assert entry.actor_id == self.user.id
+        assert entry.data["provider"] == "jira"
+        assert entry.data["added_project_mappings"] == []
+        assert sorted(entry.data["removed_project_mappings"], key=lambda m: m["external_id"]) == [
+            {"external_id": "1", "on_resolve": "done", "on_unresolve": "in_progress"},
+            {"external_id": "2", "on_resolve": "done", "on_unresolve": "in_progress"},
+        ]
+        assert audit_log.get(entry.event).render(entry) == (
+            "updated project status mappings for the jira integration "
+            "(0 added, 0 updated, 2 removed)"
+        )
+
+    @with_feature(EXPLICIT_MAPPING_REMOVALS_FEATURE)
+    def test_update_config_omitting_project_mappings_records_nothing(self) -> None:
+        """
+        A payload that omits stored mappings changes nothing, so there is nothing to record --
+        the audit log is a changelog, not a snapshot of the mappings at each save.
+        """
+        jira = self.create_provider_integration(provider="jira", name="Example Jira")
+        jira.add_organization(self.organization, self.user)
+        for external_id in ("1", "2"):
+            self.create_integration_external_project(
+                organization_id=self.organization.id,
+                integration_id=jira.id,
+                external_id=external_id,
+                resolved_status="done",
+                unresolved_status="in_progress",
+            )
+
+        self.get_success_response(self.organization.slug, jira.id, **{"sync_status_forward": {}})
+
+        assert not AuditLogEntry.objects.filter(
+            organization_id=self.organization.id,
+            event=audit_log.get_event_id("INTEGRATION_PROJECT_MAPPINGS_UPDATE"),
+        ).exists()
+
+    def test_update_config_rejects_malformed_project_mappings(self) -> None:
+        """
+        A non-mapping payload used to raise `AttributeError`, which the endpoint doesn't
+        catch -- so it surfaced as a 500 rather than a 400.
+        """
+        jira = self.create_provider_integration(provider="jira", name="Example Jira")
+        jira.add_organization(self.organization, self.user)
+
+        response = self.get_error_response(
+            self.organization.slug, jira.id, status_code=400, **{"sync_status_forward": True}
+        )
+        assert "detail" in response.data
+
+    def test_update_config_skips_project_mapping_entry_when_unchanged(self) -> None:
+        """Providers that report no mapping changes get only the `INTEGRATION_EDIT` entry."""
+        config = {"setting": "new_value"}
+        with patch(
+            "sentry.integrations.gitlab.integration.repository_service.schedule_update_gitlab_project_webhooks"
+        ):
+            self.get_success_response(self.organization.slug, self.integration.id, **config)
+
+        assert not AuditLogEntry.objects.filter(
+            organization_id=self.organization.id,
+            event=audit_log.get_event_id("INTEGRATION_PROJECT_MAPPINGS_UPDATE"),
+        ).exists()
+
+    def test_update_config_error(self) -> None:
         config = {"setting": "new_value", "setting2": "baz"}
 
-        mock_update_config.side_effect = IntegrationError("hello")
-        response = self.get_error_response(
-            self.organization.slug, self.integration.id, **config, status_code=400
-        )
-        assert response.data["detail"] == ["hello"]
+        with patch.object(
+            GitlabIntegration,
+            "update_organization_config",
+            side_effect=IntegrationError("hello"),
+        ):
+            response = self.get_error_response(
+                self.organization.slug, self.integration.id, **config, status_code=400
+            )
+            assert response.data["detail"] == "hello"
 
-        mock_update_config.side_effect = ApiError("hi")
-        response = self.get_error_response(
-            self.organization.slug, self.integration.id, **config, status_code=400
-        )
-        assert response.data["detail"] == ["hi"]
+        with patch.object(
+            GitlabIntegration,
+            "update_organization_config",
+            side_effect=ApiError("hi"),
+        ):
+            response = self.get_error_response(
+                self.organization.slug, self.integration.id, **config, status_code=400
+            )
+            assert response.data["detail"] == "hi"
 
 
 @control_silo_test
 class OrganizationIntegrationDetailsDeleteTest(OrganizationIntegrationDetailsTest):
     method = "delete"
 
-    def test_removal(self):
+    def test_removal(self) -> None:
         self.get_success_response(self.organization.slug, self.integration.id)
         assert Integration.objects.filter(id=self.integration.id).exists()
 
@@ -107,13 +208,26 @@ class OrganizationIntegrationDetailsDeleteTest(OrganizationIntegrationDetailsTes
             model_name="OrganizationIntegration", object_id=org_integration.id
         )
 
+    def test_delete_disabled_integration(self) -> None:
+        org_integration = OrganizationIntegration.objects.get(
+            integration=self.integration, organization_id=self.organization.id
+        )
+        org_integration.update(status=ObjectStatus.DISABLED)
+        self.get_success_response(self.organization.slug, self.integration.id)
+        assert Integration.objects.filter(id=self.integration.id).exists()
+
+        org_integration.refresh_from_db()
+        assert ScheduledDeletion.objects.filter(
+            model_name="OrganizationIntegration", object_id=org_integration.id
+        )
+
 
 @control_silo_test
 class IssueOrganizationIntegrationDetailsGetTest(APITestCase):
     endpoint = "sentry-api-0-organization-integration-details"
     method = "get"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.min_ago = before_now(minutes=1).isoformat()
         self.integration = self.create_integration(
@@ -134,8 +248,7 @@ class IssueOrganizationIntegrationDetailsGetTest(APITestCase):
         self.integration.add_organization(self.organization, self.user)
 
     @responses.activate
-    @with_feature("organizations:jira-paginated-projects")
-    def test_serialize_organizationintegration_with_create_issue_config_for_jira(self):
+    def test_serialize_organizationintegration_with_create_issue_config_for_jira(self) -> None:
         """Test the flow of choosing ticket creation on alert rule fire action
         then serializes the issue config correctly for Jira"""
 
@@ -181,14 +294,28 @@ class IssueOrganizationIntegrationDetailsGetTest(APITestCase):
             },
         )
 
-        params = {"action": "create"}
-        installation = self.integration.get_installation(self.organization.id)
-        response = self.get_success_response(
-            self.organization.slug,
-            self.integration.id,
-            qs_params=params,
+        params = {"action": "create", "ignored": "Sprint"}
+        installation = MagicMock(
+            spec=JiraIntegration,
+            wraps=self.integration.get_installation(self.organization.id),
         )
+        with patch.object(RpcIntegration, "get_installation", return_value=installation):
+            response = self.get_success_response(
+                self.organization.slug,
+                self.integration.id,
+                qs_params=params,
+            )
         data = response.data
+
+        installation.get_create_issue_config.assert_called_once()
+        installation.get_organization_config.assert_not_called()
+        installation.get_config_data.assert_not_called()
+        installation.get_dynamic_display_information.assert_not_called()
+
+        create_issue_call = installation.get_create_issue_config.call_args
+        assert create_issue_call.args[0] is None
+        assert create_issue_call.args[1].id == self.user.id
+        assert create_issue_call.kwargs["params"].dict() == params
 
         # Check we serialized the integration correctly
         assert data["id"] == str(self.integration.id)
@@ -211,13 +338,14 @@ class IssueOrganizationIntegrationDetailsGetTest(APITestCase):
         assert resp_provider["aspects"] == getattr(provider.metadata, "aspects", {})
 
         # Check we serialized the create issue config correctly
-        assert installation.get_create_issue_config(None, self.user) == data.get(
-            "createIssueConfig", {}
-        )
-        assert installation.get_organization_config() == data.get("configOrganization", {})
+        assert [field["name"] for field in data["createIssueConfig"]] == [
+            "project",
+            "issuetype",
+        ]
+        assert data["configOrganization"] == []
 
         # Check we serialized the other organization integration details correctly
-        assert data["configData"] == installation.get_config_data()
+        assert data["configData"] is None
         assert data["externalId"] == self.integration.external_id
         assert data["organizationId"] == self.organization.id
         assert (
@@ -225,3 +353,9 @@ class IssueOrganizationIntegrationDetailsGetTest(APITestCase):
             == self.organization_integration.get_status_display()
         )
         assert data["gracePeriodEnd"] == self.organization_integration.grace_period_end
+
+        jira_request_urls = [call.request.url for call in responses.calls]
+        assert len(jira_request_urls) == 2
+        assert "/rest/api/2/project/search" in jira_request_urls[0]
+        assert "/rest/api/2/issue/createmeta" in jira_request_urls[1]
+        assert all("/rest/api/2/statuses/search" not in url for url in jira_request_urls)

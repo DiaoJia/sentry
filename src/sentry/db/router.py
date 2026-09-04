@@ -28,7 +28,7 @@ class SiloRouter:
     - Monolith - all tables reside in the same database.
     - Siloed - tables for control and region are separated.
 
-    Within Siloed there are are two flavours:
+    Within Siloed there are two flavours:
 
     - simulated - If the application is configured with `control` and `default`
       connections, then we are in 'simulated' silo environment (like our testsuite).
@@ -41,7 +41,7 @@ class SiloRouter:
 
     __simulated_map = {
         SiloMode.MONOLITH: "default",
-        SiloMode.REGION: "default",
+        SiloMode.CELL: "default",
         SiloMode.CONTROL: "control",
     }
 
@@ -68,15 +68,46 @@ class SiloRouter:
     historical_silo_assignments = {
         "authidentity_duplicate": SiloMode.CONTROL,
         "authprovider_duplicate": SiloMode.CONTROL,
-        "sentry_actor": SiloMode.REGION,
-        "sentry_alertruleactivations": SiloMode.REGION,
-        "sentry_monitorlocation": SiloMode.REGION,
+        "feedback_feedback": SiloMode.CELL,
+        "hybridcloud_externalactorreplica": SiloMode.CONTROL,
+        "hybridcloud_organizationslugreservationreplica": SiloMode.CELL,
+        "investigations_investigationcell": SiloMode.CELL,
+        "investigations_investigationcelldependency": SiloMode.CELL,
+        "investigations_investigationcellexecution": SiloMode.CELL,
+        "investigations_investigationcellexecutionproject": SiloMode.CELL,
+        "investigations_investigationcellparameter": SiloMode.CELL,
+        "prevent_ai_configuration": SiloMode.CELL,
+        "releases_commit": SiloMode.CELL,
+        "releases_commitfilechange": SiloMode.CELL,
+        "sentry_actor": SiloMode.CELL,
+        "sentry_alertruleactivations": SiloMode.CELL,
+        "sentry_alertruleactivationcondition": SiloMode.CELL,
+        "sentry_code_review_event": SiloMode.CELL,
+        "sentry_customdynamicsamplingrule": SiloMode.CELL,
+        "sentry_customdynamicsamplingruleproject": SiloMode.CELL,
+        "sentry_dashboardlastvisited": SiloMode.CELL,
+        "sentry_dashboardtombstone": SiloMode.CELL,
+        "sentry_dashboardwidgetsnapshot": SiloMode.CELL,
+        "sentry_datasecrecywaiver": SiloMode.CELL,
+        "sentry_email": SiloMode.CONTROL,
+        "sentry_incidentseen": SiloMode.CELL,
+        "sentry_incidentsubscription": SiloMode.CELL,
+        "sentry_incidenttrigger": SiloMode.CELL,
+        "sentry_monitorlocation": SiloMode.CELL,
         "sentry_notificationsetting": SiloMode.CONTROL,
-        "sentry_pagerdutyservice": SiloMode.REGION,
-        "sentry_projectavatar": SiloMode.REGION,
+        "sentry_pagerdutyservice": SiloMode.CELL,
+        "sentry_projectavatar": SiloMode.CELL,
         "sentry_scheduledjob": SiloMode.CONTROL,
-        "sentry_teamavatar": SiloMode.REGION,
-        "workflow_engine_workflowaction": SiloMode.REGION,
+        "sentry_projecttemplate": SiloMode.CELL,
+        "sentry_projecttemplateoption": SiloMode.CELL,
+        "sentry_neglectedrule": SiloMode.CELL,
+        "sentry_rulefirehistory": SiloMode.CELL,
+        "sentry_savedsearch": SiloMode.CELL,
+        "sentry_teamreplica": SiloMode.CONTROL,
+        "sentry_organizationmember_teamsreplica": SiloMode.CONTROL,
+        "uptime_projectuptimesubscription": SiloMode.CELL,
+        "workflow_engine_actiongroupstatus": SiloMode.CELL,
+        "workflow_engine_workflowaction": SiloMode.CELL,
     }
     """
     When we remove models, we are no longer able to resolve silo assignments

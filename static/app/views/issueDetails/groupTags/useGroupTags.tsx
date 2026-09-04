@@ -1,11 +1,8 @@
-import {defined} from 'sentry/utils';
-import {
-  type ApiQueryKey,
-  useApiQuery,
-  type UseApiQueryOptions,
-} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
+import {useApiQuery, type UseApiQueryOptions} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 export interface GroupTag {
   key: string;
@@ -21,11 +18,6 @@ export interface GroupTag {
      * Example: user -> `'user.id:\"1\"'`
      */
     query?: string;
-    /**
-     * Available if `readable` query param is true
-     * @deprecated - Use the frontend to get readable device names
-     */
-    readable?: string;
   }>;
   totalValues: number;
 }
@@ -38,11 +30,6 @@ interface FetchIssueTagsParameters {
   groupId: string | undefined;
   orgSlug: string;
   limit?: number;
-  /**
-   * Readable formats mobile device names
-   * TODO(scott): Can we do this in the frontend instead
-   */
-  readable?: boolean;
 }
 
 type GroupTagUseQueryOptions = Partial<UseApiQueryOptions<GroupTag[]>>;
@@ -51,11 +38,12 @@ const makeGroupTagsQueryKey = ({
   groupId,
   orgSlug,
   environment,
-  readable,
   limit,
 }: FetchIssueTagsParameters): ApiQueryKey => [
-  `/organizations/${orgSlug}/issues/${groupId}/tags/`,
-  {query: {environment, readable, limit}},
+  getApiUrl('/organizations/$organizationIdOrSlug/issues/$issueId/tags/', {
+    path: {organizationIdOrSlug: orgSlug, issueId: groupId!},
+  }),
+  {query: {environment, limit}},
 ];
 
 export function useGroupTags(
@@ -66,6 +54,7 @@ export function useGroupTags(
   return useApiQuery<GroupTag[]>(
     makeGroupTagsQueryKey({
       orgSlug: organization.slug,
+      limit: 3,
       ...parameters,
     }),
     {
@@ -73,23 +62,5 @@ export function useGroupTags(
       enabled: defined(parameters.groupId) && enabled,
       ...options,
     }
-  );
-}
-
-/**
- * Primarily used for tag facets
- */
-export function useGroupTagsReadable(
-  parameters: Omit<FetchIssueTagsParameters, 'orgSlug' | 'limit' | 'readable'>,
-  options: GroupTagUseQueryOptions = {}
-) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
-  return useGroupTags(
-    {
-      readable: true,
-      limit: hasStreamlinedUI ? 3 : 4,
-      ...parameters,
-    },
-    options
   );
 }

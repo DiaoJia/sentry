@@ -10,7 +10,7 @@ from sentry.users.services.user.serial import serialize_rpc_user
 
 
 class TestIssueLinkCreator(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.user = self.create_user(name="foo")
@@ -28,7 +28,7 @@ class TestIssueLinkCreator(TestCase):
         self.install = app_service.get_many(filter=dict(installation_ids=[self.orm_install.id]))[0]
 
     @responses.activate
-    def test_creates_external_issue(self):
+    def test_creates_external_issue(self) -> None:
         fields = {"title": "An Issue", "description": "a bug was found", "assignee": "user-1"}
 
         responses.add(
@@ -52,14 +52,14 @@ class TestIssueLinkCreator(TestCase):
             user=serialize_rpc_user(self.user),
         ).run()
 
-        external_issue = PlatformExternalIssue.objects.all()[0]
+        external_issue = PlatformExternalIssue.objects.order_by("id")[0]
         assert result == external_issue
         assert external_issue.group_id == self.group.id
         assert external_issue.project_id == self.group.project.id
         assert external_issue.web_url == "https://example.com/project/issue-id"
         assert external_issue.display_name == "Projectname#issue-1"
 
-    def test_invalid_action(self):
+    def test_invalid_action(self) -> None:
         with pytest.raises(SentryAppSentryError):
             IssueLinkCreator(
                 install=self.install,

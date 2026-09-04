@@ -1,7 +1,7 @@
-""" This module offers the same functionality as sessions_v2, but pulls its data
+"""This module offers the same functionality as sessions_v2, but pulls its data
 from the `metrics` dataset instead of `sessions`.
 
-Do not call this module directly. Use the `release_health` service instead. """
+Do not call this module directly. Use the `release_health` service instead."""
 
 import logging
 from abc import ABC, abstractmethod
@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequenc
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Literal, Optional, TypedDict, Union, cast
+from typing import Any, Optional, TypedDict, Union, cast
 
 from snuba_sdk import (
     BooleanCondition,
@@ -27,11 +27,8 @@ from snuba_sdk.conditions import ConditionGroup
 
 from sentry.exceptions import InvalidParams
 from sentry.models.project import Project
-from sentry.models.release import Release
 from sentry.release_health.base import (
-    GroupByFieldName,
     GroupKeyDict,
-    ProjectId,
     SessionsQueryFunction,
     SessionsQueryGroup,
     SessionsQueryResult,
@@ -40,6 +37,7 @@ from sentry.release_health.base import (
 from sentry.sentry_metrics.use_case_id_registry import UseCaseID
 from sentry.snuba.metrics import get_public_name_from_mri
 from sentry.snuba.metrics.datasource import get_series
+from sentry.snuba.metrics.fields.base import DERIVED_METRICS, CompositeEntityDerivedMetric
 from sentry.snuba.metrics.naming_layer import SessionMRI
 from sentry.snuba.metrics.query import (
     DeprecatingMetricsQuery,
@@ -47,9 +45,11 @@ from sentry.snuba.metrics.query import (
     MetricGroupByField,
     MetricOrderByField,
 )
-from sentry.snuba.metrics.utils import OrderByNotSupportedOverCompositeEntityException
+from sentry.snuba.metrics.utils import (
+    MetricOperationType,
+    OrderByNotSupportedOverCompositeEntityException,
+)
 from sentry.snuba.sessions_v2 import (
-    NonPreflightOrderByException,
     QueryDefinition,
     finite_or_none,
     get_timestamps,
@@ -73,6 +73,7 @@ class SessionStatus(Enum):
     CRASHED = "crashed"
     ERRORED = "errored"
     HEALTHY = "healthy"
+    UNHANDLED = "unhandled"
 
 
 ALL_STATUSES = frozenset(iter(SessionStatus))
@@ -80,8 +81,6 @@ ALL_STATUSES = frozenset(iter(SessionStatus))
 
 #: Used to filter results by session.status
 StatusFilter = Optional[frozenset[SessionStatus]]
-
-MAX_POSTGRES_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -242,6 +241,7 @@ class CountField(Field):
                 self.status_to_metric_field[SessionStatus.ABNORMAL],
                 self.status_to_metric_field[SessionStatus.CRASHED],
                 self.status_to_metric_field[SessionStatus.ERRORED],
+                self.status_to_metric_field[SessionStatus.UNHANDLED],
             ]
         return [self.get_all_field()]
 
@@ -265,6 +265,7 @@ class SumSessionField(CountField):
         SessionStatus.ABNORMAL: MetricField(None, SessionMRI.ABNORMAL.value),
         SessionStatus.CRASHED: MetricField(None, SessionMRI.CRASHED.value),
         SessionStatus.ERRORED: MetricField(None, SessionMRI.ERRORED.value),
+        SessionStatus.UNHANDLED: MetricField(None, SessionMRI.UNHANDLED.value),
         None: MetricField(None, SessionMRI.ALL.value),
     }
 
@@ -298,13 +299,14 @@ class CountUniqueUser(CountField):
         SessionStatus.ABNORMAL: MetricField(None, SessionMRI.ABNORMAL_USER.value),
         SessionStatus.CRASHED: MetricField(None, SessionMRI.CRASHED_USER.value),
         SessionStatus.ERRORED: MetricField(None, SessionMRI.ERRORED_USER.value),
+        SessionStatus.UNHANDLED: MetricField(None, SessionMRI.UNHANDLED_USER.value),
         None: MetricField(None, SessionMRI.ALL_USER.value),
     }
 
 
 class DurationField(Field):
     def __init__(self, name: str, raw_groupby: Sequence[str], status_filter: StatusFilter):
-        self.op = name[:3]  # That this works is just a lucky coincidence
+        self.op = cast(MetricOperationType, name[:3])
         super().__init__(name, raw_groupby, status_filter)
 
     def _get_session_status(self, metric_field: MetricField) -> SessionStatus | None:
@@ -341,6 +343,13 @@ class SimpleForwardingField(Field):
         "crash_free_rate(user)": SessionMRI.CRASH_FREE_USER_RATE,
         "anr_rate()": SessionMRI.ANR_RATE,
         "foreground_anr_rate()": SessionMRI.FOREGROUND_ANR_RATE,
+        "unhandled_rate(session)": SessionMRI.UNHANDLED_RATE,
+        "unhandled_rate(user)": SessionMRI.UNHANDLED_USER_RATE,
+        "errored_rate(session)": SessionMRI.ERRORED_RATE,
+        "errored_rate(user)": SessionMRI.ERRORED_USER_RATE,
+        "abnormal_rate(session)": SessionMRI.ABNORMAL_RATE,
+        "abnormal_rate(user)": SessionMRI.ABNORMAL_USER_RATE,
+        "unhealthy_rate(session)": SessionMRI.UNHEALTHY_RATE,
     }
 
     def __init__(self, name: str, raw_groupby: Sequence[str], status_filter: StatusFilter):
@@ -379,9 +388,14 @@ FIELD_MAP: Mapping[SessionsQueryFunction, type[Field]] = {
     "crash_free_rate(user)": SimpleForwardingField,
     "anr_rate()": SimpleForwardingField,
     "foreground_anr_rate()": SimpleForwardingField,
+    "unhandled_rate(session)": SimpleForwardingField,
+    "unhandled_rate(user)": SimpleForwardingField,
+    "errored_rate(session)": SimpleForwardingField,
+    "errored_rate(user)": SimpleForwardingField,
+    "abnormal_rate(session)": SimpleForwardingField,
+    "abnormal_rate(user)": SimpleForwardingField,
+    "unhealthy_rate(session)": SimpleForwardingField,
 }
-PREFLIGHT_QUERY_COLUMNS = {"release.timestamp"}
-VirtualOrderByName = Literal["release.timestamp"]
 
 
 def run_sessions_query(
@@ -420,99 +434,13 @@ def run_sessions_query(
     project_ids = query.params["project_id"]
     limit = Limit(query.limit) if query.limit else None
 
-    ordered_preflight_filters: dict[GroupByFieldName, Sequence[str]] = {}
-    try:
-        orderby = _parse_orderby(query, fields)
-    except NonPreflightOrderByException:
-        # We hit this branch when we suspect that the orderBy columns is one of the virtual
-        # columns like `release.timestamp` that require a preflight query to be run, and so we
-        # check here if it is one of the supported preflight query columns and if so we run the
-        # preflight query. Otherwise we re-raise the exception
-        raw_orderby = query.raw_orderby[0]
-        if raw_orderby[0] == "-":
-            raw_orderby = raw_orderby[1:]
-            direction = Direction.DESC
-        else:
-            direction = Direction.ASC
+    orderby = _parse_orderby(query, fields)
 
-        if raw_orderby not in PREFLIGHT_QUERY_COLUMNS:
-            raise
-        else:
-            if raw_orderby == "release.timestamp" and "release" not in query.raw_groupby:
-                raise InvalidParams(
-                    "To sort by release.timestamp, tag release must be in the groupBy"
-                )
-
-            if query.offset and query.offset > 0:
-                raise InvalidParams(
-                    f"Passing an offset value greater than 0 when ordering by {raw_orderby} is "
-                    f"not permitted"
-                )
-
-            if query.limit is not None:
-                if query.limit > MAX_POSTGRES_LIMIT:
-                    raise InvalidParams(
-                        f"This limit is too high for queries that requests a preflight query. "
-                        f"Please choose a limit below {MAX_POSTGRES_LIMIT}"
-                    )
-                limit = Limit(query.limit)
-            else:
-                limit = Limit(MAX_POSTGRES_LIMIT)
-
-        preflight_query_conditions = {
-            "orderby_field": raw_orderby,
-            "direction": direction,
-            "org_id": org_id,
-            "project_ids": project_ids,
-            "limit": limit,
-        }
-
-        # For preflight queries, we need to evaluate environment conditions because these might
-        # be used in the preflight query. Example when we sort by `-release.timestamp`, and when
-        # we have environment filters applied to the query, then we need to include the
-        # environment filters otherwise we might end up with metrics queries filters that do not
-        # belong to the same environment
-        environment_conditions = []
-        for condition in where:
-            preflight_query_condition = _get_filters_for_preflight_query_condition(
-                tag_name="environment", condition=condition
-            )
-            if preflight_query_condition != (None, None):
-                environment_conditions.append(preflight_query_condition)
-
-        if len(environment_conditions) > 1:
-            # Should never hit this branch. Added as a fail safe
-            raise InvalidParams("Environment condition was parsed incorrectly")
-        else:
-            try:
-                preflight_query_conditions.update({"env_condition": environment_conditions[0]})
-            except IndexError:
-                pass
-
-        preflight_query_filters = _generate_preflight_query_conditions(**preflight_query_conditions)
-
-        if len(preflight_query_filters) == 0:
-            # If we get no results from the pre-flight query that are supposed to be used as a
-            # filter in the metrics query, then there is no point in running the metrics query
-            return _empty_result(query)
-
-        condition_lhs: GroupByFieldName | None = None
-        if raw_orderby == "release.timestamp":
-            condition_lhs = "release"
-            ordered_preflight_filters[condition_lhs] = preflight_query_filters
-
-        if condition_lhs is not None:
-            where += [Condition(Column(condition_lhs), Op.IN, preflight_query_filters)]
-
-        # Clear OrderBy because query is already filtered and we will re-order the results
-        # according to the order of the filter list later on
-        orderby = None
-
-    else:
-        if orderby is None:
-            # We only return the top-N groups, based on the first field that is being
-            # queried, assuming that those are the most relevant to the user.
-            primary_metric_field = _get_primary_field(list(fields.values()), query.raw_groupby)
+    if orderby is None:
+        # We only return the top-N groups, based on the first field that is being
+        # queried, assuming that those are the most relevant to the user.
+        primary_metric_field = _get_primary_field(list(fields.values()), query.raw_groupby)
+        if primary_metric_field is not None:
             orderby = MetricOrderByField(field=primary_metric_field, direction=Direction.DESC)
 
     orderby_sequence = None
@@ -584,9 +512,6 @@ def run_sessions_query(
         {"by": group_key.to_output_dict(), **group}
         for group_key, group in output_groups.items()
     ]
-    result_groups = _order_by_preflight_query_results(
-        ordered_preflight_filters, query.raw_groupby, result_groups, default_group_gen_func, limit
-    )
 
     return {
         "groups": result_groups,
@@ -595,88 +520,6 @@ def run_sessions_query(
         "intervals": [isoformat_z(ts) for ts in metrics_results["intervals"]],
         "query": query.query,
     }
-
-
-def _order_by_preflight_query_results(
-    ordered_preflight_filters: dict[GroupByFieldName, Sequence[str]],
-    groupby: GroupByFieldName,
-    result_groups: Sequence[SessionsQueryGroup],
-    default_group_gen_func: Callable[[], Group],
-    limit: Limit,
-) -> Sequence[SessionsQueryGroup]:
-    """
-    If a preflight query was run, then we want to preserve the order of results
-    returned by the preflight query
-    We create a mapping between the group value to the result group, so we are able
-    to easily sort the resulting groups.
-    For example, if we are ordering by `-release.timestamp`, we might get from
-    postgres a list of results ['1B', '1A'], and results from metrics dataset
-    [
-        {
-            "by": {"release": "1A"},
-            "totals": {"sum(session)": 0},
-            "series": {"sum(session)": [0]},
-        },
-        {
-            "by": {"release": "1B"},
-            "totals": {"sum(session)": 10},
-            "series": {"sum(session)": [10]},
-        },
-    ]
-    Then we create a mapping from release value to the result group:
-    {
-        "1A": [
-            {
-                "by": {"release": "1A"},
-                "totals": {"sum(session)": 0},
-                "series": {"sum(session)": [0]},
-            },
-        ],
-        "1B": [
-            {
-                "by": {"release": "1B"},
-                "totals": {"sum(session)": 10},
-                "series": {"sum(session)": [10]},
-            },
-        ],
-    }
-    Then loop over the releases list sequentially, and rebuild the result_groups
-    array based on that order by appending to the list the values from that mapping
-    and accessing it through the key which is the group value
-    """
-    if len(ordered_preflight_filters) == 1:
-        orderby_field = list(ordered_preflight_filters.keys())[0]
-        grp_value_to_result_grp_mapping: dict[int | str, list[SessionsQueryGroup]] = {}
-
-        for result_group in result_groups:
-            grp_value = result_group["by"][orderby_field]
-            grp_value_to_result_grp_mapping.setdefault(grp_value, []).append(result_group)
-        result_groups = []
-        for elem in ordered_preflight_filters[orderby_field]:
-            try:
-                for grp in grp_value_to_result_grp_mapping[elem]:
-                    result_groups += [grp]
-            except KeyError:
-                # We get into this branch if there are groups in the preflight query that do
-                # not have matching data in the metrics dataset, and since we want to show
-                # those groups in the output, we add them but null out the fields requested
-                # This could occur for example, when ordering by `-release.timestamp` and
-                # some of the latest releases in Postgres do not have matching data in
-                # metrics dataset
-                group_key_dict: GroupKeyDict = {orderby_field: elem}
-                for key in groupby:
-                    if key == orderby_field:
-                        continue
-                    # Added a mypy ignore here because this is a one off as result groups
-                    # will never have null group values except when the group exists in the
-                    # preflight query but not in the metrics dataset
-                    group_key_dict.update({key: None})
-                result_groups += [{"by": group_key_dict, **default_group_gen_func()}]
-
-        # Pop extra groups returned to match request limit
-        if len(result_groups) > limit.limit:
-            result_groups = result_groups[: limit.limit]
-    return result_groups
 
 
 def _empty_result(query: QueryDefinition) -> SessionsQueryResult:
@@ -746,40 +589,6 @@ def _transform_single_condition(
     return condition, None
 
 
-def _get_filters_for_preflight_query_condition(
-    tag_name: str, condition: Condition | BooleanCondition
-) -> tuple[Op | None, set[str] | None]:
-    """
-    Function that takes a tag name and a condition, and checks if that condition is for that tag
-    and if so returns a tuple of the op applied either Op.IN or Op.NOT_IN and a set of the tag
-    values
-    """
-    if isinstance(condition, Condition) and condition.lhs == Column(tag_name):
-        if condition.op in [Op.EQ, Op.NEQ, Op.IN, Op.NOT_IN]:
-            filters = (
-                {condition.rhs}
-                if isinstance(condition.rhs, str)
-                else {elem for elem in condition.rhs}
-            )
-            op = {Op.EQ: Op.IN, Op.IN: Op.IN, Op.NEQ: Op.NOT_IN, Op.NOT_IN: Op.NOT_IN}[condition.op]
-            return op, filters
-        raise InvalidParams(
-            f"Unable to resolve {tag_name} filter due to unsupported op {condition.op}"
-        )
-
-    if tag_name in str(condition):
-        # Anything not handled by the code above cannot be parsed for now,
-        # for two reasons:
-        # 1) Queries like session.status:healthy OR release:foo are hard to
-        #    translate, because they would require different conditions on the separate
-        #    metric fields.
-        # 2) AND and OR conditions come in the form `Condition(Function("or", [...]), Op.EQ, 1)`
-        #    where [...] can again contain any condition encoded as a Function. For this, we would
-        #    have to replicate the translation code above.
-        raise InvalidParams(f"Unable to parse condition with {tag_name}")
-    return None, None
-
-
 def _parse_session_status(status: Any) -> frozenset[SessionStatus]:
     try:
         return frozenset([SessionStatus(status)])
@@ -794,20 +603,12 @@ def _parse_orderby(
     if orderbys == []:
         return None
 
-    # ToDo(ahmed): We might want to enable multi field ordering if some of the fields ordered by
-    #  are generated from pre-flight queries, and thereby are popped from metrics queries,
-    #  but I though it might be confusing behavior so restricting it for now.
     if len(orderbys) > 1:
         raise InvalidParams("Cannot order by multiple fields")
     orderby = orderbys[0]
 
     if "session.status" in query.raw_groupby:
-        # We can allow grouping by `session.status` when having an orderBy column to be a field
-        # that if the orderBy columns is one of the virtual columns that indicates that a preflight
-        # query (like `release.timestamp`) needs to be run to evaluate the query, and so we raise an
-        # instance of `NonPreflightOrderByException` and delegate handling this case to the
-        # `run_sessions_query` function
-        raise NonPreflightOrderByException("Cannot use 'orderBy' when grouping by sessions.status")
+        raise InvalidParams("Cannot use 'orderBy' when grouping by sessions.status")
 
     direction = Direction.ASC
     if orderby[0] == "-":
@@ -816,12 +617,7 @@ def _parse_orderby(
 
     assert query.raw_fields
     if orderby not in query.raw_fields:
-        # We can allow orderBy column to be a field that is not requested in the select
-        # statements if it is one of the virtual columns that indicated a preflight query needs
-        # to be run to evaluate the query, and so we raise an instance of
-        # `NonPreflightOrderByException` and delegate handling this case to the
-        # `run_sessions_query` function
-        raise NonPreflightOrderByException("'orderBy' must be one of the provided 'fields'")
+        raise InvalidParams("'orderBy' must be one of the provided 'fields'")
 
     field = fields[orderby]
 
@@ -832,7 +628,7 @@ def _parse_orderby(
     return MetricOrderByField(field.metric_fields[0], direction)
 
 
-def _get_primary_field(fields: Sequence[Field], raw_groupby: Sequence[str]) -> MetricField:
+def _get_primary_field(fields: Sequence[Field], raw_groupby: Sequence[str]) -> MetricField | None:
     """Determine the field by which results will be ordered in case there is no orderBy"""
     primary_metric_field = None
     for i, field in enumerate(fields):
@@ -840,43 +636,11 @@ def _get_primary_field(fields: Sequence[Field], raw_groupby: Sequence[str]) -> M
             primary_metric_field = field.metric_fields[0]
 
     assert primary_metric_field
+
+    # CompositeEntityDerivedMetrics cannot be used as orderby, so leave it as None in this scenario.
+    if primary_metric_field.metric_mri in DERIVED_METRICS:
+        derived_metric = DERIVED_METRICS[primary_metric_field.metric_mri]
+        if isinstance(derived_metric, CompositeEntityDerivedMetric):
+            return None
+
     return primary_metric_field
-
-
-def _generate_preflight_query_conditions(
-    orderby_field: VirtualOrderByName,
-    direction: Direction,
-    org_id: int,
-    project_ids: Sequence[ProjectId],
-    limit: Limit,
-    env_condition: tuple[Op, set[str]] | None = None,
-) -> Sequence[str]:
-    """
-    Function that fetches the preflight query filters that need to be applied to the subsequent
-    metrics query
-    """
-    queryset_results = []
-    if orderby_field == "release.timestamp":
-        queryset = Release.objects.filter(
-            organization=org_id,
-            projects__id__in=project_ids,
-        )
-        if env_condition is not None:
-            op, env_filter_set = env_condition
-            environment_orm_conditions = {
-                "releaseprojectenvironment__environment__name__in": env_filter_set,
-                "releaseprojectenvironment__project_id__in": project_ids,
-            }
-            if op == Op.IN:
-                queryset = queryset.filter(**environment_orm_conditions)
-            else:
-                assert op == Op.NOT_IN
-                queryset = queryset.exclude(**environment_orm_conditions)
-
-        if direction == Direction.DESC:
-            queryset = queryset.order_by("-date_added", "-id")
-        else:
-            queryset = queryset.order_by("date_added", "id")
-
-        queryset_results = list(queryset[: limit.limit].values_list("version", flat=True))
-    return queryset_results

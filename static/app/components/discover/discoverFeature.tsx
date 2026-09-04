@@ -1,5 +1,5 @@
 import Feature from 'sentry/components/acl/feature';
-import FeatureDisabled from 'sentry/components/acl/featureDisabled';
+import {FeatureDisabled} from 'sentry/components/acl/featureDisabled';
 import {Hovercard} from 'sentry/components/hovercard';
 import {t} from 'sentry/locale';
 
@@ -11,7 +11,7 @@ type Props = {
  * Provide a component that passes a prop to indicate if the current
  * organization doesn't have access to discover results.
  */
-function DiscoverFeature({children}: Props) {
+export function DiscoverFeature({children}: Props) {
   const noFeatureMessage = t('Requires discover feature.');
 
   const renderDisabled = (p: any) => (
@@ -31,7 +31,7 @@ function DiscoverFeature({children}: Props) {
 
   return (
     <Feature
-      hookName="feature-disabled:open-discover"
+      overrideName="feature-disabled:open-discover"
       features="organizations:discover-basic"
       renderDisabled={renderDisabled}
     >
@@ -39,5 +39,3 @@ function DiscoverFeature({children}: Props) {
     </Feature>
   );
 }
-
-export default DiscoverFeature;

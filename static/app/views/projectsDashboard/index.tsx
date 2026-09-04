@@ -1,24 +1,23 @@
 import {Fragment, useEffect, useMemo, useState} from 'react';
 import LazyLoad, {forceCheck} from 'react-lazyload';
-import styled from '@emotion/styled';
 import {withProfiler} from '@sentry/react';
-import debounce from 'lodash/debounce';
+import {useDebouncedValue} from '@tanstack/react-pacer';
 import uniqBy from 'lodash/uniqBy';
 
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
+import {LinkButton} from '@sentry/scraps/button';
+import {Container, Flex, Grid, Stack} from '@sentry/scraps/layout';
+
 import * as Layout from 'sentry/components/layouts/thirds';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
 import {PageHeadingQuestionTooltip} from 'sentry/components/pageHeadingQuestionTooltip';
-import SearchBar from 'sentry/components/searchBar';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {TeamFilter} from 'sentry/components/teamFilter';
 import {DEFAULT_DEBOUNCE_DURATION} from 'sentry/constants';
 import {IconAdd, IconUser} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import ProjectsStatsStore from 'sentry/stores/projectsStatsStore';
-import {space} from 'sentry/styles/space';
 import type {Team} from 'sentry/types/organization';
 import type {Project, TeamWithProjects} from 'sentry/types/project';
 import {
@@ -30,17 +29,16 @@ import {sortProjects} from 'sentry/utils/project/sortProjects';
 import {useCanCreateProject} from 'sentry/utils/useCanCreateProject';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {useTeamsById} from 'sentry/utils/useTeamsById';
 import {useUser} from 'sentry/utils/useUser';
 import {useUserTeams} from 'sentry/utils/useUserTeams';
-import TeamFilter from 'sentry/views/alerts/list/rules/teamFilter';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
+import {TopBar} from 'sentry/views/navigation/topBar';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
-import ProjectCard from './projectCard';
-import Resources from './resources';
+import {ProjectCard} from './projectCard';
+import {Resources} from './resources';
 import {getTeamParams} from './utils';
 
 function ProjectCardList({projects}: {projects: Project[]}) {
@@ -54,7 +52,13 @@ function ProjectCardList({projects}: {projects: Project[]}) {
   }, [projects]);
 
   return (
-    <ProjectCards>
+    <Grid
+      gap="2xl"
+      columns={{
+        zero: 'repeat(auto-fill, minmax(min(400px, 100%), 1fr))',
+        lg: 'repeat(auto-fill, minmax(350px, 1fr))',
+      }}
+    >
       {sortProjects(projects).map(project => (
         <LazyLoad
           debounce={50}
@@ -70,7 +74,7 @@ function ProjectCardList({projects}: {projects: Project[]}) {
           />
         </LazyLoad>
       ))}
-    </ProjectCards>
+    </Grid>
   );
 }
 
@@ -133,13 +137,7 @@ function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
   const organization = useOrganization();
-  const prefersStackedNav = usePrefersStackedNav();
 
-  useEffect(() => {
-    return function cleanup() {
-      ProjectsStatsStore.reset();
-    };
-  }, []);
   const {teams: userTeams, isLoading: loadingTeams, isError} = useUserTeams();
   const isAllTeams = location.query.team === '';
   const selectedTeams = getTeamParams(location.query.team ?? 'myteams');
@@ -148,10 +146,10 @@ function Dashboard() {
   });
   const user = useUser();
   const [projectQuery, setProjectQuery] = useState('');
-  const debouncedSearchQuery = useMemo(
-    () => debounce(handleSearch, DEFAULT_DEBOUNCE_DURATION),
-    []
-  );
+  const [debouncedProjectQuery] = useDebouncedValue(projectQuery, {
+    wait: DEFAULT_DEBOUNCE_DURATION,
+    leading: true,
+  });
   const {projects, fetching, fetchError} = useProjects();
   const canUserCreateProject = useCanCreateProject();
 
@@ -178,7 +176,7 @@ function Dashboard() {
     isAllTeams,
     showNonMemberProjects,
     projects,
-    projectQuery,
+    projectQuery: debouncedProjectQuery,
   });
 
   setGroupedEntityTag('projects.total', 1000, projects.length);
@@ -186,10 +184,6 @@ function Dashboard() {
   const showResources = projects.length === 1 && !projects[0]!.firstEvent;
 
   const canJoinTeam = organization.access.includes('team:read');
-
-  function handleSearch(searchQuery: string) {
-    setProjectQuery(searchQuery);
-  }
 
   function handleChangeFilter(activeFilters: string[]) {
     navigate({
@@ -204,76 +198,77 @@ function Dashboard() {
   return (
     <Fragment>
       <SentryDocumentTitle title={t('Projects Dashboard')} orgSlug={organization.slug} />
-      <Layout.Header unified={prefersStackedNav}>
-        <Layout.HeaderContent unified={prefersStackedNav}>
-          <Layout.Title>
-            {t('Projects')}
-            <PageHeadingQuestionTooltip
-              docsUrl="https://docs.sentry.io/product/projects/"
-              title={t(
-                "A high-level overview of errors, transactions, and deployments filtered by teams you're part of."
-              )}
-            />
-          </Layout.Title>
-        </Layout.HeaderContent>
-        <Layout.HeaderActions>
-          <ButtonBar gap={1}>
-            <LinkButton
-              size="sm"
-              icon={<IconUser />}
-              title={
-                canJoinTeam ? undefined : t('You do not have permission to join a team.')
-              }
-              disabled={!canJoinTeam}
-              to={`/settings/${organization.slug}/teams/`}
-              data-test-id="join-team"
-            >
-              {t('Join a Team')}
-            </LinkButton>
-            <LinkButton
-              size="sm"
-              priority="primary"
-              disabled={!canUserCreateProject}
-              title={
-                canUserCreateProject
-                  ? undefined
-                  : t('You do not have permission to create projects')
-              }
-              to={makeProjectsPathname({
-                path: '/new/',
-                organization,
-              })}
-              icon={<IconAdd isCircled />}
-              data-test-id="create-project"
-            >
-              {t('Create Project')}
-            </LinkButton>
-          </ButtonBar>
-        </Layout.HeaderActions>
-      </Layout.Header>
+      <Layout.Title>
+        {t('All Projects')}
+        <PageHeadingQuestionTooltip
+          docsUrl="https://docs.sentry.io/product/projects/"
+          title={t(
+            "A high-level overview of errors, transactions, and deployments filtered by teams you're part of."
+          )}
+        />
+      </Layout.Title>
+      <TopBar.Slot name="actions">
+        <LinkButton
+          icon={<IconUser />}
+          tooltipProps={{
+            title: canJoinTeam
+              ? undefined
+              : t('You do not have permission to join a team.'),
+          }}
+          disabled={!canJoinTeam}
+          to={`/settings/${organization.slug}/teams/`}
+          data-test-id="join-team"
+        >
+          {t('Join a Team')}
+        </LinkButton>
+        <LinkButton
+          variant="primary"
+          disabled={!canUserCreateProject}
+          tooltipProps={{
+            title: canUserCreateProject
+              ? undefined
+              : t('You do not have permission to create projects'),
+          }}
+          to={makeProjectsPathname({
+            path: '/new/',
+            organization,
+          })}
+          icon={<IconAdd />}
+          data-test-id="create-project"
+        >
+          {t('Create Project')}
+        </LinkButton>
+      </TopBar.Slot>
       <Layout.Body>
-        <Layout.Main fullWidth>
-          <SearchAndSelectorWrapper>
+        <Layout.Main width="full">
+          <Flex
+            direction={{zero: 'column', xl: 'row'}}
+            gap={{zero: 'md', xl: 'xl'}}
+            justify="end"
+            align={{zero: 'stretch', xl: 'end'}}
+            marginBottom="xl"
+          >
             <TeamFilter
               selectedTeams={selectedTeams}
               handleChangeFilter={handleChangeFilter}
               hideUnassigned
               hideOtherTeams={!showNonMemberProjects}
             />
-            <StyledSearchBar
-              defaultQuery=""
-              placeholder={t('Search for projects by name')}
-              onChange={debouncedSearchQuery}
-              query={projectQuery}
-            />
-          </SearchAndSelectorWrapper>
+            <Container flexGrow={1}>
+              <SearchBar
+                placeholder={t('Search for projects by name')}
+                onChange={setProjectQuery}
+                query={projectQuery}
+              />
+            </Container>
+          </Flex>
 
           <Profiler id="ProjectCardList" onRender={onRenderCallback}>
             <ProjectCardList projects={filteredProjects} />
           </Profiler>
         </Layout.Main>
       </Layout.Body>
-      {showResources && <Resources organization={organization} />}
+      {showResources && <Resources />}
     </Fragment>
   );
 }
@@ -281,50 +276,12 @@ function Dashboard() {
 function OrganizationDashboard() {
   const organization = useOrganization();
   return (
-    <Layout.Page>
+    <Stack flex={1}>
       <NoProjectMessage organization={organization}>
         <Dashboard />
       </NoProjectMessage>
-    </Layout.Page>
+    </Stack>
   );
 }
-
-const SearchAndSelectorWrapper = styled('div')`
-  display: flex;
-  gap: ${space(2)};
-  justify-content: flex-end;
-  align-items: flex-end;
-  margin-bottom: ${space(2)};
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    display: block;
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.xlarge}) {
-    display: flex;
-  }
-`;
-
-const StyledSearchBar = styled(SearchBar)`
-  flex-grow: 1;
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    margin-top: ${space(1)};
-  }
-`;
-
-const ProjectCards = styled('div')`
-  display: grid;
-  gap: ${space(3)};
-  grid-template-columns: repeat(auto-fill, minmax(1fr, 400px));
-
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: repeat(auto-fill, minmax(470px, 1fr));
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    grid-template-columns: repeat(auto-fill, minmax(450px, 1fr));
-  }
-`;
 
 export default withProfiler(OrganizationDashboard);

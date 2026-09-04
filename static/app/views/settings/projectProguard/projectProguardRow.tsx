@@ -1,38 +1,28 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import Access from 'sentry/components/acl/access';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {Access} from 'sentry/components/acl/access';
 import {useRole} from 'sentry/components/acl/useRole';
-import Confirm from 'sentry/components/confirm';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import FileSize from 'sentry/components/fileSize';
-import Link from 'sentry/components/links/link';
-import TimeSince from 'sentry/components/timeSince';
+import {Confirm} from 'sentry/components/confirm';
+import {FileSize} from 'sentry/components/fileSize';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconClock, IconDelete, IconDownload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DebugFile} from 'sentry/types/debugFiles';
-import type {ProguardMappingAssociation} from 'sentry/views/settings/projectProguard';
-import {ProguardAssociations} from 'sentry/views/settings/projectProguard/associations';
 
 type Props = {
   downloadUrl: string;
   mapping: DebugFile;
   onDelete: (id: string) => void;
   orgSlug: string;
-  associations?: ProguardMappingAssociation;
 };
 
-function ProjectProguardRow({
-  associations = {releases: []},
-  mapping,
-  onDelete,
-  downloadUrl,
-  orgSlug,
-}: Props) {
+export function ProjectProguardRow({mapping, onDelete, downloadUrl, orgSlug}: Props) {
   const {hasRole, roleRequired: downloadRole} = useRole({role: 'debugFilesRole'});
   const {id, debugId, uuid, size, dateCreated} = mapping;
 
@@ -41,20 +31,19 @@ function ProjectProguardRow({
   };
 
   return (
-    <Fragment>
-      <NameColumn>
+    <SimpleTable.Row>
+      <SimpleTable.RowCell justify="center" align="start">
         <Name>{debugId || uuid || `(${t('empty')})`}</Name>
-        <ProguardAssociations associations={associations} />
         <TimeWrapper>
           <IconClock size="sm" />
           <TimeSince date={dateCreated} />
         </TimeWrapper>
-      </NameColumn>
+      </SimpleTable.RowCell>
       <SizeColumn>
         <FileSize bytes={size} />
       </SizeColumn>
       <ActionsColumn>
-        <ButtonBar gap={0.5}>
+        <Grid flow="column" align="center" gap="xs">
           <Tooltip
             title={tct(
               'Mappings can only be downloaded by users with organization [downloadRole] role[orHigher]. This can be changed in [settingsLink:Debug Files Access] settings.',
@@ -72,7 +61,7 @@ function ProjectProguardRow({
               icon={<IconDownload size="sm" />}
               disabled={!hasRole}
               href={downloadUrl}
-              title={hasRole ? t('Download Mapping') : undefined}
+              tooltipProps={{title: hasRole ? t('Download Mapping') : undefined}}
               aria-label={t('Download Mapping')}
             />
           </Tooltip>
@@ -91,7 +80,7 @@ function ProjectProguardRow({
                   <Button
                     size="sm"
                     icon={<IconDelete size="sm" />}
-                    title={hasAccess ? t('Remove Mapping') : undefined}
+                    tooltipProps={{title: hasAccess ? t('Remove Mapping') : undefined}}
                     aria-label={t('Remove Mapping')}
                     disabled={!hasAccess}
                   />
@@ -99,20 +88,13 @@ function ProjectProguardRow({
               </Tooltip>
             )}
           </Access>
-        </ButtonBar>
+        </Grid>
       </ActionsColumn>
-    </Fragment>
+    </SimpleTable.Row>
   );
 }
 
-const NameColumn = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-`;
-
-const SizeColumn = styled('div')`
+const SizeColumn = styled(SimpleTable.RowCell)`
   display: flex;
   justify-content: flex-end;
   text-align: right;
@@ -122,19 +104,17 @@ const SizeColumn = styled('div')`
 const ActionsColumn = styled(SizeColumn)``;
 
 const Name = styled('div')`
-  padding-right: ${space(4)};
+  padding-right: ${p => p.theme.space['3xl']};
   overflow-wrap: break-word;
   word-break: break-all;
 `;
 
 const TimeWrapper = styled('div')`
   display: grid;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
   grid-template-columns: min-content 1fr;
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
   align-items: center;
-  color: ${p => p.theme.subText};
-  margin-top: ${space(1)};
+  color: ${p => p.theme.tokens.content.secondary};
+  margin-top: ${p => p.theme.space.md};
 `;
-
-export default ProjectProguardRow;

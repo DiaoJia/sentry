@@ -1,44 +1,49 @@
 import {useCallback, useEffect, useState} from 'react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
+
+import {Alert} from '@sentry/scraps/alert';
+import {OrganizationAvatar} from '@sentry/scraps/avatar';
+import {Select} from '@sentry/scraps/select';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import {fetchOrganizations} from 'sentry/actionCreators/organizations';
 import {installSentryApp} from 'sentry/actionCreators/sentryAppInstallations';
-import {Alert} from 'sentry/components/core/alert';
-import {OrganizationAvatar} from 'sentry/components/core/avatar/organizationAvatar';
-import {Select} from 'sentry/components/core/select';
-import FieldGroup from 'sentry/components/forms/fieldGroup';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import SentryAppDetailsModal from 'sentry/components/modals/sentryAppDetailsModal';
-import NarrowLayout from 'sentry/components/narrowLayout';
+import {sentryAppApiOptions} from 'sentry/actionCreators/sentryApps';
+import {FieldGroup} from 'sentry/components/forms/fieldGroup';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryAppDetailsModal} from 'sentry/components/modals/sentryAppDetailsModal';
+import {NarrowLayout} from 'sentry/components/narrowLayout';
 import {t, tct} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {SentryApp, SentryAppInstallation} from 'sentry/types/integrations';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {Organization, OrganizationSummary} from 'sentry/types/organization';
 import {generateOrgSlugUrl} from 'sentry/utils';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {trackIntegrationAnalytics} from 'sentry/utils/integrationUtil';
-import {useApiQuery} from 'sentry/utils/queryClient';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 import {addQueryParamsToExistingUrl} from 'sentry/utils/queryString';
-import useApi from 'sentry/utils/useApi';
-import {OrganizationContext} from 'sentry/views/organizationContext';
-
-type Props = RouteComponentProps<{sentryAppSlug: string}>;
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useApi} from 'sentry/utils/useApi';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useParams} from 'sentry/utils/useParams';
 
 // Page Layout
-export default function SentryAppExternalInstallation(props: Props) {
+export default function SentryAppExternalInstallation() {
   return (
     <NarrowLayout>
       <Content>
         <h3>{t('Finish integration installation')}</h3>
-        <SentryAppExternalInstallationContent {...props} />
+        <SentryAppExternalInstallationContent />
       </Content>
     </NarrowLayout>
   );
 }
 
 // View Contents
-function SentryAppExternalInstallationContent({params, ...props}: Props) {
+function SentryAppExternalInstallationContent() {
+  const params = useParams<{sentryAppSlug: string}>();
+  const location = useLocation();
   const api = useApi();
   // The selected organization fetched from org details
   const [organization, setOrganization] = useState<Organization>();
@@ -46,41 +51,35 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
   const [selectedOrgSlug, setSelectedOrgSlug] = useState<string>();
 
   const [organizations, setOrganizations] = useState<OrganizationSummary[]>([]);
-  const [orgsLoading, setOrgsLoading] = useState<boolean>(true);
+  const [orgsLoading, setOrgsLoading] = useState(true);
   const [isInstalled, setIsInstalled] = useState<boolean>();
 
   // Load data on mount.
-  const {data: sentryApp, isPending: sentryAppLoading} = useApiQuery<SentryApp>(
-    [`/sentry-apps/${params.sentryAppSlug}/`],
-    {
-      staleTime: 0,
-    }
+  const {data: sentryApp, isPending: sentryAppLoading} = useQuery(
+    sentryAppApiOptions({appSlug: params.sentryAppSlug})
   );
 
-  useEffect(
-    function () {
-      async function loadOrgs() {
-        try {
-          const orgs = await fetchOrganizations(api);
-          setOrganizations(orgs);
-          setOrgsLoading(false);
-        } catch (e) {
-          setOrgsLoading(false);
-          // Do nothing.
-        }
+  useEffect(() => {
+    async function loadOrgs() {
+      try {
+        const orgs = await fetchOrganizations(api);
+        setOrganizations(orgs);
+        setOrgsLoading(false);
+      } catch (e) {
+        setOrgsLoading(false);
+        // Do nothing.
       }
-      loadOrgs();
-    },
-    [api]
-  );
+    }
+    loadOrgs();
+  }, [api]);
 
   const onSelectOrg = useCallback(
-    async function (orgSlug: string) {
+    async (orgSlug: string) => {
       const customerDomain = ConfigStore.get('customerDomain');
       // redirect to the org if it's different than the org being selected
       if (customerDomain?.subdomain && orgSlug !== customerDomain?.subdomain) {
-        const urlWithQuery = generateOrgSlugUrl(orgSlug) + props.location.search;
-        window.location.assign(urlWithQuery);
+        const urlWithQuery = generateOrgSlugUrl(orgSlug) + location.search;
+        testableWindowLocation.assign(urlWithQuery);
         return;
       }
       // otherwise proceed as normal
@@ -89,12 +88,24 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
       try {
         const [org, installations]: [Organization, SentryAppInstallation[]] =
           await Promise.all([
-            api.requestPromise(`/organizations/${orgSlug}/`, {
-              query: {
-                include_feature_flags: 1,
-              },
-            }),
-            api.requestPromise(`/organizations/${orgSlug}/sentry-app-installations/`),
+            api.requestPromise(
+              getApiUrl('/organizations/$organizationIdOrSlug/', {
+                path: {organizationIdOrSlug: orgSlug},
+              }),
+              {
+                query: {
+                  include_feature_flags: 1,
+                },
+              }
+            ),
+            api.requestPromise(
+              getApiUrl(
+                '/organizations/$organizationIdOrSlug/sentry-app-installations/',
+                {
+                  path: {organizationIdOrSlug: orgSlug},
+                }
+              )
+            ),
           ]);
         const installed = installations
           .map(install => install.app.slug)
@@ -110,14 +121,14 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
     [
       api,
       params.sentryAppSlug,
-      props.location.search,
+      location.search,
       setOrganization,
       setSelectedOrgSlug,
       setIsInstalled,
     ]
   );
 
-  useEffect(function () {
+  useEffect(() => {
     // Skip if we have a selected org, or if there aren't any orgs loaded yet.
     if (organization || organizations.length < 1) {
       return;
@@ -137,18 +148,15 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
   const onClose = useCallback(() => {
     // if we came from somewhere, go back there. Otherwise, back to the integrations page
     const newUrl = document.referrer || `/settings/${selectedOrgSlug}/integrations/`;
-    window.location.assign(newUrl);
+    testableWindowLocation.assign(newUrl);
   }, [selectedOrgSlug]);
 
-  const disableInstall = useCallback(
-    function () {
-      if (!(sentryApp && selectedOrgSlug)) {
-        return false;
-      }
-      return isInstalled || isSentryAppUnavailableForOrg(sentryApp, selectedOrgSlug);
-    },
-    [isInstalled, selectedOrgSlug, sentryApp]
-  );
+  const disableInstall = useCallback(() => {
+    if (!(sentryApp && selectedOrgSlug)) {
+      return false;
+    }
+    return isInstalled || isSentryAppUnavailableForOrg(sentryApp, selectedOrgSlug);
+  }, [isInstalled, selectedOrgSlug, sentryApp]);
 
   const onInstall = useCallback(async (): Promise<undefined | void> => {
     if (!organization || !sentryApp) {
@@ -157,6 +165,7 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
     trackIntegrationAnalytics('integrations.installation_start', {
       integration_type: 'sentry_app',
       integration: sentryApp.slug,
+      is_scm: false,
       view: 'external_install',
       integration_status: sentryApp.status,
       organization,
@@ -168,6 +177,7 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
       trackIntegrationAnalytics('integrations.installation_complete', {
         integration_type: 'sentry_app',
         integration: sentryApp.slug,
+        is_scm: false,
         view: 'external_install',
         integration_status: sentryApp.status,
         organization,
@@ -180,15 +190,15 @@ function SentryAppExternalInstallationContent({params, ...props}: Props) {
         code: install.code,
         orgSlug: organization.slug,
       };
-      const state = props.location.query.state;
+      const state = location.query.state as string | undefined;
       if (state) {
         queryParams.state = state;
       }
       const redirectUrl = addQueryParamsToExistingUrl(sentryApp.redirectUrl, queryParams);
-      return window.location.assign(redirectUrl);
+      return testableWindowLocation.assign(redirectUrl);
     }
     return onClose();
-  }, [api, organization, sentryApp, onClose, props.location.query.state]);
+  }, [api, organization, sentryApp, onClose, location.query.state]);
 
   if (sentryAppLoading || orgsLoading || !sentryApp) {
     return <LoadingIndicator />;
@@ -245,7 +255,7 @@ function CheckAndRenderError({
   if (selectedOrgSlug && organization && !hasAccess(organization)) {
     return (
       <Alert.Container>
-        <Alert type="error" showIcon>
+        <Alert variant="danger">
           <p>
             {tct(
               `You do not have permission to install integrations in
@@ -263,7 +273,7 @@ function CheckAndRenderError({
   if (isInstalled && organization && sentryApp) {
     return (
       <Alert.Container>
-        <Alert type="error" showIcon>
+        <Alert variant="danger">
           {tct('Integration [sentryAppName] already installed for [organization]', {
             organization: <strong>{organization.name}</strong>,
             sentryAppName: <strong>{sentryApp.name}</strong>,
@@ -278,7 +288,7 @@ function CheckAndRenderError({
     const ownerSlug = sentryApp?.owner?.slug ?? 'another organization';
     return (
       <Alert.Container>
-        <Alert type="error" showIcon>
+        <Alert variant="danger">
           {tct(
             'Integration [sentryAppName] is an unpublished integration for [otherOrg]. An unpublished integration can only be installed on the organization which created it.',
             {

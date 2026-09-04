@@ -1,0 +1,328 @@
+from unittest.mock import MagicMock, patch
+
+from sentry.integrations.types import IntegrationProviderSlug
+from sentry.models.repository import Repository
+from sentry.seer.autofix.constants import AutofixAutomationTuningSettings
+from sentry.seer.endpoints.group_autofix_setup_check import (
+    get_autofix_integration_setup_problems,
+)
+from sentry.silo.base import SiloMode
+from sentry.testutils.cases import APITestCase, SnubaTestCase, TestCase
+from sentry.testutils.helpers.features import with_feature
+from sentry.testutils.silo import assume_test_silo_mode
+from sentry.utils.cache import cache
+
+
+class GetAutofixIntegrationSetupProblemsTestCase(TestCase):
+    def test_missing_integration(self) -> None:
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result == "integration_missing"
+
+    def test_supported_github_integration(self) -> None:
+        self.create_integration(
+            organization=self.organization,
+            provider=IntegrationProviderSlug.GITHUB.value,
+            external_id="1",
+        )
+
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result is None
+
+    def test_supported_github_integration_with_disabled_status(self) -> None:
+        integration = self.create_integration(
+            organization=self.organization,
+            provider=IntegrationProviderSlug.GITHUB.value,
+            external_id="1",
+        )
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            integration.disable()
+
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result == "integration_missing"
+
+    def test_supported_github_enterprise_integration(self) -> None:
+        self.create_integration(
+            organization=self.organization,
+            provider=IntegrationProviderSlug.GITHUB_ENTERPRISE.value,
+            external_id="1",
+        )
+
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result is None
+
+    def test_supported_github_enterprise_integration_with_disabled_status(self) -> None:
+        integration = self.create_integration(
+            organization=self.organization,
+            provider=IntegrationProviderSlug.GITHUB_ENTERPRISE.value,
+            external_id="1",
+        )
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            integration.disable()
+
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result == "integration_missing"
+
+    def test_unsupported_gitlab_integration(self) -> None:
+        self.create_integration(
+            organization=self.organization,
+            provider=IntegrationProviderSlug.GITLAB.value,
+            external_id="1",
+        )
+
+        result = get_autofix_integration_setup_problems(
+            organization=self.organization, project=self.project
+        )
+
+        assert result == "integration_missing"
+
+
+@with_feature("organizations:gen-ai-features")
+class GroupAIAutofixEndpointSuccessTest(APITestCase, SnubaTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+
+        integration = self.create_integration(organization=self.organization, external_id="1")
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.org_integration = integration.add_organization(self.organization, self.user)
+
+        self.repo = Repository.objects.create(
+            organization_id=self.organization.id,
+            name="example",
+            integration_id=integration.id,
+        )
+        self.code_mapping = self.create_code_mapping(
+            repo=self.repo,
+            project=self.project,
+            stack_root="sentry/",
+            source_root="sentry/",
+        )
+
+    def _set_seat_based_tier_cache(self, value: bool) -> None:
+        """Set the cache for is_seer_seat_based_tier_enabled to return the given value."""
+        cache.set(f"seer:seat-based-tier:{self.organization.id}", value)
+
+    @patch(
+        "sentry.seer.endpoints.group_autofix_setup_check.has_project_connected_repos",
+        return_value=True,
+    )
+    def test_successful_setup(self, mock_has_repos: MagicMock) -> None:
+        """
+        Everything is set up correctly, should respond with OKs.
+        """
+        self._set_seat_based_tier_cache(True)
+
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data == {
+            "autofixEnabled": False,
+            "integration": {
+                "ok": True,
+                "reason": None,
+            },
+            "setupAcknowledgement": {
+                "orgHasAcknowledged": True,
+                "userHasAcknowledged": True,
+            },
+            "billing": {
+                "hasAutofixQuota": True,
+            },
+            "seerReposLinked": True,
+        }
+
+    @patch(
+        "sentry.seer.endpoints.group_autofix_setup_check.has_project_connected_repos",
+        return_value=False,
+    )
+    def test_seer_repos_not_linked(self, mock_has_repos: MagicMock) -> None:
+        """
+        Test when project has no repos linked in Seer.
+        """
+        self._set_seat_based_tier_cache(True)
+
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["seerReposLinked"] is False
+
+    @patch(
+        "sentry.seer.endpoints.group_autofix_setup_check.has_project_connected_repos",
+        side_effect=Exception("API error"),
+    )
+    def test_seer_repos_linked_defaults_to_false_on_error(self, mock_has_repos: MagicMock) -> None:
+        """
+        Test that seerReposLinked defaults to False when the API call fails.
+        """
+        self._set_seat_based_tier_cache(True)
+        # Don't set project repos cache - let the actual function run and raise an exception
+
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["seerReposLinked"] is False
+
+    def test_seer_repos_linked_is_false_when_feature_disabled(self) -> None:
+        """
+        Test that seerReposLinked is False when seat-based tier is not enabled.
+        """
+        self._set_seat_based_tier_cache(False)
+
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["seerReposLinked"] is False
+
+    def test_autofix_automation_tuning_non_seat_based(self) -> None:
+        self.login_as(user=self.user)
+
+        for setting in [None, *list(AutofixAutomationTuningSettings)]:
+            self.project.update_option("sentry:autofix_automation_tuning", setting)
+            group = self.create_group()
+            url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+            response = self.client.get(url, format="json")
+
+            assert response.status_code == 200
+            if setting is None or setting == AutofixAutomationTuningSettings.OFF:
+                expected = False
+            else:
+                expected = True
+            assert response.data["autofixEnabled"] is expected
+
+    def test_autofix_automation_tuning_off(self) -> None:
+        self._set_seat_based_tier_cache(True)
+        self.login_as(user=self.user)
+
+        for setting in [None, AutofixAutomationTuningSettings.OFF]:
+            self.project.update_option("sentry:autofix_automation_tuning", setting)
+            group = self.create_group()
+            url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+            response = self.client.get(url, format="json")
+
+            assert response.status_code == 200
+            assert response.data["autofixEnabled"] is False
+
+    def test_autofix_automation_tuning_on(self) -> None:
+        self._set_seat_based_tier_cache(True)
+        self.login_as(user=self.user)
+
+        for setting in [
+            setting
+            for setting in AutofixAutomationTuningSettings
+            if setting != AutofixAutomationTuningSettings.OFF
+        ]:
+            self.project.update_option("sentry:autofix_automation_tuning", setting)
+            group = self.create_group()
+            url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+            response = self.client.get(url, format="json")
+
+            assert response.status_code == 200
+            assert response.data["autofixEnabled"] is True
+
+
+class GroupAIAutofixEndpointFailureTest(APITestCase, SnubaTestCase):
+    def _set_seat_based_tier_cache(self, value: bool) -> None:
+        """Set the cache for is_seer_seat_based_tier_enabled to return the given value."""
+        cache.set(f"seer:seat-based-tier:{self.organization.id}", value)
+
+    def test_missing_integration(self) -> None:
+        self._set_seat_based_tier_cache(True)
+        # Note: has_project_connected_repos is not called when integration check fails
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.organization_integration.delete()
+
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["integration"] == {
+            "ok": False,
+            "reason": "integration_missing",
+        }
+        # seerReposLinked should be False when integration is missing
+        assert response.data["seerReposLinked"] is False
+
+
+@with_feature("organizations:gen-ai-features")
+class GroupAIAutofixSetupFreeCohortTest(APITestCase, SnubaTestCase):
+    """Tests for free cohort org behavior in the /autofix/setup/ endpoint."""
+
+    def setUp(self) -> None:
+        super().setUp()
+
+        integration = self.create_integration(organization=self.organization, external_id="1")
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.org_integration = integration.add_organization(self.organization, self.user)
+
+        self.repo = Repository.objects.create(
+            organization_id=self.organization.id,
+            name="example",
+            integration_id=integration.id,
+        )
+
+    @patch(
+        "sentry.seer.endpoints.group_autofix_setup_check.is_free_cohort_org",
+        return_value=True,
+    )
+    def test_free_cohort_org_with_existing_run_has_autofix_quota(
+        self, mock_is_free_cohort: MagicMock
+    ) -> None:
+        """Free cohort orgs with an existing autofix run get hasAutofixQuota: True."""
+        group = self.create_group()
+        run = self.create_seer_run(organization=self.organization)
+        self.create_seer_agent_run(run, source="autofix", group=group)
+
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["billing"]["hasAutofixQuota"] is True
+
+    @patch(
+        "sentry.seer.endpoints.group_autofix_setup_check.is_free_cohort_org",
+        return_value=True,
+    )
+    def test_free_cohort_org_without_existing_run_has_no_autofix_quota(
+        self, mock_is_free_cohort: MagicMock
+    ) -> None:
+        """Free cohort orgs without an existing autofix run get hasAutofixQuota: False."""
+        group = self.create_group()
+        self.login_as(user=self.user)
+        url = f"/api/0/organizations/{self.organization.slug}/issues/{group.id}/autofix/setup/"
+        response = self.client.get(url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["billing"]["hasAutofixQuota"] is False

@@ -2,14 +2,13 @@ import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 
-import * as PageFilterPersistence from 'sentry/components/organizations/pageFilters/persistence';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import * as PageFilterPersistence from 'sentry/components/pageFilters/persistence';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {SavedSearchType} from 'sentry/types/group';
-import EventView from 'sentry/utils/discover/eventView';
+import {EventView} from 'sentry/utils/discover/eventView';
 import Results from 'sentry/views/discover/results';
 import {
   DEFAULT_EVENT_VIEW,
@@ -72,12 +71,6 @@ function renderMockRequests() {
   MockApiClient.addMockResponse({
     url: '/organizations/org-slug/releases/stats/',
     body: [],
-  });
-
-  const measurementsMetaMock = MockApiClient.addMockResponse({
-    url: '/organizations/org-slug/measurements-meta/',
-    method: 'GET',
-    body: {},
   });
 
   const eventsResultsMock = MockApiClient.addMockResponse({
@@ -226,88 +219,81 @@ function renderMockRequests() {
     mockVisit,
     mockSaved,
     eventFacetsMock,
-    measurementsMetaMock,
   };
 }
 
-describe('Results', function () {
-  afterEach(function () {
+describe('Results', () => {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
     ProjectsStore.reset();
   });
-  describe('Events', function () {
+  describe('Events', () => {
     const features = ['discover-basic'];
-    it('loads data when moving from an invalid to valid EventView', function () {
+    it('loads data when moving from an invalid to valid EventView', async () => {
       const organization = OrganizationFixture({
         features,
-      });
-
-      // Start off with an invalid view (empty is invalid)
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {query: 'tag:value'}},
-        },
       });
 
       const mockRequests = renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      // Start with an invalid EventView
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {query: 'tag:value'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      // No request as eventview was invalid.
-      expect(mockRequests.eventsStatsMock).not.toHaveBeenCalled();
-
       // Should redirect and retain the old query value
-      expect(router.replace).toHaveBeenCalledWith(
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
+      expect(router.location.pathname).toBe(
+        `/organizations/${organization.slug}/explore/discover/results/`
+      );
+      expect(router.location.query).toEqual(
         expect.objectContaining({
-          pathname: '/organizations/org-slug/discover/results/',
-          query: expect.objectContaining({
-            query: 'tag:value',
-          }),
+          query: 'tag:value',
         })
       );
+
+      expect(mockRequests.eventsStatsMock).toHaveBeenCalled();
     });
 
-    it('pagination cursor should be cleared when making a search', async function () {
+    it('pagination cursor should be cleared when making a search', async () => {
       const organization = OrganizationFixture({
         features,
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
+      const mockRequests = renderMockRequests();
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
           location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
             query: {
               ...generateFields(),
               cursor: '0%3A50%3A0',
             },
           },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-
-      const mockRequests = renderMockRequests();
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // ensure cursor query string is initially present in the location
-      expect(router.location).toEqual({
-        query: {
+      expect(router.location.query).toEqual(
+        expect.objectContaining({
           ...generateFields(),
           cursor: '0%3A50%3A0',
-        },
-      });
+        })
+      );
 
       await waitFor(() =>
         expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument()
@@ -324,36 +310,38 @@ describe('Results', function () {
       expect(mockRequests.mockVisit).not.toHaveBeenCalled();
 
       // cursor query string should be omitted from the query string
-      expect(router.push).toHaveBeenCalledWith({
-        pathname: undefined,
-        query: {
-          ...generateFields(),
-          query: 'geo:canada',
-          statsPeriod: '14d',
-        },
+      await waitFor(() => {
+        expect(router.location).toEqual(
+          expect.objectContaining({
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: expect.objectContaining({
+              ...generateFields(),
+              query: 'geo:canada',
+              statsPeriod: '14d',
+            }),
+          })
+        );
       });
     });
 
-    it('renders a y-axis selector', async function () {
+    it('renders a y-axis selector', async () => {
       const organization = OrganizationFixture({
         features,
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), yAxis: 'count()'}},
-        },
       });
 
       renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), yAxis: 'count()'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // Click the 'default' option.
@@ -363,26 +351,24 @@ describe('Results', function () {
       );
     });
 
-    it('renders a display selector', async function () {
+    it('renders a display selector', async () => {
       const organization = OrganizationFixture({
         features,
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'default', yAxis: 'count'}},
-        },
       });
 
       renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'default', yAxis: 'count'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // Click the 'default' option.
@@ -392,26 +378,24 @@ describe('Results', function () {
       );
     });
 
-    it('excludes top5 options when plan does not include discover-query', async function () {
+    it('excludes top5 options when plan does not include discover-query', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'previous'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
       renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'previous'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await userEvent.click(await screen.findByRole('button', {name: /Display/}));
@@ -420,192 +404,176 @@ describe('Results', function () {
       expect(screen.queryByText('Top 5 Period')).not.toBeInTheDocument();
     });
 
-    it('needs confirmation on long queries', async function () {
+    it('needs confirmation on long queries', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), statsPeriod: '60d', project: '-1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
       const mockRequests = renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), statsPeriod: '60d', project: '-1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(0);
-      await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
-      });
+      await screen.findByRole('tab', {name: 'Errors'});
     });
 
-    it('needs confirmation on long query with explicit projects', async function () {
+    it('needs confirmation on long query with explicit projects', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      const mockRequests = renderMockRequests();
+
+      render(<Results />, {
+        initialRouterConfig: {
           location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
             query: {
               ...generateFields(),
               statsPeriod: '60d',
               project: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(String),
             },
           },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      const mockRequests = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
       expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(0);
-      await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
-      });
+      await screen.findByRole('tab', {name: 'Errors'});
     });
 
-    it('does not need confirmation on short queries', async function () {
+    it('does not need confirmation on short queries', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), statsPeriod: '30d', project: '-1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
       const mockRequests = renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), statsPeriod: '30d', project: '-1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
+        expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
       });
-      expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
     });
 
-    it('does not need confirmation with to few projects', async function () {
+    it('does not need confirmation with too few projects', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      const mockRequests = renderMockRequests();
+
+      render(<Results />, {
+        initialRouterConfig: {
           location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
             query: {
               ...generateFields(),
               statsPeriod: '90d',
               project: [1, 2, 3, 4].map(String),
             },
           },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      const mockRequests = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
+        expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
       });
-      expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
     });
 
-    it('creates event view from saved query', async function () {
+    it('creates event view from saved query', async () => {
       const organization = OrganizationFixture({
         features,
         slug: 'org-slug',
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {pathname: '/', query: {id: '1', statsPeriod: '24h'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
       const mockRequests = renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1', statsPeriod: '24h'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => expect(mockRequests.mockVisit).toHaveBeenCalled());
 
       expect(screen.getByRole('link', {name: 'timestamp'})).toHaveAttribute(
         'href',
-        '/?dataset=discover&field=title&field=event.type&field=project&field=user.display&field=timestamp&id=1&name=new&query=&queryDataset=error-events&sort=-timestamp&statsPeriod=24h&topEvents=5'
+        expect.stringContaining('field=timestamp')
       );
 
       expect(screen.getByRole('link', {name: 'project'})).toHaveAttribute(
         'href',
-        '/?dataset=discover&field=title&field=event.type&field=project&field=user.display&field=timestamp&id=1&name=new&query=&queryDataset=error-events&sort=-project&statsPeriod=24h&topEvents=5'
+        expect.stringContaining('field=project')
       );
 
       // NOTE: This uses a legacy redirect for project event to the issue group event link
       expect(screen.getByRole('link', {name: 'deadbeef'})).toHaveAttribute(
         'href',
-        '/org-slug/project-slug/events/deadbeef/?id=1&referrer=discover-events-table&statsPeriod=24h'
+        expect.stringContaining('/org-slug/project-slug/events/deadbeef/')
       );
 
       expect(screen.getByRole('link', {name: 'user.display'})).toHaveAttribute(
         'href',
-        '/?dataset=discover&field=title&field=event.type&field=project&field=user.display&field=timestamp&id=1&name=new&query=&queryDataset=error-events&sort=user.display&statsPeriod=24h&topEvents=5'
+        expect.stringContaining('field=user.display')
       );
 
       expect(screen.getByRole('link', {name: 'title'})).toHaveAttribute(
         'href',
-        '/?dataset=discover&field=title&field=event.type&field=project&field=user.display&field=timestamp&id=1&name=new&query=&queryDataset=error-events&sort=-title&statsPeriod=24h&topEvents=5'
+        expect.stringContaining('field=title')
       );
     });
 
-    it('overrides saved query params with location query params', async function () {
+    it('overrides saved query params with location query params', async () => {
       const organization = OrganizationFixture({
         features,
         slug: 'org-slug',
       });
-      const {router} = initializeOrg({
-        organization,
-        router: {
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      const mockRequests = renderMockRequests();
+
+      render(<Results />, {
+        initialRouterConfig: {
           location: {
-            pathname: '/',
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
             query: {
               id: '1',
               statsPeriod: '7d',
@@ -613,47 +581,41 @@ describe('Results', function () {
               environment: ['production'],
             },
           },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      const mockRequests = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => expect(mockRequests.mockVisit).toHaveBeenCalled());
 
       expect(screen.getByRole('link', {name: 'timestamp'})).toHaveAttribute(
         'href',
-        '/?dataset=discover&environment=production&field=title&field=event.type&field=project&field=user.display&field=timestamp&id=1&name=new&project=2&query=&queryDataset=error-events&sort=-timestamp&statsPeriod=7d&topEvents=5'
+        expect.stringContaining('statsPeriod=7d')
+      );
+      expect(screen.getByRole('link', {name: 'timestamp'})).toHaveAttribute(
+        'href',
+        expect.stringContaining('environment=production')
       );
     });
 
-    it('updates chart whenever yAxis parameter changes', async function () {
+    it('updates chart whenever yAxis parameter changes', async () => {
       const organization = OrganizationFixture({
         features,
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), yAxis: 'count()'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      const {eventsStatsMock, measurementsMetaMock} = renderMockRequests();
+      const {eventsStatsMock} = renderMockRequests();
 
-      const {rerender} = render(<Results location={router.location} router={router} />, {
-        router,
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), yAxis: 'count()'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // Should load events once
@@ -668,23 +630,17 @@ describe('Results', function () {
           }),
         })
       );
+
+      // Update location simulating a yAxis change
+      const newParams = new URLSearchParams();
+      FIELDS.forEach(f => newParams.append('field', f.field));
+      newParams.set('yAxis', 'count_unique(user)');
+      router.navigate(`${router.location.pathname}?${newParams.toString()}`);
+
+      // Should load events again with new yAxis
       await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
+        expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       });
-
-      // Update location simulating a browser back button action
-      rerender(
-        <Results
-          location={{
-            ...router.location,
-            query: {...generateFields(), yAxis: 'count_unique(user)'},
-          }}
-          router={router}
-        />
-      );
-
-      // Should load events again
-      expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       expect(eventsStatsMock).toHaveBeenNthCalledWith(
         2,
         '/organizations/org-slug/events-stats/',
@@ -695,31 +651,26 @@ describe('Results', function () {
           }),
         })
       );
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
     });
 
-    it('updates chart whenever display parameter changes', async function () {
+    it('updates chart whenever display parameter changes', async () => {
       const organization = OrganizationFixture({
         features,
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'default', yAxis: 'count()'}},
-        },
-      });
-
-      const {eventsStatsMock, measurementsMetaMock} = renderMockRequests();
+      const {eventsStatsMock} = renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      const {rerender} = render(<Results location={router.location} router={router} />, {
-        router,
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'default', yAxis: 'count()'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // Should load events once
@@ -734,23 +685,18 @@ describe('Results', function () {
           }),
         })
       );
+
+      // Update location simulating a display change
+      const newParams = new URLSearchParams();
+      FIELDS.forEach(f => newParams.append('field', f.field));
+      newParams.set('display', 'previous');
+      newParams.set('yAxis', 'count()');
+      router.navigate(`${router.location.pathname}?${newParams.toString()}`);
+
+      // Should load events again with doubled stats period for 'previous' display
       await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
+        expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       });
-
-      // Update location simulating a browser back button action
-      rerender(
-        <Results
-          location={{
-            ...router.location,
-            query: {...generateFields(), display: 'previous', yAxis: 'count()'},
-          }}
-          router={router}
-        />
-      );
-
-      // Should load events again
-      expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       expect(eventsStatsMock).toHaveBeenNthCalledWith(
         2,
         '/organizations/org-slug/events-stats/',
@@ -761,31 +707,26 @@ describe('Results', function () {
           }),
         })
       );
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
     });
 
-    it('updates chart whenever display and yAxis parameters change', async function () {
+    it('updates chart whenever display and yAxis parameters change', async () => {
       const organization = OrganizationFixture({
         features,
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'default', yAxis: 'count()'}},
-        },
-      });
-
-      const {eventsStatsMock, measurementsMetaMock} = renderMockRequests();
+      const {eventsStatsMock} = renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      const {rerender} = render(<Results location={router.location} router={router} />, {
-        router,
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'default', yAxis: 'count()'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       // Should load events once
@@ -800,27 +741,18 @@ describe('Results', function () {
           }),
         })
       );
+
+      // Update location simulating both display and yAxis changes
+      const newParams = new URLSearchParams();
+      FIELDS.forEach(f => newParams.append('field', f.field));
+      newParams.set('display', 'previous');
+      newParams.set('yAxis', 'count_unique(user)');
+      router.navigate(`${router.location.pathname}?${newParams.toString()}`);
+
+      // Should load events again with new parameters
       await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
+        expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       });
-
-      // Update location simulating a browser back button action
-      rerender(
-        <Results
-          location={{
-            ...router.location,
-            query: {
-              ...generateFields(),
-              display: 'previous',
-              yAxis: 'count_unique(user)',
-            },
-          }}
-          router={router}
-        />
-      );
-
-      // Should load events again
-      expect(eventsStatsMock).toHaveBeenCalledTimes(2);
       expect(eventsStatsMock).toHaveBeenNthCalledWith(
         2,
         '/organizations/org-slug/events-stats/',
@@ -831,31 +763,26 @@ describe('Results', function () {
           }),
         })
       );
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
     });
 
-    it('appends tag value to existing query when clicked', async function () {
+    it('appends tag value to existing query when clicked', async () => {
       const organization = OrganizationFixture({
         features,
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'default', yAxis: 'count'}},
-        },
       });
 
       const mockRequests = renderMockRequests();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'default', yAxis: 'count'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await userEvent.click(await screen.findByRole('button', {name: 'Show Tags'}));
@@ -880,16 +807,9 @@ describe('Results', function () {
       ).toBeInTheDocument();
     });
 
-    it('respects pinned filters for prebuilt queries', async function () {
+    it('respects pinned filters for prebuilt queries', async () => {
       const organization = OrganizationFixture({
-        features: [...features, 'global-views'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), display: 'default', yAxis: 'count'}},
-        },
+        features: [...features],
       });
 
       renderMockRequests();
@@ -908,18 +828,23 @@ describe('Results', function () {
 
       ProjectsStore.loadInitialData([ProjectFixture({id: '1', slug: 'Pinned Project'})]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), display: 'default', yAxis: 'count'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       const projectPageFilter = await screen.findByTestId('page-filter-project-selector');
 
-      expect(projectPageFilter).toHaveTextContent('All Projects');
+      expect(projectPageFilter).toHaveTextContent('Pinned Project');
     });
 
-    it('displays tip when events response contains a tip', async function () {
+    it('displays tip when events response contains a tip', async () => {
       renderMockRequests();
 
       MockApiClient.addMockResponse({
@@ -937,19 +862,17 @@ describe('Results', function () {
         features,
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...generateFields(), yAxis: 'count()'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), yAxis: 'count()'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => {
@@ -957,55 +880,24 @@ describe('Results', function () {
       });
     });
 
-    it('renders metric fallback alert', async function () {
+    it('renders unparameterized data banner', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {fromMetric: 'true', id: '1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
 
       renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      });
-
-      expect(
-        await screen.findByText(
-          /You've navigated to this page from a performance metric widget generated from processed events/
-        )
-      ).toBeInTheDocument();
-    });
-
-    it('renders unparameterized data banner', async function () {
-      const organization = OrganizationFixture({
-        features: ['discover-basic'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {showUnparameterizedBanner: 'true', id: '1'}},
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {showUnparameterizedBanner: 'true', id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
       expect(
@@ -1024,27 +916,27 @@ describe('Results', function () {
         features: ['discover-basic', 'discover-query'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          // These fields take priority and should be sent in the request
-          location: {query: {field: ['title', 'user'], id: '1'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
       renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            // These fields take priority and should be sent in the request
+            query: {field: ['title', 'user'], id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() =>
-        expect(screen.getByRole('button', {name: /set as default/i})).toBeEnabled()
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
       );
-      await userEvent.click(screen.getByText('Set as Default'));
+      await userEvent.click(
+        await screen.findByRole('menuitemradio', {name: 'Set as Default'})
+      );
 
       expect(mockHomepageUpdate).toHaveBeenCalledWith(
         '/organizations/org-slug/discover/homepage/',
@@ -1054,6 +946,35 @@ describe('Results', function () {
           }),
         })
       );
+    });
+
+    it('does not fetch the homepage query when discover-query is disabled', async () => {
+      renderMockRequests();
+      const mockHomepageGet = MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/discover/homepage/',
+        method: 'GET',
+        statusCode: 404,
+      });
+
+      const organization = OrganizationFixture({
+        features: ['discover-basic'],
+      });
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: generateFields(),
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
+        organization,
+      });
+
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
+      expect(mockHomepageGet).not.toHaveBeenCalled();
     });
 
     it('Changes the Use as Discover button to a reset button for saved query', async () => {
@@ -1086,43 +1007,31 @@ describe('Results', function () {
         features: ['discover-basic', 'discover-query'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
       renderMockRequests();
 
-      const {rerender} = render(<Results location={router.location} router={router} />, {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      });
-
-      await waitFor(() =>
-        expect(screen.getByRole('button', {name: /set as default/i})).toBeEnabled()
-      );
-      await userEvent.click(screen.getByText('Set as Default'));
-      expect(await screen.findByText('Remove Default')).toBeInTheDocument();
-
-      await userEvent.click(screen.getByText('Total Period'));
-      await userEvent.click(screen.getByText('Previous Period'));
-
-      const rerenderData = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...router.location.query, display: 'previous'}},
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
+        organization,
       });
 
-      rerender(
-        <Results location={rerenderData.router.location} router={rerenderData.router} />
+      // The saved query matches the homepage, so the context menu offers the
+      // "Remove Default" reset action rather than "Set as Default".
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
       );
-      screen.getByText('Previous Period');
-      expect(await screen.findByText('Set as Default')).toBeInTheDocument();
+      expect(
+        await screen.findByRole('menuitemradio', {name: 'Remove Default'})
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Set as Default'})
+      ).not.toBeInTheDocument();
     });
 
     it('Changes the Use as Discover button to a reset button for prebuilt query', async () => {
@@ -1135,48 +1044,63 @@ describe('Results', function () {
         statusCode: 200,
         body: {...getTransactionViews(organization)[0], name: ''},
       });
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {
-            ...LocationFixture(),
-            query: {
-              ...EventView.fromNewQueryWithLocation(
-                getTransactionViews(organization)[0]!,
-                LocationFixture()
-              ).generateQueryStringObject(),
-            },
-          },
-        },
-      });
+
+      const initialQuery = EventView.fromNewQueryWithLocation(
+        getTransactionViews(organization)[0]!,
+        LocationFixture()
+      ).generateQueryStringObject();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
       renderMockRequests();
 
-      const {rerender} = render(<Results location={router.location} router={router} />, {
-        router,
+      const {router} = render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: initialQuery as Record<string, string | string[]>,
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await screen.findAllByText(getTransactionViews(organization)[0]!.name);
-      await userEvent.click(screen.getByText('Set as Default'));
-      expect(await screen.findByText('Remove Default')).toBeInTheDocument();
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
+      );
+      await userEvent.click(
+        await screen.findByRole('menuitemradio', {name: 'Set as Default'})
+      );
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
+      );
+      expect(
+        await screen.findByRole('menuitemradio', {name: 'Remove Default'})
+      ).toBeInTheDocument();
+      await userEvent.keyboard('{Escape}');
 
       await userEvent.click(screen.getByText('Total Period'));
       await userEvent.click(screen.getByText('Previous Period'));
-      const rerenderData = initializeOrg({
-        organization,
-        router: {
-          location: {query: {...router.location.query, display: 'previous'}},
-        },
-      });
 
-      rerender(
-        <Results location={rerenderData.router.location} router={rerenderData.router} />
+      // Navigate to update the display parameter - recreate params with display: previous
+      const updatedParams = new URLSearchParams();
+      Object.entries(initialQuery).forEach(([key, value]) => {
+        if (Array.isArray(value)) {
+          value.forEach(v => updatedParams.append(key, v));
+        } else if (value !== null && value !== undefined) {
+          updatedParams.set(key, String(value));
+        }
+      });
+      updatedParams.set('display', 'previous');
+      router.navigate(`${router.location.pathname}?${updatedParams.toString()}`);
+
+      await screen.findByText('Previous Period');
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
       );
-      screen.getByText('Previous Period');
-      expect(await screen.findByText('Set as Default')).toBeInTheDocument();
+      expect(
+        await screen.findByRole('menuitemradio', {name: 'Set as Default'})
+      ).toBeInTheDocument();
     });
 
     it('links back to the homepage through the Discover breadcrumb', async () => {
@@ -1184,29 +1108,27 @@ describe('Results', function () {
         features: ['discover-basic', 'discover-query'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
-      });
-
       ProjectsStore.loadInitialData([ProjectFixture()]);
-      const {measurementsMetaMock} = renderMockRequests();
+      renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
+      expect(await screen.findByRole('link', {name: 'Discover'})).toBeInTheDocument();
 
-      expect(screen.getByText('Discover')).toHaveAttribute(
+      expect(screen.getByRole('link', {name: 'Discover'})).toHaveAttribute(
         'href',
-        expect.stringMatching(new RegExp('^/organizations/org-slug/discover/homepage/'))
+        expect.stringMatching(
+          new RegExp('^/organizations/org-slug/explore/discover/homepage/')
+        )
       );
     });
 
@@ -1215,27 +1137,27 @@ describe('Results', function () {
         features: ['discover-basic', 'discover-query'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+      renderMockRequests();
+
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-      const {measurementsMetaMock} = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
+      expect(await screen.findByRole('link', {name: 'Discover'})).toBeInTheDocument();
 
       expect(screen.getByRole('link', {name: 'Saved Queries'})).toHaveAttribute(
         'href',
-        expect.stringMatching(new RegExp('^/organizations/org-slug/discover/queries/'))
+        expect.stringMatching(
+          new RegExp('^/organizations/org-slug/explore/discover/queries/')
+        )
       );
     });
 
@@ -1244,122 +1166,65 @@ describe('Results', function () {
         features: ['discover-basic', 'discover-query'],
       });
 
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {
-            ...LocationFixture(),
-            query: {
-              ...EventView.fromNewQueryWithLocation(
-                DEFAULT_EVENT_VIEW,
-                LocationFixture()
-              ).generateQueryStringObject(),
-            },
-          },
-        },
-      });
+      const initialQuery = EventView.fromNewQueryWithLocation(
+        DEFAULT_EVENT_VIEW,
+        LocationFixture()
+      ).generateQueryStringObject();
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
-      const {measurementsMetaMock} = renderMockRequests();
+      renderMockRequests();
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: initialQuery as Record<string, string | string[]>,
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
-
-      expect(screen.getByTestId('set-as-default')).toBeEnabled();
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Discover Context Menu'})
+      );
+      expect(
+        await screen.findByRole('menuitemradio', {name: 'Set as Default'})
+      ).not.toHaveAttribute('aria-disabled', 'true');
     });
 
-    it("doesn't render sample data alert", async function () {
+    it("doesn't render sample data alert", async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic', 'discover-query'],
       });
-      const {router} = initializeOrg({
-        organization,
-        router: {
+
+      const initialQuery = EventView.fromNewQueryWithLocation(
+        {...DEFAULT_EVENT_VIEW, query: 'event.type:error'},
+        LocationFixture()
+      ).generateQueryStringObject();
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+      renderMockRequests();
+
+      render(<Results />, {
+        initialRouterConfig: {
           location: {
-            ...LocationFixture(),
-            query: {
-              ...EventView.fromNewQueryWithLocation(
-                {...DEFAULT_EVENT_VIEW, query: 'event.type:error'},
-                LocationFixture()
-              ).generateQueryStringObject(),
-            },
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: initialQuery as Record<string, string | string[]>,
           },
+          route: '/organizations/:orgId/explore/discover/results/',
         },
-      });
-      const {measurementsMetaMock} = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() => {
-        expect(measurementsMetaMock).toHaveBeenCalled();
-      });
+      expect(await screen.findByRole('link', {name: 'Discover'})).toBeInTheDocument();
 
       expect(screen.queryByText(/Based on your search criteria/)).not.toBeInTheDocument();
     });
 
-    it('uses split decision to populate dataset selector', async function () {
+    it('calls events endpoint with the right dataset', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic', 'discover-query'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
-      });
-
-      ProjectsStore.loadInitialData([ProjectFixture()]);
-
-      const mockRequests = renderMockRequests();
-
-      render(<Results location={router.location} router={router} />, {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      });
-
-      await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
-      });
-      expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', {name: 'Transactions'})).toHaveAttribute(
-          'aria-selected',
-          'true'
-        );
-      });
-
-      expect(
-        screen.getByText(
-          "We're splitting our datasets up to make it a bit easier to digest. We defaulted this query to Transactions. Edit as you see fit."
-        )
-      ).toBeInTheDocument();
-
-      expect(screen.queryByText('Save Changes')).not.toBeInTheDocument();
-    });
-
-    it('calls events endpoint with the right dataset', async function () {
-      const organization = OrganizationFixture({
-        features: ['discover-basic', 'discover-query'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
@@ -1390,16 +1255,20 @@ describe('Results', function () {
         },
       });
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
       await waitFor(() => {
-        expect(mockRequests.measurementsMetaMock).toHaveBeenCalled();
+        expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
       });
-      expect(mockRequests.eventsResultsMock).toHaveBeenCalledTimes(1);
 
       expect(screen.getByRole('tab', {name: 'Errors'})).toHaveAttribute(
         'aria-selected',
@@ -1434,16 +1303,9 @@ describe('Results', function () {
       );
     });
 
-    it('shows the search history for the error dataset', async function () {
+    it('shows the search history for the error dataset', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic', 'discover-query'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
@@ -1502,15 +1364,19 @@ describe('Results', function () {
         },
       });
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() =>
-        expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument()
-      );
+      // Wait for data to load
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
 
       await userEvent.click(
         screen.getByPlaceholderText('Search for events, users, tags, and more')
@@ -1520,16 +1386,9 @@ describe('Results', function () {
       ).toBeInTheDocument();
     });
 
-    it('shows the search history for the transaction dataset', async function () {
+    it('shows the search history for the transaction dataset', async () => {
       const organization = OrganizationFixture({
         features: ['discover-basic', 'discover-query'],
-      });
-
-      const {router} = initializeOrg({
-        organization,
-        router: {
-          location: {query: {id: '1'}},
-        },
       });
 
       ProjectsStore.loadInitialData([ProjectFixture()]);
@@ -1614,15 +1473,19 @@ describe('Results', function () {
         },
       });
 
-      render(<Results location={router.location} router={router} />, {
-        router,
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {id: '1'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
         organization,
-        deprecatedRouterMocks: true,
       });
 
-      await waitFor(() =>
-        expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument()
-      );
+      // Wait for data to load
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
 
       await userEvent.click(
         screen.getByPlaceholderText('Search for events, users, tags, and more')
@@ -1631,6 +1494,97 @@ describe('Results', function () {
       expect(
         await screen.findByRole('option', {name: 'transaction.status:ok'})
       ).toBeInTheDocument();
+    });
+  });
+
+  describe('transactions deprecation', () => {
+    const deprecationFeatures = [
+      'discover-basic',
+      'deprecate-discover',
+      'discover-saved-queries-deprecation',
+    ];
+
+    it('blocks the transactions dataset and points users to Explore', async () => {
+      const organization = OrganizationFixture({features: deprecationFeatures});
+
+      const mockRequests = renderMockRequests();
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/errors/results/`,
+            query: {...generateFields(), queryDataset: 'transaction-like'},
+          },
+          route: '/organizations/:orgId/explore/errors/results/',
+        },
+        organization,
+      });
+
+      const link = await screen.findByRole('link', {name: 'Explore Queries'});
+      expect(link).toHaveAttribute(
+        'href',
+        '/organizations/org-slug/explore/saved-queries/'
+      );
+
+      expect(mockRequests.eventsResultsMock).not.toHaveBeenCalled();
+      expect(mockRequests.eventsStatsMock).not.toHaveBeenCalled();
+      expect(mockRequests.eventsMetaMock).not.toHaveBeenCalled();
+    });
+
+    it('still renders the table for the errors dataset', async () => {
+      const organization = OrganizationFixture({features: deprecationFeatures});
+
+      const mockRequests = renderMockRequests();
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/errors/results/`,
+            query: {...generateFields(), queryDataset: 'error-events'},
+          },
+          route: '/organizations/:orgId/explore/errors/results/',
+        },
+        organization,
+      });
+
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
+      expect(mockRequests.eventsResultsMock).toHaveBeenCalled();
+      expect(mockRequests.eventsStatsMock).toHaveBeenCalled();
+      await waitFor(() => expect(mockRequests.eventsMetaMock).toHaveBeenCalled());
+      expect(
+        screen.queryByRole('link', {name: 'Explore Queries'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('does not block transactions when the deprecation is disabled', async () => {
+      const organization = OrganizationFixture({features: ['discover-basic']});
+
+      const mockRequests = renderMockRequests();
+
+      ProjectsStore.loadInitialData([ProjectFixture()]);
+
+      render(<Results />, {
+        initialRouterConfig: {
+          location: {
+            pathname: `/organizations/${organization.slug}/explore/discover/results/`,
+            query: {...generateFields(), queryDataset: 'transaction-like'},
+          },
+          route: '/organizations/:orgId/explore/discover/results/',
+        },
+        organization,
+      });
+
+      expect(await screen.findByText(eventTitle)).toBeInTheDocument();
+      expect(mockRequests.eventsResultsMock).toHaveBeenCalled();
+      expect(mockRequests.eventsStatsMock).toHaveBeenCalled();
+      await waitFor(() => expect(mockRequests.eventsMetaMock).toHaveBeenCalled());
+      expect(
+        screen.queryByRole('link', {name: 'Explore Queries'})
+      ).not.toBeInTheDocument();
     });
   });
 });

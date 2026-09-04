@@ -1,11 +1,11 @@
 import {Fragment, type ReactNode} from 'react';
-import type {Theme} from '@emotion/react';
-import styled from '@emotion/styled';
 
-import ExternalLink from 'sentry/components/links/externalLink';
-import QuestionTooltip from 'sentry/components/questionTooltip';
-import CrumbErrorTitle from 'sentry/components/replays/breadcrumbs/errorTitle';
-import SelectorList from 'sentry/components/replays/breadcrumbs/selectorList';
+import {InfoTip} from '@sentry/scraps/info';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {CrumbErrorTitle} from 'sentry/components/replays/breadcrumbs/errorTitle';
+import {SelectorList} from 'sentry/components/replays/breadcrumbs/selectorList';
 import {
   IconCursorArrow,
   IconFire,
@@ -28,12 +28,12 @@ import {
   IconWifi,
 } from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {explodeSlug} from 'sentry/utils';
 import {TabKey} from 'sentry/utils/replays/hooks/useActiveReplayTab';
 import type {
   BreadcrumbFrame,
   ClickFrame,
+  ClickFrameNode,
   ConsoleFrame,
   DeviceBatteryFrame,
   DeviceConnectivityFrame,
@@ -62,11 +62,12 @@ import {
   isRageClick,
 } from 'sentry/utils/replays/types';
 import {toTitleCase} from 'sentry/utils/string/toTitleCase';
-import stripURLOrigin from 'sentry/utils/url/stripURLOrigin';
+import type {GraphicsVariant} from 'sentry/utils/theme';
+import {stripURLOrigin} from 'sentry/utils/url/stripURLOrigin';
 import {MODULE_DOC_LINK} from 'sentry/views/insights/browser/webVitals/settings';
 
 interface Details {
-  colorGraphicsToken: keyof Theme['tokens']['graphics'];
+  colorGraphicsToken: GraphicsVariant;
   description: ReactNode;
   icon: ReactNode;
   tabKey: TabKey;
@@ -82,7 +83,7 @@ const DEVICE_CONNECTIVITY_MESSAGE: Record<string, string> = {
 
 const MAPPER_FOR_FRAME: Record<string, (frame: any) => Details> = {
   'replay.init': (frame: BreadcrumbFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: stripURLOrigin(frame.message ?? ''),
     tabKey: TabKey.CONSOLE,
     title: 'Replay Start',
@@ -97,7 +98,7 @@ const MAPPER_FOR_FRAME: Record<string, (frame: any) => Details> = {
   }),
   feedback: (frame: FeedbackFrame) => ({
     colorGraphicsToken: 'promotion',
-    description: frame.data.projectSlug,
+    description: frame.message,
     tabKey: TabKey.BREADCRUMBS,
     title: defaultTitle(frame),
     icon: <IconMegaphone size="xs" />,
@@ -274,7 +275,7 @@ const MAPPER_FOR_FRAME: Record<string, (frame: any) => Details> = {
     icon: <IconFocus isFocused={false} size="xs" />,
   }),
   console: (frame: ConsoleFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: frame.message ?? '',
     tabKey: TabKey.CONSOLE,
     title: 'Console',
@@ -346,77 +347,77 @@ const MAPPER_FOR_FRAME: Record<string, (frame: any) => Details> = {
     }
   },
   memory: () => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.MEMORY,
     title: 'Memory',
     icon: <IconInfo size="xs" />,
   }),
   paint: () => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: 'Paint',
     icon: <IconInfo size="xs" />,
   }),
   'resource.css': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.fetch': (frame: RequestFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.iframe': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.img': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.link': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.other': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.script': (frame: ResourceFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.xhr': (frame: RequestFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
     icon: <IconSort size="xs" rotated />,
   }),
   'resource.http': (frame: RequestFrame) => ({
-    colorGraphicsToken: 'muted',
+    colorGraphicsToken: 'neutral',
     description: undefined,
     tabKey: TabKey.NETWORK,
     title: frame.description,
@@ -451,14 +452,14 @@ const MAPPER_FOR_FRAME: Record<string, (frame: any) => Details> = {
 };
 
 const MAPPER_DEFAULT = (frame: any): Details => ({
-  colorGraphicsToken: 'muted',
+  colorGraphicsToken: 'neutral',
   description: frame.message ?? frame.data ?? '',
   tabKey: TabKey.BREADCRUMBS,
   title: toTitleCase(defaultTitle(frame)),
   icon: <IconTerminal size="xs" />,
 });
 
-export default function getFrameDetails(frame: ReplayFrame): Details {
+export function getFrameDetails(frame: ReplayFrame): Details {
   const key = getFrameOpOrCategory(frame);
   const fn = MAPPER_FOR_FRAME[key] ?? MAPPER_DEFAULT;
   try {
@@ -470,7 +471,11 @@ export default function getFrameDetails(frame: ReplayFrame): Details {
 
 export function defaultTitle(frame: ReplayFrame | RawBreadcrumbFrame) {
   // Override title for User Feedback frames
-  if ('message' in frame && frame.message === 'User Feedback') {
+  if (
+    'message' in frame &&
+    typeof frame.message === 'string' &&
+    frame.category === 'feedback'
+  ) {
     return t('User Feedback');
   }
   if ('category' in frame && frame.category) {
@@ -483,10 +488,10 @@ export function defaultTitle(frame: ReplayFrame | RawBreadcrumbFrame) {
   return 'description' in frame ? (frame.description ?? '') : '';
 }
 
-function stringifyNodeAttributes(node: SlowClickFrame['data']['node']) {
+function stringifyNodeAttributes(node: ClickFrameNode | undefined) {
   const {tagName, attributes} = node ?? {};
   const attributesEntries = Object.entries(attributes ?? {});
-  const componentName = node?.attributes['data-sentry-component'];
+  const componentName = attributes?.['data-sentry-component'];
 
   return `${componentName ?? tagName}${
     attributesEntries.length
@@ -513,11 +518,10 @@ function WebVitalTitle(frame: WebVitalFrame) {
     }
   };
   return (
-    <Title>
+    <Flex align="center" gap="xs">
       {t('Web Vital: ') + toTitleCase(explodeSlug(frame.description))}
-      <QuestionTooltip
-        isHoverable
-        size={'xs'}
+      <InfoTip
+        size="xs"
         title={
           <Fragment>
             {vitalDefinition()}
@@ -527,12 +531,6 @@ function WebVitalTitle(frame: WebVitalFrame) {
           </Fragment>
         }
       />
-    </Title>
+    </Flex>
   );
 }
-
-const Title = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.5)};
-`;

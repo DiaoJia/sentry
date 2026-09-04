@@ -1,25 +1,19 @@
-from functools import cached_property
-from unittest.mock import patch
+from __future__ import annotations
+
+from typing import Any
 
 import pytest
 import responses
+from django.urls import reverse
 from rest_framework.serializers import ValidationError
 
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
-from sentry.integrations.opsgenie.integration import OpsgenieIntegrationProvider
-from sentry.integrations.opsgenie.tasks import (
-    ALERT_LEGACY_INTEGRATIONS,
-    ALERT_LEGACY_INTEGRATIONS_WITH_NAME,
-)
-from sentry.integrations.types import EventLifecycleOutcome
-from sentry.models.rule import Rule
+from sentry.integrations.pipeline import IntegrationPipeline
 from sentry.shared_integrations.exceptions import ApiRateLimitedError, ApiUnauthorized
-from sentry.testutils.asserts import assert_slo_metric
-from sentry.testutils.cases import APITestCase, IntegrationTestCase
+from sentry.testutils.cases import APITestCase, TestCase
 from sentry.testutils.helpers.features import with_feature
-from sentry.testutils.silo import assume_test_silo_mode_of, control_silo_test
-from sentry_plugins.opsgenie.plugin import OpsGeniePlugin
+from sentry.testutils.silo import control_silo_test
 
 EXTERNAL_ID = "test-app"
 METADATA = {
@@ -30,104 +24,11 @@ METADATA = {
 
 
 @control_silo_test
-class OpsgenieIntegrationTest(IntegrationTestCase):
-    provider = OpsgenieIntegrationProvider
-    config_no_key = {
-        "base_url": "https://api.opsgenie.com/",
-        "provider": "cool-name",
-        "api_key": "",
-    }
-    config_with_key = {
-        "base_url": "https://api.opsgenie.com/",
-        "provider": "cool-name",
-        "api_key": "123-key",
-    }
-    eu_config_no_key = {
-        "base_url": "https://api.eu.opsgenie.com/",
-        "provider": "chill-name",
-        "api_key": "",
-    }
-    eu_config_with_key = {
-        "base_url": "https://api.eu.opsgenie.com/",
-        "provider": "chill-name",
-        "api_key": "123-key",
-    }
-
-    def setUp(self):
-        super().setUp()
-        self.init_path_without_guide = f"{self.init_path}?completed_installation_guide"
-
-    def assert_setup_flow(self, config):
-        resp = self.client.get(self.init_path)
-        assert resp.status_code == 200
-
-        resp = self.client.post(self.init_path, data=config)
-        assert resp.status_code == 200
-
-    def test_installation_no_key(self):
-        self.assert_setup_flow(self.config_no_key)
-
-        integration = Integration.objects.get(provider=self.provider.key)
-        org_integration = OrganizationIntegration.objects.get(integration_id=integration.id)
-
-        assert org_integration.config["team_table"] == []
-        assert org_integration.organization_id == self.organization.id
-        assert org_integration.config == {"team_table": []}
-        assert integration.external_id == "cool-name"
-        assert integration.name == "cool-name"
-        assert integration.metadata["domain_name"] == "cool-name.app.opsgenie.com"
-
-    def test_eu_installation_no_key(self):
-        self.assert_setup_flow(self.eu_config_no_key)
-
-        integration = Integration.objects.get(provider=self.provider.key)
-        org_integration = OrganizationIntegration.objects.get(integration_id=integration.id)
-
-        assert org_integration.config["team_table"] == []
-        assert org_integration.organization_id == self.organization.id
-        assert org_integration.config == {"team_table": []}
-        assert integration.external_id == "chill-name"
-        assert integration.name == "chill-name"
-        assert integration.metadata["domain_name"] == "chill-name.app.eu.opsgenie.com"
-
-    def test_installation_with_key(self):
-        self.assert_setup_flow(self.config_with_key)
-
-        integration = Integration.objects.get(provider=self.provider.key)
-        org_integration = OrganizationIntegration.objects.get(integration_id=integration.id)
-
-        assert org_integration.config["team_table"] == [
-            {
-                "team": "my-first-key",
-                "id": f"{org_integration.id}-my-first-key",
-                "integration_key": "123-key",
-            }
-        ]
-        assert org_integration.organization_id == self.organization.id
-        assert integration.external_id == "cool-name"
-        assert integration.name == "cool-name"
-        assert integration.metadata["domain_name"] == "cool-name.app.opsgenie.com"
-
-    def test_eu_installation_with_key(self):
-        self.assert_setup_flow(self.eu_config_with_key)
-
-        integration = Integration.objects.get(provider=self.provider.key)
-        org_integration = OrganizationIntegration.objects.get(integration_id=integration.id)
-
-        assert org_integration.config["team_table"] == [
-            {
-                "team": "my-first-key",
-                "id": f"{org_integration.id}-my-first-key",
-                "integration_key": "123-key",
-            }
-        ]
-        assert org_integration.organization_id == self.organization.id
-        assert integration.external_id == "chill-name"
-        assert integration.name == "chill-name"
-        assert integration.metadata["domain_name"] == "chill-name.app.eu.opsgenie.com"
+class OpsgenieUpdateConfigTest(TestCase):
+    provider = "opsgenie"
 
     @responses.activate
-    def test_update_config_valid(self):
+    def test_update_config_valid(self) -> None:
         integration = self.create_provider_integration(
             provider="opsgenie", name="test-app", external_id=EXTERNAL_ID, metadata=METADATA
         )
@@ -135,7 +36,7 @@ class OpsgenieIntegrationTest(IntegrationTestCase):
         integration.add_organization(self.organization, self.user)
         installation = integration.get_installation(self.organization.id)
 
-        integration = Integration.objects.get(provider=self.provider.key)
+        integration = Integration.objects.get(provider=self.provider)
         org_integration = OrganizationIntegration.objects.get(integration_id=integration.id)
 
         responses.add(
@@ -150,7 +51,7 @@ class OpsgenieIntegrationTest(IntegrationTestCase):
         }
 
     @responses.activate
-    def test_update_config_invalid(self):
+    def test_update_config_invalid(self) -> None:
         integration = self.create_provider_integration(
             provider="opsgenie", name="test-app", external_id=EXTERNAL_ID, metadata=METADATA
         )
@@ -186,7 +87,7 @@ class OpsgenieIntegrationTest(IntegrationTestCase):
         }
 
     @responses.activate
-    def test_update_config_invalid_rate_limited(self):
+    def test_update_config_invalid_rate_limited(self) -> None:
         integration = self.create_provider_integration(
             provider="opsgenie", name="test-app", external_id=EXTERNAL_ID, metadata=METADATA
         )
@@ -205,7 +106,7 @@ class OpsgenieIntegrationTest(IntegrationTestCase):
             installation.update_organization_config(data)
 
     @responses.activate
-    def test_update_config_invalid_integration_key(self):
+    def test_update_config_invalid_integration_key(self) -> None:
         integration = self.create_provider_integration(
             provider="opsgenie", name="test-app", external_id=EXTERNAL_ID, metadata=METADATA
         )
@@ -223,376 +124,253 @@ class OpsgenieIntegrationTest(IntegrationTestCase):
         with pytest.raises(ApiUnauthorized):
             installation.update_organization_config(data)
 
-    @with_feature(
-        {
-            "organizations:integrations-enterprise-alert-rule": False,
-            "organizations:integrations-enterprise-incident-management": False,
-        }
-    )
-    def test_disallow_when_no_business_plan(self):
-        resp = self.client.get(self.init_path)
-        assert resp.status_code == 200
-        assert (
-            b"At least one feature from this list has to be enabled in order to setup the integration"
-            in resp.content
-        )
 
+@control_silo_test
+class OpsgenieApiPipelineTest(APITestCase):
+    endpoint = "sentry-api-0-organization-pipeline"
+    method = "post"
 
-class OpsgenieMigrationIntegrationTest(APITestCase):
-    @cached_property
-    def integration(self):
-        integration = self.create_provider_integration(
-            provider="opsgenie", name="test-app", external_id=EXTERNAL_ID, metadata=METADATA
-        )
-        integration.add_organization(self.organization, self.user)
-        return integration
-
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
-        self.project = self.create_project(
-            name="thonk", organization=self.organization, teams=[self.team]
-        )
-        self.plugin = OpsGeniePlugin()
-        self.plugin.set_option("enabled", True, self.project)
-        self.plugin.set_option("alert_url", "https://api.opsgenie.com/v2/alerts/", self.project)
-        self.plugin.set_option("api_key", "123-key", self.project)
-        with assume_test_silo_mode_of(Integration):
-            self.installation = self.integration.get_installation(self.organization.id)
         self.login_as(self.user)
 
-    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_migrate_plugin(self, mock_record):
-        """
-        Test that 2 projects with the Opsgenie plugin activated that have one alert rule each
-        and distinct API keys are successfully migrated.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {"team_table": []}
-            org_integration.save()
-
-        project2 = self.create_project(
-            name="thinkies", organization=self.organization, teams=[self.team]
-        )
-        plugin2 = OpsGeniePlugin()
-        plugin2.set_option("enabled", True, project2)
-        plugin2.set_option("alert_url", "https://api.opsgenie.com/v2/alerts/", project2)
-        plugin2.set_option("api_key", "456-key", project2)
-
-        Rule.objects.create(
-            label="rule",
-            project=self.project,
-            data={"match": "all", "actions": [ALERT_LEGACY_INTEGRATIONS]},
+    def _get_pipeline_url(self, organization=None) -> str:
+        organization = organization or self.organization
+        return reverse(
+            self.endpoint,
+            args=[organization.slug, IntegrationPipeline.pipeline_name],
         )
 
-        Rule.objects.create(
-            label="rule2",
-            project=project2,
-            data={"match": "all", "actions": [ALERT_LEGACY_INTEGRATIONS]},
+    def _initialize_pipeline(self, organization=None) -> Any:
+        return self.client.post(
+            self._get_pipeline_url(organization),
+            data={"action": "initialize", "provider": "opsgenie"},
+            format="json",
         )
 
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
+    def _advance_step(self, data: dict[str, Any], organization=None) -> Any:
+        return self.client.post(self._get_pipeline_url(organization), data=data, format="json")
 
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-        id1 = str(self.organization_integration.id) + "-thonk"
-        id2 = str(self.organization_integration.id) + "-thinkies"
-        assert org_integration.config == {
-            "team_table": [
-                {"id": id1, "team": "thonk [MIGRATED]", "integration_key": "123-key"},
-                {"id": id2, "team": "thinkies [MIGRATED]", "integration_key": "456-key"},
-            ]
+    def _install(
+        self,
+        organization=None,
+        *,
+        base_url: str = "https://api.opsgenie.com/",
+        provider: str = "cool-name",
+        api_key: str = "123-key",
+    ) -> Any:
+        self._initialize_pipeline(organization)
+        return self._advance_step(
+            {"baseUrl": base_url, "provider": provider, "apiKey": api_key}, organization
+        )
+
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
         }
+    )
+    def test_initialize_pipeline(self) -> None:
+        resp = self._initialize_pipeline()
+        assert resp.status_code == 200
+        assert resp.data["step"] == "installation_config"
+        assert resp.data["stepIndex"] == 0
+        assert resp.data["totalSteps"] == 1
+        assert resp.data["provider"] == "opsgenie"
+        assert "baseUrlChoices" in resp.data["data"]
 
-        rule_updated = Rule.objects.get(
-            label="rule",
-            project=self.project,
-        )
-
-        assert rule_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
-            {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": id1,
-            },
-        ]
-
-        rule2_updated = Rule.objects.get(
-            label="rule2",
-            project=project2,
-        )
-        assert rule2_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
-            {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": id2,
-            },
-        ]
-
-        assert self.plugin.is_enabled(self.project) is False
-        assert self.plugin.is_configured(self.project) is False
-        assert plugin2.is_enabled(project2) is False
-        assert plugin2.is_configured(self.project) is False
-
-        assert_slo_metric(mock_record, EventLifecycleOutcome.SUCCESS)
-
-    def test_no_duplicate_keys(self):
-        """
-        Keys should not be migrated twice.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {"team_table": []}
-            org_integration.save()
-
-        project2 = self.create_project(
-            name="thinkies", organization=self.organization, teams=[self.team]
-        )
-        plugin2 = OpsGeniePlugin()
-        plugin2.set_option("enabled", True, project2)
-        plugin2.set_option("alert_url", "https://api.opsgenie.com/v2/alerts/", project2)
-        plugin2.set_option("api_key", "123-key", project2)
-
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
-
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-        id1 = str(self.organization_integration.id) + "-thonk"
-
-        assert org_integration.config == {
-            "team_table": [
-                {"id": id1, "team": "thonk [MIGRATED]", "integration_key": "123-key"},
-            ]
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
         }
-
-    def test_existing_key(self):
-        """
-        Test that migration works if a key has already been added to config.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {
-                "team_table": [
-                    {
-                        "id": str(self.organization_integration.id) + "-pikachu",
-                        "team": "pikachu",
-                        "integration_key": "123-key",
-                    },
-                ]
+    )
+    def test_invalid_base_url(self) -> None:
+        self._initialize_pipeline()
+        resp = self._advance_step(
+            {
+                "baseUrl": "https://evil.example.com/",
+                "provider": "test-app",
             }
-            org_integration.save()
-
-        Rule.objects.create(
-            label="rule",
-            project=self.project,
-            data={"match": "all", "actions": [ALERT_LEGACY_INTEGRATIONS]},
         )
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
+        assert resp.status_code == 400
 
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
+        }
+    )
+    def test_full_pipeline_flow(self) -> None:
+        resp = self._initialize_pipeline()
+        assert resp.data["step"] == "installation_config"
+
+        resp = self._advance_step(
+            {
+                "baseUrl": "https://api.opsgenie.com/",
+                "provider": "cool-name",
+                "apiKey": "123-key",
+            }
+        )
+        assert resp.status_code == 200
+        assert resp.data["status"] == "complete"
+
+        integration = Integration.objects.get(provider="opsgenie")
+        assert integration.external_id == "cool-name"
+        assert integration.name == "cool-name"
+        assert integration.metadata == {
+            "base_url": "https://api.opsgenie.com/",
+            "domain_name": "cool-name.app.opsgenie.com",
+        }
+
+        org_integration = OrganizationIntegration.objects.get(
+            organization_id=self.organization.id,
+            integration=integration,
+        )
         assert org_integration.config == {
             "team_table": [
                 {
-                    "id": str(self.organization_integration.id) + "-pikachu",
-                    "team": "pikachu",
+                    "team": "my-first-key",
+                    "id": f"{org_integration.id}-my-first-key",
                     "integration_key": "123-key",
-                },
+                }
             ]
         }
 
-        rule_updated = Rule.objects.get(
-            label="rule",
-            project=self.project,
-        )
-
-        assert rule_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
+        }
+    )
+    def test_full_pipeline_flow_no_key(self) -> None:
+        self._initialize_pipeline()
+        resp = self._advance_step(
             {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": str(self.organization_integration.id) + "-pikachu",
-            },
-        ]
-
-    def test_multiple_rules(self):
-        """
-        Test multiple rules, some of which send notifications to legacy integrations.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {"team_table": []}
-            org_integration.save()
-
-        Rule.objects.create(
-            label="rule",
-            project=self.project,
-            data={"match": "all", "actions": [ALERT_LEGACY_INTEGRATIONS]},
-        )
-
-        Rule.objects.create(
-            label="rule2",
-            project=self.project,
-            data={"match": "all", "actions": []},
-        )
-
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
-
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-        id1 = str(org_integration.id) + "-thonk"
-        rule_updated = Rule.objects.get(
-            label="rule",
-            project=self.project,
-        )
-
-        assert rule_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
-            {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": id1,
-            },
-        ]
-
-        rule2_updated = Rule.objects.get(
-            label="rule2",
-            project=self.project,
-        )
-
-        assert rule2_updated.data["actions"] == []
-
-    def test_existing_rule(self):
-        """
-        Don't add a new recipient from an API key if the recipient already exists.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {
-                "team_table": [
-                    {
-                        "id": str(self.organization_integration.id) + "-pikachu",
-                        "team": "pikachu",
-                        "integration_key": "123-key",
-                    },
-                ]
+                "baseUrl": "https://api.opsgenie.com/",
+                "provider": "cool-name",
             }
-            org_integration.save()
-
-        Rule.objects.create(
-            label="rule",
-            project=self.project,
-            data={
-                "match": "all",
-                "actions": [
-                    ALERT_LEGACY_INTEGRATIONS,
-                    {
-                        "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                        "account": self.integration.id,
-                        "team": str(self.organization_integration.id) + "-pikachu",
-                    },
-                ],
-            },
         )
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
+        assert resp.status_code == 200
+        assert resp.data["status"] == "complete"
 
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-        assert org_integration.config == {
-            "team_table": [
-                {
-                    "id": str(self.organization_integration.id) + "-pikachu",
-                    "team": "pikachu",
-                    "integration_key": "123-key",
-                },
-            ]
+        integration = Integration.objects.get(provider="opsgenie")
+        assert integration.external_id == "cool-name"
+        assert integration.metadata == {
+            "base_url": "https://api.opsgenie.com/",
+            "domain_name": "cool-name.app.opsgenie.com",
         }
+        assert OrganizationIntegration.objects.get(
+            organization_id=self.organization.id, integration=integration
+        ).config == {"team_table": []}
 
-        rule_updated = Rule.objects.get(
-            label="rule",
-            project=self.project,
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
+        }
+    )
+    def test_cross_organization_install_preserves_global_data_and_isolates_keys(self) -> None:
+        self._install()
+        integration = Integration.objects.get(provider="opsgenie", external_id="cool-name")
+
+        other_organization = self.create_organization(owner=self.user)
+        resp = self._install(
+            other_organization,
+            base_url="https://api.eu.opsgenie.com/",
+            api_key="other-key",
         )
+        assert resp.status_code == 200
 
-        assert rule_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
+        integration.refresh_from_db()
+        assert integration.name == "cool-name"
+        assert integration.metadata == {
+            "base_url": "https://api.opsgenie.com/",
+            "domain_name": "cool-name.app.opsgenie.com",
+        }
+        assert Integration.objects.filter(provider="opsgenie", external_id="cool-name").count() == 1
+
+        organization_integration = OrganizationIntegration.objects.get(
+            integration=integration, organization_id=self.organization.id
+        )
+        other_organization_integration = OrganizationIntegration.objects.get(
+            integration=integration, organization_id=other_organization.id
+        )
+        assert organization_integration.config["team_table"] == [
             {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": str(self.organization_integration.id) + "-pikachu",
-            },
+                "team": "my-first-key",
+                "id": f"{organization_integration.id}-my-first-key",
+                "integration_key": "123-key",
+            }
+        ]
+        assert other_organization_integration.config["team_table"] == [
+            {
+                "team": "my-first-key",
+                "id": f"{other_organization_integration.id}-my-first-key",
+                "integration_key": "other-key",
+            }
         ]
 
-    def test_migrate_plugin_with_name(self):
-        """
-        Test that the Opsgenie plugin is migrated correctly if the legacy alert action has a name field.
-        """
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-            org_integration.config = {"team_table": []}
-            org_integration.save()
-
-        Rule.objects.create(
-            label="rule",
-            project=self.project,
-            data={"match": "all", "actions": [ALERT_LEGACY_INTEGRATIONS_WITH_NAME]},
-        )
-
-        with self.tasks():
-            self.installation.schedule_migrate_opsgenie_plugin()
-
-        with assume_test_silo_mode_of(OrganizationIntegration):
-            org_integration = OrganizationIntegration.objects.get(
-                integration_id=self.integration.id
-            )
-        id1 = str(self.organization_integration.id) + "-thonk"
-        assert org_integration.config == {
-            "team_table": [
-                {"id": id1, "team": "thonk [MIGRATED]", "integration_key": "123-key"},
-            ]
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
         }
+    )
+    def test_existing_legacy_key_is_not_copied_to_new_organization(self) -> None:
+        integration = self.create_provider_integration(
+            provider="opsgenie",
+            external_id="cool-name",
+            name="Existing Name",
+            metadata={
+                "api_key": "legacy-key",
+                "base_url": "https://api.opsgenie.com/",
+                "domain_name": "cool-name.app.opsgenie.com",
+            },
+        )
+        other_organization = self.create_organization(owner=self.user)
 
-        rule_updated = Rule.objects.get(
-            label="rule",
-            project=self.project,
+        resp = self._install(other_organization, api_key="")
+        assert resp.status_code == 200
+
+        integration.refresh_from_db()
+        assert integration.name == "Existing Name"
+        assert integration.metadata["api_key"] == "legacy-key"
+        assert OrganizationIntegration.objects.get(
+            integration=integration, organization_id=other_organization.id
+        ).config == {"team_table": []}
+
+    @with_feature(
+        {
+            "organizations:integrations-enterprise-alert-rule": True,
+            "organizations:integrations-enterprise-incident-management": True,
+        }
+    )
+    def test_same_organization_reinstall_preserves_global_data_and_replaces_key(self) -> None:
+        self._install()
+        integration = Integration.objects.get(provider="opsgenie", external_id="cool-name")
+        org_integration = OrganizationIntegration.objects.get(
+            integration=integration, organization_id=self.organization.id
         )
 
-        assert rule_updated.data["actions"] == [
-            ALERT_LEGACY_INTEGRATIONS,
-            {
-                "id": "sentry.integrations.opsgenie.notify_action.OpsgenieNotifyTeamAction",
-                "account": self.integration.id,
-                "team": id1,
-            },
-        ]
+        self._install(base_url="https://api.eu.opsgenie.com/", api_key="replacement-key")
 
-        assert self.plugin.is_enabled(self.project) is False
-        assert self.plugin.is_configured(self.project) is False
+        integration.refresh_from_db()
+        org_integration.refresh_from_db()
+        assert integration.metadata == {
+            "base_url": "https://api.opsgenie.com/",
+            "domain_name": "cool-name.app.opsgenie.com",
+        }
+        assert (
+            OrganizationIntegration.objects.get(
+                integration=integration, organization_id=self.organization.id
+            ).id
+            == org_integration.id
+        )
+        assert org_integration.config["team_table"] == [
+            {
+                "team": "my-first-key",
+                "id": f"{org_integration.id}-my-first-key",
+                "integration_key": "replacement-key",
+            }
+        ]

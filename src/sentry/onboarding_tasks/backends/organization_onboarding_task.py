@@ -1,11 +1,13 @@
 from datetime import datetime
 
+import sentry_sdk
 from django.db import IntegrityError, router, transaction
 from django.db.models import Q
 from django.forms import model_to_dict
 from django.utils import timezone
 
 from sentry import analytics
+from sentry.analytics.events.onboarding_complete import OnboardingCompleteEvent
 from sentry.models.options.organization_option import OrganizationOption
 from sentry.models.organization import Organization
 from sentry.models.organizationonboardingtask import (
@@ -30,11 +32,11 @@ class OrganizationOnboardingTaskBackend(OnboardingTaskBackend[OrganizationOnboar
         )
 
     def create_or_update_onboarding_task(self, organization, user, task, values):
-        return self.Model.objects.create_or_update(
+        return self.Model.objects.update_or_create(
             organization=organization,
             task=task,
-            values=values,
-            defaults={"user_id": user.id},
+            defaults=values,
+            create_defaults={"user_id": user.id, **values},
         )
 
     def complete_onboarding_task(
@@ -102,12 +104,17 @@ class OrganizationOnboardingTaskBackend(OnboardingTaskBackend[OrganizationOnboar
                         key="onboarding:complete",
                         value={"updated": json.datetime_to_str(timezone.now())},
                     )
-                analytics.record(
-                    "onboarding.complete",
-                    user_id=organization.default_owner_id,
-                    organization_id=organization_id,
-                    referrer="onboarding_tasks",
-                )
+                try:
+                    analytics.record(
+                        OnboardingCompleteEvent(
+                            user_id=organization.default_owner_id,
+                            organization_id=organization_id,
+                            referrer="onboarding_tasks",
+                        )
+                    )
+                except Exception as e:
+                    sentry_sdk.capture_exception(e)
+
             except IntegrityError:
                 pass
 

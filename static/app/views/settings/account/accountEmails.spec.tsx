@@ -5,16 +5,15 @@ import {
   renderGlobalModal,
   screen,
   userEvent,
+  waitFor,
 } from 'sentry-test/reactTestingLibrary';
 
 import AccountEmails from 'sentry/views/settings/account/accountEmails';
 
-jest.mock('scroll-to-element', () => {});
-
 const ENDPOINT = '/users/me/emails/';
 
-describe('AccountEmails', function () {
-  beforeEach(function () {
+describe('AccountEmails', () => {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: ENDPOINT,
@@ -22,11 +21,11 @@ describe('AccountEmails', function () {
     });
   });
 
-  it('renders with emails', function () {
+  it('renders with emails', () => {
     render(<AccountEmails />);
   });
 
-  it('can remove an email', async function () {
+  it('can remove an email', async () => {
     const mock = MockApiClient.addMockResponse({
       url: ENDPOINT,
       method: 'DELETE',
@@ -54,7 +53,7 @@ describe('AccountEmails', function () {
     );
   });
 
-  it('can change a secondary email to primary an email', async function () {
+  it('can change a secondary email to primary an email', async () => {
     const mock = MockApiClient.addMockResponse({
       url: ENDPOINT,
       method: 'PUT',
@@ -79,7 +78,7 @@ describe('AccountEmails', function () {
     );
   });
 
-  it('can resend verification email', async function () {
+  it('can resend verification email', async () => {
     const mock = MockApiClient.addMockResponse({
       url: `${ENDPOINT}confirm/`,
       method: 'POST',
@@ -104,7 +103,7 @@ describe('AccountEmails', function () {
     );
   });
 
-  it('can add a secondary email', async function () {
+  it('can add a secondary email', async () => {
     const mock = MockApiClient.addMockResponse({
       url: ENDPOINT,
       method: 'POST',
@@ -131,24 +130,31 @@ describe('AccountEmails', function () {
     });
 
     const textbox = await screen.findByRole('textbox');
+    await screen.findAllByLabelText('Remove email');
     expect(screen.getAllByLabelText('Remove email')).toHaveLength(
       AccountEmailsFixture().filter(email => !email.isPrimary).length
     );
 
-    await userEvent.type(textbox, 'test@example.com{enter}');
-    expect(screen.getAllByLabelText('Remove email')).toHaveLength(
-      mockGetResponseBody.filter(email => !email.isPrimary).length
-    );
+    await userEvent.type(textbox, 'test@example.com');
+    await userEvent.click(screen.getByRole('button', {name: 'Add email'}));
 
-    expect(mock).toHaveBeenCalledWith(
-      ENDPOINT,
-      expect.objectContaining({
-        method: 'POST',
-        data: {
-          email: 'test@example.com',
-        },
-      })
-    );
+    await waitFor(() => {
+      expect(mock).toHaveBeenCalledWith(
+        ENDPOINT,
+        expect.objectContaining({
+          method: 'POST',
+          data: {
+            email: 'test@example.com',
+          },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByLabelText('Remove email')).toHaveLength(
+        mockGetResponseBody.filter(email => !email.isPrimary).length
+      );
+    });
 
     expect(mockGet).toHaveBeenCalledWith(
       ENDPOINT,

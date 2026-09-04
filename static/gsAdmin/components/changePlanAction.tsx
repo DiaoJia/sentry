@@ -1,5 +1,4 @@
-import React, {Fragment, useMemo, useState} from 'react';
-import styled from '@emotion/styled';
+import {Fragment, useMemo, useState} from 'react';
 import classNames from 'classnames';
 
 import {
@@ -7,26 +6,22 @@ import {
   addLoadingMessage,
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
-import {type ModalRenderProps, openModal} from 'sentry/actionCreators/modal';
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import FormModel from 'sentry/components/forms/model';
+import {openModal, type ModalRenderProps} from 'sentry/actionCreators/modal';
+import {FormModel} from 'sentry/components/forms/model';
 import type {Data, OnSubmitCallback} from 'sentry/components/forms/types';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import type {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
 import {toTitleCase} from 'sentry/utils/string/toTitleCase';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 
-import PlanList from 'admin/components/planList';
-import {ANNUAL, MONTHLY} from 'getsentry/constants';
+import {PlanList} from 'admin/components/planList';
+import {ANNUAL, BillingConfigTier, MONTHLY} from 'getsentry/constants';
 import type {BillingConfig, Plan, Subscription} from 'getsentry/types';
-import {CheckoutType, PlanTier, ReservedBudgetCategoryType} from 'getsentry/types';
-
-const ALLOWED_TIERS = [PlanTier.MM2, PlanTier.AM1, PlanTier.AM2, PlanTier.AM3];
+import {isCheckoutCategory} from 'getsentry/utils/dataCategory';
 
 type Props = {
   onSuccess: () => void;
@@ -42,48 +37,30 @@ function ChangePlanAction({
   onSuccess,
   closeModal,
 }: Props) {
-  const [billingInterval, setBillingInterval] = useState<string>(MONTHLY);
-  const [contractInterval, setContractInterval] = useState<string>(MONTHLY);
-  const [activeTier, setActiveTier] = useState<PlanTier>(PlanTier.AM3);
+  const [billingInterval, setBillingInterval] = useState(MONTHLY);
   const [activePlan, setActivePlan] = useState<Plan | null>(null);
   const [formModel] = useState(() => new FormModel());
   const orgId = organization.slug;
-
-  /**
-   * Check if the current subscription has Seer budget enabled
-   */
-  const hasCurrentSeerBudget = useMemo(() => {
-    return (
-      subscription.reservedBudgets?.some(
-        budget =>
-          budget.apiName === ReservedBudgetCategoryType.SEER && budget.reservedBudget > 0
-      ) ?? false
-    );
-  }, [subscription.reservedBudgets]);
-
-  // Initialize Seer budget value in form model
-  React.useEffect(() => {
-    formModel.setValue('seer', hasCurrentSeerBudget);
-  }, [formModel, hasCurrentSeerBudget]);
 
   const api = useApi({persistInFlight: true});
   const {
     data: configs,
     isPending,
     isError,
-  } = useApiQuery<BillingConfig>([`/customers/${orgId}/billing-config/?tier=all`], {
-    // TODO(isabella): pass billing config from customerDetails
-    staleTime: Infinity,
-  });
-
-  const planList = useMemo(
-    () =>
-      configs?.planList.filter(
-        plan =>
-          ALLOWED_TIERS.includes(plan.id.split('_')[0] as PlanTier) || plan.isTestPlan
-      ) ?? [],
-    [configs]
+  } = useApiQuery<BillingConfig>(
+    [
+      getApiUrl('/customers/$organizationIdOrSlug/billing-config/', {
+        path: {organizationIdOrSlug: orgId},
+      }),
+      {query: {tier: BillingConfigTier.ALL}},
+    ],
+    {
+      // TODO(isabella): pass billing config from customerDetails
+      staleTime: Infinity,
+    }
   );
+
+  const planList = useMemo(() => configs?.planList ?? [], [configs]);
 
   if (isPending) {
     return <LoadingIndicator />;
@@ -94,39 +71,18 @@ function ChangePlanAction({
   }
 
   /**
-   * Check if the user has provision permission for test plans
+   * Get the selectable plans for the current billing/contract interval.
    */
-  const hasProvisionPermission = () => {
-    return ConfigStore.get('user')?.permissions?.has?.('billing.provision');
-  };
-
-  /**
-   * Get the plan list for the active tier
-   */
-  const getPlanListForTier = (): BillingConfig['planList'] => {
-    if (activeTier === PlanTier.TEST) {
-      return planList.filter(
-        plan =>
-          plan.isTestPlan &&
-          plan.price !== 0 && // filter out enterprise, trial, and free test plans
-          plan.billingInterval === billingInterval &&
-          plan.contractInterval === contractInterval
-      );
-    }
-    return planList
-      .sort((a, b) => a.reservedMinimum - b.reservedMinimum)
-      .filter(
-        plan =>
-          plan.price &&
-          (plan.userSelectable || plan.checkoutType === CheckoutType.BUNDLE) &&
-          plan.billingInterval === billingInterval &&
-          plan.contractInterval === contractInterval &&
-          // Plan id on partner sponsored subscriptions is not modifiable so only including
-          // the existing plan in the list
-          ((partnerPlanId === null && plan.id.split('_')[0] === activeTier) ||
-            partnerPlanId === plan.id)
-      );
-  };
+  const getPlanList = (): BillingConfig['planList'] =>
+    planList.filter(
+      plan =>
+        plan.totalPrice &&
+        plan.userSelectable &&
+        plan.billingInterval === billingInterval &&
+        // Plan id on partner sponsored subscriptions is not modifiable so only
+        // including the existing plan in the list
+        (partnerPlanId === null || partnerPlanId === plan.id)
+    );
 
   /**
    * Find the closest volume tier in the plan for a given category and current volume
@@ -170,16 +126,13 @@ function ChangePlanAction({
    * and available tiers in the newly selected plan
    */
   const setInitialReservedVolumes = (planId: string): void => {
-    const plan = getPlanListForTier().find(p => p.id === planId) || null;
+    const plan = getPlanList().find(p => p.id === planId) || null;
     if (!plan) {
       return;
     }
 
     Object.entries(subscription.categories).forEach(([category, metricHistory]) => {
-      if (
-        metricHistory.reserved &&
-        plan.checkoutCategories.includes(category as DataCategory)
-      ) {
+      if (metricHistory.reserved && isCheckoutCategory(category as DataCategory, plan)) {
         const closestTier = findClosestTier(
           plan,
           category as DataCategory,
@@ -214,30 +167,10 @@ function ChangePlanAction({
       return;
     }
 
-    // Add Seer budget parameter for AM plans and TEST tier
-    const submitData = {
-      ...data,
-      seer: formModel.getValue('seer'),
-    };
-
-    if (activeTier === PlanTier.MM2) {
-      try {
-        await api.requestPromise(`/customers/${orgId}/`, {
-          method: 'PUT',
-          data: submitData,
-        });
-        onSubmitSuccess(data);
-      } catch (error) {
-        onSubmitError(error);
-      }
-      return;
-    }
-
-    // AM plans use a different endpoint to update plans
     try {
       await api.requestPromise(`/customers/${orgId}/subscription/`, {
         method: 'PUT',
-        data: submitData,
+        data,
       });
       onSubmitSuccess(data);
       onSuccess?.();
@@ -247,99 +180,36 @@ function ChangePlanAction({
   };
 
   // Plan for partner sponsored subscriptions is not modifiable so skipping
-  // the navigation that will allow modifying billing cycle and plan tier
-  const PLAN_TABS = [
-    {
-      label: 'AM3',
-      tier: PlanTier.AM3,
-    },
-    {
-      label: 'AM2',
-      tier: PlanTier.AM2,
-    },
-    {
-      label: 'AM1',
-      tier: PlanTier.AM1,
-    },
-    {
-      label: 'MM2',
-      tier: PlanTier.MM2,
-    },
-    {
-      label: 'TEST',
-      tier: PlanTier.TEST,
-    },
-  ];
-
+  // the navigation that will allow modifying the billing cycle
   const header = partnerPlanId ? null : (
-    <React.Fragment>
-      <TabsContainer>
-        <Tabs
-          value={activeTier}
-          onChange={tab => {
-            setActivePlan(null);
-            setActiveTier(tab);
+    <ul className="nav nav-pills">
+      <li
+        className={classNames({
+          active: billingInterval === MONTHLY,
+        })}
+      >
+        <a
+          onClick={() => {
             setBillingInterval(MONTHLY);
-            setContractInterval(MONTHLY);
-            formModel.setValue('seer', hasCurrentSeerBudget);
           }}
         >
-          <TabList>
-            {PLAN_TABS.filter(
-              tab => tab.tier !== PlanTier.TEST || hasProvisionPermission()
-            ).map(tab => (
-              <TabList.Item key={tab.tier}>{tab.label}</TabList.Item>
-            ))}
-          </TabList>
-        </Tabs>
-      </TabsContainer>
-      <ul className="nav nav-pills">
-        <li
-          className={classNames({
-            active: contractInterval === MONTHLY && billingInterval === MONTHLY,
-          })}
+          Monthly
+        </a>
+      </li>
+      <li
+        className={classNames({
+          active: billingInterval === ANNUAL,
+        })}
+      >
+        <a
+          onClick={() => {
+            setBillingInterval(ANNUAL);
+          }}
         >
-          <a
-            onClick={() => {
-              setBillingInterval(MONTHLY);
-              setContractInterval(MONTHLY);
-            }}
-          >
-            Monthly
-          </a>
-        </li>
-        {activeTier === PlanTier.MM2 && (
-          <li
-            className={classNames({
-              active: contractInterval === ANNUAL && billingInterval === MONTHLY,
-            })}
-          >
-            <a
-              onClick={() => {
-                setBillingInterval(MONTHLY);
-                setContractInterval(ANNUAL);
-              }}
-            >
-              Annual (Contract)
-            </a>
-          </li>
-        )}
-        <li
-          className={classNames({
-            active: contractInterval === ANNUAL && billingInterval === ANNUAL,
-          })}
-        >
-          <a
-            onClick={() => {
-              setBillingInterval(ANNUAL);
-              setContractInterval(ANNUAL);
-            }}
-          >
-            Annual (Upfront)
-          </a>
-        </li>
-      </ul>
-    </React.Fragment>
+          Annual (Upfront)
+        </a>
+      </li>
+    </ul>
   );
 
   return (
@@ -349,7 +219,6 @@ function ChangePlanAction({
         formModel={formModel}
         activePlan={activePlan}
         subscription={subscription}
-        organization={organization}
         onSubmit={handleSubmit}
         onCancel={closeModal}
         onSubmitSuccess={(data: Data) => {
@@ -363,7 +232,7 @@ function ChangePlanAction({
           addErrorMessage(error?.responseJSON?.detail ?? error);
         }}
         onPlanChange={handlePlanChange}
-        tierPlans={getPlanListForTier()}
+        tierPlans={getPlanList()}
       />
     </Fragment>
   );
@@ -376,11 +245,5 @@ type Options = {
   subscription: Subscription;
 };
 
-const triggerChangePlanAction = (opts: Options) =>
+export const triggerChangePlanAction = (opts: Options) =>
   openModal(deps => <ChangePlanAction {...deps} {...opts} />);
-
-const TabsContainer = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
-export default triggerChangePlanAction;

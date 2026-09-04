@@ -1,8 +1,31 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, StrEnum
-from typing import Generic, TypeVar
+from typing import Any, Generic, NotRequired, TypedDict, TypeVar
 
 from sentry.hybridcloud.rpc import ValueEqualityEnum
+
+
+class IntegrationIssueConfigField(TypedDict):
+    """JSON form field returned by an issue integration."""
+
+    name: str
+    label: str
+    type: str
+    default: NotRequired[Any]
+    defaultValue: NotRequired[Any]
+    required: NotRequired[bool]
+    choices: NotRequired[Sequence[tuple[Any, str]]]
+    url: NotRequired[str]
+    updatesForm: NotRequired[bool]
+    multiple: NotRequired[bool]
+    autosize: NotRequired[bool]
+    maxRows: NotRequired[int]
+    maxLength: NotRequired[int]
+    help: NotRequired[str]
+    placeholder: NotRequired[str]
+    prefetch: NotRequired[bool]
+    dependsOn: NotRequired[Sequence[str]]
 
 
 class ExternalProviders(ValueEqualityEnum):
@@ -11,6 +34,7 @@ class ExternalProviders(ValueEqualityEnum):
 
     EMAIL = 100
     SLACK = 110
+    SLACK_STAGING = 111
     MSTEAMS = 120
     PAGERDUTY = 130
     DISCORD = 140
@@ -19,6 +43,7 @@ class ExternalProviders(ValueEqualityEnum):
     GITHUB_ENTERPRISE = 201
     GITLAB = 210
     JIRA_SERVER = 300
+    PERFORCE = 400
 
     # TODO: do migration to delete this from database
     CUSTOM = 700
@@ -30,6 +55,7 @@ class ExternalProviders(ValueEqualityEnum):
 
 class IntegrationProviderSlug(StrEnum):
     SLACK = "slack"
+    SLACK_STAGING = "slack_staging"
     DISCORD = "discord"
     MSTEAMS = "msteams"
     JIRA = "jira"
@@ -42,12 +68,32 @@ class IntegrationProviderSlug(StrEnum):
     BITBUCKET_SERVER = "bitbucket_server"
     PAGERDUTY = "pagerduty"
     OPSGENIE = "opsgenie"
+    PERFORCE = "perforce"
+    DATADOG = "datadog"
+    DATADOG_PAT = "datadog_pat"
+    GCP = "gcp"
+
+
+MONITORING_PROVIDERS: frozenset[str] = frozenset(
+    {
+        IntegrationProviderSlug.DATADOG,
+        IntegrationProviderSlug.DATADOG_PAT,
+        IntegrationProviderSlug.GCP,
+    }
+)
+
+
+class DataForwarderProviderSlug(StrEnum):
+    SEGMENT = "segment"
+    SQS = "sqs"
+    SPLUNK = "splunk"
 
 
 class ExternalProviderEnum(StrEnum):
     EMAIL = "email"
     CUSTOM = "custom_scm"
     SLACK = IntegrationProviderSlug.SLACK
+    SLACK_STAGING = IntegrationProviderSlug.SLACK_STAGING
     MSTEAMS = IntegrationProviderSlug.MSTEAMS
     PAGERDUTY = IntegrationProviderSlug.PAGERDUTY
     DISCORD = IntegrationProviderSlug.DISCORD
@@ -56,11 +102,13 @@ class ExternalProviderEnum(StrEnum):
     GITHUB_ENTERPRISE = IntegrationProviderSlug.GITHUB_ENTERPRISE
     GITLAB = IntegrationProviderSlug.GITLAB
     JIRA_SERVER = IntegrationProviderSlug.JIRA_SERVER
+    PERFORCE = IntegrationProviderSlug.PERFORCE
 
 
 EXTERNAL_PROVIDERS_REVERSE = {
     ExternalProviderEnum.EMAIL: ExternalProviders.EMAIL,
     ExternalProviderEnum.SLACK: ExternalProviders.SLACK,
+    ExternalProviderEnum.SLACK_STAGING: ExternalProviders.SLACK_STAGING,
     ExternalProviderEnum.MSTEAMS: ExternalProviders.MSTEAMS,
     ExternalProviderEnum.PAGERDUTY: ExternalProviders.PAGERDUTY,
     ExternalProviderEnum.DISCORD: ExternalProviders.DISCORD,
@@ -68,6 +116,7 @@ EXTERNAL_PROVIDERS_REVERSE = {
     ExternalProviderEnum.GITHUB: ExternalProviders.GITHUB,
     ExternalProviderEnum.GITHUB_ENTERPRISE: ExternalProviders.GITHUB_ENTERPRISE,
     ExternalProviderEnum.GITLAB: ExternalProviders.GITLAB,
+    ExternalProviderEnum.PERFORCE: ExternalProviders.PERFORCE,
     ExternalProviderEnum.CUSTOM: ExternalProviders.CUSTOM,
 }
 
@@ -76,6 +125,7 @@ EXTERNAL_PROVIDERS_REVERSE_VALUES = {k.value: v for k, v in EXTERNAL_PROVIDERS_R
 EXTERNAL_PROVIDERS = {
     ExternalProviders.EMAIL: ExternalProviderEnum.EMAIL.value,
     ExternalProviders.SLACK: ExternalProviderEnum.SLACK.value,
+    ExternalProviders.SLACK_STAGING: ExternalProviderEnum.SLACK_STAGING.value,
     ExternalProviders.MSTEAMS: ExternalProviderEnum.MSTEAMS.value,
     ExternalProviders.PAGERDUTY: ExternalProviderEnum.PAGERDUTY.value,
     ExternalProviders.DISCORD: ExternalProviderEnum.DISCORD.value,
@@ -84,14 +134,30 @@ EXTERNAL_PROVIDERS = {
     ExternalProviders.GITHUB_ENTERPRISE: ExternalProviderEnum.GITHUB_ENTERPRISE.value,
     ExternalProviders.GITLAB: ExternalProviderEnum.GITLAB.value,
     ExternalProviders.JIRA_SERVER: ExternalProviderEnum.JIRA_SERVER.value,
+    ExternalProviders.PERFORCE: ExternalProviderEnum.PERFORCE.value,
     ExternalProviders.CUSTOM: ExternalProviderEnum.CUSTOM.value,
 }
 
 PERSONAL_NOTIFICATION_PROVIDERS = [
     ExternalProviderEnum.EMAIL.value,
     ExternalProviderEnum.SLACK.value,
+    ExternalProviderEnum.SLACK_STAGING.value,
     ExternalProviderEnum.MSTEAMS.value,
 ]
+
+
+class ExternalActorSource(ValueEqualityEnum):
+    """How an ExternalActor row was created. New values can be added here
+    without a database migration (the column is a plain integer)."""
+
+    MANUAL = 0
+    IDENTITY = 1
+    COMMIT_AUTHOR = 2
+    SCM_API = 3
+
+    @classmethod
+    def as_choices(cls) -> tuple[tuple[int, str], ...]:
+        return tuple((e.value, e._name_.lower()) for e in cls)
 
 
 class EventLifecycleOutcome(Enum):

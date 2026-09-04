@@ -3,10 +3,9 @@ import {EventFixture} from 'sentry-fixture/event';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 
-import {makeTestQueryClient} from 'sentry-test/queryClient';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {
   Event,
   EventError,
@@ -15,11 +14,9 @@ import type {
   Frame,
 } from 'sentry/types/event';
 import {EntryType, EventOrGroupType} from 'sentry/types/event';
-import type {EventData} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
-import {QueryClientProvider} from 'sentry/utils/queryClient';
+import type {EventData, EventView} from 'sentry/utils/discover/eventView';
 
-import EventContext from './eventContext';
+import {EventContext} from './eventContext';
 
 const mockedLocation = LocationFixture({
   query: {
@@ -38,19 +35,17 @@ const dataRow: EventData = {
 const renderEventContext = (location?: Location, eventView?: EventView) => {
   const organization = OrganizationFixture();
   render(
-    <QueryClientProvider client={makeTestQueryClient()}>
-      <EventContext
-        dataRow={dataRow}
-        organization={organization}
-        location={location}
-        eventView={eventView}
-      />
-    </QueryClientProvider>,
+    <EventContext
+      dataRow={dataRow}
+      organization={organization}
+      location={location}
+      eventView={eventView}
+    />,
     {organization}
   );
 };
 
-describe('Quick Context Content: Event ID Column', function () {
+describe('Quick Context Content: Event ID Column', () => {
   afterEach(() => {
     MockApiClient.clearMockResponses();
   });
@@ -176,6 +171,6 @@ describe('Quick Context Content: Event ID Column', function () {
 
     renderEventContext(mockedLocation);
 
-    expect(await screen.findByTestId('stack-trace-content')).toBeInTheDocument();
+    expect(await screen.findByTestId('core-stacktrace-frame-row')).toBeInTheDocument();
   });
 });

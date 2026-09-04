@@ -1,8 +1,8 @@
 import {act, render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import Carousel from 'sentry/components/carousel';
+import {Carousel} from 'sentry/components/carousel';
 
-describe('Carousel', function () {
+describe('Carousel', () => {
   let intersectionOnbserverCb: (
     entries: Array<Partial<IntersectionObserverEntry>>
   ) => void = jest.fn();
@@ -10,6 +10,7 @@ describe('Carousel', function () {
   window.IntersectionObserver = class IntersectionObserver {
     root = null;
     rootMargin = '';
+    scrollMargin = '';
     thresholds = [];
     takeRecords = jest.fn();
 
@@ -22,7 +23,7 @@ describe('Carousel', function () {
     disconnect() {}
   };
 
-  it('hides arrows if content does not overflow in x', function () {
+  it('hides arrows if content does not overflow in x', () => {
     render(
       <Carousel>
         <div data-test-id="child-1" />
@@ -40,7 +41,7 @@ describe('Carousel', function () {
     expect(screen.queryByRole('button', {name: 'Scroll right'})).not.toBeInTheDocument();
   });
 
-  it('shows right arrow when elements exist to the right', async function () {
+  it('shows right arrow when elements exist to the right', async () => {
     render(
       <Carousel>
         <div data-test-id="child-1" />
@@ -73,7 +74,7 @@ describe('Carousel', function () {
     expect(elements[1]!.scrollIntoView).toHaveBeenCalled();
   });
 
-  it('shows left arrow when elements exist to the left', async function () {
+  it('shows left arrow when elements exist to the left', async () => {
     render(
       <Carousel>
         <div data-test-id="child-1" />
@@ -106,7 +107,7 @@ describe('Carousel', function () {
     expect(elements[0]!.scrollIntoView).toHaveBeenCalled();
   });
 
-  it('skips an element when it is past the visibleRatio', async function () {
+  it('skips an element when it is past the visibleRatio', async () => {
     render(
       <Carousel visibleRatio={0.9}>
         <div data-test-id="child-1" />

@@ -1,63 +1,37 @@
-import {Button} from 'sentry/components/core/button';
+import {LinkButton} from '@sentry/scraps/button';
+
 import {t} from 'sentry/locale';
-import type EventView from 'sentry/utils/discover/eventView';
-import {useLocation} from 'sentry/utils/useLocation';
-import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import {traceAnalytics} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
-import {
-  getSearchInExploreTarget,
-  TraceDrawerActionKind,
-} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
+import type {EventView} from 'sentry/utils/discover/eventView';
+import type {TraceWaterfallSource} from 'sentry/views/performance/newTraceDetails/traceWaterfall';
+import {useTraceExploreTarget} from 'sentry/views/performance/newTraceDetails/useTraceExploreTarget';
 
 type Props = {
+  source: TraceWaterfallSource;
   traceEventView: EventView;
-  trace_id: string;
+  traceSlug: string;
+  replayId?: string;
 };
 
-export function TraceOpenInExploreButton({trace_id, traceEventView}: Props) {
-  const organization = useOrganization();
-  const hasExploreEnabled = organization.features.includes('visibility-explore-view');
-  const location = useLocation();
-  const navigate = useNavigate();
+export function TraceOpenInExploreButton({
+  traceSlug,
+  traceEventView,
+  source,
+  replayId,
+}: Props) {
+  const exploreTarget = useTraceExploreTarget({
+    traceSlug,
+    traceEventView,
+    source,
+    replayId,
+  });
 
-  if (!hasExploreEnabled || !trace_id) {
+  if (!exploreTarget) {
     return null;
   }
 
   return (
-    <Button
-      size="xs"
-      onClick={() => {
-        traceAnalytics.trackExploreSearch(
-          organization,
-          'trace',
-          trace_id ?? '',
-          TraceDrawerActionKind.INCLUDE,
-          'toolbar_menu'
-        );
-
-        const {start, end, statsPeriod} = traceEventView;
-        const target = getSearchInExploreTarget(
-          organization,
-          {
-            ...location,
-            query: {
-              start,
-              end,
-              statsPeriod: start && end ? null : statsPeriod, // We don't want statsPeriod to have precedence over start and end
-            },
-          },
-          '-1',
-          'trace',
-          trace_id ?? '',
-          TraceDrawerActionKind.INCLUDE
-        );
-
-        navigate(target);
-      }}
-    >
+    <LinkButton size="xs" to={exploreTarget.to} onClick={exploreTarget.onClick}>
       {t('Open in Explore')}
-    </Button>
+    </LinkButton>
   );
 }

@@ -1,3 +1,4 @@
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
 import {SIMILARITY_SCORE_COLORS} from './similarScoreCard';
@@ -6,7 +7,6 @@ type Props = {
   score: number;
   className?: string;
   palette?: readonly string[];
-  paletteClassNames?: string[];
   radius?: number;
   size?: number;
   thickness?: number;
@@ -40,24 +40,28 @@ function BaseScoreBar({
 
   return (
     <div className={className} {...props}>
-      {[...new Array(scoreInBounds)].map((_j, i) => (
+      {Array.from({length: scoreInBounds}, (_, i) => (
         <Bar {...barProps} key={i} color={palette[paletteIndex]} />
       ))}
-      {[...new Array(maxScore - scoreInBounds)].map((_j, i) => (
+      {Array.from({length: maxScore - scoreInBounds}, (_, i) => (
         <Bar key={`empty-${i}`} {...barProps} empty />
       ))}
     </div>
   );
 }
 
-const ScoreBar = styled(BaseScoreBar)`
+export const ScoreBar = styled(BaseScoreBar)`
   display: flex;
 
   ${p =>
     p.vertical
-      ? `flex-direction: column-reverse;
-    justify-content: flex-end;`
-      : 'min-width: 80px;'};
+      ? css`
+          flex-direction: column-reverse;
+          justify-content: flex-end;
+        `
+      : css`
+          min-width: 80px;
+        `}
 `;
 
 type BarProps = {
@@ -73,10 +77,8 @@ const Bar = styled('div')<BarProps>`
   border-radius: ${p => p.radius}px;
   margin: 2px;
   /* @TODO(jonasbadalic) This used to be defined on the theme, but is component specific and had no dark mode color. */
-  background-color: ${p => (p.empty ? p.theme.gray200 : p.color)};
+  background-color: ${p => (p.empty ? p.theme.colors.gray200 : p.color)};
 
   width: ${p => (p.vertical ? p.size : p.thickness)}px;
   height: ${p => (p.vertical ? p.thickness : p.size)}px;
 `;
-
-export default ScoreBar;

@@ -2,7 +2,7 @@ import {EventFixture} from 'sentry-fixture/event';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import {getReplayContextData} from 'sentry/components/events/contexts/knownContext/replay';
 
 const REPLAY_ID = '61d2d7c5acf448ffa8e2f8f973e2cd36';
@@ -23,8 +23,8 @@ const MOCK_REDACTION = {
   },
 };
 
-describe('ReplayContext', function () {
-  it('returns values and according to the parameters', function () {
+describe('ReplayContext', () => {
+  it('returns values and according to the parameters', () => {
     expect(getReplayContextData({data: MOCK_REPLAY_CONTEXT})).toEqual([
       {
         key: 'extra_data',
@@ -41,7 +41,7 @@ describe('ReplayContext', function () {
     ]);
   });
 
-  it('renders with meta annotations correctly', function () {
+  it('renders with meta annotations correctly', () => {
     const event = EventFixture({
       _meta: {contexts: {replay: MOCK_REDACTION}},
     });
@@ -49,8 +49,8 @@ describe('ReplayContext', function () {
     render(
       <ContextCard
         event={event}
-        type={'default'}
-        alias={'replay'}
+        type="default"
+        alias="replay"
         value={{...MOCK_REPLAY_CONTEXT, extra_data: ''}}
       />
     );

@@ -1,10 +1,10 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
-import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
 import {useNavigate} from 'sentry/utils/useNavigate';
-import DatasetSelector from 'sentry/views/dashboards/widgetBuilder/components/datasetSelector';
+import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
+import {WidgetBuilderDatasetSelector as DatasetSelector} from 'sentry/views/dashboards/widgetBuilder/components/datasetSelector';
 import {WidgetBuilderProvider} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
 
 jest.mock('sentry/utils/useNavigate', () => ({
@@ -13,35 +13,143 @@ jest.mock('sentry/utils/useNavigate', () => ({
 
 const mockUseNavigate = jest.mocked(useNavigate);
 
-describe('DatasetSelector', function () {
-  let router!: ReturnType<typeof RouterFixture>;
-  let organization!: ReturnType<typeof OrganizationFixture>;
-  beforeEach(function () {
-    router = RouterFixture();
-    organization = OrganizationFixture({});
-  });
-
-  it('changes the dataset', async function () {
+describe('DatasetSelector', () => {
+  it('changes the dataset', async () => {
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
     render(
       <WidgetBuilderProvider>
         <DatasetSelector />
-      </WidgetBuilderProvider>,
-      {
-        router,
-        organization,
-        deprecatedRouterMocks: true,
-      }
+      </WidgetBuilderProvider>
     );
 
-    await userEvent.click(await screen.findByLabelText('Issues'));
+    await userEvent.click(await screen.findByRole('button', {name: 'Errors'}));
+
+    await userEvent.click(await screen.findByRole('option', {name: 'Issues'}));
 
     expect(mockNavigate).toHaveBeenCalledWith(
       expect.objectContaining({
-        ...router.location,
         query: expect.objectContaining({dataset: 'issue'}),
+      }),
+      expect.anything()
+    );
+  });
+
+  it('does not restore a Trace Metrics table when the feature is disabled', async () => {
+    const mockNavigate = jest.fn();
+    mockUseNavigate.mockReturnValue(mockNavigate);
+
+    render(<DatasetSelector />, {
+      organization: OrganizationFixture({features: ['tracemetrics-enabled']}),
+      additionalWrapper: WidgetBuilderProvider,
+      initialRouterConfig: {
+        location: {
+          pathname: '/organizations/org-slug/dashboard/1/',
+          query: {
+            dataset: WidgetType.TRACEMETRICS,
+            displayType: DisplayType.TABLE,
+            field: ['sum(value,alpha_metric,counter,none)'],
+          },
+        },
+      },
+    });
+
+    await userEvent.click(
+      await screen.findByRole('button', {name: 'Application Metrics'})
+    );
+    await userEvent.click(await screen.findByRole('option', {name: 'Errors'}));
+
+    await userEvent.click(await screen.findByRole('button', {name: 'Errors'}));
+    await userEvent.click(
+      await screen.findByRole('option', {name: 'Application Metrics'})
+    );
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            displayType: DisplayType.LINE,
+          }),
+        }),
+        expect.anything()
+      );
+    });
+  });
+
+  it('disables transactions dataset when discover-saved-queries-deprecation feature is enabled', async () => {
+    const organizationWithDeprecation = OrganizationFixture({
+      features: ['discover-saved-queries-deprecation'],
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <DatasetSelector />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithDeprecation,
+      }
+    );
+
+    await userEvent.click(await screen.findByRole('button', {name: 'Errors'}));
+
+    const transactionsOption = await screen.findByRole('option', {name: 'Transactions'});
+    expect(transactionsOption).toHaveAttribute('aria-disabled', 'true');
+
+    expect(
+      await screen.findByText(/No longer supported\. Use the spans dataset with the/)
+    ).toBeInTheDocument();
+    expect(screen.getByText('is_transaction:true')).toBeInTheDocument();
+  });
+
+  it('does not show transactions dataset when deprecate-discover feature is enabled', async () => {
+    const organizationWithDeprecation = OrganizationFixture({
+      features: ['deprecate-discover', 'discover-saved-queries-deprecation'],
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <DatasetSelector />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithDeprecation,
+      }
+    );
+
+    await userEvent.click(await screen.findByRole('button', {name: 'Errors'}));
+    expect(screen.queryByRole('option', {name: 'Transactions'})).not.toBeInTheDocument();
+  });
+
+  it('allows selection of transactions dataset when discover-saved-queries-deprecation feature is disabled', async () => {
+    const mockNavigate = jest.fn();
+    mockUseNavigate.mockReturnValue(mockNavigate);
+
+    const organizationWithoutDeprecation = OrganizationFixture({
+      features: [], // No discover-saved-queries-deprecation feature
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <DatasetSelector />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithoutDeprecation,
+      }
+    );
+
+    await userEvent.click(await screen.findByRole('button', {name: 'Errors'}));
+
+    const transactionsOption = await screen.findByRole('option', {name: 'Transactions'});
+
+    expect(
+      await screen.findByText('Transactions from your application')
+    ).toBeInTheDocument();
+
+    await userEvent.click(transactionsOption);
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({dataset: 'transaction-like'}),
       }),
       expect.anything()
     );

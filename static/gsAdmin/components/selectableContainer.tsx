@@ -1,10 +1,11 @@
 import {useState} from 'react';
 import styled from '@emotion/styled';
 
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import Panel from 'sentry/components/panels/panel';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import {space} from 'sentry/styles/space';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
 
 type SelectableContainerPanelProps = {
   children: React.ReactNode;
@@ -46,10 +47,6 @@ type Props = {
    */
   sections: Section[];
   /**
-   * The default section to show first
-   */
-  defaultSectionKey?: string;
-  /**
    * Text rendered infront of the dropdown button
    */
   dropdownPrefix?: string;
@@ -60,13 +57,8 @@ type Props = {
   panelTitle?: string;
 };
 
-function SelectableContainer({
-  dropdownPrefix,
-  sections,
-  panelTitle,
-  defaultSectionKey,
-}: Props) {
-  const [sectionKey, setSection] = useState(defaultSectionKey ?? sections[0]?.key ?? '');
+export function SelectableContainer({dropdownPrefix, sections, panelTitle}: Props) {
+  const [sectionKey, setSection] = useState(sections[0]?.key ?? '');
 
   const section = sections.find(s => s.key === sectionKey);
 
@@ -76,7 +68,9 @@ function SelectableContainer({
 
   const selector = (
     <CompactSelect
-      triggerProps={{size: 'xs', prefix: dropdownPrefix}}
+      trigger={triggerProps => (
+        <OverlayTrigger.Button {...triggerProps} size="xs" prefix={dropdownPrefix} />
+      )}
       value={sectionKey}
       options={sections.map(s => ({value: s.key, label: s.name}))}
       onChange={opt => setSection(opt.value)}
@@ -108,7 +102,5 @@ const Actions = styled('div')`
   font-weight: normal;
   display: flex;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
-
-export default SelectableContainer;

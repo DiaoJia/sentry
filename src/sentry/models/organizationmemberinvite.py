@@ -12,7 +12,7 @@ from sentry import features
 from sentry.backup.dependencies import ImportKind
 from sentry.backup.helpers import ImportFlags
 from sentry.backup.scopes import ImportScope, RelocationScope
-from sentry.db.models import FlexibleForeignKey, region_silo_model, sane_repr
+from sentry.db.models import FlexibleForeignKey, cell_silo_model, sane_repr
 from sentry.db.models.base import DefaultFieldsModel
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 from sentry.exceptions import UnableToAcceptMemberInvitationException
@@ -77,7 +77,7 @@ class OrganizationMemberInviteResponse(TypedDict):
     teams: list[dict]
 
 
-@region_silo_model
+@cell_silo_model
 class OrganizationMemberInvite(DefaultFieldsModel):
     """
     Identifies relationships between organizations and their invited users.
@@ -199,6 +199,27 @@ class OrganizationMemberInvite(DefaultFieldsModel):
             data=self.get_audit_log_data(),
             event=(audit_log.get_event_id("MEMBER_INVITE")),
         )
+
+    def remove_invite_from_db(self, acting_user, event_name, api_key=None, ip_address=None):
+        """
+        Remove a member invite obejct from the DB and send an audit log entry
+        """
+        from sentry import audit_log
+        from sentry.utils.audit import create_audit_entry_from_user
+
+        with transaction.atomic(router.db_for_write(OrganizationMemberInvite)):
+            # also deletes the invite object via cascades
+            self.organization_member.delete()
+
+            create_audit_entry_from_user(
+                acting_user,
+                api_key,
+                ip_address,
+                organization_id=self.organization_id,
+                target_object=self.id,
+                data=self.get_audit_log_data(),
+                event=audit_log.get_event_id(event_name),
+            )
 
     @property
     def invite_approved(self):

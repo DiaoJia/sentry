@@ -8,8 +8,8 @@ import type {
 
 import {transformEventsResponseToSeries} from './transformEventsResponseToSeries';
 
-describe('transformEventsResponseToSeries', function () {
-  it('converts a single series response to an array', function () {
+describe('transformEventsResponseToSeries', () => {
+  it('converts a single series response to an array', () => {
     const rawData: EventsStats = {
       data: [
         [1737731713, [{count: 17}]],
@@ -40,7 +40,7 @@ describe('transformEventsResponseToSeries', function () {
     ]);
   });
 
-  it('converts a multi series response to an array', function () {
+  it('converts a multi series response to an array', () => {
     const rawData: MultiSeriesEventsStats = {
       'count()': {
         data: [
@@ -52,7 +52,7 @@ describe('transformEventsResponseToSeries', function () {
       'avg(transaction.duration)': {
         data: [
           [1737731713, [{count: 12.4}]],
-          [1737731773, [{count: 17.7}, {count: 1.0}]],
+          [1737731773, [{count: 17.7}, {count: 1}]],
         ],
         order: 0,
       },
@@ -94,7 +94,7 @@ describe('transformEventsResponseToSeries', function () {
     ]);
   });
 
-  it('converts a grouped series response to an array', function () {
+  it('converts a grouped series response to an array', () => {
     const rawData: GroupedMultiSeriesEventsStats = {
       prod: {
         'count()': {
@@ -121,7 +121,7 @@ describe('transformEventsResponseToSeries', function () {
         'avg(transaction.duration)': {
           data: [
             [1737731713, [{count: 12.4}]],
-            [1737731773, [{count: 17.7}, {count: 1.0}]],
+            [1737731773, [{count: 17.7}, {count: 1}]],
           ],
         },
         order: 0,

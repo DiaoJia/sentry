@@ -2,7 +2,9 @@ from django.contrib.auth.models import AnonymousUser
 
 from sentry import options
 from sentry.models.organization import Organization
+from sentry.organizations.services.organization import RpcOrganization
 from sentry.users.models.user import User
+from sentry.users.services.user.model import RpcUser
 
 READONLY_SCOPES = frozenset(
     [
@@ -17,27 +19,25 @@ READONLY_SCOPES = frozenset(
 )
 
 
-def is_demo_mode_enabled():
+def is_demo_mode_enabled() -> bool:
     return options.get("demo-mode.enabled")
 
 
-def is_demo_user(user: User | AnonymousUser | None) -> bool:
-
+def is_demo_user(user: User | AnonymousUser | None | RpcUser) -> bool:
     if not user:
         return False
 
     return user.id in options.get("demo-mode.users")
 
 
-def is_demo_org(organization: Organization | None):
-
+def is_demo_org(organization: Organization | RpcOrganization | None) -> bool:
     if not organization:
         return False
 
     return organization.id in options.get("demo-mode.orgs")
 
 
-def get_demo_org():
+def get_demo_org() -> Organization | None:
     if not is_demo_mode_enabled():
         return None
 
@@ -45,7 +45,7 @@ def get_demo_org():
     return Organization.objects.get(id=org_id)
 
 
-def get_demo_user():
+def get_demo_user() -> User | None:
     if not is_demo_mode_enabled():
         return None
 

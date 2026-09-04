@@ -1,6 +1,6 @@
 import type {User} from 'sentry/types/user';
 
-import ResultTable from 'admin/components/resultTable';
+import {ResultTable} from 'admin/components/resultTable';
 import type {SelectableContainerPanel} from 'admin/components/selectableContainer';
 
 type Props = {
@@ -8,7 +8,7 @@ type Props = {
   user: User;
 };
 
-function UserEmails({Panel, user}: Props) {
+export function UserEmails({Panel, user}: Props) {
   const primary = user.email;
   const emails = user.emails ? user.emails : [{email: primary}];
 
@@ -28,7 +28,7 @@ function UserEmails({Panel, user}: Props) {
                 <strong>{data.email}</strong>
                 {data.email === primary && <small> — primary </small>}
               </td>
-              <td>
+              <td data-label="Status">
                 {
                   // @ts-expect-error TS(2339): Property 'is_verified' does not exist on type '{ e... Remove this comment to see the full error message
                   data.is_verified ? 'Verified' : 'Unverified'
@@ -41,5 +41,3 @@ function UserEmails({Panel, user}: Props) {
     </Panel>
   );
 }
-
-export default UserEmails;

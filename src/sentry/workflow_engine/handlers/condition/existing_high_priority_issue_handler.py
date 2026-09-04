@@ -10,6 +10,7 @@ from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
 class ExistingHighPriorityIssueConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.WORKFLOW_TRIGGER
     comparison_json_schema = {"type": "boolean"}
+    label_template = "Sentry marks an existing issue as high priority"
 
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
@@ -17,5 +18,4 @@ class ExistingHighPriorityIssueConditionHandler(DataConditionHandler[WorkflowEve
         if state is None or state["is_new"]:
             return False
 
-        is_escalating = bool(event_data.has_reappeared or event_data.has_escalated)
-        return is_escalating and event_data.event.group.priority == PriorityLevel.HIGH
+        return bool(event_data.has_escalated) and event_data.group.priority == PriorityLevel.HIGH

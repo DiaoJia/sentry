@@ -1,21 +1,32 @@
-import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
-import {render, screen, userEvent, within} from 'sentry-test/reactTestingLibrary';
+import {
+  render,
+  screen,
+  userEvent,
+  waitFor,
+  within,
+} from 'sentry-test/reactTestingLibrary';
 
 import type {TagCollection} from 'sentry/types/group';
 import {FieldKind} from 'sentry/utils/fields';
-import useCustomMeasurements from 'sentry/utils/useCustomMeasurements';
+import {useCustomMeasurements} from 'sentry/utils/useCustomMeasurements';
 import {useNavigate} from 'sentry/utils/useNavigate';
 import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
-import Visualize from 'sentry/views/dashboards/widgetBuilder/components/visualize';
+import {Visualize} from 'sentry/views/dashboards/widgetBuilder/components/visualize';
 import {WidgetBuilderProvider} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
+import {
+  useTraceItemDatasetAttributes,
+  useTraceMetricItemAttributes,
+} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 
 jest.mock('sentry/utils/useCustomMeasurements');
-jest.mock('sentry/views/explore/contexts/spanTagsContext');
+jest.mock('sentry/views/explore/hooks/useTraceItemAttributes');
 jest.mock('sentry/utils/useNavigate');
+
+const DASHBOARD_WIDGET_BUILDER_PATHNAME =
+  '/organizations/org-slug/dashboards/new/widget/new/';
+const DASHBOARD_WIDGET_BUILDER_ROUTE = '/organizations/:orgId/dashboards/new/widget/new/';
 
 describe('Visualize', () => {
   let organization!: ReturnType<typeof OrganizationFixture>;
@@ -28,44 +39,70 @@ describe('Visualize', () => {
 
     jest.mocked(useCustomMeasurements).mockReturnValue({customMeasurements: {}});
 
-    jest.mocked(useTraceItemTags).mockImplementation((type?: 'number' | 'string') => {
-      if (type === 'number') {
+    jest
+      .mocked(useTraceItemDatasetAttributes)
+      .mockImplementation((_traceItemType, _options, type?) => {
+        if (type === 'number') {
+          const tags: TagCollection = {
+            'span.duration': {
+              key: 'span.duration',
+              name: 'span.duration',
+              kind: FieldKind.MEASUREMENT,
+              secondaryAliases: [],
+            },
+            'span.self_time': {
+              key: 'span.self_time',
+              name: 'span.self_time',
+              kind: FieldKind.MEASUREMENT,
+              secondaryAliases: [],
+            },
+          };
+          return {attributes: tags, isLoading: false, secondaryAliases: {}};
+        }
+
+        if (type === 'boolean') {
+          const tags: TagCollection = {
+            'span.status': {
+              key: 'span.status',
+              name: 'span.status',
+              kind: FieldKind.BOOLEAN,
+            },
+          };
+          return {attributes: tags, isLoading: false, secondaryAliases: {}};
+        }
+
         const tags: TagCollection = {
-          'span.duration': {
-            key: 'span.duration',
-            name: 'span.duration',
-            kind: FieldKind.MEASUREMENT,
+          'span.op': {
+            key: 'span.op',
+            name: 'span.op',
+            kind: FieldKind.TAG,
           },
-          'span.self_time': {
-            key: 'span.self_time',
-            name: 'span.self_time',
-            kind: FieldKind.MEASUREMENT,
+          'span.description': {
+            key: 'span.description',
+            name: 'span.description',
+            kind: FieldKind.TAG,
           },
         };
-        return {tags, isLoading: false};
-      }
 
-      const tags: TagCollection = {
-        'span.op': {
-          key: 'span.op',
-          name: 'span.op',
-          kind: FieldKind.TAG,
-        },
-        'span.description': {
-          key: 'span.description',
-          name: 'span.description',
-          kind: FieldKind.TAG,
-        },
-      };
+        return {
+          attributes: tags,
+          secondaryAliases: {},
+          isLoading: false,
+        };
+      });
 
-      return {
-        tags,
-        isLoading: false,
-      };
+    jest.mocked(useTraceMetricItemAttributes).mockReturnValue({
+      attributes: {},
+      isLoading: false,
+      secondaryAliases: {},
     });
 
     mockNavigate = jest.fn();
     jest.mocked(useNavigate).mockReturnValue(mockNavigate);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
   });
 
   it('renders basic aggregates correctly from the URL params', async () => {
@@ -75,28 +112,31 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['p90(transaction.duration)', 'max(spans.db)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
     expect(await screen.findByText('+ Add Series')).toBeInTheDocument();
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
     const p90FieldRow = (await screen.findByText('p90')).closest(
       '[data-testid="field-bar"]'
     ) as HTMLElement;
     expect(p90FieldRow).toBeInTheDocument();
     expect(within(p90FieldRow).getByText('transaction.duration')).toBeInTheDocument();
 
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+    // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
     const maxFieldRow = (await screen.findByText('max')).closest(
       '[data-testid="field-bar"]'
     ) as HTMLElement;
@@ -111,18 +151,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['max(spans.db)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -143,18 +182,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['max(spans.db)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -175,18 +213,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -202,6 +239,32 @@ describe('Visualize', () => {
     );
   });
 
+  it('adds the correct default new series when a default is provided for series display type', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <Visualize />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+            query: {
+              yAxis: ['count(resolved_issues)'],
+              dataset: WidgetType.ISSUE,
+              displayType: DisplayType.BAR,
+            },
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
+      }
+    );
+
+    expect(screen.queryByText('new_issues')).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByText('+ Add Series'));
+    expect(screen.getByText('new_issues')).toBeInTheDocument();
+  });
+
   it('maintains the selected aggregate when the column selection is changed and there are parameters', async () => {
     render(
       <WidgetBuilderProvider>
@@ -209,18 +272,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['max(spans.db)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -242,18 +304,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -283,18 +344,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['transaction.duration'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -313,29 +373,25 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
     await userEvent.click(screen.getByRole('button', {name: 'Aggregate Selection'}));
     await userEvent.click(screen.getByRole('option', {name: 'field'}));
 
-    // The column selection is automatically opened for aggregates
-    await userEvent.click(screen.getByRole('option', {name: 'transaction.duration'}));
-
     expect(screen.getByRole('button', {name: 'Column Selection'})).toHaveTextContent(
-      'transaction.duration'
+      'app.in_foreground'
     );
     expect(screen.getByRole('button', {name: 'Aggregate Selection'})).toHaveTextContent(
       'field'
@@ -349,18 +405,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -368,9 +423,8 @@ describe('Visualize', () => {
     await userEvent.click(screen.getByRole('option', {name: 'p50'}));
 
     // Indicate that the column selection is open, and multiple options are available
-    expect(
-      screen.getByRole('option', {name: 'transaction.duration'})
-    ).toBeInTheDocument();
+    const option = await screen.findByRole('option', {name: 'transaction.duration'});
+    expect(option).toBeInTheDocument();
     expect(screen.getAllByRole('option').length).toBeGreaterThan(1);
   });
 
@@ -381,18 +435,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -411,18 +464,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               yAxis: ['transaction.duration'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -441,18 +493,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['max(spans.db)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -471,18 +522,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['count_if(transaction.duration,equals,testValue)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -508,18 +558,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['count_if(transaction.duration,equals,testValue)'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -548,18 +597,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['transaction.duration'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -578,18 +626,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               field: ['transaction'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -613,18 +660,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.ISSUE,
               field: ['issue.id'],
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -640,18 +686,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
               yAxis: ['p90(transaction.duration)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -671,18 +716,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
               field: ['count()'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -699,18 +743,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
               field: ['count()'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -728,18 +771,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
               field: ['p50(transaction.duration)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -782,17 +824,16 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -816,14 +857,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.TRANSACTIONS, displayType: DisplayType.LINE},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -838,18 +878,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
               field: ['count_unique(user)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -871,19 +910,18 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
               field: ['count_unique(1)', 'count_unique(2)', 'count_unique(3)'],
               selectedAggregate: '2',
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -908,14 +946,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.RELEASE, field: ['crash_free_rate(session)']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -936,14 +973,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.TRANSACTIONS, field: ['transaction.duration']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -962,17 +998,16 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               field: ['count_if(transaction.duration,equals,300)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -995,17 +1030,16 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.RELEASE,
               field: ['crash_free_rate(session)', 'environment'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1022,14 +1056,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.TRANSACTIONS, field: ['apdex(3000)']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1049,14 +1082,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.TRANSACTIONS, field: ['apdex(9999)']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1073,17 +1105,16 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               field: ['equation|count()+1', 'count()'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1099,18 +1130,17 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               field: ['transaction.duration', 'transaction.id'],
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1126,14 +1156,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.TRANSACTIONS, field: ['count()']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1156,14 +1185,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.RELEASE, field: ['crash_free_rate(session)']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1183,14 +1211,13 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {dataset: WidgetType.RELEASE, field: ['crash_free_rate(session)']},
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1217,17 +1244,16 @@ describe('Visualize', () => {
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.TRANSACTIONS,
               field: ['p50(transaction.duration)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1247,36 +1273,44 @@ describe('Visualize', () => {
 
   describe('spans', () => {
     beforeEach(() => {
-      jest.mocked(useTraceItemTags).mockImplementation((type?: 'string' | 'number') => {
-        if (type === 'number') {
+      jest
+        .mocked(useTraceItemDatasetAttributes)
+        .mockImplementation((_traceItemType, _options, type?) => {
+          if (type === 'number') {
+            return {
+              attributes: {
+                'span.duration': {
+                  key: 'span.duration',
+                  name: 'span.duration',
+                  kind: 'measurement',
+                },
+                'tags[anotherNumericTag,number]': {
+                  key: 'anotherNumericTag',
+                  name: 'anotherNumericTag',
+                  kind: 'measurement',
+                },
+              } as TagCollection,
+              secondaryAliases: {},
+              isLoading: false,
+            };
+          }
+
+          if (type === 'boolean') {
+            return {attributes: {}, isLoading: false, secondaryAliases: {}};
+          }
+
           return {
-            tags: {
-              'span.duration': {
-                key: 'span.duration',
-                name: 'span.duration',
-                kind: 'measurement',
-              },
-              'tags[anotherNumericTag,number]': {
-                key: 'anotherNumericTag',
-                name: 'anotherNumericTag',
-                kind: 'measurement',
+            attributes: {
+              'span.description': {
+                key: 'span.description',
+                name: 'span.description',
+                kind: 'tag',
               },
             } as TagCollection,
+            secondaryAliases: {},
             isLoading: false,
           };
-        }
-
-        return {
-          tags: {
-            'span.description': {
-              key: 'span.description',
-              name: 'span.description',
-              kind: 'tag',
-            },
-          } as TagCollection,
-          isLoading: false,
-        };
-      });
+        });
     });
 
     it('shows numeric tags as primary options for chart widgets', async () => {
@@ -1286,18 +1320,17 @@ describe('Visualize', () => {
         </WidgetBuilderProvider>,
         {
           organization,
-
-          router: RouterFixture({
-            location: LocationFixture({
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
               query: {
                 dataset: WidgetType.SPANS,
                 displayType: DisplayType.LINE,
                 yAxis: ['p90(span.duration)'],
               },
-            }),
-          }),
-
-          deprecatedRouterMocks: true,
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
         }
       );
 
@@ -1319,18 +1352,17 @@ describe('Visualize', () => {
         </WidgetBuilderProvider>,
         {
           organization,
-
-          router: RouterFixture({
-            location: LocationFixture({
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
               query: {
                 dataset: WidgetType.SPANS,
                 displayType: DisplayType.LINE,
                 yAxis: ['count(span.duration)'],
               },
-            }),
-          }),
-
-          deprecatedRouterMocks: true,
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
         }
       );
 
@@ -1360,18 +1392,17 @@ describe('Visualize', () => {
         </WidgetBuilderProvider>,
         {
           organization,
-
-          router: RouterFixture({
-            location: LocationFixture({
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
               query: {
                 dataset: WidgetType.SPANS,
                 displayType: DisplayType.TABLE,
                 field: ['p90(span.duration)'],
               },
-            }),
-          }),
-
-          deprecatedRouterMocks: true,
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
         }
       );
 
@@ -1384,6 +1415,34 @@ describe('Visualize', () => {
       expect(within(listbox).getByText('anotherNumericTag')).toBeInTheDocument();
     });
 
+    it('shows the saved column in the trigger even when missing from attributes', async () => {
+      render(
+        <WidgetBuilderProvider>
+          <Visualize />
+        </WidgetBuilderProvider>,
+        {
+          organization,
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+              query: {
+                dataset: WidgetType.SPANS,
+                displayType: DisplayType.TABLE,
+                // The saved column argument is not returned by the attributes call
+                field: ['p90(my.missing.field)'],
+              },
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
+        }
+      );
+
+      // The column dropdown should reflect the saved state instead of "None"
+      expect(
+        await screen.findByRole('button', {name: 'Column Selection'})
+      ).toHaveTextContent('my.missing.field');
+    });
+
     it('shows the correct column options for the non-aggregate field type', async () => {
       render(
         <WidgetBuilderProvider>
@@ -1391,18 +1450,17 @@ describe('Visualize', () => {
         </WidgetBuilderProvider>,
         {
           organization,
-
-          router: RouterFixture({
-            location: LocationFixture({
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
               query: {
                 dataset: WidgetType.SPANS,
                 displayType: DisplayType.TABLE,
                 field: ['span.duration'],
               },
-            }),
-          }),
-
-          deprecatedRouterMocks: true,
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
         }
       );
 
@@ -1415,40 +1473,226 @@ describe('Visualize', () => {
       expect(within(listbox).getByText('span.description')).toBeInTheDocument();
     });
 
-    it('differentiates between function and column values in selection', async () => {
-      jest.mocked(useTraceItemTags).mockImplementation((type?: 'string' | 'number') => {
-        if (type === 'number') {
+    it('fetches additional attributes from the server while typing in the column dropdown', async () => {
+      // Mock a search-aware attributes endpoint: the cold-start attribute is only
+      // returned when the dropdown forwards a matching search term, mirroring the
+      // capped initial `/attributes` response in production.
+      jest
+        .mocked(useTraceItemDatasetAttributes)
+        .mockImplementation((_traceItemType, options, type?) => {
+          if (type === 'number') {
+            const searched =
+              options?.enabled && options?.search?.includes('cold')
+                ? {
+                    'measurements.app_start_cold': {
+                      key: 'measurements.app_start_cold',
+                      name: 'measurements.app_start_cold',
+                      kind: 'measurement',
+                    },
+                  }
+                : {};
+            return {
+              attributes: {
+                'span.duration': {
+                  key: 'span.duration',
+                  name: 'span.duration',
+                  kind: 'measurement',
+                },
+                ...searched,
+              } as TagCollection,
+              secondaryAliases: {},
+              isLoading: false,
+            };
+          }
+
+          if (type === 'boolean') {
+            return {attributes: {}, secondaryAliases: {}, isLoading: false};
+          }
+
           return {
-            tags: {
-              'tags[count,number]': {key: 'count', name: 'count', kind: 'measurement'},
+            attributes: {
+              'span.description': {
+                key: 'span.description',
+                name: 'span.description',
+                kind: 'tag',
+              },
             } as TagCollection,
+            secondaryAliases: {},
             isLoading: false,
           };
-        }
+        });
 
-        return {
-          tags: {count: {key: 'count', name: 'count', kind: 'tag'}} as TagCollection,
-          isLoading: false,
-        };
+      render(
+        <WidgetBuilderProvider>
+          <Visualize />
+        </WidgetBuilderProvider>,
+        {
+          organization: OrganizationFixture({
+            features: ['performance-view', 'visibility-explore-view'],
+          }),
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+              query: {
+                dataset: WidgetType.SPANS,
+                displayType: DisplayType.TABLE,
+                field: ['span.duration'],
+              },
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
+        }
+      );
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Column Selection'})
+      );
+
+      // The attribute is not part of the initial response.
+      expect(screen.queryByText('measurements.app_start_cold')).not.toBeInTheDocument();
+
+      // Typing forwards the search to the attributes endpoint and the newly
+      // fetched attribute shows up as an option.
+      await userEvent.type(screen.getByPlaceholderText('Search…'), 'cold');
+      expect(await screen.findByText('measurements.app_start_cold')).toBeInTheDocument();
+
+      // Closing and reopening resets the search, so the previously fetched
+      // attribute should not linger in the options when there is no query.
+      await userEvent.keyboard('{Escape}');
+      await userEvent.click(screen.getByRole('button', {name: 'Column Selection'}));
+      const reopenedListbox = await screen.findByRole('listbox', {
+        name: 'Column Selection',
       });
+      expect(within(reopenedListbox).getByText('span.duration')).toBeInTheDocument();
+      expect(
+        within(reopenedListbox).queryByText('measurements.app_start_cold')
+      ).not.toBeInTheDocument();
+    });
+
+    it('matches searched attributes by key even when the display label differs', async () => {
+      // The attribute's display label ("Cold Start") does not contain the
+      // queried substring, but its key does. The dropdown filter must score on
+      // the key so the server match is not dropped client-side.
+      jest
+        .mocked(useTraceItemDatasetAttributes)
+        .mockImplementation((_traceItemType, options, type?) => {
+          if (type === 'number') {
+            const searched =
+              options?.enabled && options?.search?.includes('app_start')
+                ? {
+                    'measurements.app_start_cold': {
+                      key: 'measurements.app_start_cold',
+                      name: 'Cold Start',
+                      kind: 'measurement',
+                    },
+                  }
+                : {};
+            return {
+              attributes: {
+                'span.duration': {
+                  key: 'span.duration',
+                  name: 'span.duration',
+                  kind: 'measurement',
+                },
+                ...searched,
+              } as TagCollection,
+              secondaryAliases: {},
+              isLoading: false,
+            };
+          }
+
+          if (type === 'boolean') {
+            return {attributes: {}, secondaryAliases: {}, isLoading: false};
+          }
+
+          return {
+            attributes: {
+              'span.description': {
+                key: 'span.description',
+                name: 'span.description',
+                kind: 'tag',
+              },
+            } as TagCollection,
+            secondaryAliases: {},
+            isLoading: false,
+          };
+        });
+
+      render(
+        <WidgetBuilderProvider>
+          <Visualize />
+        </WidgetBuilderProvider>,
+        {
+          organization: OrganizationFixture({
+            features: ['performance-view', 'visibility-explore-view'],
+          }),
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+              query: {
+                dataset: WidgetType.SPANS,
+                displayType: DisplayType.TABLE,
+                field: ['span.duration'],
+              },
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
+        }
+      );
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Column Selection'})
+      );
+
+      // Searching by the key surfaces the attribute even though its label is
+      // "Cold Start".
+      await userEvent.type(screen.getByPlaceholderText('Search…'), 'app_start');
+      expect(await screen.findByText('Cold Start')).toBeInTheDocument();
+    });
+
+    it('differentiates between function and column values in selection', async () => {
+      jest
+        .mocked(useTraceItemDatasetAttributes)
+        .mockImplementation((_traceItemType, _options, type?) => {
+          if (type === 'number') {
+            return {
+              attributes: {
+                'tags[count,number]': {key: 'count', name: 'count', kind: 'measurement'},
+              } as TagCollection,
+              secondaryAliases: {},
+              isLoading: false,
+            };
+          }
+
+          if (type === 'boolean') {
+            return {attributes: {}, secondaryAliases: {}, isLoading: false};
+          }
+
+          return {
+            attributes: {
+              count: {key: 'count', name: 'count', kind: 'tag'},
+            } as TagCollection,
+            secondaryAliases: {},
+            isLoading: false,
+          };
+        });
       render(
         <WidgetBuilderProvider>
           <Visualize />
         </WidgetBuilderProvider>,
         {
           organization,
-
-          router: RouterFixture({
-            location: LocationFixture({
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
               query: {
                 dataset: WidgetType.SPANS,
                 displayType: DisplayType.TABLE,
                 field: ['count(span.duration)'],
               },
-            }),
-          }),
-
-          deprecatedRouterMocks: true,
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
         }
       );
 
@@ -1457,27 +1701,128 @@ describe('Visualize', () => {
         await screen.findByRole('button', {name: 'Aggregate Selection'})
       ).toHaveTextContent(/^count$/);
     });
+
+    it('adds equations', async () => {
+      render(
+        <WidgetBuilderProvider>
+          <Visualize />
+        </WidgetBuilderProvider>,
+        {
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+              query: {
+                dataset: WidgetType.SPANS,
+                displayType: DisplayType.TABLE,
+                yAxis: ['count(span.duration)'],
+              },
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
+        }
+      );
+
+      await userEvent.click(screen.getByRole('button', {name: 'Add Equation'}));
+
+      expect(screen.getByLabelText('Enter an equation')).toBeInTheDocument();
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      await userEvent.type(input, 'avg(');
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'avg(span.duration)',
+        })
+      ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
+      await userEvent.type(input, '{ArrowDown}{Enter}');
+
+      expect(mockNavigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({field: ['equation|( avg(span.duration)']}),
+        }),
+        expect.anything()
+      );
+    });
+
+    it('adds equations line chart', async () => {
+      render(
+        <WidgetBuilderProvider>
+          <Visualize />
+        </WidgetBuilderProvider>,
+        {
+          initialRouterConfig: {
+            location: {
+              pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+              query: {
+                dataset: WidgetType.SPANS,
+                displayType: DisplayType.TABLE,
+                yAxis: ['count(span.duration)'],
+              },
+            },
+            route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+          },
+        }
+      );
+
+      await userEvent.click(screen.getByRole('button', {name: 'Add Equation'}));
+
+      expect(screen.getByLabelText('Enter an equation')).toBeInTheDocument();
+
+      const input = screen.getByRole('combobox', {
+        name: 'Add a term',
+      });
+      expect(input).toBeInTheDocument();
+
+      await userEvent.click(input);
+      await userEvent.type(input, 'avg(');
+
+      expect(
+        await screen.findByRole('row', {
+          name: 'avg(span.duration)',
+        })
+      ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Select an attribute')).toHaveFocus();
+      });
+      await userEvent.type(input, '{ArrowDown}{Enter}');
+
+      expect(mockNavigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({field: ['equation|( avg(span.duration)']}),
+        }),
+        expect.anything()
+      );
+    });
   });
 
-  it('disables changing visualize fields for count', async function () {
+  it('disables changing visualize fields for count', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['count(span.duration)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
     expect(
@@ -1486,25 +1831,24 @@ describe('Visualize', () => {
     expect(await screen.findByRole('button', {name: 'Column Selection'})).toBeDisabled();
   });
 
-  it('changes to count(span.duration) when using count', async function () {
+  it('changes to count(span.duration) when using count', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['avg(span.self_time)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1529,25 +1873,24 @@ describe('Visualize', () => {
     expect(await screen.findByRole('button', {name: 'Column Selection'})).toBeDisabled();
   });
 
-  it('disables changing visualize fields for epm', async function () {
+  it('disables changing visualize fields for epm', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['epm()'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
     expect(
@@ -1558,25 +1901,24 @@ describe('Visualize', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('disables changing visualize fields for failure_rate', async function () {
+  it('disables changing visualize fields for failure_rate', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['failure_rate()'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
     expect(
@@ -1587,25 +1929,24 @@ describe('Visualize', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('changes to epm() when using epm', async function () {
+  it('changes to epm() when using epm', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['avg(span.self_time)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1628,25 +1969,24 @@ describe('Visualize', () => {
       screen.queryByRole('button', {name: 'Column Selection'})
     ).not.toBeInTheDocument();
   });
-  it('changes to failure_rate() when using failure_rate', async function () {
+  it('changes to failure_rate() when using failure_rate', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['avg(span.self_time)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1670,25 +2010,24 @@ describe('Visualize', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('defaults count_unique argument to span.op', async function () {
+  it('defaults count_unique argument to span.op', async () => {
     render(
       <WidgetBuilderProvider>
         <Visualize />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
             query: {
               dataset: WidgetType.SPANS,
               displayType: DisplayType.LINE,
               yAxis: ['count(span.duration)'],
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
       }
     );
 
@@ -1737,5 +2076,242 @@ describe('Visualize', () => {
     expect(
       await screen.findByRole('button', {name: 'Column Selection'})
     ).toHaveTextContent('span.op');
+  });
+
+  it('disables visualize step when discover-saved-queries-deprecation feature is enabled and dataset is transactions', async () => {
+    const organizationWithDeprecation = OrganizationFixture({
+      features: ['discover-saved-queries-deprecation'],
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <Visualize />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithDeprecation,
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+            query: {
+              dataset: WidgetType.TRANSACTIONS,
+              displayType: DisplayType.LINE,
+              yAxis: ['p95(transaction.duration)'],
+            },
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
+      }
+    );
+
+    // The dropdowns should be disabled
+    const aggregateSelect = await screen.findByRole('button', {
+      name: 'Aggregate Selection',
+    });
+    expect(aggregateSelect).toBeDisabled();
+
+    const columnSelect = await screen.findByRole('button', {name: 'Column Selection'});
+    expect(columnSelect).toBeDisabled();
+  });
+
+  it('duplicates the last y-axis when adding a series for trace metrics timeseries chart', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/events/',
+      body: {
+        data: [
+          {
+            'metric.name': 'alpha_metric',
+            'metric.type': 'counter',
+            'count(metric.name)': 1,
+          },
+        ],
+      },
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <Visualize />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+            query: {
+              yAxis: ['sum(value,alpha_metric,counter,none)'],
+              dataset: WidgetType.TRACEMETRICS,
+              displayType: DisplayType.LINE,
+            },
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
+      }
+    );
+
+    // Wait for the initial aggregate selector to render
+    const initialAggregateSelectors = await screen.findAllByRole('button', {
+      name: 'Aggregate Selection',
+    });
+    expect(initialAggregateSelectors).toHaveLength(1);
+    expect(initialAggregateSelectors[0]).toHaveTextContent('sum');
+
+    // Click "Add Series"
+    await userEvent.click(screen.getByRole('button', {name: 'Add Series'}));
+
+    const metricSelectors = await screen.findAllByRole('button', {
+      name: 'alpha_metric',
+    });
+    expect(metricSelectors).toHaveLength(2);
+    expect(metricSelectors[0]).toHaveTextContent('alpha_metric');
+    expect(metricSelectors[1]).toHaveTextContent('alpha_metric');
+
+    // Should now have two aggregate selectors, both showing 'sum' (duplicated from last)
+    const aggregateSelectors = await screen.findAllByRole('button', {
+      name: 'Aggregate Selection',
+    });
+    expect(aggregateSelectors).toHaveLength(2);
+    expect(aggregateSelectors[0]).toHaveTextContent('sum');
+    expect(aggregateSelectors[1]).toHaveTextContent('sum');
+  });
+
+  it('uses the attribute selector for group-by columns in trace metrics tables', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/events/',
+      body: {
+        data: [
+          {
+            'metric.name': 'alpha_metric',
+            'metric.type': 'counter',
+            'count(metric.name)': 1,
+          },
+        ],
+      },
+    });
+
+    render(<Visualize />, {
+      organization,
+      additionalWrapper: WidgetBuilderProvider,
+      initialRouterConfig: {
+        location: {
+          pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+          query: {
+            field: ['span.op', 'sum(value,alpha_metric,counter,none)'],
+            dataset: WidgetType.TRACEMETRICS,
+            displayType: DisplayType.TABLE,
+          },
+        },
+        route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+      },
+    });
+
+    expect(await screen.findByRole('button', {name: 'alpha_metric'})).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Column Selection'})).toHaveTextContent(
+      'span.op'
+    );
+  });
+
+  it('lets users switch trace metrics table columns between aggregates and fields', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/events/',
+      body: {
+        data: [
+          {
+            'metric.name': 'alpha_metric',
+            'metric.type': 'counter',
+            'count(metric.name)': 1,
+          },
+        ],
+      },
+    });
+
+    render(<Visualize />, {
+      organization,
+      additionalWrapper: WidgetBuilderProvider,
+      initialRouterConfig: {
+        location: {
+          pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+          query: {
+            field: [
+              'sum(value,alpha_metric,counter,none)',
+              'sum(value,alpha_metric,counter,none)',
+            ],
+            dataset: WidgetType.TRACEMETRICS,
+            displayType: DisplayType.TABLE,
+          },
+        },
+        route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+      },
+    });
+
+    await userEvent.click(
+      (await screen.findAllByRole('button', {name: 'alpha_metric'}))[0]!
+    );
+    await userEvent.click(await screen.findByRole('option', {name: 'field'}));
+
+    expect(
+      await screen.findByRole('button', {name: 'Column Selection'})
+    ).toHaveTextContent('span.description');
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            field: ['span.description', 'sum(value,alpha_metric,counter,none)'],
+          }),
+        }),
+        expect.anything()
+      );
+    });
+
+    await userEvent.click(screen.getByRole('button', {name: 'field'}));
+    await userEvent.click(await screen.findByRole('option', {name: 'alpha_metric'}));
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            field: [
+              'sum(value,alpha_metric,counter,none)',
+              'sum(value,alpha_metric,counter,none)',
+            ],
+          }),
+        }),
+        expect.anything()
+      );
+    });
+  });
+
+  it('enables visualize step when discover-saved-queries-deprecation feature is disabled', async () => {
+    const organizationWithoutDeprecation = OrganizationFixture({
+      features: [], // No discover-saved-queries-deprecation feature
+    });
+
+    render(
+      <WidgetBuilderProvider>
+        <Visualize />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithoutDeprecation,
+        initialRouterConfig: {
+          location: {
+            pathname: DASHBOARD_WIDGET_BUILDER_PATHNAME,
+            query: {
+              dataset: WidgetType.TRANSACTIONS,
+              displayType: DisplayType.LINE,
+              yAxis: ['p95(transaction.duration)'],
+            },
+          },
+          route: DASHBOARD_WIDGET_BUILDER_ROUTE,
+        },
+      }
+    );
+
+    // The dropdowns should be enabled
+    const aggregateSelect = await screen.findByRole('button', {
+      name: 'Aggregate Selection',
+    });
+    expect(aggregateSelect).toBeEnabled();
+
+    const columnSelect = await screen.findByRole('button', {name: 'Column Selection'});
+    expect(columnSelect).toBeEnabled();
   });
 });

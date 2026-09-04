@@ -1,14 +1,18 @@
 __all__ = ["ReleaseHook"]
 
+import logging
+
 from django.db import IntegrityError, router, transaction
+from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.utils import timezone
-from rest_framework.request import Request
 
 from sentry.exceptions import HookValidationError
 from sentry.models.activity import Activity
 from sentry.models.release import Release
 from sentry.types.activity import ActivityType
+
+logger = logging.getLogger(__name__)
 
 
 class ReleaseHook:
@@ -67,7 +71,13 @@ class ReleaseHook:
             data={"version": version},
             datetime=values["date_released"],
         )
+        logger.info(
+            "heroku.plugin_release_update",
+            extra={
+                "project_id": self.project.id,
+            },
+        )
         self.set_refs(release=release, **values)
 
-    def handle(self, request: Request) -> HttpResponseBase | None:
+    def handle(self, request: HttpRequest) -> HttpResponseBase | None:
         raise NotImplementedError

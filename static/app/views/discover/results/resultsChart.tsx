@@ -3,21 +3,22 @@ import styled from '@emotion/styled';
 import type {Location} from 'history';
 import isEqual from 'lodash/isEqual';
 
+import type {SelectValue} from '@sentry/scraps/select';
+
 import type {Client} from 'sentry/api';
 import {AreaChart} from 'sentry/components/charts/areaChart';
 import {BarChart} from 'sentry/components/charts/barChart';
-import EventsChart from 'sentry/components/charts/eventsChart';
+import {EventsChart} from 'sentry/components/charts/eventsChart';
 import {getInterval, getPreviousSeriesName} from 'sentry/components/charts/utils';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
-import Panel from 'sentry/components/panels/panel';
-import Placeholder from 'sentry/components/placeholder';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {Panel} from 'sentry/components/panels/panel';
+import {Placeholder} from 'sentry/components/placeholder';
 import {t} from 'sentry/locale';
-import type {SelectValue} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 import type {CustomMeasurementCollection} from 'sentry/utils/customMeasurements/customMeasurements';
 import {CustomMeasurementsContext} from 'sentry/utils/customMeasurements/customMeasurementsContext';
 import {getUtcToLocalDateObject} from 'sentry/utils/dates';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {getAggregateArg, stripEquationPrefix} from 'sentry/utils/discover/fields';
 import {
   DisplayModes,
@@ -25,12 +26,12 @@ import {
   TOP_EVENT_MODES,
   TOP_N,
 } from 'sentry/utils/discover/types';
-import getDynamicText from 'sentry/utils/getDynamicText';
+import {getDynamicText} from 'sentry/utils/getDynamicText';
 import {valueIsEqual} from 'sentry/utils/object/valueIsEqual';
 import {decodeScalar} from 'sentry/utils/queryString';
-import withApi from 'sentry/utils/withApi';
+import {withApi} from 'sentry/utils/withApi';
 import {isCustomMeasurement} from 'sentry/views/dashboards/utils';
-import ChartFooter from 'sentry/views/discover/results/chartFooter';
+import {ChartFooter} from 'sentry/views/discover/results/chartFooter';
 
 type ResultsChartProps = {
   api: Client;
@@ -64,10 +65,6 @@ class ResultsChart extends Component<ResultsChartProps> {
       yAxisValue,
       customMeasurements,
     } = this.props;
-
-    const hasPerformanceChartInterpolation = organization.features.includes(
-      'performance-chart-interpolation'
-    );
 
     const globalSelection = eventView.getPageFilters();
     const start = globalSelection.datetime.start
@@ -147,7 +144,6 @@ class ResultsChart extends Component<ResultsChartProps> {
               orderby={isTopEvents ? decodeScalar(apiPayload.sort) : undefined}
               utc={utc === 'true'}
               confirmedQuery={confirmedQuery}
-              withoutZerofill={hasPerformanceChartInterpolation}
               chartComponent={chartComponent}
               referrer={referrer}
               fromDiscover
@@ -175,7 +171,6 @@ type ContainerProps = {
   // chart footer props
   total: number | null;
   yAxis: string[];
-  hideFooter?: boolean;
 };
 
 type ContainerState = {
@@ -223,7 +218,6 @@ class ResultsChartContainer extends Component<ContainerProps, ContainerState> {
       organization,
       confirmedQuery,
       yAxis,
-      hideFooter,
     } = this.props;
 
     const {yAxisOptions} = this.state;
@@ -277,21 +271,19 @@ class ResultsChartContainer extends Component<ContainerProps, ContainerState> {
             )}
           </CustomMeasurementsContext.Consumer>
         )) || <NoChartContainer>{t('No Y-Axis selected.')}</NoChartContainer>}
-        {hideFooter ? null : (
-          <ChartFooter
-            total={total}
-            yAxisValue={yAxis}
-            yAxisOptions={yAxisOptions}
-            eventView={eventView}
-            onAxisChange={onAxisChange}
-            displayOptions={displayOptions}
-            displayMode={eventView.getDisplayMode()}
-            onDisplayChange={onDisplayChange}
-            onTopEventsChange={onTopEventsChange}
-            onIntervalChange={onIntervalChange}
-            topEvents={eventView.topEvents ?? TOP_N.toString()}
-          />
-        )}
+        <ChartFooter
+          total={total}
+          yAxisValue={yAxis}
+          yAxisOptions={yAxisOptions}
+          eventView={eventView}
+          onAxisChange={onAxisChange}
+          displayOptions={displayOptions}
+          displayMode={eventView.getDisplayMode()}
+          onDisplayChange={onDisplayChange}
+          onTopEventsChange={onTopEventsChange}
+          onIntervalChange={onIntervalChange}
+          topEvents={eventView.topEvents ?? TOP_N.toString()}
+        />
       </StyledPanel>
     );
   }
@@ -300,7 +292,7 @@ class ResultsChartContainer extends Component<ContainerProps, ContainerState> {
 export default withApi(ResultsChartContainer);
 
 const StyledPanel = styled(Panel)`
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
+  @container (min-width: ${p => p.theme.container['4xl']}) {
     margin: 0;
   }
 `;
@@ -318,6 +310,6 @@ const NoChartContainer = styled('div')<{height?: string}>`
   position: relative;
   border-color: transparent;
   margin-bottom: 0;
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSize.xl};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.xl};
 `;

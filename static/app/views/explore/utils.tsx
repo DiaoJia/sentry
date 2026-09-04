@@ -1,62 +1,80 @@
-import type {ReactNode} from 'react';
-import styled from '@emotion/styled';
+import * as Sentry from '@sentry/react';
 import type {Location} from 'history';
 import * as qs from 'query-string';
 
+import {Expression} from 'sentry/components/arithmeticBuilder/expression';
+import {isTokenFunction} from 'sentry/components/arithmeticBuilder/token';
 import {openConfirmModal} from 'sentry/components/confirm';
-import type {SelectOptionWithKey} from 'sentry/components/core/compactSelect/types';
-import HookOrDefault from 'sentry/components/hookOrDefault';
-import {IconBusiness} from 'sentry/icons/iconBusiness';
+import {getTooltipText as getAnnotatedTooltipText} from 'sentry/components/events/meta/annotatedText/utils';
+import {normalizeDateTimeString} from 'sentry/components/pageFilters/parse';
+import type {CaseInsensitive} from 'sentry/components/searchQueryBuilder/hooks';
 import {t} from 'sentry/locale';
 import type {PageFilters} from 'sentry/types/core';
-import type {TagCollection} from 'sentry/types/group';
+import type {Tag, TagCollection} from 'sentry/types/group';
 import type {Confidence, Organization} from 'sentry/types/organization';
-import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
+import type {DetailedProject, Project} from 'sentry/types/project';
+import {escapeDoubleQuotes} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {encodeSort} from 'sentry/utils/discover/eventView';
 import type {Sort} from 'sentry/utils/discover/fields';
-import {parseFunction} from 'sentry/utils/discover/fields';
+import {
+  isEquation,
+  parseFunction,
+  prettifyParsedFunction,
+  stripEquationPrefix,
+} from 'sentry/utils/discover/fields';
 import {decodeSorts} from 'sentry/utils/queryString';
+import {determineTimeSeriesConfidence} from 'sentry/utils/timeSeries/determineSeriesConfidence';
+import {determineSeriesSampleCountAndIsSampled} from 'sentry/utils/timeSeries/determineSeriesSampleCount';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import {determineSeriesSampleCountAndIsSampled} from 'sentry/views/alerts/rules/metric/utils/determineSeriesSampleCount';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import type {TimeSeries} from 'sentry/views/dashboards/widgets/common/types';
-import {newExploreTarget} from 'sentry/views/explore/contexts/pageParamsContext';
+import type {ChartSelectionQueryParam} from 'sentry/views/explore/components/attributeBreakdowns/chartSelectionContext';
 import type {GroupBy} from 'sentry/views/explore/contexts/pageParamsContext/aggregateFields';
 import {isGroupBy} from 'sentry/views/explore/contexts/pageParamsContext/aggregateFields';
 import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
-import type {
-  BaseVisualize,
-  Visualize,
-} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import type {BaseVisualize} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import {EXPLORE_AGENTS_SUB_PATH} from 'sentry/views/explore/conversations/settings';
 import type {
   RawGroupBy,
   RawVisualize,
   SavedQuery,
 } from 'sentry/views/explore/hooks/useGetSavedQueries';
-import {isRawVisualize} from 'sentry/views/explore/hooks/useGetSavedQueries';
-import type {ReadableExploreQueryParts} from 'sentry/views/explore/multiQueryMode/locationUtils';
-import type {ChartType} from 'sentry/views/insights/common/components/chart';
+import {
+  getSavedQueryTraceItemDataset,
+  isRawVisualize,
+} from 'sentry/views/explore/hooks/useGetSavedQueries';
+import type {
+  TraceItemAttributeMeta,
+  TraceItemDetailsMeta,
+} from 'sentry/views/explore/hooks/useTraceItemDetails';
+import {getLogsUrlFromSavedQueryUrl} from 'sentry/views/explore/logs/utils';
+import {getMetricsUrlFromSavedQueryUrl} from 'sentry/views/explore/metrics/utils';
+import {
+  getFieldsForConstructedQuery,
+  normalizeCompareQueryParts,
+  type ReadableExploreQueryParts,
+} from 'sentry/views/explore/multiQueryMode/locationUtils';
+import type {CrossEvent} from 'sentry/views/explore/queryParams/crossEvent';
+import type {Visualize} from 'sentry/views/explore/queryParams/visualize';
+import {makeReplaysPathname} from 'sentry/views/explore/replays/pathnames';
+import {getTargetWithReadableQueryParams} from 'sentry/views/explore/spans/spansQueryParams';
+import {TraceItemDataset} from 'sentry/views/explore/types';
+import {
+  parseConditionalAggregate,
+  withReadableConditionalFilter,
+} from 'sentry/views/explore/utils/conditionalAggregate';
 import {isChartType} from 'sentry/views/insights/common/components/chart';
-import type {useSortedTimeSeries} from 'sentry/views/insights/common/queries/useSortedTimeSeries';
+import type {SortedTimeSeries} from 'sentry/views/insights/common/queries/useSortedTimeSeries';
 import {makeTracesPathname} from 'sentry/views/traces/pathnames';
 
-export function getExploreUrl({
-  organization,
-  selection,
-  interval,
-  mode,
-  aggregateField,
-  visualize,
-  query,
-  groupBy,
-  sort,
-  field,
-  id,
-  title,
-  referrer,
-}: {
+export interface GetExploreUrlArgs {
   organization: Organization;
   aggregateField?: Array<GroupBy | BaseVisualize>;
+  aggregateSort?: string;
+  caseInsensitive?: CaseInsensitive;
+  chartSelection?: ChartSelectionQueryParam;
+  crossEvents?: CrossEvent[];
   field?: string[];
   groupBy?: string[];
   id?: number;
@@ -66,17 +84,40 @@ export function getExploreUrl({
   referrer?: string;
   selection?: PageFilters;
   sort?: string;
+  table?: 'trace' | 'attribute_breakdowns';
   title?: string;
   visualize?: BaseVisualize[];
-}) {
+}
+
+export function getExploreUrl({
+  organization,
+  selection,
+  interval,
+  mode,
+  aggregateField,
+  chartSelection,
+  visualize,
+  query,
+  groupBy,
+  sort,
+  aggregateSort,
+  field,
+  id,
+  table,
+  title,
+  referrer,
+  caseInsensitive,
+  crossEvents,
+}: GetExploreUrlArgs) {
   const {start, end, period: statsPeriod, utc} = selection?.datetime ?? {};
   const {environments, projects} = selection ?? {};
   const queryParams = {
-    project: projects,
+    // Pass empty string when projects is empty to preserve "My Projects" selection in URL
+    project: projects?.length === 0 ? '' : projects,
     environment: environments,
     statsPeriod,
-    start,
-    end,
+    start: normalizeDateTimeString(start),
+    end: normalizeDateTimeString(end),
     interval,
     mode,
     query,
@@ -84,11 +125,16 @@ export function getExploreUrl({
     visualize: visualize?.map(v => JSON.stringify(v)),
     groupBy,
     sort,
+    aggregateSort,
     field,
     utc,
     id,
+    table,
     title,
     referrer,
+    caseInsensitive: caseInsensitive ? '1' : undefined,
+    chartSelection: chartSelection ? JSON.stringify(chartSelection) : undefined,
+    crossEvents: crossEvents?.length ? JSON.stringify(crossEvents) : undefined,
   };
 
   return (
@@ -99,7 +145,7 @@ export function getExploreUrl({
   );
 }
 
-export function getExploreUrlFromSavedQueryUrl({
+function getExploreUrlFromSavedQueryUrl({
   savedQuery,
   organization,
 }: {
@@ -115,19 +161,31 @@ export function getExploreUrlFromSavedQueryUrl({
           q.aggregateField
             ?.filter<RawGroupBy>(isGroupBy)
             ?.map(groupBy => groupBy.groupBy) ?? q.groupby;
-        const visualize: RawVisualize | undefined =
+        const visualize =
           q.aggregateField?.find<RawVisualize>(isRawVisualize) ?? q.visualize?.[0];
-        const chartType: ChartType | undefined = isChartType(visualize?.chartType)
+        const chartType = isChartType(visualize?.chartType)
           ? visualize.chartType
           : undefined;
 
-        return {
-          ...q,
+        const normalized = normalizeCompareQueryParts({
           chartType,
           yAxes: (visualize?.yAxes ?? []).slice(),
           groupBys: groupBys ?? [],
+          query: q.query ?? '',
           sortBys: decodeSorts(q.orderby),
-        };
+          caseInsensitive: q.caseInsensitive ? '1' : null,
+        });
+        const yAxes = normalized.yAxes ?? [];
+
+        return {
+          chartType: normalized.chartType,
+          yAxes,
+          groupBys: [...(normalized.groupBys ?? groupBys ?? [])],
+          query: normalized.query ?? '',
+          sortBys: [...(normalized.sortBys ?? decodeSorts(q.orderby))],
+          fields: getFieldsForConstructedQuery(yAxes),
+          caseInsensitive: normalized.caseInsensitive,
+        } satisfies ReadableExploreQueryParts;
       }),
       title: savedQuery.name,
       selection: {
@@ -142,6 +200,7 @@ export function getExploreUrlFromSavedQueryUrl({
       },
     });
   }
+
   return getExploreUrl({
     organization,
     ...savedQuery,
@@ -175,52 +234,61 @@ export function getExploreMultiQueryUrl({
   queries,
   title,
   id,
+  referrer,
 }: {
   interval: string;
   organization: Organization;
   queries: ReadableExploreQueryParts[];
   selection: PageFilters;
   id?: number;
+  referrer?: string;
   title?: string;
 }) {
   const {start, end, period: statsPeriod, utc} = selection.datetime;
   const {environments, projects} = selection;
   const queryParams = {
-    project: projects,
+    // Pass empty string when projects is empty to preserve "My Projects" selection in URL
+    project: projects.length === 0 ? '' : projects,
     environment: environments,
     statsPeriod,
-    start,
-    end,
+    start: normalizeDateTimeString(start),
+    end: normalizeDateTimeString(end),
     interval,
-    queries: queries.map(({chartType, fields, groupBys, query, sortBys, yAxes}) =>
-      JSON.stringify({
-        chartType,
-        fields,
-        groupBys,
-        query,
-        sortBys: sortBys[0] ? encodeSort(sortBys[0]) : undefined, // Explore only handles a single sort by
-        yAxes,
-      })
+    queries: queries.map(
+      ({chartType, fields, groupBys, query, sortBys, yAxes, caseInsensitive}) =>
+        JSON.stringify({
+          chartType,
+          fields,
+          groupBys,
+          query,
+          sortBys: sortBys[0] ? encodeSort(sortBys[0]) : undefined, // Explore only handles a single sort by
+          yAxes,
+          caseInsensitive: caseInsensitive ? '1' : undefined,
+        })
     ),
     title,
     id,
     utc,
+    referrer,
   };
 
   return `/organizations/${organization.slug}/explore/traces/compare/?${qs.stringify(queryParams, {skipNull: true})}`;
 }
 
-export function combineConfidenceForSeries(
-  series: Array<Pick<TimeSeries, 'confidence'>>
-): Confidence {
+export function combineConfidenceForSeries(series: TimeSeries[]): Confidence {
   let lows = 0;
   let highs = 0;
   let nulls = 0;
 
-  for (const s of series) {
-    if (s.confidence === 'low') {
+  // We filter the series because there are cases where the series is a sparse array,
+  // meaning we have possible undefined values. This typically happens in multi-yaxis
+  // charts when we have a grouping so the data is positioned in such a way to make
+  // series colors consistent when rendering
+  for (const s of series.filter(defined)) {
+    const confidence = determineTimeSeriesConfidence(s);
+    if (confidence === 'low') {
       lows += 1;
-    } else if (s.confidence === 'high') {
+    } else if (confidence === 'high') {
       highs += 1;
     } else {
       nulls += 1;
@@ -238,30 +306,33 @@ export function combineConfidenceForSeries(
   return 'high';
 }
 
-export function viewSamplesTarget({
-  location,
-  query,
+export function generateTargetQuery({
   fields,
   groupBys,
-  visualizes,
-  sorts,
-  row,
+  location,
   projects,
+  search,
+  row,
+  sorts,
+  yAxes,
 }: {
-  fields: string[];
-  groupBys: string[];
+  fields: readonly string[];
+  groupBys: readonly string[];
   location: Location;
   // needed to generate targets when `project` is in the group by
   projects: Project[];
-  query: string;
   row: Record<string, any>;
-  sorts: Sort[];
-  visualizes: Visualize[];
+  search: MutableSearch;
+  sorts: readonly Sort[];
+  yAxes: string[];
 }) {
-  const search = new MutableSearch(query);
+  search = search.copy();
 
   // first update the resulting query to filter for the target group
   for (const groupBy of groupBys) {
+    if (!groupBy) {
+      continue;
+    }
     const value = row[groupBy];
     // some fields require special handling so make sure to handle it here
     if (groupBy === 'project' && typeof value === 'string') {
@@ -274,7 +345,17 @@ export function viewSamplesTarget({
     } else if (groupBy === 'environment' && typeof value === 'string') {
       location.query.environment = value;
     } else if (typeof value === 'string') {
-      search.setFilterValues(groupBy, [value]);
+      // TODO(nsdeschenes): Remove this once we have a proper way to handle quoted values
+      // that have square brackets included in the value
+      if (value.startsWith('[') && value.endsWith(']')) {
+        search.setFilterValues(groupBy, [`"${escapeDoubleQuotes(value)}"`]);
+      } else {
+        search.setFilterValues(groupBy, [value]);
+      }
+    } else if (typeof value === 'number') {
+      search.setFilterValues(groupBy, [String(value)]);
+    } else if (!defined(value)) {
+      search.addFilterValue('!has', groupBy);
     }
   }
 
@@ -282,8 +363,10 @@ export function viewSamplesTarget({
   const seenFields = new Set(newFields);
 
   // add all the arguments of the visualizations as columns
-  for (const visualize of visualizes) {
-    const parsedFunction = parseFunction(visualize.yAxis);
+  for (const yAxis of yAxes) {
+    // Parse conditionally so an `_if` filter query is not mistaken for an attribute and
+    // added as a samples column.
+    const parsedFunction = parseConditionalAggregate(yAxis);
     if (!parsedFunction?.arguments[0]) {
       continue;
     }
@@ -310,7 +393,7 @@ export function viewSamplesTarget({
 
   // find the first valid sort and sort on that
   for (const sort of sorts) {
-    const parsedFunction = parseFunction(sort.field);
+    const parsedFunction = parseConditionalAggregate(sort.field);
     if (!parsedFunction?.arguments[0]) {
       continue;
     }
@@ -329,86 +412,64 @@ export function viewSamplesTarget({
     break;
   }
 
-  return newExploreTarget(location, {
+  return {
+    fields: newFields,
+    search,
+    sortBys: [sortBy],
+  };
+}
+
+export function viewSamplesTarget({
+  location,
+  query,
+  fields,
+  groupBys,
+  visualizes,
+  sorts,
+  row,
+  projects,
+}: {
+  fields: readonly string[];
+  groupBys: readonly string[];
+  location: Location;
+  // needed to generate targets when `project` is in the group by
+  projects: Project[];
+  query: string;
+  row: Record<string, any>;
+  sorts: readonly Sort[];
+  visualizes: readonly Visualize[];
+}) {
+  const search = new MutableSearch(query);
+
+  const {
+    fields: newFields,
+    search: newSearch,
+    sortBys: newSortBys,
+  } = generateTargetQuery({
+    fields,
+    groupBys,
+    location,
+    projects,
+    search,
+    row,
+    sorts,
+    yAxes: visualizes.map(visualize => visualize.yAxis),
+  });
+
+  const target = getTargetWithReadableQueryParams(location, {
     mode: Mode.SAMPLES,
     fields: newFields,
-    query: search.formatString(),
-    sortBys: [sortBy],
+    query: newSearch.formatString(),
+    sortBys: newSortBys,
   });
-}
 
-type MaxPickableDays = 7 | 14 | 30;
-type DefaultPeriod = '24h' | '7d' | '14d' | '30d';
+  delete target.query.table;
 
-export interface PickableDays {
-  defaultPeriod: DefaultPeriod;
-  maxPickableDays: MaxPickableDays;
-  relativeOptions: ({
-    arbitraryOptions,
-  }: {
-    arbitraryOptions: Record<string, ReactNode>;
-  }) => Record<string, ReactNode>;
-  isOptionDisabled?: ({value}: SelectOptionWithKey<string>) => boolean;
-  menuFooter?: ReactNode;
-}
-
-export function limitMaxPickableDays(organization: Organization): PickableDays {
-  const defaultPeriods: Record<MaxPickableDays, DefaultPeriod> = {
-    7: '7d',
-    14: '14d',
-    30: '30d',
-  };
-
-  const relativeOptions: Array<[DefaultPeriod, ReactNode]> = [
-    ['7d', t('Last 7 days')],
-    ['14d', t('Last 14 days')],
-    ['30d', t('Last 30 days')],
-  ];
-
-  const maxPickableDays: MaxPickableDays = organization.features.includes(
-    'visibility-explore-range-high'
-  )
-    ? 30
-    : organization.features.includes('visibility-explore-range-medium')
-      ? 14
-      : 7;
-  const defaultPeriod: DefaultPeriod = defaultPeriods[maxPickableDays];
-
-  const index = relativeOptions.findIndex(([period, _]) => period === defaultPeriod) + 1;
-  const enabledOptions = Object.fromEntries(relativeOptions.slice(0, index));
-  const disabledOptions = Object.fromEntries(
-    relativeOptions.slice(index).map(([value, label]) => {
-      return [value, <DisabledDateOption key={value} label={label} />];
-    })
-  );
-
-  const isOptionDisabled = (option: SelectOptionWithKey<string>): boolean => {
-    return disabledOptions.hasOwnProperty(option.value);
-  };
-
-  const menuFooter = index === relativeOptions.length ? null : <UpsellFooterHook />;
-
-  return {
-    defaultPeriod,
-    isOptionDisabled,
-    maxPickableDays,
-    menuFooter,
-    relativeOptions: ({
-      arbitraryOptions,
-    }: {
-      arbitraryOptions: Record<string, ReactNode>;
-    }) => ({
-      ...arbitraryOptions,
-      '1h': t('Last hour'),
-      '24h': t('Last 24 hours'),
-      ...enabledOptions,
-      ...disabledOptions,
-    }),
-  };
+  return target;
 }
 
 export function getDefaultExploreRoute(organization: Organization) {
-  if (organization.features.includes('performance-trace-explorer')) {
+  if (organization.features.includes('visibility-explore-view')) {
     return 'traces';
   }
 
@@ -421,7 +482,7 @@ export function getDefaultExploreRoute(organization: Organization) {
   }
 
   if (organization.features.includes('performance-profiling')) {
-    return 'profiling';
+    return 'profiles';
   }
 
   if (organization.features.includes('session-replay-ui')) {
@@ -432,40 +493,16 @@ export function getDefaultExploreRoute(organization: Organization) {
 }
 
 export function computeVisualizeSampleTotals(
-  visualizes: Visualize[],
-  data: ReturnType<typeof useSortedTimeSeries>['data'],
+  yAxes: string[],
+  data: SortedTimeSeries['data'],
   isTopN: boolean
 ) {
-  return visualizes.map(visualize => {
-    const dedupedYAxes = [visualize.yAxis];
-    const series = dedupedYAxes.flatMap(yAxis => data[yAxis]).filter(defined);
+  return yAxes.map(yAxis => {
+    const series = data?.[yAxis]?.filter(defined) ?? [];
     const {sampleCount} = determineSeriesSampleCountAndIsSampled(series, isTopN);
     return sampleCount;
   });
 }
-
-function DisabledDateOption({label}: {label: ReactNode}) {
-  return (
-    <DisabledDateOptionContainer>
-      {label}
-      <StyledIconBuisness />
-    </DisabledDateOptionContainer>
-  );
-}
-
-const DisabledDateOptionContainer = styled('div')`
-  display: flex;
-  align-items: center;
-`;
-
-const StyledIconBuisness = styled(IconBusiness)`
-  margin-left: auto;
-`;
-
-const UpsellFooterHook = HookOrDefault({
-  hookName: 'component:explore-date-range-query-limit-footer',
-  defaultComponent: () => undefined,
-});
 
 export function confirmDeleteSavedQuery({
   handleDelete,
@@ -487,6 +524,7 @@ export function findSuggestedColumns(
   newSearch: MutableSearch,
   oldSearch: MutableSearch,
   attributes: {
+    booleanAttributes: TagCollection;
     numberAttributes: TagCollection;
     stringAttributes: TagCollection;
   }
@@ -494,7 +532,7 @@ export function findSuggestedColumns(
   const oldFilters = oldSearch.filters;
   const newFilters = newSearch.filters;
 
-  const keys: Set<string> = new Set();
+  const keys = new Set<string>();
 
   for (const [key, value] of Object.entries(newFilters)) {
     if (key === 'has' || key === '!has') {
@@ -503,14 +541,17 @@ export function findSuggestedColumns(
     }
 
     const isStringAttribute = key.startsWith('!')
-      ? attributes.stringAttributes.hasOwnProperty(key.slice(1))
-      : attributes.stringAttributes.hasOwnProperty(key);
+      ? key.slice(1) in attributes.stringAttributes
+      : key in attributes.stringAttributes;
     const isNumberAttribute = key.startsWith('!')
-      ? attributes.numberAttributes.hasOwnProperty(key.slice(1))
-      : attributes.numberAttributes.hasOwnProperty(key);
+      ? key.slice(1) in attributes.numberAttributes
+      : key in attributes.numberAttributes;
+    const isBooleanAttribute = key.startsWith('!')
+      ? key.slice(1) in attributes.booleanAttributes
+      : key in attributes.booleanAttributes;
 
     // guard against unknown keys and aggregate keys
-    if (!isStringAttribute && !isNumberAttribute) {
+    if (!isStringAttribute && !isNumberAttribute && !isBooleanAttribute) {
       continue;
     }
 
@@ -519,7 +560,7 @@ export function findSuggestedColumns(
     }
 
     if (
-      !oldFilters.hasOwnProperty(key) || // new filter key
+      !Object.hasOwn(oldFilters, key) || // new filter key
       isSimpleFilter(key, oldFilters[key] || [], attributes) // existing filter key turned complex
     ) {
       keys.add(normalizeKey(key));
@@ -529,14 +570,14 @@ export function findSuggestedColumns(
 
   const oldHas = new Set(oldFilters.has);
   for (const key of newFilters.has || []) {
-    if (oldFilters.hasOwnProperty(key) || oldHas.has(key)) {
+    if (Object.hasOwn(oldFilters, key) || oldHas.has(key)) {
       // old condition, don't add column
       continue;
     }
 
     // if there's a simple filter on the key, don't add column
     if (
-      newFilters.hasOwnProperty(key) &&
+      Object.hasOwn(newFilters, key) &&
       isSimpleFilter(key, newFilters[key] || [], attributes)
     ) {
       continue;
@@ -555,6 +596,7 @@ function isSimpleFilter(
   key: string,
   value: string[],
   attributes: {
+    booleanAttributes: TagCollection;
     numberAttributes: TagCollection;
     stringAttributes: TagCollection;
   }
@@ -567,8 +609,14 @@ function isSimpleFilter(
 
   // all number attributes are considered non trivial because they
   // almost always match on a range of values
-  if (attributes.numberAttributes.hasOwnProperty(key)) {
+  if (key in attributes.numberAttributes) {
     return false;
+  }
+
+  // boolean attributes are always considered trivial because they almost match on a
+  // single value, so there's no value in adding a column
+  if (key in attributes.booleanAttributes) {
+    return true;
   }
 
   if (value.length === 1) {
@@ -600,60 +648,290 @@ function normalizeKey(key: string): string {
   return key.startsWith('!') ? key.slice(1) : key;
 }
 
-export function formatQueryToNaturalLanguage(query: string): string {
-  if (!query.trim()) return '';
-  const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-  const formattedTokens = tokens.map(formatToken);
+export function prettifyAggregation(aggregation: string): string | null {
+  if (isEquation(aggregation)) {
+    const expression = new Expression(stripEquationPrefix(aggregation));
+    return expression.tokens
+      .map(token => {
+        if (isTokenFunction(token)) {
+          const func = parseFunction(withReadableConditionalFilter(token.text));
+          if (func) {
+            return prettifyParsedFunction(func);
+          }
+        }
+        return token.text;
+      })
+      .join(' ');
+  }
 
-  return formattedTokens.reduce((result, token, index) => {
-    if (index === 0) return token;
+  const func = parseFunction(withReadableConditionalFilter(aggregation));
+  if (func) {
+    return prettifyParsedFunction(func);
+  }
 
-    const prevToken = formattedTokens[index - 1];
-    if (!prevToken) return `${result}, ${token}`;
-
-    const isLogicalOp = token.toUpperCase() === 'AND' || token.toUpperCase() === 'OR';
-    const prevIsLogicalOp =
-      prevToken.toUpperCase() === 'AND' || prevToken.toUpperCase() === 'OR';
-
-    if (isLogicalOp || prevIsLogicalOp) {
-      return `${result} ${token}`;
-    }
-
-    return `${result}, ${token}`;
-  }, '');
+  return null;
 }
 
-function formatToken(token: string): string {
-  const isNegated = token.startsWith('!') && token.includes(':');
-  const actualToken = isNegated ? token.slice(1) : token;
+// The hidden lists target Sentry-defined fields. A user-sent attribute is kept
+// even when its name collides with a reserved field (e.g. a custom
+// `organization.id`), so it stays selectable in search and the column editor.
+export const isHiddenAttribute = (tag: Tag, hiddenKeys: Set<string>): boolean => {
+  if (tag.attributeSource === 'user') {
+    return false;
+  }
+  // Hide by both the raw key and the display name. Explicitly-typed keys such as
+  // `tags[project_id,number]` carry a display name (`project_id`) that is what
+  // appears in the hidden lists.
+  return hiddenKeys.has(tag.key) || (!!tag.name && hiddenKeys.has(tag.name));
+};
 
-  const operators = [
-    [':>=', 'greater than or equal to'],
-    [':<=', 'less than or equal to'],
-    [':!=', 'not'],
-    [':>', 'greater than'],
-    [':<', 'less than'],
-    ['>=', 'greater than or equal to'],
-    ['<=', 'less than or equal to'],
-    ['!=', 'not'],
-    ['!:', 'not'],
-    ['>', 'greater than'],
-    ['<', 'less than'],
-    [':', ''],
-  ] as const;
+export const removeHiddenKeys = (
+  tagCollection: TagCollection,
+  hiddenKeys: Set<string>
+): TagCollection => {
+  const result: TagCollection = {};
+  for (const key in tagCollection) {
+    const tag = tagCollection[key];
+    if (!key || !tag) {
+      continue;
+    }
+    if (isHiddenAttribute(tag, hiddenKeys)) {
+      continue;
+    }
+    result[key] = tag;
+  }
+  return result;
+};
 
-  for (const [op, desc] of operators) {
-    if (actualToken.includes(op)) {
-      const [key, value] = actualToken.split(op);
-      const cleanKey = key?.trim() || '';
-      const cleanVal = value?.trim() || '';
+export function getSavedQueryTraceItemUrl({
+  savedQuery,
+  organization,
+}: {
+  organization: Organization;
+  savedQuery: SavedQuery;
+}) {
+  if (savedQuery.dataset === 'ai_conversations') {
+    return getConversationsUrlFromSavedQueryUrl({savedQuery, organization});
+  }
+  const traceItemDataset = getSavedQueryTraceItemDataset(savedQuery.dataset);
+  const urlFunction = TRACE_ITEM_TO_URL_FUNCTION[traceItemDataset];
+  if (urlFunction) {
+    return urlFunction({savedQuery, organization});
+  }
+  // Invariant, only spans, logs, and metrics are currently supported.
+  Sentry.captureMessage(
+    `Saved query ${savedQuery.id} has an invalid dataset: ${savedQuery.dataset}`
+  );
+  return getExploreUrlFromSavedQueryUrl({savedQuery, organization});
+}
 
-      const negation = isNegated ? 'not ' : '';
-      const description = desc ? `${negation}${desc}` : negation ? 'not' : '';
+function getConversationsUrlFromSavedQueryUrl({
+  savedQuery,
+  organization,
+}: {
+  organization: Organization;
+  savedQuery: SavedQuery;
+}) {
+  const firstQuery = savedQuery.query[0];
+  const queryParams = {
+    query: firstQuery?.query,
+    project: savedQuery.projects,
+    environment: savedQuery.environment,
+    start: normalizeDateTimeString(savedQuery.start),
+    end: normalizeDateTimeString(savedQuery.end),
+    statsPeriod: savedQuery.range,
+    id: savedQuery.id,
+    title: savedQuery.name,
+  };
 
-      return `${cleanKey} is ${description} ${cleanVal}`.replace(/\s+/g, ' ').trim();
+  let queryString = qs.stringify(queryParams, {skipNull: true});
+  if (savedQuery.agent?.length) {
+    queryString += `&agent=${savedQuery.agent.map(encodeURIComponent).join(',')}`;
+  }
+  const basePath = normalizeUrl(
+    `/organizations/${organization.slug}/explore/${EXPLORE_AGENTS_SUB_PATH}/`
+  );
+  return `${basePath}?${queryString}`;
+}
+
+function getReplayUrlFromSavedQueryUrl({
+  savedQuery,
+  organization,
+}: {
+  organization: Organization;
+  savedQuery: SavedQuery;
+}) {
+  const firstQuery = savedQuery.query[0];
+  const queryParams = {
+    query: firstQuery?.query,
+    project: savedQuery.projects,
+    environment: savedQuery.environment,
+    start: normalizeDateTimeString(savedQuery.start),
+    end: normalizeDateTimeString(savedQuery.end),
+    statsPeriod: savedQuery.range,
+    id: savedQuery.id,
+    title: savedQuery.name,
+  };
+
+  const queryString = qs.stringify(queryParams, {skipNull: true});
+  return `${makeReplaysPathname({organization, path: '/'})}?${queryString}`;
+}
+
+const TRACE_ITEM_TO_URL_FUNCTION: Record<
+  TraceItemDataset,
+  | (({
+      savedQuery,
+      organization,
+    }: {
+      organization: Organization;
+      savedQuery: SavedQuery;
+    }) => string)
+  | undefined
+> = {
+  [TraceItemDataset.LOGS]: getLogsUrlFromSavedQueryUrl,
+  [TraceItemDataset.SPANS]: getExploreUrlFromSavedQueryUrl,
+  [TraceItemDataset.UPTIME_RESULTS]: undefined,
+  [TraceItemDataset.TRACEMETRICS]: getMetricsUrlFromSavedQueryUrl,
+  [TraceItemDataset.PREPROD]: undefined,
+  [TraceItemDataset.REPLAYS]: getReplayUrlFromSavedQueryUrl,
+  [TraceItemDataset.PROCESSING_ERRORS]: undefined,
+  [TraceItemDataset.ERRORS]: undefined,
+};
+
+/**
+ * Metadata about trace item attributes.
+ *
+ * This can be used to extract additional information about attributes
+ * like remarks (e.g. why a value was redacted).
+ */
+export class TraceItemMetaInfo {
+  private static readonly META_PATH_CURRENT = '';
+
+  private meta: TraceItemDetailsMeta;
+
+  constructor(meta: TraceItemDetailsMeta) {
+    this.meta = meta;
+  }
+
+  getAttributeMeta(attribute: string): TraceItemAttributeMeta | undefined {
+    return this.meta?.[attribute]?.meta?.value?.[TraceItemMetaInfo.META_PATH_CURRENT];
+  }
+
+  getRemarks(attribute: string): RemarkObject[] {
+    const attributeMeta = this.getAttributeMeta(attribute);
+    if (!attributeMeta?.rem?.length) {
+      return [];
+    }
+
+    const properlyFormedRemarks = attributeMeta.rem.filter(r => r.length >= 2); // Defensive against unexpected length remarks.
+
+    return properlyFormedRemarks.map((rem): RemarkObject => {
+      const [ruleId, type, rangeStart, rangeEnd] = rem;
+      return {
+        ruleId: String(ruleId),
+        type: String(type),
+        rangeStart: Number(rangeStart),
+        rangeEnd: Number(rangeEnd),
+      };
+    });
+  }
+
+  hasRemarks(attribute: string): boolean {
+    const attributeMeta = this.getAttributeMeta(attribute);
+    return (attributeMeta?.rem?.length ?? 0) > 0;
+  }
+
+  static getTooltipText(
+    attribute: string,
+    meta: TraceItemDetailsMeta,
+    organization?: Organization,
+    project?: DetailedProject
+  ): string | React.ReactNode | null {
+    const metaInfo = new TraceItemMetaInfo(meta);
+    const remarks = metaInfo.getRemarks(attribute);
+
+    const firstRemark = remarks[0];
+    if (!firstRemark) {
+      return null;
+    }
+
+    return getAnnotatedTooltipText({
+      remark: firstRemark.type,
+      rule_id: firstRemark.ruleId,
+      organization,
+      project,
+    });
+  }
+}
+
+interface RemarkObject {
+  rangeEnd: number;
+  rangeStart: number;
+  ruleId: string;
+  type: string;
+}
+
+const SAMPLING_SENSITIVE_AGGREGATES = new Set([
+  'count_unique',
+  'failure_count',
+  'failure_rate',
+]);
+const LOW_SAMPLE_RATE_THRESHOLD = 0.1;
+
+export type SamplingWarningReason = 'partialData' | 'lowSampleRate';
+
+export function getSamplingWarningReason(
+  yAxis: string,
+  series: TimeSeries[],
+  dataScanned: 'full' | 'partial' | undefined
+): SamplingWarningReason | null {
+  if (!isSamplingSensitiveAggregate(yAxis)) {
+    return null;
+  }
+  if (!series.some(seriesItem => defined(seriesItem) && seriesItem.values.length > 0)) {
+    return null;
+  }
+  if (dataScanned === 'partial') {
+    return 'partialData';
+  }
+  if (shouldWarnSamplingSensitive(yAxis, series)) {
+    return 'lowSampleRate';
+  }
+  return null;
+}
+
+export function shouldWarnSamplingSensitive(
+  yAxis: string,
+  series: TimeSeries[]
+): boolean {
+  if (!isSamplingSensitiveAggregate(yAxis)) {
+    return false;
+  }
+  const avgSampleRate = computeAvgSampleRate(series);
+  return defined(avgSampleRate) && avgSampleRate < LOW_SAMPLE_RATE_THRESHOLD;
+}
+
+export function isSamplingSensitiveAggregate(yAxis: string): boolean {
+  // Parse conditionally so `count_unique_if` is recognised as `count_unique`.
+  const parsed = parseConditionalAggregate(yAxis);
+  if (!parsed) {
+    return false;
+  }
+  return SAMPLING_SENSITIVE_AGGREGATES.has(parsed.name);
+}
+
+function computeAvgSampleRate(series: TimeSeries[]): number | undefined {
+  let total = 0;
+  let count = 0;
+
+  for (const seriesItem of series.filter(defined)) {
+    for (const item of seriesItem.values) {
+      if (defined(item.sampleRate)) {
+        total += item.sampleRate;
+        count += 1;
+      }
     }
   }
 
-  return token;
+  return count > 0 ? total / count : undefined;
 }

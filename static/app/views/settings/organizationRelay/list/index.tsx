@@ -1,11 +1,13 @@
 import orderBy from 'lodash/orderBy';
 
+import {Stack} from '@sentry/scraps/layout';
+
 import type {Relay, RelayActivity} from 'sentry/types/relay';
 
-import ActivityList from './activityList';
-import CardHeader from './cardHeader';
+import {ActivityList} from './activityList';
+import {CardHeader} from './cardHeader';
 import {getRelaysByPublicKey} from './utils';
-import WaitingActivity from './waitingActivity';
+import {WaitingActivity} from './waitingActivity';
 
 type CardHeaderProps = React.ComponentProps<typeof CardHeader>;
 type WaitingActivityProps = React.ComponentProps<typeof WaitingActivity>;
@@ -14,10 +16,19 @@ type Props = {
   disabled: boolean;
   relayActivities: RelayActivity[];
   relays: Relay[];
+  registerKeyAction?: React.ReactNode;
 } & Pick<CardHeaderProps, 'onDelete' | 'onEdit'> &
   Pick<WaitingActivityProps, 'onRefresh'>;
 
-function List({relays, relayActivities, onRefresh, onDelete, onEdit, disabled}: Props) {
+export function List({
+  relays,
+  relayActivities,
+  onRefresh,
+  onDelete,
+  onEdit,
+  disabled,
+  registerKeyAction,
+}: Props) {
   const orderedRelays = orderBy(relays, relay => relay.created, ['desc']);
 
   const relaysByPublicKey = getRelaysByPublicKey(orderedRelays, relayActivities);
@@ -31,12 +42,12 @@ function List({relays, relayActivities, onRefresh, onDelete, onEdit, disabled}: 
   };
 
   return (
-    <div>
+    <Stack gap="xl">
       {Object.keys(relaysByPublicKey).map(relayByPublicKey => {
         const {name, description, created, activities} =
           relaysByPublicKey[relayByPublicKey]!;
         return (
-          <div key={relayByPublicKey}>
+          <Stack key={relayByPublicKey} gap="md">
             <CardHeader
               publicKey={relayByPublicKey}
               name={name}
@@ -45,13 +56,16 @@ function List({relays, relayActivities, onRefresh, onDelete, onEdit, disabled}: 
               onEdit={onEdit}
               onDelete={onDelete}
               disabled={disabled}
+              extraAction={
+                relayByPublicKey === orderedRelays[0]?.publicKey
+                  ? registerKeyAction
+                  : undefined
+              }
             />
             {renderCardContent(activities)}
-          </div>
+          </Stack>
         );
       })}
-    </div>
+    </Stack>
   );
 }
-
-export default List;

@@ -1,7 +1,9 @@
 import zipfile
 from io import BytesIO
+from unittest.mock import patch
 from uuid import uuid4
 
+import requests
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 
@@ -11,6 +13,8 @@ from sentry.models.release import Release
 from sentry.models.releasefile import ReleaseFile
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.helpers.response import close_streaming_response
+from sentry.testutils.objectstore import debug_files_test_both_backends
+from sentry.testutils.skips import requires_objectstore
 
 # This is obviously a freely generated UUID and not the checksum UUID.
 # This is permissible if users want to send different UUIDs
@@ -24,7 +28,7 @@ org.slf4j.helpers.Util$ClassContextSecurityManager -> org.a.b.g$a:
 
 
 class DebugFilesTestCases(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.url = reverse(
             "sentry-api-0-dsym-files",
             kwargs={
@@ -50,9 +54,31 @@ class DebugFilesTestCases(APITestCase):
             format="multipart",
         )
 
+    def _assert_successful_download(self, response, content: bytes, filename=None) -> None:
+        if response.status_code == 302:
+            location = response["Location"]
+            # In dev/test the host may be rewritten to the Docker-internal `objectstore` hostname
+            # (so Symbolicator can reach it); rewrite it back so this host-side test can follow it.
+            location = location.replace("://objectstore:", "://127.0.0.1:")
+            response = requests.get(location)
+            assert response.status_code == 200, response.text
+            assert response.content == content
+            if filename is not None:
+                assert (
+                    response.headers["Content-Disposition"] == f'attachment; filename="{filename}"'
+                )
+        else:
+            assert response.status_code == 200, response.content
+            if filename is not None:
+                assert response.get("Content-Disposition") == f'attachment; filename="{filename}"'
+                assert response.get("Content-Length") == str(len(content))
+            assert response.get("Content-Type") == "application/octet-stream"
+            assert content == close_streaming_response(response)
 
+
+@debug_files_test_both_backends
 class DebugFilesTest(DebugFilesTestCases):
-    def test_simple_proguard_upload(self):
+    def test_simple_proguard_upload(self) -> None:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201, response.content
         assert len(response.data) == 1
@@ -63,7 +89,7 @@ class DebugFilesTest(DebugFilesTestCases):
         assert response.data[0]["cpuName"] == "any"
         assert response.data[0]["symbolType"] == "proguard"
 
-    def test_dsyms_search(self):
+    def test_dsyms_search(self) -> None:
         for i in range(25):
             last_uuid = str(uuid4())
             self._upload_proguard(self.url, last_uuid)
@@ -85,7 +111,43 @@ class DebugFilesTest(DebugFilesTestCases):
         dsyms = response.data
         assert len(dsyms) == 20
 
-    def test_access_control(self):
+    def test_dsyms_debugid_codeid_full_match(self) -> None:
+        self._do_test_dsyms_by_debugid_and_codeid(
+            ("dfb8e43a-f242-3d73-a453-aeb6a777ef75", "ae0459704fc7256"),
+            [(True, "dfb8e43a-f242-3d73-a453-aeb6a777ef75", "ae0459704fc7256")],
+        )
+
+    def test_dsyms_debugid_codeid_full_match_and_partials(self) -> None:
+        self._do_test_dsyms_by_debugid_and_codeid(
+            ("dfb8e43a-f242-3d73-a453-aeb6a777ef75", "ae0459704fc7256"),
+            [
+                (True, "dfb8e43a-f242-3d73-a453-aeb6a777ef75", "ae0459704fc7256"),
+                (False, "00000000-000000000-0000-000000000000", "ae0459704fc7256"),
+                (True, "dfb8e43a-f242-3d73-a453-aeb6a777ef75", "000000000000000"),
+            ],
+        )
+
+    def test_dsyms_debugid_codeid_only_codeid(self) -> None:
+        self._do_test_dsyms_by_debugid_and_codeid(
+            ("22222222-000000000-0000-000000000000", "ae0459704fc7256"),
+            [
+                (True, "10000000-000000000-0000-000000000000", "ae0459704fc7256"),
+                (True, "00000000-000000000-0000-000000000000", "ae0459704fc7256"),
+                (False, "dfb8e43a-f242-3d73-a453-aeb6a777ef75", "000000000000000"),
+            ],
+        )
+
+    def _do_test_dsyms_by_debugid_and_codeid(self, query, files):
+        for _, debug_id, code_id in files:
+            self.create_dif_file(debug_id=debug_id, code_id=code_id)
+
+        response = self.client.get(f"{self.url}?debug_id={query[0]}&code_id={query[1]}")
+        assert response.status_code == 200, response.content
+
+        actual = sorted((dsym["debugId"], dsym["codeId"]) for dsym in response.data)
+        assert actual == sorted((debug_id, code_id) for (exp, debug_id, code_id) in files if exp)
+
+    def test_access_control(self) -> None:
         # create a debug files such as proguard:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201, response.content
@@ -99,8 +161,7 @@ class DebugFilesTest(DebugFilesTestCases):
 
         # `self.user` has access to these files
         response = self.client.get(f"{self.url}?id={download_id}")
-        assert response.status_code == 200, response.content
-        assert PROGUARD_SOURCE == close_streaming_response(response)
+        self._assert_successful_download(response, PROGUARD_SOURCE)
 
         # with another user on a different org
         other_user = self.create_user()
@@ -119,7 +180,7 @@ class DebugFilesTest(DebugFilesTestCases):
         response = self.client.get(f"{url}?id={download_id}")
         assert response.status_code == 404
 
-    def test_dsyms_requests(self):
+    def test_dsyms_requests(self) -> None:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201, response.content
         assert len(response.data) == 1
@@ -139,21 +200,13 @@ class DebugFilesTest(DebugFilesTestCases):
         # Download as a user with sufficient role
         self.organization.update_option("sentry:debug_files_role", "admin")
         response = self.client.get(self.url + "?id=" + download_id)
-        assert response.status_code == 200, response.content
-        assert (
-            response.get("Content-Disposition")
-            == 'attachment; filename="' + PROGUARD_UUID + '.txt"'
-        )
-        assert response.get("Content-Length") == str(len(PROGUARD_SOURCE))
-        assert response.get("Content-Type") == "application/octet-stream"
-        assert PROGUARD_SOURCE == close_streaming_response(response)
+        self._assert_successful_download(response, PROGUARD_SOURCE, filename=f"{PROGUARD_UUID}.txt")
 
         # Download as a superuser
         superuser = self.create_user(is_superuser=True)
         self.login_as(user=superuser, superuser=True)
         response = self.client.get(self.url + "?id=" + download_id)
-        assert response.get("Content-Type") == "application/octet-stream"
-        close_streaming_response(response)
+        self._assert_successful_download(response, PROGUARD_SOURCE)
 
         # Download as a user without sufficient role
         self.organization.update_option("sentry:debug_files_role", "owner")
@@ -184,7 +237,15 @@ class DebugFilesTest(DebugFilesTestCases):
         assert response.status_code == 204, response.content
         assert ProjectDebugFile.objects.count() == 0
 
-    def test_dsyms_as_team_admin(self):
+    def test_delete_without_id_returns_404(self) -> None:
+        response = self._upload_proguard(self.url, PROGUARD_UUID)
+        assert response.status_code == 201
+
+        response = self.client.delete(self.url)
+        assert response.status_code == 404, response.content
+        assert ProjectDebugFile.objects.count() == 1
+
+    def test_dsyms_as_team_admin(self) -> None:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201
         assert len(response.data) == 1
@@ -238,18 +299,103 @@ class DebugFilesTest(DebugFilesTestCases):
         self.login_as(team_admin)
         # Team admin with project access can download
         response = self.client.get(self.url + "?id=" + download_id)
-        assert response.status_code == 200, response.content
-        assert response.get("Content-Type") == "application/octet-stream"
-        close_streaming_response(response)
+        self._assert_successful_download(response, PROGUARD_SOURCE)
 
         # Team admin with project access can delete
         response = self.client.delete(self.url + "?id=" + download_id)
         assert response.status_code == 204, response.content
         assert ProjectDebugFile.objects.count() == 0
 
+    def test_project_debug_files_role_overrides_organization(self) -> None:
+        """Test that project-level debug_files_role option overrides organization-level setting"""
+        response = self._upload_proguard(self.url, PROGUARD_UUID)
+        assert response.status_code == 201
+        assert len(response.data) == 1
 
+        response = self.client.get(self.url)
+        download_id = response.data[0]["id"]
+
+        # Create a member user with limited permissions
+        member_user = self.create_user("member@localhost")
+        self.create_member(user=member_user, organization=self.organization, role="member")
+        self.login_as(user=member_user)
+
+        # Set organization debug_files_role to "owner" - member should not be able to download
+        self.organization.update_option("sentry:debug_files_role", "owner")
+        response = self.client.get(f"{self.url}?id={download_id}")
+        assert response.status_code == 403, response.content
+
+        # Set project debug_files_role to "member" - member should now be able to download
+        self.project.update_option("sentry:debug_files_role", "member")
+        response = self.client.get(f"{self.url}?id={download_id}")
+        self._assert_successful_download(response, PROGUARD_SOURCE)
+
+        # Remove project option - should fall back to organization setting (owner)
+        self.project.delete_option("sentry:debug_files_role")
+        response = self.client.get(f"{self.url}?id={download_id}")
+        assert response.status_code == 403, response.content
+
+        # Set organization to "member" - member should be able to download
+        self.organization.update_option("sentry:debug_files_role", "member")
+        response = self.client.get(f"{self.url}?id={download_id}")
+        self._assert_successful_download(response, PROGUARD_SOURCE)
+
+
+@requires_objectstore
+class DebugFileObjectstoreRedirectTest(DebugFilesTestCases):
+    """Explicit coverage of both redirect branches for Objectstore-backed debug files."""
+
+    def _upload_and_get_download_id(self) -> str:
+        with self.feature({"organizations:objectstore-debugfiles-write": True}):
+            response = self._upload_proguard(self.url, PROGUARD_UUID)
+        assert response.status_code == 201, response.content
+        return self.client.get(self.url).data[0]["id"]
+
+    def test_internal_request_redirects_to_objectstore(self) -> None:
+        download_id = self._upload_and_get_download_id()
+
+        with (
+            self.feature("organizations:objectstore-debugfiles-read"),
+            self.feature("organizations:objectstore-debugfiles-direct-read"),
+            patch("sentry.auth.system.is_internal_ip", return_value=True),
+        ):
+            response = self.client.get(f"{self.url}?id={download_id}")
+
+        assert response.status_code == 302
+        # Internal callers are redirected straight to Objectstore, not through the cell proxy.
+        assert "/organizations/" not in response["Location"]
+        self._assert_successful_download(response, PROGUARD_SOURCE)
+
+    def test_external_request_redirects_to_cell_proxy(self) -> None:
+        download_id = self._upload_and_get_download_id()
+
+        with (
+            self.feature("organizations:objectstore-debugfiles-read"),
+            self.feature("organizations:objectstore-debugfiles-direct-read"),
+            patch("sentry.auth.system.is_internal_ip", return_value=False),
+        ):
+            response = self.client.get(f"{self.url}?id={download_id}")
+
+        assert response.status_code == 302
+        location = response["Location"]
+        assert (
+            f"/organizations/{self.organization.id}/objectstore/v1/objects/debug_files/" in location
+        )
+        assert "os_auth=" in location
+
+    def test_direct_read_requires_read_gate(self) -> None:
+        download_id = self._upload_and_get_download_id()
+
+        with self.feature("organizations:objectstore-debugfiles-direct-read"):
+            response = self.client.get(f"{self.url}?id={download_id}")
+
+        assert response.status_code == 200
+        assert close_streaming_response(response) == PROGUARD_SOURCE
+
+
+@debug_files_test_both_backends
 class AssociateDebugFilesTest(DebugFilesTestCases):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.associate_url = reverse(
             "sentry-api-0-associate-dsym-files",
@@ -259,7 +405,7 @@ class AssociateDebugFilesTest(DebugFilesTestCases):
             },
         )
 
-    def test_associate_proguard_dsym(self):
+    def test_associate_proguard_dsym(self) -> None:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201, response.content
         assert len(response.data) == 1
@@ -287,7 +433,7 @@ class AssociateDebugFilesTest(DebugFilesTestCases):
         assert "associatedDsymFiles" in response.data
         assert response.data["associatedDsymFiles"] == []
 
-    def test_associate_proguard_dsym_no_build(self):
+    def test_associate_proguard_dsym_no_build(self) -> None:
         response = self._upload_proguard(self.url, PROGUARD_UUID)
         assert response.status_code == 201, response.content
         assert len(response.data) == 1
@@ -316,7 +462,7 @@ class AssociateDebugFilesTest(DebugFilesTestCases):
 
 
 class SourceMapsEndpointTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.url = reverse(
             "sentry-api-0-source-maps",
             kwargs={
@@ -326,7 +472,7 @@ class SourceMapsEndpointTest(APITestCase):
         )
         self.login_as(user=self.user)
 
-    def test_source_maps(self):
+    def test_source_maps(self) -> None:
         release = Release.objects.create(organization_id=self.project.organization_id, version="1")
         release2 = Release.objects.create(organization_id=self.project.organization_id, version="2")
         release3 = Release.objects.create(organization_id=self.project.organization_id, version="3")
@@ -368,7 +514,7 @@ class SourceMapsEndpointTest(APITestCase):
         assert response.data[2]["name"] == str(release.version)
         assert response.data[2]["fileCount"] == 2
 
-    def test_source_maps_sorting(self):
+    def test_source_maps_sorting(self) -> None:
         release = Release.objects.create(organization_id=self.project.organization_id, version="1")
         release2 = Release.objects.create(organization_id=self.project.organization_id, version="2")
         release.add_project(self.project)
@@ -401,7 +547,7 @@ class SourceMapsEndpointTest(APITestCase):
         assert response.status_code == 400
         assert response.data["error"] == "You can either sort via 'date_added' or '-date_added'"
 
-    def test_source_maps_delete_archive(self):
+    def test_source_maps_delete_archive(self) -> None:
         release = Release.objects.create(
             organization_id=self.project.organization_id, version="1", id=1
         )
@@ -418,7 +564,7 @@ class SourceMapsEndpointTest(APITestCase):
         assert response.status_code == 204
         assert not ReleaseFile.objects.filter(release_id=release.id).exists()
 
-    def test_source_maps_release_archive(self):
+    def test_source_maps_release_archive(self) -> None:
         release = Release.objects.create(organization_id=self.project.organization_id, version="1")
         release.add_project(self.project)
 

@@ -1,6 +1,6 @@
 import {EventFixture} from 'sentry-fixture/event';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {ProjectFixture} from 'sentry-fixture/project';
+import {DetailedProjectFixture} from 'sentry-fixture/project';
 
 import {
   act,
@@ -11,18 +11,18 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 
 import {openModal} from 'sentry/actionCreators/modal';
-import EditHighlightsModal, {
+import {
+  EditHighlightsModal,
   type EditHighlightsModalProps,
 } from 'sentry/components/events/highlights/editHighlightsModal';
-import ModalStore from 'sentry/stores/modalStore';
-import type {Project} from 'sentry/types/project';
+import type {DetailedProject} from 'sentry/types/project';
 import * as analytics from 'sentry/utils/analytics';
 
 import {TEST_EVENT_CONTEXTS, TEST_EVENT_TAGS} from './testUtils';
 
-describe('EditHighlightsModal', function () {
+describe('EditHighlightsModal', () => {
   const organization = OrganizationFixture();
-  const project = ProjectFixture();
+  const project = DetailedProjectFixture();
   const event = EventFixture({
     contexts: TEST_EVENT_CONTEXTS,
     tags: TEST_EVENT_TAGS,
@@ -48,7 +48,7 @@ describe('EditHighlightsModal', function () {
     'missingType:missingKey',
   ]);
 
-  const highlightPreset: Project['highlightPreset'] = {
+  const highlightPreset: DetailedProject['highlightPreset'] = {
     context: {presetType: ['presetKey']},
     tags: ['presetTag'],
   };
@@ -74,13 +74,12 @@ describe('EditHighlightsModal', function () {
     });
   }
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     jest.resetAllMocks();
-    ModalStore.reset();
   });
 
-  it('should renders with basic functions', async function () {
+  it('should renders with basic functions', async () => {
     renderModal({highlightContext: {}, highlightTags: []});
     renderGlobalModal();
     expect(screen.getByText('Edit Event Highlights')).toBeInTheDocument();
@@ -125,7 +124,7 @@ describe('EditHighlightsModal', function () {
     expect(closeModal).toHaveBeenCalled();
   });
 
-  it('should update preview section from user selection', async function () {
+  it('should update preview section from user selection', async () => {
     const updateProjectMock = MockApiClient.addMockResponse({
       url,
       method: 'PUT',
@@ -195,7 +194,7 @@ describe('EditHighlightsModal', function () {
     expect(closeModal).toHaveBeenCalled();
   });
 
-  it('should update tag section from user selection', async function () {
+  it('should update tag section from user selection', async () => {
     const updateProjectMock = MockApiClient.addMockResponse({
       url,
       method: 'PUT',
@@ -256,7 +255,7 @@ describe('EditHighlightsModal', function () {
     expect(closeModal).toHaveBeenCalled();
   });
 
-  it('should update context section from user selection', async function () {
+  it('should update context section from user selection', async () => {
     const updateProjectMock = MockApiClient.addMockResponse({
       url,
       method: 'PUT',
@@ -343,7 +342,7 @@ describe('EditHighlightsModal', function () {
     expect(closeModal).toHaveBeenCalled();
   });
 
-  it('should update sections from search input', async function () {
+  it('should update sections from search input', async () => {
     renderModal();
     renderGlobalModal();
     const tagCount = TEST_EVENT_TAGS.length;

@@ -7,6 +7,8 @@ from django.conf import settings
 from django.utils import timezone
 
 from sentry.monitors.system_incidents import (
+    MONITOR_LAST_SYSTEM_INCIDENT_TS,
+    MONITOR_TICK_DECISION,
     MONITOR_TICK_METRIC,
     MONITOR_VOLUME_DECISION_STEP,
     MONITOR_VOLUME_HISTORY,
@@ -22,6 +24,7 @@ from sentry.monitors.system_incidents import (
     process_clock_tick_for_system_incidents,
     prune_incident_check_in_volume,
     record_clock_tick_volume_metric,
+    record_last_incident_ts,
     update_check_in_volume,
 )
 from sentry.testutils.helpers.options import override_options
@@ -79,7 +82,7 @@ def fill_historic_metrics(start: datetime, metrics: Sequence[float | None]):
     redis_client.mset(values)
 
 
-def test_update_check_in_volume():
+def test_update_check_in_volume() -> None:
     redis_client = redis.redis_clusters.get(settings.SENTRY_MONITORS_REDIS_CLUSTER)
 
     now = timezone.now().replace(second=5)
@@ -172,16 +175,25 @@ def test_process_clock_tick_for_system_incident(
     )
 
 
+def test_record_last_incident_ts_expires() -> None:
+    record_last_incident_ts(timezone.now().replace(second=0, microsecond=0))
+
+    ttl = redis_client.ttl(MONITOR_LAST_SYSTEM_INCIDENT_TS)
+    assert 0 < ttl <= MONITOR_VOLUME_RETENTION.total_seconds()
+
+
 @mock.patch("sentry.monitors.system_incidents.logger")
 @mock.patch("sentry.monitors.system_incidents.metrics")
 @override_options({"crons.system_incidents.collect_metrics": True})
-def test_record_clock_tick_volume_metric_simple(metrics, logger):
+def test_record_clock_tick_volume_metric_simple(
+    metrics: mock.MagicMock, logger: mock.MagicMock
+) -> None:
     tick = timezone.now().replace(second=0, microsecond=0)
 
     # This is the timestamp we're looking at just before the tick
     past_ts = tick - timedelta(minutes=1)
 
-    # Fill histroic volume data for earlier minutes.
+    # Fill historic volume data for earlier minutes.
     fill_historic_volume(
         start=past_ts - MONITOR_VOLUME_DECISION_STEP,
         length=MONITOR_VOLUME_RETENTION,
@@ -228,13 +240,15 @@ def test_record_clock_tick_volume_metric_simple(metrics, logger):
 @mock.patch("sentry.monitors.system_incidents.logger")
 @mock.patch("sentry.monitors.system_incidents.metrics")
 @override_options({"crons.system_incidents.collect_metrics": True})
-def test_record_clock_tick_volume_metric_volume_drop(metrics, logger):
+def test_record_clock_tick_volume_metric_volume_drop(
+    metrics: mock.MagicMock, logger: mock.MagicMock
+) -> None:
     tick = timezone.now().replace(second=0, microsecond=0)
 
     # This is the timestamp we're looking at just before the tick
     past_ts = tick - timedelta(minutes=1)
 
-    # Fill histroic volume data for earlier minutes.
+    # Fill historic volume data for earlier minutes.
     fill_historic_volume(
         start=past_ts - MONITOR_VOLUME_DECISION_STEP,
         length=MONITOR_VOLUME_RETENTION,
@@ -282,7 +296,9 @@ def test_record_clock_tick_volume_metric_volume_drop(metrics, logger):
 @mock.patch("sentry.monitors.system_incidents.logger")
 @mock.patch("sentry.monitors.system_incidents.metrics")
 @override_options({"crons.system_incidents.collect_metrics": True})
-def test_record_clock_tick_volume_metric_low_history(metrics, logger):
+def test_record_clock_tick_volume_metric_low_history(
+    metrics: mock.MagicMock, logger: mock.MagicMock
+) -> None:
     tick = timezone.now().replace(second=0, microsecond=0)
 
     # This is the timestamp we're looking at just before the tick
@@ -308,7 +324,9 @@ def test_record_clock_tick_volume_metric_low_history(metrics, logger):
 @mock.patch("sentry.monitors.system_incidents.logger")
 @mock.patch("sentry.monitors.system_incidents.metrics")
 @override_options({"crons.system_incidents.collect_metrics": True})
-def test_record_clock_tick_volume_metric_uniform(metrics, logger):
+def test_record_clock_tick_volume_metric_uniform(
+    metrics: mock.MagicMock, logger: mock.MagicMock
+) -> None:
     tick = timezone.now().replace(second=0, microsecond=0)
 
     # This is the timestamp we're looking at just before the tick
@@ -359,7 +377,7 @@ def test_record_clock_tick_volume_metric_uniform(metrics, logger):
 
 
 @override_options({"crons.system_incidents.collect_metrics": True})
-def test_prune_incident_check_in_volume():
+def test_prune_incident_check_in_volume() -> None:
     now = timezone.now().replace(second=0, microsecond=0)
 
     # Fill in some historic volume data
@@ -378,8 +396,8 @@ def test_prune_incident_check_in_volume():
 
     volumes = [redis_client.get(make_key(timedelta(minutes=offset))) for offset in range(10)]
 
-    # Ensure we removed the correct keys. remmeber,
-    # prune_incident_check_in_volume recieves the timestamp of the incident
+    # Ensure we removed the correct keys. remember,
+    # prune_incident_check_in_volume receives the timestamp of the incident
     # tick decisions, but the volume data is recorded in the timestamp before
     assert volumes == ["1", None, None, None, None, "6", "7", "8", "9", "10"]
 
@@ -393,17 +411,27 @@ def test_prune_incident_check_in_volume():
         "crons.system_incidents.pct_deviation_incident_threshold": -25,
     }
 )
-def test_tick_decision_anomaly_recovery():
+def test_tick_decision_anomaly_recovery() -> None:
     start = timezone.now().replace(minute=0, second=0, microsecond=0)
 
     test_metrics = [
         # fmt: off
         # Operating as normal
-        1.0, 4.0, 3.0, 2.0, 2.0, -3.0,
+        1.0,
+        4.0,
+        3.0,
+        2.0,
+        2.0,
+        -3.0,
         # Anomaly detected
-        -6.0, -7.0,
+        -6.0,
+        -7.0,
         # Anomaly recovers to normal
-        -4.0, -3.0, -3.0, -4.0, -1.0
+        -4.0,
+        -3.0,
+        -3.0,
+        -4.0,
+        -1.0,
         # fmt: on
     ]
 
@@ -438,9 +466,13 @@ def test_tick_decision_anomaly_recovery():
         assert result.transition == AnomalyTransition.ABNORMALITY_RECOVERED
         assert result.ts == ts
 
-    # The last 6 ABNORMAL ticks transitioned to NORMAL
+    # The last 6 ABNORMAL ticks transitioned to NORMAL, keeping their expiry
     for i in range(1, 7):
-        assert get_clock_tick_decision(ts - timedelta(minutes=i)) == TickAnomalyDecision.NORMAL
+        backfilled_ts = ts - timedelta(minutes=i)
+        assert get_clock_tick_decision(backfilled_ts) == TickAnomalyDecision.NORMAL
+
+        key = MONITOR_TICK_DECISION.format(ts=_make_reference_ts(backfilled_ts))
+        assert 0 < redis_client.ttl(key) <= MONITOR_VOLUME_RETENTION.total_seconds()
 
 
 @django_db_all
@@ -452,7 +484,7 @@ def test_tick_decision_anomaly_recovery():
         "crons.system_incidents.pct_deviation_incident_threshold": -25,
     }
 )
-def test_tick_decisions_simple_incident():
+def test_tick_decisions_simple_incident() -> None:
     """
     Tests incident detection for an incident that immediately starts and
     immediately stops.
@@ -462,11 +494,23 @@ def test_tick_decisions_simple_incident():
     test_metrics = [
         # fmt: off
         # Operating as normal
-        1.0, 4.0, 3.0, 2.0, 2.0, -3.0,
+        1.0,
+        4.0,
+        3.0,
+        2.0,
+        2.0,
+        -3.0,
         # Incident starts immediately
-        -35.0, -80.0, -100.0, -50.0,
+        -35.0,
+        -80.0,
+        -100.0,
+        -50.0,
         # Incident quickly recovers
-        -3.0, -2.0, -4.0, -1.0, -4.0
+        -3.0,
+        -2.0,
+        -4.0,
+        -1.0,
+        -4.0,
         # fmt: on
     ]
 
@@ -530,7 +574,7 @@ def test_tick_decisions_simple_incident():
         "crons.system_incidents.pct_deviation_incident_threshold": -25,
     }
 )
-def test_tick_decisions_variable_incident():
+def test_tick_decisions_variable_incident() -> None:
     """
     Tests an incident that slowly starts and slowly recovers.
     """
@@ -539,25 +583,44 @@ def test_tick_decisions_variable_incident():
     test_metrics = [
         # fmt: off
         # Operating as normal
-        1.0, 4.0, 3.0, 2.0, 2.0, -3.0,
+        1.0,
+        4.0,
+        3.0,
+        2.0,
+        2.0,
+        -3.0,
         # Anomaly detected
-        -6.0, -7.0,
+        -6.0,
+        -7.0,
         # Metrics below anomaly threshold, but not recovered
-        -4.0, -3.0,
+        -4.0,
+        -3.0,
         # Metrics above anomaly threshold again, but not at incident threshold
         -10.0,
         # Incident threshold reached
-        -30.0, -40.0, -38.0, -42.0, -25.0, -20.0, -10.0,
+        -30.0,
+        -40.0,
+        -38.0,
+        -42.0,
+        -25.0,
+        -20.0,
+        -10.0,
         # Incident recovering
-        -4.0, -3.0,
+        -4.0,
+        -3.0,
         # Metrics above anomaly threshold, recovery failed
         -6.0,
         # Metrics back below anomaly threshold, begin recovering again
-        -2.0, -1.0,
+        -2.0,
+        -1.0,
         # Metrics above incident threshold, recovery failed
         -30.0,
         # Metrics below anomaly threshold, incident will recover
-        -3.0, -2.0, -4.0, -4.0, -3.0,
+        -3.0,
+        -2.0,
+        -4.0,
+        -4.0,
+        -3.0,
         # fmt: on
     ]
 

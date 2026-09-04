@@ -8,12 +8,14 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry import analytics
+from sentry.analytics.events.api_token_created import ApiTokenCreated
+from sentry.analytics.events.api_token_deleted import ApiTokenDeleted
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.authentication import SessionNoAuthTokenAuthentication
 from sentry.api.base import Endpoint, control_silo_endpoint
 from sentry.api.exceptions import ResourceDoesNotExist
-from sentry.api.permissions import SentryIsAuthenticated
+from sentry.api.permissions import DisallowImpersonatedTokenCreation, SentryIsAuthenticated
 from sentry.api.serializers import serialize
 from sentry.auth.elevated_mode import has_elevated_mode
 from sentry.hybridcloud.models.outbox import outbox_context
@@ -63,11 +65,10 @@ class ApiTokensEndpoint(Endpoint):
         "POST": ApiPublishStatus.PRIVATE,
     }
     authentication_classes = (SessionNoAuthTokenAuthentication,)
-    permission_classes = (SentryIsAuthenticated,)
+    permission_classes = (SentryIsAuthenticated, DisallowImpersonatedTokenCreation)
 
     @method_decorator(never_cache)
     def get(self, request: Request) -> Response:
-
         user_id = get_appropriate_user_id(request=request)
 
         token_list = list(
@@ -83,6 +84,7 @@ class ApiTokensEndpoint(Endpoint):
 
         if serializer.is_valid():
             result = serializer.validated_data
+            assert request.user.is_authenticated, "User must not be anonymous"
 
             token = ApiToken.objects.create(
                 user_id=request.user.id,
@@ -101,14 +103,13 @@ class ApiTokensEndpoint(Endpoint):
                 send_email=True,
             )
 
-            analytics.record("api_token.created", user_id=request.user.id)
+            analytics.record(ApiTokenCreated(user_id=request.user.id))
 
             return Response(serialize(token, request.user), status=201)
         return Response(serializer.errors, status=400)
 
     @method_decorator(never_cache)
     def delete(self, request: Request):
-
         user_id = get_appropriate_user_id(request=request)
 
         token_id = request.data.get("tokenId", None)
@@ -126,6 +127,6 @@ class ApiTokensEndpoint(Endpoint):
 
             token_to_delete.delete()
 
-        analytics.record("api_token.deleted", user_id=request.user.id)
+        analytics.record(ApiTokenDeleted(user_id=request.user.id))
 
         return Response(status=204)

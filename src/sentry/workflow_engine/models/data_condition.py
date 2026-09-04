@@ -1,26 +1,28 @@
 import logging
 import operator
-import time
-from datetime import timedelta
 from enum import StrEnum
-from typing import Any, TypeVar, cast
+from typing import Any, TypedDict, TypeVar, cast
 
 from django.db import models
-from django.db.models.signals import pre_save
-from django.dispatch import receiver
 from jsonschema import ValidationError, validate
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import DefaultFieldsModel, region_silo_model, sane_repr
+from sentry.db.models import DefaultFieldsModel, cell_silo_model, sane_repr
 from sentry.utils import metrics, registry
+from sentry.workflow_engine.processors.evaluations import (
+    DataConditionEvaluation,
+    DataConditionEvaluationException,
+)
 from sentry.workflow_engine.registry import condition_handler_registry
-from sentry.workflow_engine.types import DataConditionResult, DetectorPriorityLevel
+from sentry.workflow_engine.types import (
+    ConditionError,
+    DataConditionHandler,
+    DataConditionResult,
+    DetectorPriorityLevel,
+)
+from sentry.workflow_engine.utils import scopedstats
 
 logger = logging.getLogger(__name__)
-
-
-class DataConditionEvaluationException(Exception):
-    pass
 
 
 class Condition(StrEnum):
@@ -41,21 +43,25 @@ class Condition(StrEnum):
     EVENT_ATTRIBUTE = "event_attribute"
     EVENT_CREATED_BY_DETECTOR = "event_created_by_detector"
     EVENT_SEEN_COUNT = "event_seen_count"
+    EVERY_EVENT = "every_event"
     EXISTING_HIGH_PRIORITY_ISSUE = "existing_high_priority_issue"
     FIRST_SEEN_EVENT = "first_seen_event"
     ISSUE_CATEGORY = "issue_category"
     ISSUE_OCCURRENCES = "issue_occurrences"
+    ISSUE_OPEN_DURATION = "issue_open_duration"
+    ISSUE_PRIORITY_DEESCALATING = "issue_priority_deescalating"
+    ISSUE_PRIORITY_EQUALS = "issue_priority_equals"
+    ISSUE_PRIORITY_GREATER_OR_EQUAL = "issue_priority_greater_or_equal"
+    ISSUE_RESOLUTION_CHANGE = "issue_resolution_change"
+    ISSUE_RESOLVED_TRIGGER = "issue_resolved_trigger"
+    ISSUE_TYPE = "issue_type"
     LATEST_ADOPTED_RELEASE = "latest_adopted_release"
     LATEST_RELEASE = "latest_release"
     LEVEL = "level"
     NEW_HIGH_PRIORITY_ISSUE = "new_high_priority_issue"
-    REGRESSION_EVENT = "regression_event"
     REAPPEARED_EVENT = "reappeared_event"
+    REGRESSION_EVENT = "regression_event"
     TAGGED_EVENT = "tagged_event"
-    ISSUE_PRIORITY_EQUALS = "issue_priority_equals"
-    ISSUE_PRIORITY_GREATER_OR_EQUAL = "issue_priority_greater_or_equal"
-    ISSUE_PRIORITY_DEESCALATING = "issue_priority_deescalating"
-    ISSUE_RESOLUTION_CHANGE = "issue_resolution_change"
 
     # Event frequency conditions
     EVENT_FREQUENCY_COUNT = "event_frequency_count"
@@ -65,8 +71,8 @@ class Condition(StrEnum):
     PERCENT_SESSIONS_COUNT = "percent_sessions_count"
     PERCENT_SESSIONS_PERCENT = "percent_sessions_percent"
 
-    # Migration Only
-    EVERY_EVENT = "every_event"
+    # Activity trigger conditions
+    SEER_ACTIVITY_TRIGGER = "seer_activity_trigger"
 
 
 CONDITION_OPS = {
@@ -92,33 +98,33 @@ SLOW_CONDITIONS = [
 
 # Conditions that are not supported in the UI
 LEGACY_CONDITIONS = [
-    Condition.EVERY_EVENT,
     Condition.EVENT_CREATED_BY_DETECTOR,
     Condition.EVENT_SEEN_COUNT,
     Condition.NEW_HIGH_PRIORITY_ISSUE,
     Condition.EXISTING_HIGH_PRIORITY_ISSUE,
-    Condition.ISSUE_CATEGORY,
     Condition.ISSUE_RESOLUTION_CHANGE,
+    Condition.ISSUE_PRIORITY_EQUALS,
 ]
 
 
 T = TypeVar("T")
 
-# Threshold at which we consider a fast condition's evaluation time to
-# be long enough to be worth logging. Our systems are designed on the
-# assumption that fast conditions should be fast, and if they aren't,
-# it's worth investigating.
-FAST_CONDITION_TOO_SLOW_THRESHOLD = timedelta(milliseconds=500)
+
+class DataConditionSnapshot(TypedDict):
+    id: int
+    type: str
+    comparison: str
+    condition_result: DataConditionResult
 
 
-@region_silo_model
+@cell_silo_model
 class DataCondition(DefaultFieldsModel):
     """
     A data condition is a way to specify a logic condition, if the condition is met, the condition_result is returned.
     """
 
     __relocation_scope__ = RelocationScope.Organization
-    __repr__ = sane_repr("type", "condition", "condition_group")
+    __repr__ = sane_repr("type", "comparison", "condition_result", "condition_group_id")
 
     # The comparison is the value that the condition is compared to for the evaluation, this must be a primitive value
     comparison = models.JSONField()
@@ -137,7 +143,7 @@ class DataCondition(DefaultFieldsModel):
         on_delete=models.CASCADE,
     )
 
-    def get_snapshot(self) -> dict[str, Any]:
+    def get_snapshot(self) -> DataConditionSnapshot:
         return {
             "id": self.id,
             "type": self.type,
@@ -145,7 +151,7 @@ class DataCondition(DefaultFieldsModel):
             "condition_result": self.condition_result,
         }
 
-    def get_condition_result(self) -> DataConditionResult:
+    def get_condition_result(self) -> DataConditionResult | ConditionError:
         match self.condition_result:
             case float() | bool():
                 return self.condition_result
@@ -159,39 +165,34 @@ class DataCondition(DefaultFieldsModel):
                     "Invalid condition result",
                     extra={"condition_result": self.condition_result, "id": self.id},
                 )
+                return ConditionError(msg="Invalid condition result")
 
-        return None
+    def _evaluate_operator(
+        self,
+        condition_type: Condition,
+        value: T,
+    ) -> DataConditionResult | ConditionError:
+        # If the condition is a base type, handle it directly
+        op = CONDITION_OPS[condition_type]
 
-    def evaluate_value(self, value: T) -> DataConditionResult:
         try:
-            condition_type = Condition(self.type)
-        except ValueError:
+            return op(cast(Any, value), self.comparison)
+        except TypeError:
             logger.exception(
-                "Invalid condition type",
-                extra={"type": self.type, "id": self.id},
+                "Invalid comparison for data condition",
+                extra={
+                    "comparison": self.comparison,
+                    "value": value,
+                    "type": self.type,
+                    "condition_id": self.id,
+                },
             )
-            return None
+            return ConditionError(msg="Invalid comparison for data condition")
 
-        if condition_type in CONDITION_OPS:
-            # If the condition is a base type, handle it directly
-            op = CONDITION_OPS[Condition(self.type)]
-            result = None
-            try:
-                result = op(cast(Any, value), self.comparison)
-            except TypeError:
-                logger.exception(
-                    "Invalid comparison for data condition",
-                    extra={
-                        "comparison": self.comparison,
-                        "value": value,
-                        "type": self.type,
-                        "condition_id": self.id,
-                    },
-                )
-
-            return self.get_condition_result() if result else None
-
-        # Otherwise, we need to get the handler and evaluate the value
+    @scopedstats.timer()
+    def _evaluate_condition(
+        self, condition_type: Condition, value: T
+    ) -> DataConditionResult | ConditionError:
         try:
             handler = condition_handler_registry.get(condition_type)
         except registry.NoRegistrationExistsError:
@@ -199,10 +200,9 @@ class DataCondition(DefaultFieldsModel):
                 "No registration exists for condition",
                 extra={"type": self.type, "id": self.id},
             )
-            return None
+            return ConditionError(msg="No registration exists for condition")
 
         should_be_fast = not is_slow_condition(self)
-        start_time = time.time()
         try:
             with metrics.timer(
                 "workflow_engine.data_condition.evaluation_duration",
@@ -221,26 +221,53 @@ class DataCondition(DefaultFieldsModel):
                     "error": str(e),
                 },
             )
-            return None
-        finally:
-            duration = time.time() - start_time
-            if should_be_fast and duration >= FAST_CONDITION_TOO_SLOW_THRESHOLD.total_seconds():
-                logger.error(
-                    "Fast condition evaluation too slow; took %s seconds",
-                    duration,
-                    extra={
-                        "condition_id": self.id,
-                        "duration": duration,
-                        "type": self.type,
-                        "value": value,
-                        "comparison": self.comparison,
-                    },
-                )
-
-        if isinstance(result, bool):
-            return self.get_condition_result() if result else None
+            return ConditionError(msg=str(e))
 
         return result
+
+    def evaluate_value(self, value: T) -> DataConditionEvaluation:
+        error: ConditionError | None = None
+
+        try:
+            condition_type = Condition(self.type)
+
+            if condition_type in CONDITION_OPS:
+                result = self._evaluate_operator(condition_type, value)
+            else:
+                result = self._evaluate_condition(condition_type, value)
+        except ValueError as ve:
+            # TODO - Determine if we want to catch other exceptions here to have generic
+            # handling of DataConditionEvaluationExceptions.
+            raise DataConditionEvaluationException("Unable to evaluate condition") from ve
+
+        if isinstance(result, bool):
+            result = self.get_condition_result() if result else None
+
+        if isinstance(result, ConditionError):
+            error = result
+            result = None
+
+        metrics.incr("workflow_engine.data_condition.evaluation", tags={"type": self.type})
+
+        return DataConditionEvaluation(
+            condition=self,
+            triggered=(result is not None),
+            error=error,
+            result=result,
+            data=value,
+        )
+
+
+def get_condition_handler(
+    condition_type: Condition,
+) -> type[DataConditionHandler[Any]] | None:
+    if condition_type not in CONDITION_OPS:
+        try:
+            return condition_handler_registry.get(condition_type)
+        except registry.NoRegistrationExistsError:
+            pass
+
+    return None
 
 
 def is_slow_condition(condition: DataCondition) -> bool:
@@ -262,14 +289,9 @@ def enforce_data_condition_json_schema(data_condition: DataCondition) -> None:
         )
         return None
 
-    schema = handler.comparison_json_schema
+    schema = handler().comparison_json_schema
 
     try:
         validate(data_condition.comparison, schema)
     except ValidationError as e:
         raise ValidationError(f"Invalid config: {e.message}")
-
-
-@receiver(pre_save, sender=DataCondition)
-def enforce_comparison_schema(sender, instance: DataCondition, **kwargs):
-    enforce_data_condition_json_schema(instance)

@@ -1,9 +1,13 @@
+from io import BytesIO
+
 from django.conf import settings
 
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.project import ProjectSerializer
 from sentry.api.serializers.models.team import TeamSCIMSerializer, TeamWithProjectsSerializer
 from sentry.app import env
+from sentry.models.avatars.team_avatar import TeamAvatar
+from sentry.models.files.file import File
 from sentry.models.organizationmember import InviteStatus
 from sentry.testutils.cases import TestCase
 
@@ -12,7 +16,7 @@ TEAM_ADMIN = settings.SENTRY_TEAM_ROLES[1]
 
 
 class TeamSerializerTest(TestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -30,11 +34,52 @@ class TeamSerializerTest(TestCase):
             "isMember": False,
             "teamRole": None,
             "flags": {"idp:provisioned": False},
-            "avatar": {"avatarType": "letter_avatar", "avatarUuid": None},
+            "avatar": {"avatarType": "letter_avatar", "avatarUuid": None, "avatarUrl": None},
             "memberCount": 0,
         }
 
-    def test_member_count(self):
+    def test_avatar_letter_avatar_row(self) -> None:
+        user = self.create_user(username="foo")
+        organization = self.create_organization()
+        team = self.create_team(organization=organization)
+        TeamAvatar.objects.create(team=team)
+
+        result = serialize(team, user)
+        assert result["avatar"] == {
+            "avatarType": "letter_avatar",
+            "avatarUuid": None,
+            "avatarUrl": None,
+        }
+
+    def test_avatar_upload(self) -> None:
+        user = self.create_user(username="foo")
+        organization = self.create_organization()
+        team = self.create_team(organization=organization)
+        photo = File.objects.create(name="test.png", type="avatar.file")
+        photo.putfile(BytesIO(b"test"))
+        avatar = TeamAvatar.objects.create(team=team, file_id=photo.id, avatar_type=1)
+
+        result = serialize(team, user)
+        assert result["avatar"]["avatarType"] == "upload"
+        assert result["avatar"]["avatarUuid"] == avatar.ident
+        assert avatar.ident in result["avatar"]["avatarUrl"]
+
+    def test_avatar_letter_avatar_with_stale_file(self) -> None:
+        user = self.create_user(username="foo")
+        organization = self.create_organization()
+        team = self.create_team(organization=organization)
+        photo = File.objects.create(name="test.png", type="avatar.file")
+        photo.putfile(BytesIO(b"test"))
+        TeamAvatar.objects.create(team=team, file_id=photo.id, avatar_type=0)
+
+        result = serialize(team, user)
+        assert result["avatar"] == {
+            "avatarType": "letter_avatar",
+            "avatarUuid": None,
+            "avatarUrl": None,
+        }
+
+    def test_member_count(self) -> None:
         user = self.create_user(username="foo")
         other_user = self.create_user(username="bar")
         third_user = self.create_user(username="baz")
@@ -50,7 +95,7 @@ class TeamSerializerTest(TestCase):
         result = serialize(team, user)
         assert result["memberCount"] == 3
 
-    def test_member_count_does_not_include_invite_requests(self):
+    def test_member_count_does_not_include_invite_requests(self) -> None:
         org = self.create_organization(owner=self.user)
         team = self.create_team(organization=org)
         self.create_member(user=self.create_user(), organization=org, teams=[team])  # member
@@ -76,7 +121,7 @@ class TeamSerializerTest(TestCase):
         result = serialize(team, self.user)
         assert result["memberCount"] == 2
 
-    def test_member(self):
+    def test_member(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -105,7 +150,7 @@ class TeamSerializerTest(TestCase):
         assert result["isMember"] is True
         assert result["teamRole"] == TEAM_CONTRIBUTOR["id"]
 
-    def test_member_with_team_role(self):
+    def test_member_with_team_role(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -134,7 +179,7 @@ class TeamSerializerTest(TestCase):
         assert result["isMember"] is True
         assert result["teamRole"] == TEAM_ADMIN["id"]
 
-    def test_admin(self):
+    def test_admin(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -163,7 +208,7 @@ class TeamSerializerTest(TestCase):
         assert result["isMember"] is True
         assert result["teamRole"] == TEAM_ADMIN["id"]
 
-    def test_manager(self):
+    def test_manager(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         self.create_member(user=user, organization=organization, role="manager")
@@ -192,7 +237,7 @@ class TeamSerializerTest(TestCase):
         assert result["isMember"] is True
         assert result["teamRole"] == TEAM_ADMIN["id"]
 
-    def test_owner(self):
+    def test_owner(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         self.create_member(user=user, organization=organization, role="owner")
@@ -221,7 +266,7 @@ class TeamSerializerTest(TestCase):
         assert result["isMember"] is True
         assert result["teamRole"] == TEAM_ADMIN["id"]
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         user = self.create_user(username="foo", is_superuser=True)
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -248,7 +293,7 @@ class TeamSerializerTest(TestCase):
 
 
 class TeamWithProjectsSerializerTest(TestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization()
         team = self.create_team(organization=organization)
@@ -271,15 +316,29 @@ class TeamWithProjectsSerializerTest(TestCase):
             "teamRole": None,
             "flags": {"idp:provisioned": False},
             "projects": serialized_projects,
-            "avatar": {"avatarType": "letter_avatar", "avatarUuid": None},
+            "avatar": {"avatarType": "letter_avatar", "avatarUuid": None, "avatarUrl": None},
             "memberCount": 0,
             "dateCreated": team.date_added,
             "externalTeams": [],
         }
 
+    def test_project_on_multiple_teams_no_duplicate_features(self) -> None:
+        """A project belonging to multiple teams should not have its features list duplicated."""
+        user = self.create_user(username="foo")
+        organization = self.create_organization()
+        team1 = self.create_team(organization=organization)
+        team2 = self.create_team(organization=organization)
+        self.create_project(teams=[team1, team2], organization=organization)
+
+        result = serialize([team1, team2], user, TeamWithProjectsSerializer())
+        features = result[0]["projects"][0]["features"]
+
+        assert len(features) > 0
+        assert features == list(dict.fromkeys(features))
+
 
 class TeamSCIMSerializerTest(TestCase):
-    def test_simple_with_members(self):
+    def test_simple_with_members(self) -> None:
         user = self.create_user(username="foo")
         user2 = self.create_user(username="bar")
         organization = self.create_organization()
@@ -299,7 +358,7 @@ class TeamSCIMSerializerTest(TestCase):
             "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
         }
 
-    def test_excluded_members(self):
+    def test_excluded_members(self) -> None:
         user = self.create_user(username="foo")
         organization = self.create_organization(owner=user)
         team = self.create_team(organization=organization, members=[user])

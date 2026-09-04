@@ -13,22 +13,32 @@ from slack_sdk.web import SlackResponse
 
 from sentry.api.endpoints.project_rules import get_max_alerts
 from sentry.constants import ObjectStatus
+from sentry.incidents.endpoints.serializers.utils import (
+    get_fake_id_from_object_id,
+)
 from sentry.integrations.slack.tasks.find_channel_id_for_rule import find_channel_id_for_rule
 from sentry.integrations.slack.utils.channel import SlackChannelIdData
 from sentry.models.environment import Environment
+from sentry.models.options.project_option import ProjectOption
 from sentry.models.rule import Rule, RuleActivity, RuleActivityType
+from sentry.rules.conditions.existing_high_priority_issue import ExistingHighPriorityIssueCondition
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.helpers import install_slack, with_feature
 from sentry.testutils.silo import assume_test_silo_mode
-from sentry.types.actor import Actor
 from sentry.users.models.user import User
+from sentry.workflow_engine.models import (
+    Condition,
+    Workflow,
+)
+from tests.sentry.api.endpoints.test_project_rule_details import assert_serializer_results_match
+from tests.sentry.workflow_engine.test_base import BaseWorkflowTest
 
 
-class ProjectRuleBaseTestCase(APITestCase):
+class ProjectRuleBaseTestCase(APITestCase, BaseWorkflowTest):
     endpoint = "sentry-api-0-project-rules"
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.rule = self.create_project_rule(project=self.project)
         self.slack_integration = install_slack(organization=self.organization)
         self.sentry_app = self.create_sentry_app(
@@ -65,63 +75,276 @@ class ProjectRuleBaseTestCase(APITestCase):
             {
                 "id": "sentry.integrations.slack.notify_action.SlackNotifyServiceAction",
                 "name": "Send a notification to the funinthesun Slack workspace to #team-team-team and show tags [] in notification",
-                "workspace": str(self.slack_integration.id),
+                "workspace": self.slack_integration.id,
                 "channel": "#team-team-team",
-                "input_channel_id": self.channel_id,
+                "channel_id": self.channel_id,
             }
         ]
+        # create single written workflow
+        self.detector = self.create_detector(project=self.project)
+        self.workflow_triggers = self.create_data_condition_group()
+        self.workflow = self.create_workflow(
+            when_condition_group=self.workflow_triggers,
+            organization=self.detector.linked_project.organization,
+        )
+        self.detector_workflow = self.create_detector_workflow(
+            detector=self.detector, workflow=self.workflow
+        )
+        self.create_data_condition(  # trigger condition
+            condition_group=self.workflow_triggers,
+            type=Condition.EVENT_FREQUENCY_COUNT,
+            comparison={"interval": "1d", "value": 100},
+            condition_result=True,
+        )
+        self.workflow_filters = self.create_data_condition_group()
+        self.workflow_dcg = self.create_workflow_data_condition_group(
+            workflow=self.workflow, condition_group=self.workflow_filters
+        )
+        self.create_data_condition(  # filter condition
+            condition_group=self.workflow_filters,
+            type=Condition.EVENT_ATTRIBUTE,
+            comparison={"attribute": "platform", "match": "eq", "value": "python"},
+            condition_result=True,
+        )
+        self.action_group, self.action = self.create_workflow_action(self.workflow)
 
 
 class ProjectRuleListTest(ProjectRuleBaseTestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         response = self.get_success_response(
             self.organization.slug,
             self.project.slug,
             status_code=status.HTTP_200_OK,
         )
-        assert len(response.data) == Rule.objects.filter(project=self.project).count()
+        assert (
+            len(response.data)
+            == Workflow.objects.filter(organization=self.project.organization).count()
+        )
+        returned_ids = {item["id"] for item in response.data}
+        assert str(self.rule.id) in returned_ids
+        assert str(get_fake_id_from_object_id(self.workflow.id)) in returned_ids
+
+    @with_feature("organizations:workflow-engine-rule-serializers")
+    def test_unsupported_condition(self) -> None:
+        """Test with an unsupported condition e.g. IssueResolvedTriggerCondition
+        we should return what we can - the supported ones, and skip over the unsupported ones
+        """
+        detector = self.create_detector(project=self.project)
+        workflow_triggers = self.create_data_condition_group()
+        workflow = self.create_workflow(
+            when_condition_group=workflow_triggers,
+            organization=detector.linked_project.organization,
+            name="Issue resolved trigger workflow",
+        )
+        self.create_detector_workflow(detector=detector, workflow=workflow)
+        self.create_data_condition(  # trigger condition
+            condition_group=workflow_triggers,
+            type=Condition.ISSUE_RESOLVED_TRIGGER,
+            comparison=True,
+            condition_result=True,
+        )
+        self.create_data_condition(  # trigger condition
+            condition_group=workflow_triggers,
+            type=Condition.EXISTING_HIGH_PRIORITY_ISSUE,
+            comparison=True,
+            condition_result=True,
+        )
+        action_group, _ = self.create_workflow_action(workflow)
+        self.create_data_condition(  # filter condition
+            condition_group=action_group,
+            type=Condition.EVENT_ATTRIBUTE,
+            comparison={"attribute": "platform", "match": "eq", "value": "python"},
+            condition_result=True,
+        )
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            status_code=status.HTTP_200_OK,
+        )
+        assert (
+            len(response.data)
+            == Workflow.objects.filter(organization=self.project.organization).count()
+        )
+        issue_resolved_trigger_resp = None
+
+        for resp in response.data:
+            if resp["name"] == workflow.name:
+                issue_resolved_trigger_resp = resp
+
+        assert issue_resolved_trigger_resp
+        # assert we skipped over Condition.ISSUE_RESOLVED_TRIGGER and only have Condition.EXISTING_HIGH_PRIORITY_ISSUE
+        assert len(issue_resolved_trigger_resp["conditions"]) == 1
+        assert (
+            issue_resolved_trigger_resp["conditions"][0]["id"]
+            == ExistingHighPriorityIssueCondition.id
+        )
+        assert len(issue_resolved_trigger_resp["filters"]) == 1
+        assert (
+            issue_resolved_trigger_resp["errors"][0]["detail"]
+            == f"Condition not supported: {Condition.ISSUE_RESOLVED_TRIGGER}"
+        )
+
+    @with_feature("organizations:workflow-engine-rule-serializers")
+    def test_multiple_action_filters(self) -> None:
+        """
+        Test that if a workflow has multiple action filters (uses an if/then block) we only render 1 in the old UI and add to the error response
+        """
+
+        detector = self.create_detector(project=self.project)
+        workflow_triggers = self.create_data_condition_group()
+        workflow = self.create_workflow(
+            when_condition_group=workflow_triggers,
+            organization=detector.linked_project.organization,
+            name="Issue resolved trigger workflow",
+        )
+        self.create_detector_workflow(detector=detector, workflow=workflow)
+        self.create_data_condition(  # trigger condition
+            condition_group=workflow_triggers,
+            type=Condition.ISSUE_RESOLVED_TRIGGER,
+            comparison=True,
+            condition_result=True,
+        )
+        self.create_data_condition(  # trigger condition
+            condition_group=workflow_triggers,
+            type=Condition.EXISTING_HIGH_PRIORITY_ISSUE,
+            comparison=True,
+            condition_result=True,
+        )
+        # First if/then block: action DCG with filter condition + action
+        action_group1, _ = self.create_workflow_action(workflow)
+        self.create_data_condition(
+            condition_group=action_group1,
+            type=Condition.EVENT_ATTRIBUTE,
+            comparison={"attribute": "platform", "match": "eq", "value": "python"},
+            condition_result=True,
+        )
+        # Second if/then block: action DCG with filter condition + action
+        action_group2, _ = self.create_workflow_action(workflow)
+        dc2 = self.create_data_condition(
+            condition_group=action_group2,
+            type=Condition.EVENT_ATTRIBUTE,
+            comparison={"attribute": "platform", "match": "eq", "value": "java"},
+            condition_result=True,
+        )
+
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            status_code=status.HTTP_200_OK,
+        )
+
+        multiple_action_filter_resp = None
+        for resp in response.data:
+            if resp["name"] == workflow.name:
+                multiple_action_filter_resp = resp
+
+        assert multiple_action_filter_resp
+        # only the first if/then block's filter is rendered
+        assert len(multiple_action_filter_resp["filters"]) == 1
+        assert (
+            multiple_action_filter_resp["errors"][0]["detail"]
+            == "Multiple if/then blocks are not supported in this view. Only the first if/then block is displayed."
+        )
+
+        # remove the 2nd data condition so the if/then is just an action - this should still show the error
+        dc2.delete()
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            status_code=status.HTTP_200_OK,
+        )
+
+        multiple_action_filter_resp = None
+        for resp in response.data:
+            if resp["name"] == workflow.name:
+                multiple_action_filter_resp = resp
+
+        assert multiple_action_filter_resp
+        # only the first if/then block's filter is rendered
+        assert len(multiple_action_filter_resp["filters"]) == 1
+        assert (
+            multiple_action_filter_resp["errors"][0]["detail"]
+            == "Multiple if/then blocks are not supported in this view. Only the first if/then block is displayed."
+        )
+
+    @with_feature("organizations:workflow-engine-rule-serializers")
+    def test_workflow_engine_only_fetch_workflows_in_project(self) -> None:
+        another_rule = self.create_project_rule(
+            project=self.create_project(), name="other project rule"
+        )
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            status_code=status.HTTP_200_OK,
+        )
+        for resp in response.data:
+            assert not resp["name"] == another_rule.label
 
 
 class GetMaxAlertsTest(ProjectRuleBaseTestCase):
     @override_settings(MAX_SLOW_CONDITION_ISSUE_ALERTS=1)
-    def test_get_max_alerts_slow(self):
+    def test_get_max_alerts_slow(self) -> None:
         result = get_max_alerts(self.project, "slow")
         assert result == 1
 
     @with_feature("organizations:more-slow-alerts")
     @override_settings(MAX_SLOW_CONDITION_ISSUE_ALERTS=1)
     @override_settings(MAX_MORE_SLOW_CONDITION_ISSUE_ALERTS=2)
-    def test_get_max_alerts_more_slow(self):
+    def test_get_max_alerts_more_slow(self) -> None:
         result = get_max_alerts(self.project, "slow")
         assert result == 2
 
     @override_settings(MAX_FAST_CONDITION_ISSUE_ALERTS=1)
-    def test_get_max_alerts_fast(self):
+    def test_get_max_alerts_fast(self) -> None:
         result = get_max_alerts(self.project, "fast")
         assert result == 1
 
     @with_feature("organizations:more-fast-alerts")
     @override_settings(MAX_FAST_CONDITION_ISSUE_ALERTS=1)
     @override_settings(MAX_MORE_FAST_CONDITION_ISSUE_ALERTS=2)
-    def test_get_max_alerts_more_fast_with_group_processing(self):
+    def test_get_max_alerts_more_fast_with_group_processing(self) -> None:
         result = get_max_alerts(self.project, "fast")
         assert result == 2
 
     @override_settings(MAX_FAST_CONDITION_ISSUE_ALERTS=1)
     @override_settings(MAX_MORE_FAST_CONDITION_ISSUE_ALERTS=2)
-    def test_get_max_alerts_fast_with_group_processing(self):
+    def test_get_max_alerts_fast_with_group_processing(self) -> None:
         result = get_max_alerts(self.project, "fast")
         assert result == 1
 
     @override_settings(MAX_SLOW_CONDITION_ISSUE_ALERTS=1)
     @override_settings(MAX_MORE_SLOW_CONDITION_ISSUE_ALERTS=2)
-    def test_get_max_alerts_slow_with_group_processing(self):
+    def test_get_max_alerts_slow_with_group_processing(self) -> None:
         result = get_max_alerts(self.project, "slow")
         assert result == 1
 
 
+class GetProjectRulesTest(ProjectRuleBaseTestCase):
+    method = "get"
+
+    def test_simple(self) -> None:
+        # attaches lastTriggered by default
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            status_code=status.HTTP_200_OK,
+        )
+        assert (
+            len(response.data)
+            == Workflow.objects.filter(organization=self.project.organization).count()
+        )
+        for rule in response.data:
+            assert "lastTriggered" in rule
+
+
 class CreateProjectRuleTest(ProjectRuleBaseTestCase):
     method = "post"
+
+    def setUp(self) -> None:
+        super().setUp()
+        # NotifyEventAction (used by several tests) only dual-writes a WEBHOOK action when webhooks
+        # are enabled; enable it so the parity checks have a comparable action to compare.
+        ProjectOption.objects.set_value(self.project, "webhooks:enabled", True)
 
     def mock_conversations_info(self, channel):
         return patch(
@@ -218,12 +441,30 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
                 )
 
         assert RuleActivity.objects.filter(rule=rule, type=RuleActivityType.CREATED.value).exists()
+
+        # Mark the rule as non-active so the duplicate check doesn't block the second creation.
+        Rule.objects.filter(id=rule.id).update(status=ObjectStatus.PENDING_DELETION)
+
+        # Verify that the workflow engine serializer returns the same response shape.
+        with self.feature("organizations:workflow-engine-rule-serializers"):
+            workflow_response = self.get_success_response(
+                self.project.organization.slug,
+                self.project.slug,
+                name=name,
+                owner=owner,
+                actionMatch=action_match,
+                frequency=frequency,
+                status_code=status.HTTP_201_CREATED,
+                **query_args,
+            )
+        assert_serializer_results_match(response.data, workflow_response.data)
+
         return response
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.run_test(actions=self.notify_issue_owners_action, conditions=self.first_seen_condition)
 
-    def test_with_name(self):
+    def test_with_name(self) -> None:
         conditions = [
             {
                 "id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition",
@@ -240,7 +481,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
 
         self.run_test(actions=actions, conditions=conditions)
 
-    def test_duplicate_rule(self):
+    def test_duplicate_rule(self) -> None:
         response = self.get_success_response(
             self.organization.slug,
             self.project.slug,
@@ -271,7 +512,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             == f"This rule is an exact duplicate of '{rule.label}' in this project and may not be created."
         )
 
-    def test_duplicate_rule_environment(self):
+    def test_duplicate_rule_environment(self) -> None:
         """Test the duplicate check for various forms of environments being set (and not set)"""
         response = self.get_success_response(
             self.organization.slug,
@@ -354,7 +595,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             conditions=self.first_seen_condition,
         )
 
-    def test_pre_save(self):
+    def test_pre_save(self) -> None:
         """Test that a rule with name data in the conditions and actions is saved without it"""
         action_uuid = str(uuid4())
         actions = [
@@ -385,7 +626,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             "id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"
         }
 
-    def test_with_environment(self):
+    def test_with_environment(self) -> None:
         Environment.get_or_create(self.project, "production")
         self.run_test(
             actions=self.notify_event_action,
@@ -393,12 +634,12 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             environment="production",
         )
 
-    def test_with_null_environment(self):
+    def test_with_null_environment(self) -> None:
         self.run_test(
             actions=self.notify_event_action, conditions=self.first_seen_condition, environment=None
         )
 
-    def test_missing_name(self):
+    def test_missing_name(self) -> None:
         self.get_error_response(
             self.organization.slug,
             self.project.slug,
@@ -411,7 +652,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         )
 
     @override_settings(MAX_FAST_CONDITION_ISSUE_ALERTS=1)
-    def test_exceed_limit_fast_conditions(self):
+    def test_exceed_limit_fast_conditions(self) -> None:
         Rule.objects.filter(project=self.project).delete()
         self.run_test(conditions=self.first_seen_condition, actions=self.notify_event_action)
         resp = self.get_error_response(
@@ -436,7 +677,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
 
     @override_settings(MAX_SLOW_CONDITION_ISSUE_ALERTS=1)
     @override_settings(MAX_MORE_SLOW_CONDITION_ISSUE_ALERTS=2)
-    def test_exceed_limit_slow_conditions(self):
+    def test_exceed_limit_slow_conditions(self) -> None:
         actions = [
             {"id": "sentry.rules.actions.notify_event.NotifyEventAction", "uuid": str(uuid4())}
         ]
@@ -481,7 +722,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         with self.feature("organizations:more-slow-alerts"):
             self.run_test(conditions=conditions, actions=actions)
 
-    def test_owner_perms(self):
+    def test_owner_perms(self) -> None:
         other_user = self.create_user()
         response = self.get_error_response(
             self.organization.slug,
@@ -509,8 +750,8 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         )
         assert str(response.data["owner"][0]) == "Team is not a member of this organization"
 
-    def test_team_owner(self):
-        team = self.create_team(organization=self.organization)
+    def test_team_owner(self) -> None:
+        team = self.create_team(organization=self.organization, members=[self.user])
         response = self.get_success_response(
             self.organization.slug,
             self.project.slug,
@@ -529,7 +770,96 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         assert rule.owner_team_id == team.id
         assert rule.owner_user_id is None
 
-    def test_frequency_percent_validation(self):
+    def test_team_owner_not_member(self) -> None:
+        self.organization.flags.allow_joinleave = False
+        self.organization.save()
+
+        team = self.create_team(organization=self.organization)
+        member_user = self.create_user()
+        self.create_member(
+            user=member_user,
+            organization=self.organization,
+            role="member",
+            teams=[self.team],
+        )
+        self.login_as(member_user)
+        response = self.get_error_response(
+            self.organization.slug,
+            self.project.slug,
+            name="test",
+            frequency=30,
+            owner=f"team:{team.id}",
+            actionMatch="any",
+            filterMatch="any",
+            actions=self.notify_event_action,
+            conditions=self.first_seen_condition,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+        assert "owner" in response.data
+        assert str(response.data["owner"][0]) == "You can only assign teams you are a member of"
+
+    def test_team_owner_not_member_with_team_admin_scope(self) -> None:
+        """Test that users with team:admin scope can assign a team they're not a member of as the owner"""
+        team = self.create_team(organization=self.organization)
+        # Create a manager user who has team:admin scope
+        manager_user = self.create_user()
+        self.create_member(
+            user=manager_user,
+            organization=self.organization,
+            role="manager",
+            teams=[self.team],
+        )
+        self.login_as(manager_user)
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            name="test",
+            frequency=30,
+            owner=f"team:{team.id}",
+            actionMatch="any",
+            filterMatch="any",
+            actions=self.notify_event_action,
+            conditions=self.first_seen_condition,
+        )
+        assert response.status_code == 200
+        assert response.data["owner"] == f"team:{team.id}"
+
+        rule = Rule.objects.get(id=response.data["id"])
+        assert rule.owner_team_id == team.id
+        assert rule.owner_user_id is None
+
+    def test_user_owner_another_member(self) -> None:
+        """Test that a user can assign another organization member as the rule owner.
+
+        Unlike team ownership (which requires team membership), user ownership
+        only requires the target user to be an organization member.
+        """
+        # XXX(oioki): this behavior could be updated in the future iterations of the rule ownership feature
+        other_user = self.create_user()
+        self.create_member(
+            user=other_user,
+            organization=self.organization,
+            role="member",
+        )
+        response = self.get_success_response(
+            self.organization.slug,
+            self.project.slug,
+            name="test",
+            frequency=30,
+            owner=f"user:{other_user.id}",
+            actionMatch="any",
+            filterMatch="any",
+            actions=self.notify_event_action,
+            conditions=self.first_seen_condition,
+        )
+        assert response.status_code == 200
+        assert response.data["owner"] == f"user:{other_user.id}"
+
+        rule = Rule.objects.get(id=response.data["id"])
+        assert rule.owner_user_id == other_user.id
+        assert rule.owner_team_id is None
+
+    def test_frequency_percent_validation(self) -> None:
         condition = {
             "id": "sentry.rules.conditions.event_frequency.EventFrequencyPercentCondition",
             "interval": "1h",
@@ -567,7 +897,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             status_code=status.HTTP_200_OK,
         )
 
-    def test_match_values(self):
+    def test_match_values(self) -> None:
         filters = [
             {
                 "id": "sentry.rules.filters.tagged_event.TaggedEventFilter",
@@ -600,7 +930,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    def test_with_filters(self):
+    def test_with_filters(self) -> None:
         conditions: list[dict[str, Any]] = [
             {
                 "id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition",
@@ -620,7 +950,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             expected_conditions=conditions + filters,
         )
 
-    def test_with_no_filter_match(self):
+    def test_with_no_filter_match(self) -> None:
         conditions: list[dict[str, Any]] = [
             {"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}
         ]
@@ -634,7 +964,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             conditions=conditions,
         )
 
-    def test_with_filters_without_match(self):
+    def test_with_filters_without_match(self) -> None:
         conditions: list[dict[str, Any]] = [
             {"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}
         ]
@@ -662,7 +992,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             "filterMatch": ["Must select a filter match (all, any, none) if filters are supplied."]
         }
 
-    def test_no_actions(self):
+    def test_no_actions(self) -> None:
         resp = self.get_error_response(
             self.organization.slug,
             self.project.slug,
@@ -678,7 +1008,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         assert resp.data["actions"][0] == "You must add an action for this alert to fire."
 
     @patch(
-        "sentry.integrations.slack.actions.notification.get_channel_id",
+        "sentry.integrations.slack.actions.form.get_channel_id",
         return_value=SlackChannelIdData("#", None, True),
     )
     @patch.object(find_channel_id_for_rule, "apply_async")
@@ -736,13 +1066,35 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             "actions": payload.get("actions", []),
             "frequency": payload.get("frequency"),
             "user_id": self.user.id,
-            "owner": Actor.from_id(user_id=self.user.id),
+            "owner": f"user:{self.user.id}",
             "uuid": "abc123",
         }
         call_args = mock_find_channel_id_for_alert_rule.call_args[1]["kwargs"]
         assert call_args == kwargs
 
-    def test_comparison_condition(self):
+    def test_condition_with_zero_value(self) -> None:
+        condition = {
+            "id": "sentry.rules.conditions.event_frequency.EventFrequencyCondition",
+            "interval": "1h",
+            "value": 0,
+        }
+        actions: list[dict[str, object]] = [
+            {"id": "sentry.rules.actions.notify_event.NotifyEventAction", "uuid": str(uuid4())}
+        ]
+        self.run_test(
+            actions=actions,
+            conditions=[condition],
+            expected_conditions=[
+                {
+                    "id": "sentry.rules.conditions.event_frequency.EventFrequencyCondition",
+                    "interval": "1h",
+                    "value": 0,
+                    "comparisonType": "count",
+                }
+            ],
+        )
+
+    def test_comparison_condition(self) -> None:
         condition = {
             "id": "sentry.rules.conditions.event_frequency.EventFrequencyCondition",
             "interval": "1h",
@@ -789,7 +1141,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         )
         self.run_test(actions=actions, conditions=[condition])
 
-    def test_comparison_condition_validation(self):
+    def test_comparison_condition_validation(self) -> None:
         condition = {
             "id": "sentry.rules.conditions.event_frequency.EventFrequencyCondition",
             "interval": "1h",
@@ -829,7 +1181,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
             == "Select a valid choice. bad data is not one of the available choices."
         )
 
-    def test_latest_adopted_release_filter_validation(self):
+    def test_latest_adopted_release_filter_validation(self) -> None:
         filter = {
             "id": "sentry.rules.filters.latest_adopted_release_filter.LatestAdoptedReleaseFilter",
             "oldest_or_newest": "oldest",
@@ -864,7 +1216,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         )
 
     @responses.activate
-    def test_create_sentry_app_action_success(self):
+    def test_create_sentry_app_action_success(self) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -903,7 +1255,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         assert len(responses.calls) == 1
 
     @responses.activate
-    def test_create_sentry_app_action_failure(self):
+    def test_create_sentry_app_action_failure(self) -> None:
         error_message = "Something is totally broken :'("
         responses.add(
             method=responses.POST,
@@ -939,7 +1291,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         assert len(responses.calls) == 1
         assert error_message in response.json().get("actions")[0]
 
-    def test_post_rule_256_char_name(self):
+    def test_post_rule_256_char_name(self) -> None:
         char_256_name = "wOOFmsWY80o0RPrlsrrqDp2Ylpr5K2unBWbsrqvuNb4Fy3vzawkNAyFJdqeFLlXNWF2kMfgMT9EQmFF3u3MqW3CTI7L2SLsmS9uSDQtcinjlZrr8BT4v8Q6ySrVY5HmiFO97w3awe4lA8uyVikeaSwPjt8MD5WSjdTI0RRXYeK3qnHTpVswBe9AIcQVMLKQXHgjulpsrxHc0DI0Vb8hKA4BhmzQXhYmAvKK26ZwCSjJurAODJB6mgIdlV7tigsFO"
         response = self.get_success_response(
             self.organization.slug,
@@ -955,7 +1307,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         rule = Rule.objects.get(id=response.data["id"])
         assert rule.label == char_256_name
 
-    def test_post_rule_over_256_char_name(self):
+    def test_post_rule_over_256_char_name(self) -> None:
         char_257_name = "wOOFmsWY80o0RPrlsrrqDp2Ylpr5K2unBWbsrqvuNb4Fy3vzawkNAyFJdqeFLlXNWF2kMfgMT9EQmFF3u3MqW3CTI7L2SLsmS9uSDQtcinjlZrr8BT4v8Q6ySrVY5HmiFO97w3awe4lA8uyVikeaSwPjt8MD5WSjdTI0RRXYeK3qnHTpVswBe9AIcQVMLKQXHgjulpsrxHc0DI0Vb8hKA4BhmzQXhYmAvKK26ZwCSjJurAODJB6mgIdlV7tigsFOK"
         resp = self.get_error_response(
             self.organization.slug,
@@ -971,7 +1323,7 @@ class CreateProjectRuleTest(ProjectRuleBaseTestCase):
         )
         assert resp.data["name"][0] == "Ensure this field has no more than 256 characters."
 
-    def test_rule_with_empty_comparison_interval(self):
+    def test_rule_with_empty_comparison_interval(self) -> None:
         """
         Test that the serializer cleans up any empty strings passed in the data
         """

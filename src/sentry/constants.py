@@ -7,16 +7,16 @@ import logging
 import os.path
 from collections import namedtuple
 from collections.abc import Sequence
-from datetime import timedelta
-from enum import Enum
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from enum import Enum, IntEnum
+from typing import Literal, cast
 
 import sentry_relay.consts
 import sentry_relay.processing
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
-from sentry.seer.seer_utils import AutofixAutomationTuningSettings
+from sentry.seer.autofix.constants import AutofixAutomationTuningSettings
 from sentry.utils.geo import rust_geoip
 from sentry.utils.integrationdocs import load_doc
 
@@ -34,7 +34,9 @@ def get_all_languages() -> list[str]:
 
 
 MODULE_ROOT = os.path.dirname(cast(str, __import__("sentry").__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(MODULE_ROOT))
 DATA_ROOT = os.path.join(MODULE_ROOT, "data")
+STATIC_ROOT = os.path.join(PROJECT_ROOT, "static")
 
 BAD_RELEASE_CHARS = "\r\n\f\x0c\t/\\"
 MAX_VERSION_LENGTH = 200
@@ -67,7 +69,7 @@ STATUS_IGNORED = 2
 # accuracy provided.
 MINUTE_NORMALIZATION = 15
 
-MAX_TAG_VALUE_LENGTH = 200
+MAX_TAG_VALUE_LENGTH = 256
 MAX_CULPRIT_LENGTH = 200
 MAX_EMAIL_FIELD_LENGTH = 75
 
@@ -80,7 +82,7 @@ PROJECT_SLUG_MAX_LENGTH = 100
 
 # Maximum number of results we are willing to fetch when calculating rollup
 # Clients should adapt the interval width based on their display width.
-MAX_ROLLUP_POINTS = 10000
+MAX_ROLLUP_POINTS = 10100
 
 
 # Organization slugs which may not be used. Generally these are top level URL patterns
@@ -120,6 +122,7 @@ RESERVED_ORGANIZATION_SLUGS = frozenset(
         "corp",
         "customers",
         "de",
+        "de2",
         "debug",
         "devinfra",
         "docs",
@@ -138,9 +141,9 @@ RESERVED_ORGANIZATION_SLUGS = frozenset(
         "from",
         "get-cli",
         "github-deployment-gate",
-        "gsnlink",
         "go",
         "guide",
+        "healthcheck",
         "help",
         "ingest",
         "ingest-beta",
@@ -181,6 +184,12 @@ RESERVED_ORGANIZATION_SLUGS = frozenset(
         "remote",
         "resources",
         "rollback",
+        "s4s",
+        "s4s1",
+        "s4s2",
+        "s4s3",
+        "s4s4",
+        "s4s5",
         "sa1",
         "sales",
         "security",
@@ -205,6 +214,7 @@ RESERVED_ORGANIZATION_SLUGS = frozenset(
         "themonitor",
         "trust",
         "us",
+        "us2",
         "vs",
         "welcome",
         "www",
@@ -235,7 +245,19 @@ RESERVED_PROJECT_SLUGS = frozenset(
     )
 )
 
-LOG_LEVELS = {
+
+class LogLevel(IntEnum):
+    SAMPLE = logging.NOTSET
+    DEBUG = logging.DEBUG
+    INFO = logging.INFO
+    WARNING = logging.WARNING
+    ERROR = logging.ERROR
+    FATAL = logging.FATAL
+
+
+LogLevelStr = Literal["sample", "debug", "info", "warning", "error", "fatal"]
+
+LOG_LEVELS: dict[int, LogLevelStr] = {
     logging.NOTSET: "sample",
     logging.DEBUG: "debug",
     logging.INFO: "info",
@@ -245,7 +267,14 @@ LOG_LEVELS = {
 }
 DEFAULT_LOG_LEVEL = "error"
 DEFAULT_LOGGER_NAME = ""
-LOG_LEVELS_MAP = {v: k for k, v in LOG_LEVELS.items()}
+LOG_LEVELS_MAP: dict[str, LogLevel] = {level.name.lower(): level for level in LogLevel}
+
+
+def parse_log_level(level: str | None) -> LogLevel | None:
+    if level is None:
+        return None
+    return LOG_LEVELS_MAP.get(level)
+
 
 PLACEHOLDER_EVENT_TITLES = frozenset(["<untitled>", "<unknown>", "<unlabeled event>", "Error"])
 
@@ -255,6 +284,7 @@ DEFAULT_ALERT_GROUP_THRESHOLD = (1000, 25)  # 1000%, 25 events
 
 # Default sort option for the group stream
 DEFAULT_SORT_OPTION = "date"
+
 
 # Setup languages for only available locales
 _language_map = dict(settings.LANGUAGES)
@@ -300,6 +330,7 @@ _SENTRY_RULES = (
     "sentry.rules.filters.latest_adopted_release_filter.LatestAdoptedReleaseFilter",
     "sentry.rules.filters.latest_release.LatestReleaseFilter",
     "sentry.rules.filters.issue_category.IssueCategoryFilter",
+    "sentry.rules.filters.issue_type.IssueTypeFilter",
     # The following filters are duplicates of their respective conditions and are conditionally shown if the user has issue alert-filters
     "sentry.rules.filters.event_attribute.EventAttributeFilter",
     "sentry.rules.filters.tagged_event.TaggedEventFilter",
@@ -331,7 +362,7 @@ SENTRY_APP_ACTIONS = frozenset(
 # methods as defined by http://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html + PATCH
 HTTP_METHODS = ("GET", "POST", "PUT", "OPTIONS", "HEAD", "DELETE", "TRACE", "CONNECT", "PATCH")
 
-# See https://github.com/getsentry/relay/blob/master/relay-general/src/protocol/constants.rs
+# See https://github.com/getsentry/relay/blob/master/relay-event-schema/src/protocol/constants.rs
 VALID_PLATFORMS = sentry_relay.processing.VALID_PLATFORMS
 
 OK_PLUGIN_ENABLED = _("The {name} integration has been enabled.")
@@ -359,6 +390,7 @@ KNOWN_DIF_FORMATS: dict[str, str] = {
     "application/x-debugid-map": "uuidmap",
     "application/x-il2cpp-json": "il2cpp",
     "application/x-portable-pdb": "portablepdb",
+    "application/x-dartsymbolmap+json": "dartsymbolmap",
 }
 
 NATIVE_UNKNOWN_STRING = "<unknown>"
@@ -497,14 +529,26 @@ class ObjectStatus:
 
     DISABLED = 1
 
+    _CHOICES = (
+        (ACTIVE, "active"),
+        (DISABLED, "disabled"),
+        (PENDING_DELETION, "pending_deletion"),
+        (DELETION_IN_PROGRESS, "deletion_in_progress"),
+    )
+
+    _STR_TO_STATUS = {v: k for k, v in _CHOICES}
+
     @classmethod
     def as_choices(cls) -> Sequence[tuple[int, str]]:
-        return (
-            (cls.ACTIVE, "active"),
-            (cls.DISABLED, "disabled"),
-            (cls.PENDING_DELETION, "pending_deletion"),
-            (cls.DELETION_IN_PROGRESS, "deletion_in_progress"),
-        )
+        return cls._CHOICES
+
+    @classmethod
+    def as_str_to_status_choices(cls) -> Sequence[tuple[str, int]]:
+        return tuple((v, k) for k, v in cls._CHOICES)
+
+    @classmethod
+    def from_str(cls, status_str: str) -> int:
+        return cls._STR_TO_STATUS[status_str]
 
 
 class SentryAppStatus:
@@ -573,14 +617,17 @@ class SentryAppStatus:
 class SentryAppInstallationStatus:
     PENDING = 0
     INSTALLED = 1
+    PENDING_DELETION = 2
     PENDING_STR = "pending"
     INSTALLED_STR = "installed"
+    PENDING_DELETION_STR = "pending_deletion"
 
     @classmethod
     def as_choices(cls) -> Sequence[tuple[int, str]]:
         return (
             (cls.PENDING, cls.PENDING_STR),
             (cls.INSTALLED, cls.INSTALLED_STR),
+            (cls.PENDING_DELETION, cls.PENDING_DELETION_STR),
         )
 
     @classmethod
@@ -589,6 +636,8 @@ class SentryAppInstallationStatus:
             return cls.PENDING_STR
         elif status == cls.INSTALLED:
             return cls.INSTALLED_STR
+        elif status == cls.PENDING_DELETION:
+            return cls.PENDING_DELETION_STR
         else:
             raise ValueError(f"Not a SentryAppInstallationStatus int: {status!r}")
 
@@ -638,49 +687,11 @@ class InsightModules(Enum):
     VITAL = "vital"
     CACHE = "cache"
     QUEUE = "queue"
-    LLM_MONITORING = "llm_monitoring"
     AGENTS = "agents"
+    MCP = "mcp"
 
-
-INSIGHT_MODULE_FILTERS = {
-    InsightModules.HTTP: lambda spans: any(
-        span.get("sentry_tags", {}).get("category") == "http" and span.get("op") == "http.client"
-        for span in spans
-    ),
-    InsightModules.DB: lambda spans: any(
-        span.get("sentry_tags", {}).get("category") == "db" and "description" in span.keys()
-        for span in spans
-    ),
-    InsightModules.ASSETS: lambda spans: any(
-        span.get("op") in ["resource.script", "resource.css", "resource.font", "resource.img"]
-        for span in spans
-    ),
-    InsightModules.APP_START: lambda spans: any(
-        span.get("op").startswith("app.start.") for span in spans
-    ),
-    InsightModules.SCREEN_LOAD: lambda spans: any(
-        span.get("sentry_tags", {}).get("transaction.op") == "ui.load" for span in spans
-    ),
-    InsightModules.VITAL: lambda spans: any(
-        span.get("sentry_tags", {}).get("transaction.op") == "pageload" for span in spans
-    ),
-    InsightModules.CACHE: lambda spans: any(
-        span.get("op") in ["cache.get_item", "cache.get", "cache.put"] for span in spans
-    ),
-    InsightModules.QUEUE: lambda spans: any(
-        span.get("op") in ["queue.process", "queue.publish"] for span in spans
-    ),
-    InsightModules.LLM_MONITORING: lambda spans: any(
-        span.get("op").startswith("ai.pipeline") for span in spans
-    ),
-    InsightModules.AGENTS: lambda spans: any(
-        span.get("op").startswith("gen_ai.") for span in spans
-    ),
-}
 
 StatsPeriod = namedtuple("StatsPeriod", ("segments", "interval"))
-
-LEGACY_RATE_LIMIT_OPTIONS = frozenset(("sentry:project-rate-limit", "sentry:account-rate-limit"))
 
 
 # We need to limit the range of valid timestamps of an event because that
@@ -706,8 +717,6 @@ ALL_ACCESS_PROJECTS_SLUG = "$all"
 MAX_TOP_EVENTS = 10
 
 # org option default values
-PROJECT_RATE_LIMIT_DEFAULT = 100
-ACCOUNT_RATE_LIMIT_DEFAULT = 0
 REQUIRE_SCRUB_DATA_DEFAULT = False
 REQUIRE_SCRUB_DEFAULTS_DEFAULT = False
 ATTACHMENTS_ROLE_DEFAULT = settings.SENTRY_DEFAULT_ROLE
@@ -717,8 +726,6 @@ REQUIRE_SCRUB_IP_ADDRESS_DEFAULT = False
 SCRAPE_JAVASCRIPT_DEFAULT = True
 JOIN_REQUESTS_DEFAULT = True
 HIDE_AI_FEATURES_DEFAULT = False
-GITHUB_COMMENT_BOT_DEFAULT = True
-GITLAB_COMMENT_BOT_DEFAULT = True
 ISSUE_ALERTS_THREAD_DEFAULT = True
 METRIC_ALERTS_THREAD_DEFAULT = True
 DATA_CONSENT_DEFAULT = False
@@ -726,9 +733,27 @@ UPTIME_AUTODETECTION = True
 TARGET_SAMPLE_RATE_DEFAULT = 1.0
 SAMPLING_MODE_DEFAULT = "organization"
 ROLLBACK_ENABLED_DEFAULT = True
-DEFAULT_AUTOFIX_AUTOMATION_TUNING_DEFAULT = AutofixAutomationTuningSettings.OFF
+AUTOFIX_AUTOMATION_TUNING_DEFAULT = AutofixAutomationTuningSettings.OFF
 DEFAULT_SEER_SCANNER_AUTOMATION_DEFAULT = True
-INGEST_THROUGH_TRUSTED_RELAYS_ONLY_DEFAULT = False
+ENABLE_SEER_CODING_DEFAULT = True
+# Seer Org level default for automated_run_stopping_point in project preferences
+AUTO_OPEN_PRS_DEFAULT = False
+# Seer Org level setting to automatically enable code review for all new GitHub repo's that become connected
+AUTO_ENABLE_CODE_REVIEW = False
+# Seer Org level default for code review triggers
+DEFAULT_CODE_REVIEW_TRIGGERS: list[str] = [
+    "on_ready_for_review",
+]
+SEER_DEFAULT_CODING_AGENT_DEFAULT = "seer"
+SEER_AUTOMATED_RUN_STOPPING_POINT_DEFAULT = "code_changes"
+ENABLED_CONSOLE_PLATFORMS_DEFAULT: list[str] = []
+CONSOLE_SDK_INVITE_QUOTA_DEFAULT = 0
+DASHBOARDS_ASYNC_QUEUE_PARALLEL_LIMIT_DEFAULT = 10
+
+INGEST_THROUGH_TRUSTED_RELAYS_ONLY_DEFAULT = "disabled"
+
+# Repository owner for console SDK repositories. Helpful for testing: add your test org here
+CONSOLE_SDK_REPO_OWNER = "getsentry"
 
 # `sentry:events_member_admin` - controls whether the 'member' role gets the event:admin scope
 EVENTS_MEMBER_ADMIN_DEFAULT = True
@@ -740,55 +765,12 @@ DataCategory = sentry_relay.consts.DataCategory
 CRASH_RATE_ALERT_SESSION_COUNT_ALIAS = "_total_count"
 CRASH_RATE_ALERT_AGGREGATE_ALIAS = "_crash_rate_alert_aggregate"
 
-# Dynamic sampling denylist composed manually from
-# 1. `src/sentry/event_manager.py:save`. We have function
-# `_derive_interface_tags_many(jobs)` which iterates across all interfaces
-# and execute `iter_tags`, so i've searched usage of `iter_tags`.
-# 2. `src/sentry/event_manager.py:_pull_out_data` we have `set_tag`.
-# 3. `src/sentry/event_manager.py:_get_event_user_many` we have `set_tag`.
-# 4. `src/sentry/event_manager.py:_get_or_create_release_many` we have `set_tag`.
-# 5. `src/sentry/interfaces/exception.py:Mechanism` we have `iter_tags`.
-# 6. `src/sentry/plugins/sentry_urls/models.py:UrlsPlugin`.
-# 7. `sentry/src/sentry/plugins/sentry_interface_types/models.py`.
-# 8. `src/sentry/plugins/sentry_useragents/models.py:UserAgentPlugin`.
-# Note:
-# should be sorted alphabetically so that it is easy to maintain in future
-# if you update this list please add explanation or source of it
-DS_DENYLIST = frozenset(
-    [
-        "app.device",
-        "browser",
-        "browser.name",
-        "device",
-        "device.family",
-        "environment",
-        "gpu.name",
-        "gpu.vendor",
-        "handled",
-        "interface_type",
-        "level",
-        "logger",
-        "mechanism",
-        "monitor.id",
-        "os",
-        "os.name",
-        "os.rooted",
-        "runtime",
-        "runtime.name",
-        "sentry:dist",
-        "sentry:release",
-        "sentry:user",
-        "transaction",
-        "url",
-    ]
-)
-
-
 # DESCRIBES the globs used to check if a transaction is for a healthcheck endpoint
 # https://kubernetes.io/docs/reference/using-api/health-checks/
 # Also it covers: livez, readyz
 HEALTH_CHECK_GLOBS = [
     "*healthcheck*",
+    "*health-check*",
     "*heartbeat*",
     "*/health{/,}",
     "*/healthy{/,}",
@@ -802,6 +784,9 @@ HEALTH_CHECK_GLOBS = [
     "*/readyz{/,}",
     "*/ping{/,}",
     "*/up{/,}",
+    # Globs for Spring Boot: https://docs.spring.io/spring-boot/api/rest/actuator/health.html
+    "*/actuator/health{/*,}",
+    "*/manage/health{/*,}",
 ]
 
 
@@ -1058,3 +1043,10 @@ EXTENSION_LANGUAGE_MAP = {
     "dsr": "visual basic 6.0",
     "frm": "visual basic 6.0",
 }
+
+# After this date APIs that are incompatible with cell routing
+# will begin periodic brownouts.
+CELL_API_DEPRECATION_DATE = datetime(2026, 5, 15, 0, 0, 0, tzinfo=UTC)
+ALERTS_API_DEPRECATION_DATE = datetime(2026, 5, 14, 0, 0, 0, tzinfo=UTC)
+# Option key prefix for the deprecated alerts API brownout schedule and duration.
+ALERTS_API_DEPRECATION_KEY = "api.deprecation.alerts"

@@ -1,18 +1,69 @@
 import {useTheme} from '@emotion/react';
+import styled from '@emotion/styled';
 
-import type {GridColumnOrder} from 'sentry/components/gridEditable';
-import GridEditable from 'sentry/components/gridEditable';
+import {Flex} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {getNextSort} from 'sentry/components/tables/getNextSort';
+import {COL_WIDTH_UNDEFINED, GridEditable} from 'sentry/components/tables/gridEditable';
+import {IconStar} from 'sentry/icons';
+import {getSortField} from 'sentry/utils/dashboards/issueFieldRenderers';
+import {defined} from 'sentry/utils/defined';
+import type {TableDataRow} from 'sentry/utils/discover/discoverQuery';
+import {encodeSort} from 'sentry/utils/discover/eventView';
+import type {MetaType} from 'sentry/utils/discover/eventView';
+import type {RenderFunctionBaggage} from 'sentry/utils/discover/fieldRenderers';
+import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
+import type {Column, ColumnValueType, Sort, SortKind} from 'sentry/utils/discover/fields';
+import {
+  fieldAlignment,
+  isEquation,
+  parseFunction,
+  stripEquationPrefix,
+} from 'sentry/utils/discover/fields';
+import {FieldValueType, prettifyTagKey} from 'sentry/utils/fields';
+import {decodeSorts} from 'sentry/utils/queryString';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {ALLOWED_CELL_ACTIONS} from 'sentry/views/dashboards/widgets/common/settings';
 import type {
   TabularColumn,
   TabularData,
+  TabularMeta,
   TabularRow,
 } from 'sentry/views/dashboards/widgets/common/types';
 import {
-  renderDefaultBodyCell,
-  renderDefaultHeadCell,
-} from 'sentry/views/dashboards/widgets/tableWidget/defaultTableCellRenderers';
+  Actions,
+  CellAction,
+  copyToClipboard,
+} from 'sentry/views/discover/table/cellAction';
+import {SpanFields} from 'sentry/views/insights/types';
+
+type FieldRendererGetter = (
+  field: string,
+  data: TabularRow,
+  meta: TabularMeta
+) => FieldRenderer;
+
+export type FieldRenderer = (
+  data: TabularRow,
+  baggage: RenderFunctionBaggage
+) => React.ReactNode | undefined;
+
+type BaggageMaker = (
+  field: string,
+  _dataRow: TabularRow,
+  meta: TabularMeta
+) => RenderFunctionBaggage;
+
+type GetAllowedCellActionsFn = (cellInfo: {
+  column: TabularColumn;
+  columnIndex: number;
+  dataRow: TabularRow;
+  rowIndex: number;
+}) => Actions[];
 
 interface TableWidgetVisualizationProps {
   /**
@@ -20,50 +71,71 @@ interface TableWidgetVisualizationProps {
    */
   tableData: TabularData;
   /**
+   * A mapping between column key to a column alias to override header name.
+   */
+  aliases?: Record<string, string>;
+  /**
+   * The cell actions that may appear when a user clicks on a table cell. By default, copying text and opening external links are enabled.
+   */
+  allowedCellActions?: Actions[] | GetAllowedCellActionsFn;
+  /**
    * If supplied, will override the ordering of columns from `tableData`. Can also be used to
    * supply custom display names for columns, column widths and column data type
    */
   columns?: TabularColumn[];
   /**
-   * If provided, forces the table to overflow scroll horizontally without requiring column resizing
-   * - `max-content`: makes the table expand horizontally to fit the largest content
-   */
-  fit?: 'max-content';
-  /**
    * If true, removes the borders of the sides and bottom of the table
    */
   frameless?: boolean;
   /**
-   * Custom renderer that overrides default for table body cells
-   * @param column
-   * @param dataRow
-   * @param rowIndex
-   * @param columnIndex
-   * @returns `React.ReactNode | undefined`
+   * A function that returns a field renderer that can be used to render that field given the data and meta. A field renderer is a function that accepts a data row, and a baggage object, and returns a React node or `undefined`, and can be rendered as a table cell.
+   * @param fieldName The name of the field to render
+   * @param dataRow The full table row of data
+   * @param meta The full table metadata
+   * @returns `FieldRenderer`
    */
-  renderTableBodyCell?: (
-    column: TabularColumn,
-    dataRow: TabularRow,
-    rowIndex: number,
-    columnIndex: number
-  ) => React.ReactNode | undefined;
+  getRenderer?: FieldRendererGetter;
   /**
-   * Custom renderer that overrides default for table header cells
-   * @param column
-   * @param columnIndex
-   * @returns `React.ReactNode | undefined`
+   * A function that returns a baggage object that will be passed to all the field renderers during table rendering.
+   * @param fieldName The name of the field to render
+   * @param dataRow The full table row of data
+   * @param meta The full table metadata
    */
-  renderTableHeadCell?: (
-    column: TabularColumn,
-    columnIndex: number
-  ) => React.ReactNode | undefined;
+  makeBaggage?: BaggageMaker;
+  /**
+   * A callback function that is invoked after a user clicks a sortable column header. If omitted, clicking a column header updates the sort in the URL
+   * @param sort `Sort` object contain the `field` and `kind` ('asc' or 'desc')
+   */
+  onChangeSort?: (sort: Sort) => void;
+
+  /**
+   * A callback function that is invoked after a user resizes a column. If omitted, resizing will update the width parameters in the URL. This function always guarantees width field is supplied, meaning it will fallback to -1
+   * @param columns an array of columns with the updated widths
+   */
+  onResizeColumn?: (columns: TabularColumn[]) => void;
+  /**
+   * A callback function that is invoked when a user clicks an option in the cell action dropdown.
+   */
+  onTriggerCellAction?: (
+    action: Actions,
+    value: string | number,
+    dataRow: TabularRow
+  ) => void;
+  /**
+   * If true, will allow table columns to be resized, otherwise no resizing. By default this is true
+   */
+  resizable?: boolean;
   /**
    * If true, the table will scroll on overflow. Note that the table headers will also be sticky
    */
   scrollable?: boolean;
+  /**
+   * The current sort order to display
+   */
+  sort?: Sort;
 }
 
-const FRAMELESS_STYLES = {
+export const FRAMELESS_STYLES = {
   borderTopLeftRadius: 0,
   borderTopRightRadius: 0,
   marginBottom: 0,
@@ -73,62 +145,302 @@ const FRAMELESS_STYLES = {
   height: '100%',
 };
 
+/**
+ * The starred column only ever holds an icon, so it hugs its content rather
+ * than stretching to the table's minimum column width.
+ */
+const STARRED_COLUMN_WIDTH = 'max-content';
+
+function isStarredColumn(key: string, aliases?: Record<string, string>): boolean {
+  return key === SpanFields.IS_STARRED_TRANSACTION && !aliases?.[key];
+}
+
+function getStaticColumnWidths(
+  columns: TabularColumn[],
+  aliases?: Record<string, string>
+): Record<string, string> | undefined {
+  const starredColumn = columns.find(
+    column =>
+      isStarredColumn(column.key, aliases) &&
+      (column.width === undefined || column.width === COL_WIDTH_UNDEFINED)
+  );
+
+  return starredColumn ? {[starredColumn.key]: STARRED_COLUMN_WIDTH} : undefined;
+}
+
+function prettifyColumnKey(key: string): string {
+  if (isEquation(key) || parseFunction(key)) {
+    return key;
+  }
+  return prettifyTagKey(key);
+}
+
 export function TableWidgetVisualization(props: TableWidgetVisualizationProps) {
   const {
     tableData,
     frameless,
-    renderTableBodyCell,
-    renderTableHeadCell,
+    getRenderer: getRenderer,
+    makeBaggage: makeBaggage,
     columns,
     scrollable,
-    fit,
+    aliases,
+    onChangeSort,
+    sort,
+    onResizeColumn,
+    resizable = true,
+    onTriggerCellAction,
+    allowedCellActions = ALLOWED_CELL_ACTIONS,
   } = props;
 
   const theme = useTheme();
   const location = useLocation();
   const organization = useOrganization();
+  const {projects} = useProjects();
+  const navigate = useNavigate();
+
+  const getGenericRenderer: FieldRendererGetter = (field, _dataRow, meta) => {
+    // NOTE: `alias` is set to `false` here because in almost all endpoints, we don't alias field names anymore. In the past, fields like `"p75(duration)"` would be aliased to `"p75_duration"`, but we don't do that much anymore, so we can safely assume that the field name is the same as the alias.
+    return getFieldRenderer(field, meta as MetaType, false);
+  };
+
+  const getGenericBaggage: BaggageMaker = (
+    field,
+    _dataRow,
+    meta
+  ): RenderFunctionBaggage => {
+    const unit = meta.units?.[field] as string | undefined;
+
+    return {
+      organization,
+      theme,
+      location,
+      navigate,
+      unit,
+      projects,
+    };
+  };
+
+  const {data, meta} = tableData;
+  const locationSort = decodeSorts(location?.query?.sort)[0];
+  const numColumns = columns?.length ?? Object.keys(meta.fields).length;
+
+  let widths = Array.from<number>({length: numColumns}).fill(COL_WIDTH_UNDEFINED);
+  const locationWidths = location.query?.width;
+  // If at least one column has the width key and that key is defined, take that over url widths
+  if (columns?.some(column => defined(column.width))) {
+    widths = columns.map(column =>
+      defined(column.width) ? column.width : COL_WIDTH_UNDEFINED
+    );
+  } else if (
+    resizable &&
+    Array.isArray(locationWidths) &&
+    locationWidths.length === numColumns
+  ) {
+    widths = locationWidths.map(width => {
+      const val = parseInt(width, 10);
+      return isNaN(val) ? COL_WIDTH_UNDEFINED : val;
+    });
+  }
 
   // Fallback to extracting fields from the tableData if no columns are provided
   const columnOrder: TabularColumn[] =
-    columns ??
-    Object.keys(tableData?.meta.fields).map((key: string) => ({
+    columns?.map((column, index) => ({
+      ...column,
+      width: widths[index],
+    })) ??
+    Object.keys(meta.fields).map((key, index) => ({
       key,
-      name: key,
-      width: -1,
-      type: tableData?.meta.fields[key],
+      width: widths[index],
+      type: meta.fields[key],
     }));
 
   return (
     <GridEditable
-      data={tableData?.data ?? []}
-      columnOrder={columnOrder}
-      columnSortBy={[]}
+      data={data}
+      // GridEditable needs name, but this functionality is replaced by aliases
+      columnOrder={columnOrder.map(column => ({...column, name: column.key}))}
       grid={{
-        renderHeadCell: renderDefaultHeadCell({renderTableHeadCell}) as (
-          column: GridColumnOrder,
-          columnIndex: number
-        ) => React.ReactNode,
-        renderBodyCell: renderDefaultBodyCell({
-          tableData,
-          location,
-          organization,
-          theme,
-          renderTableBodyCell,
-        }),
+        staticColumnWidths: getStaticColumnWidths(columnOrder, aliases),
+        getColumnSort: (_tableColumn, columnIndex) => {
+          const column = columnOrder[columnIndex]!;
+          const sortColumn = getSortField(column.key) ?? column.key;
+
+          let direction: SortKind | undefined;
+          if (sort?.field === sortColumn) {
+            direction = sort.kind;
+          } else if (locationSort?.field === sortColumn && !sort) {
+            direction = locationSort.kind;
+          }
+
+          const nextSort = getNextSort(
+            sortColumn,
+            direction && {field: sortColumn, kind: direction}
+          );
+
+          return {
+            align: fieldAlignment(column.key, column.type as ColumnValueType),
+            direction: column.sortable ? direction : undefined,
+            onSort: column.sortable
+              ? event => {
+                  if (!onChangeSort) {
+                    return;
+                  }
+                  event.preventDefault();
+                  onChangeSort(nextSort);
+                }
+              : undefined,
+            to: column.sortable
+              ? {...location, query: {...location.query, sort: encodeSort(nextSort)}}
+              : undefined,
+          };
+        },
+        renderHeadCell: (_tableColumn, columnIndex) => {
+          const column = columnOrder[columnIndex]!;
+          if (isStarredColumn(column.key, aliases)) {
+            return <StarColumnHeader columnKey={column.key} />;
+          }
+
+          let name: React.ReactNode =
+            aliases?.[column.key] || prettifyColumnKey(column.key);
+          if (isEquation(column.key)) {
+            name = stripEquationPrefix(name as string);
+          }
+
+          return <StyledTooltip title={name}>{name}</StyledTooltip>;
+        },
+        renderBodyCell: (tableColumn, dataRow, rowIndex, columnIndex) => {
+          const field = tableColumn.key;
+
+          const valueRenderer = (getRenderer ?? getGenericRenderer)(field, dataRow, meta);
+          const baggage = (makeBaggage ?? getGenericBaggage)(field, dataRow, meta);
+
+          const cell = valueRenderer(dataRow, baggage);
+
+          const column = columnOrder[columnIndex]!;
+          const cellAllowedActions =
+            typeof allowedCellActions === 'function'
+              ? allowedCellActions({
+                  column,
+                  dataRow,
+                  columnIndex,
+                  rowIndex,
+                })
+              : allowedCellActions;
+          const formattedColumn = {
+            key: column.key,
+            name: column.key,
+            isSortable: !!column.sortable,
+            type: column.type ?? FieldValueType.NEVER,
+            column: {
+              field: column.key,
+              kind: 'field',
+            } as Column,
+          };
+
+          return (
+            <CellAction
+              key={`${rowIndex}-${columnIndex}:${tableColumn.name}`}
+              column={formattedColumn}
+              dataRow={dataRow as TableDataRow}
+              handleCellAction={(action: Actions, value: string | number) => {
+                onTriggerCellAction?.(action, value, dataRow);
+                switch (action) {
+                  case Actions.COPY_TO_CLIPBOARD:
+                    copyToClipboard(value);
+                    break;
+                  default:
+                    break;
+                }
+              }}
+              allowActions={cellAllowedActions}
+            >
+              {cell}
+            </CellAction>
+          );
+        },
+        onResizeColumn: (columnIndex: number, nextColumn: TabularColumn) => {
+          widths[columnIndex] = defined(nextColumn.width)
+            ? nextColumn.width
+            : COL_WIDTH_UNDEFINED;
+
+          columnOrder[columnIndex]!.width = widths[columnIndex];
+
+          if (onResizeColumn) {
+            onResizeColumn(columnOrder);
+            return;
+          }
+
+          // Default is to fallback to location query
+          navigate(
+            {
+              pathname: location.pathname,
+              query: {
+                ...location.query,
+                width: widths,
+              },
+            },
+            {replace: true}
+          );
+        },
       }}
       stickyHeader={scrollable}
       scrollable={scrollable}
       height={scrollable ? '100%' : undefined}
       bodyStyle={frameless ? FRAMELESS_STYLES : {}}
-      // Resizing is not implemented yet
-      resizable={false}
-      fit={fit}
+      resizable={resizable}
     />
   );
 }
 
-TableWidgetVisualization.LoadingPlaceholder = function () {
+TableWidgetVisualization.LoadingPlaceholder = function ({
+  columns,
+  aliases,
+}: {
+  aliases?: Record<string, string>;
+  columns?: TabularColumn[];
+}) {
+  const columnsWithName = columns?.map(column => ({...column, name: column.key})) ?? [];
   return (
-    <GridEditable isLoading columnOrder={[]} columnSortBy={[]} data={[]} grid={{}} />
+    <GridEditable
+      isLoading
+      columnOrder={columnsWithName}
+      data={[]}
+      resizable={false}
+      grid={{
+        staticColumnWidths: getStaticColumnWidths(columns ?? [], aliases),
+        renderHeadCell: (_tableColumn, columnIndex) => {
+          if (!columns) {
+            return null;
+          }
+          const column = columns[columnIndex]!;
+          if (isStarredColumn(column.key, aliases)) {
+            return <StarColumnHeader columnKey={column.key} />;
+          }
+
+          const name = aliases?.[column.key] || prettifyColumnKey(column.key);
+
+          return <StyledTooltip title={name}>{name}</StyledTooltip>;
+        },
+      }}
+    />
   );
 };
+
+const StyledTooltip = styled(Tooltip)`
+  display: initial;
+  vertical-align: middle;
+`;
+
+function StarColumnHeader({columnKey}: {columnKey: string}) {
+  return (
+    <StarColumnTooltip title={columnKey}>
+      <Flex align="center" justify="center">
+        <IconStar isSolid variant="warning" />
+      </Flex>
+    </StarColumnTooltip>
+  );
+}
+
+const StarColumnTooltip = styled(StyledTooltip)`
+  flex: 1;
+`;

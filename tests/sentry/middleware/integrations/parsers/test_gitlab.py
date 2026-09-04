@@ -1,27 +1,32 @@
 from unittest import mock
 
 import responses
-from django.db import router, transaction
+from django.db import connections, router, transaction
 from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 
 from fixtures.gitlab import EXTERNAL_ID, PUSH_EVENT, WEBHOOK_SECRET, WEBHOOK_TOKEN
 from sentry.hybridcloud.models.outbox import outbox_context
+from sentry.integrations.gitlab.webhook_types import GITLAB_EVENT_KINDS
+from sentry.integrations.gitlab.webhooks import GitlabWebhookEndpoint
+from sentry.integrations.middleware.hybrid_cloud.parser import SHED_INBOUND_KILLSWITCH
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.middleware.integrations.classifications import IntegrationClassification
 from sentry.middleware.integrations.parsers.gitlab import GitlabRequestParser
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
+from sentry.testutils.cell import override_cells
+from sentry.testutils.helpers.options import override_options
 from sentry.testutils.outbox import assert_no_webhook_payloads, assert_webhook_payloads_for_mailbox
-from sentry.testutils.region import override_regions
 from sentry.testutils.silo import control_silo_test
-from sentry.types.region import Region, RegionCategory
+from sentry.types.cell import Cell
 
-region = Region("us", 1, "https://us.testserver", RegionCategory.MULTI_TENANT)
-region_config = (region,)
+cell = Cell("us", 1, "https://us.testserver")
+cell_config = (cell,)
 
 
 @control_silo_test
@@ -33,7 +38,7 @@ class GitlabRequestParserTest(TestCase):
         return HttpResponse(status=200, content="passthrough")
 
     def get_integration(self) -> Integration:
-        self.organization = self.create_organization(owner=self.user, region="us")
+        self.organization = self.create_organization(owner=self.user, cell="us")
         return self.create_integration(
             organization=self.organization,
             provider="gitlab",
@@ -54,8 +59,8 @@ class GitlabRequestParserTest(TestCase):
         return parser.get_response()
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
-    def test_missing_x_gitlab_token(self):
+    @override_cells(cell_config)
+    def test_missing_x_gitlab_token(self) -> None:
         self.get_integration()
         request = self.factory.post(
             self.path,
@@ -70,8 +75,31 @@ class GitlabRequestParserTest(TestCase):
         )
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
-    def test_invalid_token(self):
+    @override_cells(cell_config)
+    @override_options({SHED_INBOUND_KILLSWITCH: [{"provider": "gitlab"}]})
+    def test_provider_wide_shed_skips_the_routing_lookups(self) -> None:
+        """A condition naming no integration_id matches on the provider alone, so the
+        shed settles before the lookups — but below the token check, so an invalid
+        request is still rejected without consulting the killswitch."""
+        self.get_integration()
+        request = self.factory.post(
+            self.path,
+            data=PUSH_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Push Hook",
+        )
+
+        with CaptureQueriesContext(connections[router.db_for_read(Integration)]) as queries:
+            response = self.run_parser(request)
+
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert not [q for q in queries.captured_queries if 'FROM "sentry_integration"' in q["sql"]]
+        assert_no_webhook_payloads()
+
+    @override_settings(SILO_MODE=SiloMode.CONTROL)
+    @override_cells(cell_config)
+    def test_invalid_token(self) -> None:
         self.get_integration()
         request = self.factory.post(
             self.path,
@@ -86,9 +114,9 @@ class GitlabRequestParserTest(TestCase):
         assert_no_webhook_payloads()
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @responses.activate
-    def test_routing_webhook_properly_no_regions(self):
+    def test_routing_webhook_properly_no_cells(self) -> None:
         request = self.factory.post(
             self.path,
             data=PUSH_EVENT,
@@ -111,9 +139,33 @@ class GitlabRequestParserTest(TestCase):
         assert_no_webhook_payloads()
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @responses.activate
-    def test_routing_webhook_properly_with_regions(self):
+    def test_forwarding_reads_the_integration_once(self) -> None:
+        """GitLab used to keep its own lookup cache; the base memo replaces it, and a
+        query count is the only thing that notices if it stops covering this."""
+        self.get_integration()
+        request = self.factory.post(
+            self.path,
+            data=PUSH_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Push Hook",
+        )
+
+        with CaptureQueriesContext(connections[router.db_for_read(Integration)]) as queries:
+            response = self.run_parser(request)
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        assert (
+            len([q for q in queries.captured_queries if 'FROM "sentry_integration"' in q["sql"]])
+            == 1
+        )
+
+    @override_settings(SILO_MODE=SiloMode.CONTROL)
+    @override_cells(cell_config)
+    @responses.activate
+    def test_routing_webhook_properly_with_cells(self) -> None:
         integration = self.get_integration()
         request = self.factory.post(
             self.path,
@@ -131,14 +183,57 @@ class GitlabRequestParserTest(TestCase):
         assert len(responses.calls) == 0
         assert_webhook_payloads_for_mailbox(
             request=request,
-            mailbox_name=f"gitlab:{integration.id}",
-            region_names=[region.name],
+            mailbox_name=f"gitlab:{integration.id}:push",
+            cell_names=[cell.name],
         )
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @responses.activate
-    def test_routing_webhook_properly_with_multiple_orgs(self):
+    def test_routing_webhook_ignores_an_unhandled_event_type(self) -> None:
+        integration = self.get_integration()
+        request = self.factory.post(
+            self.path,
+            data=PUSH_EVENT.replace(b'"object_kind": "push"', b'"object_kind": "tag_push"'),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Tag Push Hook",
+        )
+        parser = GitlabRequestParser(request=request, response_handler=self.get_response)
+        response = parser.get_response()
+
+        assert isinstance(response, HttpResponse)
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        # An unvalidated suffix would put an arbitrary body value in the mailbox name.
+        assert_webhook_payloads_for_mailbox(
+            request=request,
+            mailbox_name=f"gitlab:{integration.id}",
+            cell_names=[cell.name],
+        )
+
+    def test_mailbox_event_type(self) -> None:
+        request = self.factory.post(
+            self.path,
+            data=PUSH_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Push Hook",
+        )
+        parser = GitlabRequestParser(request=request, response_handler=self.get_response)
+
+        assert parser.mailbox_event_type({"object_kind": "merge_request"}) == "merge_request"
+        assert parser.mailbox_event_type({}) is None
+        assert parser.mailbox_event_type({"object_kind": 4}) is None
+
+    def test_handled_events_all_have_a_mailbox_event_type(self) -> None:
+        # A handler added without its object_kind would silently keep queuing that
+        # event under the integration-level mailbox.
+        assert set(GitlabWebhookEndpoint._handlers) == set(GITLAB_EVENT_KINDS)
+
+    @override_settings(SILO_MODE=SiloMode.CONTROL)
+    @override_cells(cell_config)
+    @responses.activate
+    def test_routing_webhook_properly_with_multiple_orgs(self) -> None:
         integration = self.get_integration()
         other_org = self.create_organization(owner=self.user)
         integration.add_organization(other_org)
@@ -159,14 +254,14 @@ class GitlabRequestParserTest(TestCase):
         assert len(responses.calls) == 0
         assert_webhook_payloads_for_mailbox(
             request=request,
-            mailbox_name=f"gitlab:{integration.id}",
-            region_names=[region.name],
+            mailbox_name=f"gitlab:{integration.id}:push",
+            cell_names=[cell.name],
         )
 
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @override_settings(SILO_MODE=SiloMode.CONTROL)
     @responses.activate
-    def test_routing_webhook_with_mailbox_buckets(self):
+    def test_routing_webhook_with_mailbox_buckets(self) -> None:
         integration = self.get_integration()
         request = self.factory.post(
             self.path,
@@ -188,14 +283,14 @@ class GitlabRequestParserTest(TestCase):
         assert len(responses.calls) == 0
         assert_webhook_payloads_for_mailbox(
             request=request,
-            mailbox_name=f"gitlab:{integration.id}:15",
-            region_names=[region.name],
+            mailbox_name=f"gitlab:{integration.id}:15:push",
+            cell_names=[cell.name],
         )
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @responses.activate
-    def test_routing_search_properly(self):
+    def test_routing_search_properly(self) -> None:
         self.get_integration()
         path = reverse(
             "sentry-extensions-gitlab-search",
@@ -215,8 +310,8 @@ class GitlabRequestParserTest(TestCase):
         assert_no_webhook_payloads()
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
-    def test_get_integration_from_request(self):
+    @override_cells(cell_config)
+    def test_get_integration_from_request(self) -> None:
         integration = self.get_integration()
         request = self.factory.post(
             self.path,
@@ -231,9 +326,9 @@ class GitlabRequestParserTest(TestCase):
         assert result.id == integration.id
 
     @override_settings(SILO_MODE=SiloMode.CONTROL)
-    @override_regions(region_config)
+    @override_cells(cell_config)
     @responses.activate
-    def test_webhook_outbox_creation(self):
+    def test_webhook_outbox_creation(self) -> None:
         request = self.factory.post(
             self.path,
             data=PUSH_EVENT,
@@ -252,6 +347,6 @@ class GitlabRequestParserTest(TestCase):
         assert len(responses.calls) == 0
         assert_webhook_payloads_for_mailbox(
             request=request,
-            mailbox_name=f"gitlab:{integration.id}",
-            region_names=[region.name],
+            mailbox_name=f"gitlab:{integration.id}:push",
+            cell_names=[cell.name],
         )

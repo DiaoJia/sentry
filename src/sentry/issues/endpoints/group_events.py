@@ -10,18 +10,17 @@ from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import eventstore
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import GroupEndpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.exceptions import ResourceDoesNotExist
+from sentry.api.helpers.deprecation import deprecated
 from sentry.api.helpers.environments import get_environments
-from sentry.api.helpers.events import get_direct_hit_response, get_query_builder_for_group
+from sentry.api.helpers.events import get_direct_hit_response, run_group_events_query
 from sentry.api.paginator import GenericOffsetPaginator
 from sentry.api.serializers import EventSerializer, SimpleEventSerializer, serialize
 from sentry.api.serializers.models.event import SimpleEventSerializerResponse
-from sentry.api.utils import get_date_range_from_params
+from sentry.api.utils import get_date_range_from_params, handle_query_errors
 from sentry.apidocs.constants import (
     RESPONSE_BAD_REQUEST,
     RESPONSE_FORBIDDEN,
@@ -29,12 +28,22 @@ from sentry.apidocs.constants import (
     RESPONSE_UNAUTHORIZED,
 )
 from sentry.apidocs.examples.event_examples import EventExamples
-from sentry.apidocs.parameters import EventParams, GlobalParams, IssueParams
+from sentry.apidocs.parameters import (
+    CursorQueryParam,
+    EventParams,
+    GlobalParams,
+    IssueParams,
+    VisibilityParams,
+)
+from sentry.apidocs.response_types import DetailResponse
 from sentry.apidocs.utils import inline_sentry_response_serializer
-from sentry.eventstore.models import Event
-from sentry.exceptions import InvalidParams, InvalidSearchQuery
-from sentry.search.events.types import ParamsType
+from sentry.constants import CELL_API_DEPRECATION_DATE
+from sentry.exceptions import InvalidSearchQuery
+from sentry.issues.endpoints.bases.group import GroupEndpoint
+from sentry.search.events.types import SnubaParams
 from sentry.search.utils import InvalidQuery, parse_query
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event
 
 if TYPE_CHECKING:
     from sentry.models.environment import Environment
@@ -49,16 +58,28 @@ class GroupEventsError(Exception):
     pass
 
 
+FULL_PAYLOAD_MAX_PER_PAGE = 10
+
+
 @extend_schema(tags=["Events"])
-@region_silo_endpoint
+@cell_silo_endpoint
 class GroupEventsEndpoint(GroupEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PUBLIC,
     }
     owner = ApiOwner.ISSUES
 
+    def get_per_page(
+        self, request: Request, default_per_page: int | None = None, max_per_page: int | None = None
+    ) -> int:
+        per_page = super().get_per_page(request, default_per_page, max_per_page)
+        if request.GET.get("full") in ("1", "true"):
+            return min(per_page, FULL_PAYLOAD_MAX_PER_PAGE)
+        return per_page
+
     @extend_schema(
-        operation_id="List an Issue's Events",
+        operation_id="listOrganizationIssueEvents",
+        summary="List an Issue's Events",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             IssueParams.ISSUES_OR_GROUPS,
@@ -70,6 +91,8 @@ class GroupEventsEndpoint(GroupEndpoint):
             EventParams.FULL_PAYLOAD,
             EventParams.SAMPLE,
             EventParams.QUERY,
+            VisibilityParams.PER_PAGE,
+            CursorQueryParam,
         ],
         responses={
             200: inline_sentry_response_serializer(
@@ -82,7 +105,14 @@ class GroupEventsEndpoint(GroupEndpoint):
         },
         examples=EventExamples.GROUP_EVENTS_SIMPLE,
     )
-    def get(self, request: Request, group: Group) -> Response:
+    @deprecated(
+        CELL_API_DEPRECATION_DATE,
+        suggested_api="sentry-api-0-organization-group-group-events",
+        url_names=["sentry-api-0-group-events"],
+    )
+    def get(
+        self, request: Request, group: Group
+    ) -> Response[list[SimpleEventSerializerResponse]] | Response[DetailResponse]:
         """
         Return a list of error events bound to an issue
         """
@@ -95,13 +125,11 @@ class GroupEventsEndpoint(GroupEndpoint):
         except (NoResults, ResourceDoesNotExist):
             return Response([])
 
-        try:
-            start, end = get_date_range_from_params(request.GET, optional=True)
-        except InvalidParams as e:
-            raise ParseError(detail=str(e))
+        start, end = get_date_range_from_params(request.GET, optional=True)
 
         try:
-            return self._get_events_snuba(request, group, environments, query, start, end)
+            with handle_query_errors():
+                return self._get_events_snuba(request, group, environments, query, start, end)
         except GroupEventsError as exc:
             raise ParseError(detail=str(exc))
 
@@ -116,22 +144,27 @@ class GroupEventsEndpoint(GroupEndpoint):
     ) -> Response:
         default_end = timezone.now()
         default_start = default_end - timedelta(days=90)
-        params: ParamsType = {
-            "project_id": [group.project_id],
-            "organization_id": group.project.organization_id,
-            "start": start if start else default_start,
-            "end": end if end else default_end,
-        }
         referrer = f"api.group-events.{group.issue_category.name.lower()}"
 
+        direct_hit_snuba_params = SnubaParams(
+            start=start if start else default_start,
+            end=end if end else default_end,
+            projects=[group.project],
+            organization=group.project.organization,
+        )
         direct_hit_resp = get_direct_hit_response(
-            request, query, params, f"{referrer}.direct-hit", group
+            request, query, direct_hit_snuba_params, f"{referrer}.direct-hit", group
         )
         if direct_hit_resp:
             return direct_hit_resp
 
-        if environments:
-            params["environment"] = [env.name for env in environments]
+        snuba_params = SnubaParams(
+            start=start if start else default_start,
+            end=end if end else default_end,
+            environments=environments,
+            projects=[group.project],
+            organization=group.project.organization,
+        )
 
         full = request.GET.get("full") in ("1", "true")
         sample = request.GET.get("sample") in ("1", "true")
@@ -143,17 +176,17 @@ class GroupEventsEndpoint(GroupEndpoint):
 
         def data_fn(offset: int, limit: int) -> Any:
             try:
-                snuba_query = get_query_builder_for_group(
-                    request.GET.get("query", ""),
-                    params,
-                    group,
+                data = run_group_events_query(
+                    query=request.GET.get("query", ""),
+                    snuba_params=snuba_params,
+                    group=group,
                     limit=limit,
                     offset=offset,
                     orderby=orderby,
+                    referrer=referrer,
                 )
             except InvalidSearchQuery as e:
                 raise ParseError(detail=str(e))
-            results = snuba_query.run_query(referrer=referrer)
             results = [
                 Event(
                     event_id=evt["id"],
@@ -165,7 +198,7 @@ class GroupEventsEndpoint(GroupEndpoint):
                         "timestamp": evt["timestamp"],
                     },
                 )
-                for evt in results["data"]
+                for evt in data
             ]
             if full:
                 eventstore.backend.bind_nodes(results)

@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 
-import sentry_sdk
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
@@ -9,7 +8,7 @@ from rest_framework.response import Response
 from sentry import release_health
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects
 from sentry.api.bases.organization import OrganizationEndpoint
 from sentry.api.paginator import GenericOffsetPaginator
@@ -28,10 +27,11 @@ from sentry.models.organization import Organization
 from sentry.release_health.base import SessionsQueryResult
 from sentry.snuba.sessions_v2 import SNUBA_LIMIT, InvalidField, QueryDefinition
 from sentry.utils.cursors import Cursor, CursorResult
+from sentry.utils.tracing import start_span
 
 
 @extend_schema(tags=["Releases"])
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationSessionsEndpoint(OrganizationEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PUBLIC,
@@ -39,7 +39,8 @@ class OrganizationSessionsEndpoint(OrganizationEndpoint):
     owner = ApiOwner.TELEMETRY_EXPERIENCE
 
     @extend_schema(
-        operation_id="Retrieve Release Health Session Statistics",
+        operation_id="getOrganizationSessions",
+        summary="Retrieve Release Health Session Statistics",
         parameters=[
             GlobalParams.START,
             GlobalParams.END,
@@ -63,7 +64,7 @@ class OrganizationSessionsEndpoint(OrganizationEndpoint):
         },
         examples=SessionExamples.QUERY_SESSIONS,
     )
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response[SessionsQueryResult]:
         """
         Returns a time series of release health session statistics for projects bound to an organization.
 
@@ -81,7 +82,7 @@ class OrganizationSessionsEndpoint(OrganizationEndpoint):
 
         def data_fn(offset: int, limit: int) -> SessionsQueryResult:
             with self.handle_query_errors():
-                with sentry_sdk.start_span(op="sessions.endpoint", name="build_sessions_query"):
+                with start_span(op="sessions.endpoint", name="build_sessions_query"):
                     request_limit = None
                     if request.GET.get("per_page") is not None:
                         request_limit = limit
@@ -116,14 +117,11 @@ class OrganizationSessionsEndpoint(OrganizationEndpoint):
         except NoProjects:
             raise NoProjects("No projects available")  # give it a description
 
-        query_config = release_health.backend.sessions_query_config(organization)
-
         return QueryDefinition(
             query=request.GET,
             params=params,
             offset=offset,
             limit=limit,
-            query_config=query_config,
         )
 
     @contextmanager

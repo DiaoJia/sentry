@@ -2,32 +2,37 @@ import {useEffect, useMemo} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+
 import {
   addErrorMessage,
   addLoadingMessage,
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import {openSaveQueryModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
 import {DropdownMenu} from 'sentry/components/dropdownMenu';
 import * as Layout from 'sentry/components/layouts/thirds';
-import {DatePageFilter} from 'sentry/components/organizations/datePageFilter';
-import {EnvironmentPageFilter} from 'sentry/components/organizations/environmentPageFilter';
-import PageFilterBar from 'sentry/components/organizations/pageFilterBar';
-import {ProjectPageFilter} from 'sentry/components/organizations/projectPageFilter';
+import {PageFiltersContainer} from 'sentry/components/pageFilters/container';
+import type {DatePageFilterProps} from 'sentry/components/pageFilters/date/datePageFilter';
+import {DatePageFilter} from 'sentry/components/pageFilters/date/datePageFilter';
+import {EnvironmentPageFilter} from 'sentry/components/pageFilters/environment/environmentPageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
+import {ProjectPageFilter} from 'sentry/components/pageFilters/project/projectPageFilter';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {IconAdd} from 'sentry/icons/iconAdd';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
+import {DataCategory} from 'sentry/types/core';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {defined} from 'sentry/utils/defined';
 import {encodeSort} from 'sentry/utils/discover/eventView';
 import {valueIsEqual} from 'sentry/utils/object/valueIsEqual';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {useDatePageFilterProps} from 'sentry/utils/useDatePageFilterProps';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {useMaxPickableDays} from 'sentry/utils/useMaxPickableDays';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {WidgetSyncContextProvider} from 'sentry/views/dashboards/contexts/widgetSyncContext';
-import {getIdFromLocation} from 'sentry/views/explore/contexts/pageParamsContext/id';
-import {TraceItemAttributeProvider} from 'sentry/views/explore/contexts/traceItemAttributeContext';
 import {useGetSavedQuery} from 'sentry/views/explore/hooks/useGetSavedQueries';
 import {useSaveMultiQuery} from 'sentry/views/explore/hooks/useSaveMultiQuery';
 import {useVisitQuery} from 'sentry/views/explore/hooks/useVisitQuery';
@@ -37,20 +42,22 @@ import {
 } from 'sentry/views/explore/multiQueryMode/locationUtils';
 import {QueryRow} from 'sentry/views/explore/multiQueryMode/queryRow';
 import {TraceItemDataset} from 'sentry/views/explore/types';
-import {limitMaxPickableDays} from 'sentry/views/explore/utils';
 
 export const MAX_QUERIES_ALLOWED = 5;
 
-function Content() {
+interface ContentProps {
+  datePageFilterProps: DatePageFilterProps;
+}
+
+function Content({datePageFilterProps}: ContentProps) {
   const location = useLocation();
   const organization = useOrganization();
   const pageFilters = usePageFilters();
   const {saveQuery, updateQuery} = useSaveMultiQuery();
-  const datePageFilterProps = limitMaxPickableDays(organization);
   const queries = useReadQueriesFromLocation().slice(0, MAX_QUERIES_ALLOWED);
   const addQuery = useAddQuery();
   const totalQueryRows = queries.length;
-  const id = getIdFromLocation(location);
+  const id = decodeScalar(location.query.id);
 
   const visitQuery = useVisitQuery();
   useEffect(() => {
@@ -107,8 +114,8 @@ function Content() {
 
   return (
     <Layout.Body>
-      <Layout.Main fullWidth>
-        <Flex>
+      <Layout.Main width="full">
+        <Flex justify="between" align="center">
           <StyledPageFilterBar condensed>
             <ProjectPageFilter />
             <EnvironmentPageFilter />
@@ -141,7 +148,7 @@ function Content() {
                 : []),
               {
                 key: 'save-query',
-                label: t('A New Query'),
+                label: t('New Query'),
                 onAction: () => {
                   trackAnalytics('trace_explorer.save_query_modal', {
                     action: 'open',
@@ -153,6 +160,7 @@ function Content() {
                     organization,
                     saveQuery,
                     source: 'toolbar',
+                    traceItemDataset: TraceItemDataset.SPANS,
                   });
                 },
               },
@@ -160,7 +168,7 @@ function Content() {
             trigger={triggerProps => (
               <Button
                 {...triggerProps}
-                priority={shouldHighlightSaveButton ? 'primary' : 'default'}
+                variant={shouldHighlightSaveButton ? 'primary' : 'secondary'}
                 aria-label={t('Save')}
                 onClick={e => {
                   e.stopPropagation();
@@ -169,7 +177,7 @@ function Content() {
                   triggerProps.onClick?.(e);
                 }}
               >
-                {shouldHighlightSaveButton ? `${t('Save')}` : `${t('Save as')}\u2026`}
+                {shouldHighlightSaveButton ? t('Save') : `${t('Save as')}\u2026`}
               </Button>
             )}
           />
@@ -204,19 +212,18 @@ function Content() {
 }
 
 export function MultiQueryModeContent() {
+  const maxPickableDays = useMaxPickableDays({
+    dataCategories: [DataCategory.SPANS],
+  });
+  const datePageFilterProps = useDatePageFilterProps(maxPickableDays);
+
   return (
-    <TraceItemAttributeProvider traceItemType={TraceItemDataset.SPANS} enabled>
-      <Content />
-    </TraceItemAttributeProvider>
+    <PageFiltersContainer maxPickableDays={datePageFilterProps.maxPickableDays}>
+      <Content datePageFilterProps={datePageFilterProps} />
+    </PageFiltersContainer>
   );
 }
 
 const StyledPageFilterBar = styled(PageFilterBar)`
-  margin-bottom: ${space(1)};
-`;
-
-const Flex = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  margin-bottom: ${p => p.theme.space.md};
 `;

@@ -6,9 +6,9 @@ import {ProjectFixture} from 'sentry-fixture/project';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import {ScreenshotDataSection} from 'sentry/components/events/eventTagsAndScreenshot/screenshot/screenshotDataSection';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 
-describe('ScreenshotDataSection', function () {
+describe('ScreenshotDataSection', () => {
   const organization = OrganizationFixture({
     features: ['event-attachments'],
     orgRole: 'member',
@@ -21,7 +21,7 @@ describe('ScreenshotDataSection', function () {
     ProjectsStore.loadInitialData([project]);
   });
 
-  it('renders without error when screenshot has application/json mimetype', async function () {
+  it('renders without error when screenshot has application/json mimetype', async () => {
     const attachment = EventAttachmentFixture({
       name: 'screenshot.png',
       mimetype: 'application/json',

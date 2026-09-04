@@ -3,8 +3,6 @@ import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 import {ReleaseFixture} from 'sentry-fixture/release';
-import {RouteComponentPropsFixture} from 'sentry-fixture/routeComponentPropsFixture';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 import {TeamFixture} from 'sentry-fixture/team';
 import {UserFixture} from 'sentry-fixture/user';
 import {WidgetFixture} from 'sentry-fixture/widget';
@@ -22,23 +20,31 @@ import {
 import * as dashboardActions from 'sentry/actionCreators/dashboards';
 import {addLoadingMessage} from 'sentry/actionCreators/indicator';
 import * as modals from 'sentry/actionCreators/modal';
-import ConfigStore from 'sentry/stores/configStore';
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
+import {registerOverride} from 'sentry/overrideRegistry';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {TeamStore} from 'sentry/stores/teamStore';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
+import {UNSAVED_FILTERS_MESSAGE} from 'sentry/views/dashboards/constants';
 import CreateDashboard from 'sentry/views/dashboards/create';
-import DashboardDetail, {
-  handleUpdateDashboardSplit,
-} from 'sentry/views/dashboards/detail';
-import EditAccessSelector from 'sentry/views/dashboards/editAccessSelector';
+import {DashboardDetailWithInjectedProps as DashboardDetail} from 'sentry/views/dashboards/detail';
+import {EditAccessSelector} from 'sentry/views/dashboards/editAccessSelector';
+import {useGetStarredDashboards} from 'sentry/views/dashboards/hooks/useGetStarredDashboards';
 import * as types from 'sentry/views/dashboards/types';
 import {DashboardState} from 'sentry/views/dashboards/types';
+import {PrebuiltDashboardId} from 'sentry/views/dashboards/utils/prebuiltConfigs';
 import ViewEditDashboard from 'sentry/views/dashboards/view';
-import useWidgetBuilderState from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {useWidgetBuilderState} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 jest.mock('sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderState');
 jest.mock('sentry/actionCreators/indicator');
+
+function StarredDashboardTitle() {
+  const {data: dashboards = []} = useGetStarredDashboards();
+  return <span aria-label="Starred dashboard title">{dashboards[0]?.title}</span>;
+}
 
 class MockIntersectionObserver {
   constructor(callback: IntersectionObserverCallback) {
@@ -72,22 +78,66 @@ class MockIntersectionObserver {
     }));
 
     if (entries.length > 0) {
-      this.callback(entries as IntersectionObserverEntry[], this as any);
+      this.callback(entries, this as any);
     }
   }
 }
 
-describe('Dashboards > Detail', function () {
+describe('Dashboards > Detail', () => {
   const organization = OrganizationFixture({
-    features: ['global-views', 'dashboards-basic', 'dashboards-edit', 'discover-query'],
+    features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
   });
   const projects = [ProjectFixture()];
+  const DASHBOARD_ROUTE = '/organizations/:orgId/dashboard/:dashboardId/';
+  const DASHBOARD_WIDGET_ROUTE =
+    '/organizations/:orgId/dashboard/:dashboardId/widget/:widgetId/';
+  const DASHBOARD_NEW_ROUTE = '/organizations/:orgId/dashboards/new/';
+  const DASHBOARD_WIDGET_BUILDER_ROUTE =
+    '/organizations/:orgId/dashboard/:dashboardId/widget-builder/widget/:widgetIndex/edit/';
+  const DASHBOARD_NEW_WIDGET_BUILDER_ROUTE =
+    '/organizations/:orgId/dashboard/:dashboardId/widget-builder/widget/new/';
+
+  function makeDashboardRouterConfig({
+    pathname,
+    route,
+    routes,
+    query = {},
+    state,
+  }: {
+    pathname: string;
+    query?: Record<string, string | number | string[]>;
+    route?: string;
+    routes?: string[];
+    state?: Record<string, unknown>;
+  }) {
+    return {
+      initialRouterConfig: {
+        location: {
+          pathname,
+          query,
+          ...(state ? {state} : {}),
+        },
+        ...(route ? {route} : {routes}),
+      },
+    };
+  }
+
+  async function activateDashboardEditMode() {
+    await userEvent.click(await screen.findByRole('button', {name: 'Dashboard actions'}));
+    await userEvent.click(await screen.findByRole('menuitemradio', {name: 'Edit'}));
+    await screen.findByRole('button', {name: 'Save and Finish'});
+  }
+
   window.IntersectionObserver = MockIntersectionObserver as any;
 
-  describe('prebuilt dashboards', function () {
+  describe('prebuilt dashboards', () => {
     let initialData!: ReturnType<typeof initializeOrg>;
 
-    beforeEach(function () {
+    beforeEach(() => {
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/members/',
+        body: [],
+      });
       act(() => ProjectsStore.loadInitialData(projects));
       initialData = initializeOrg({organization});
 
@@ -108,7 +158,10 @@ describe('Dashboards > Detail', function () {
       });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/default-overview/',
-        body: DashboardFixture([], {id: 'default-overview', title: 'Default'}),
+        body: DashboardFixture([], {
+          id: 'default-overview',
+          title: 'Default',
+        }),
       });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/visit/',
@@ -151,20 +204,23 @@ describe('Dashboards > Detail', function () {
         url: '/organizations/org-slug/releases/stats/',
         body: [],
       });
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/measurements-meta/',
+        body: [],
+      });
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/trace-items/attributes/',
+        body: [],
+      });
     });
 
-    afterEach(function () {
+    afterEach(() => {
       MockApiClient.clearMockResponses();
     });
 
     // TODO(nar): Flaky test
     // eslint-disable-next-line jest/no-disabled-tests
-    it.skip('assigns unique IDs to all widgets so grid keys are unique', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: 'default-overview'},
-      });
-
+    it.skip('assigns unique IDs to all widgets so grid keys are unique', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/events-stats/',
         body: {data: []},
@@ -207,86 +263,48 @@ describe('Dashboards > Detail', function () {
       });
       initialData = initializeOrg({
         organization: OrganizationFixture({
-          features: ['global-views', 'dashboards-basic', 'discover-query'],
+          features: ['dashboards-basic', 'discover-query'],
         }),
       });
 
       render(
         <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: 'default-overview'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
+          <ViewEditDashboard />
         </OrganizationContext>,
-        {
-          router,
-          deprecatedRouterMocks: true,
-        }
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/default-overview/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
       );
 
       expect(await screen.findByText('Default Widget 1')).toBeInTheDocument();
       expect(screen.getByText('Default Widget 2')).toBeInTheDocument();
     });
-
-    it('opens the widget viewer modal in a prebuilt dashboard using the widget id specified in the url', async () => {
-      const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
-
-      render(
-        <CreateDashboard
-          {...RouteComponentPropsFixture()}
-          organization={initialData.organization}
-          params={{templateId: 'default-template', widgetId: '2'}}
-          router={initialData.router}
-          location={{...initialData.router.location, pathname: '/widget/2/'}}
-        >
-          {null}
-        </CreateDashboard>,
-        {
-          router: initialData.router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await waitFor(() => {
-        expect(openWidgetViewerModal).toHaveBeenCalledWith(
-          expect.objectContaining({
-            organization: initialData.organization,
-            widget: expect.objectContaining({
-              displayType: 'line',
-              interval: '5m',
-              queries: [
-                {
-                  aggregates: ['count()'],
-                  columns: [],
-                  conditions: '',
-                  fields: ['count()'],
-                  name: 'Events',
-                  orderby: 'count()',
-                },
-              ],
-              title: 'Events',
-              widgetType: types.WidgetType.ERRORS,
-            }),
-            onClose: expect.anything(),
-          })
-        );
-      });
-    });
   });
 
-  describe('custom dashboards', function () {
+  describe('custom dashboards', () => {
     let initialData!: ReturnType<typeof initializeOrg>;
     let widgets!: Array<ReturnType<typeof WidgetFixture>>;
     let mockVisit!: jest.Mock;
     let mockPut!: jest.Mock;
     let mockScrollIntoView!: jest.Mock;
 
-    beforeEach(function () {
+    beforeEach(() => {
+      registerOverride(
+        'component:dashboards-limit-provider',
+        () =>
+          function DashboardLimitProvider({children}) {
+            return typeof children === 'function'
+              ? children({
+                  dashboardsLimit: 0,
+                  hasReachedDashboardLimit: false,
+                  isLoading: false,
+                  limitMessage: null,
+                })
+              : children;
+          }
+      );
       window.confirm = jest.fn();
       initialData = initializeOrg({
         organization,
@@ -294,15 +312,16 @@ describe('Dashboards > Detail', function () {
           location: LocationFixture(),
         },
       });
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/members/',
+        body: [],
+      });
       PageFiltersStore.init();
-      PageFiltersStore.onInitializeUrlState(
-        {
-          projects: [],
-          environments: [],
-          datetime: {start: null, end: null, period: '14d', utc: null},
-        },
-        new Set()
-      );
+      PageFiltersStore.onInitializeUrlState({
+        projects: [],
+        environments: [],
+        datetime: {start: null, end: null, period: '14d', utc: null},
+      });
       widgets = [
         WidgetFixture({
           queries: [
@@ -448,47 +467,43 @@ describe('Dashboards > Detail', function () {
         url: '/organizations/org-slug/measurements-meta/',
         body: [],
       });
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/trace-items/attributes/',
+        body: [],
+      });
 
       mockScrollIntoView = jest.fn();
       window.HTMLElement.prototype.scrollIntoView = mockScrollIntoView;
     });
 
-    afterEach(function () {
+    afterEach(() => {
       MockApiClient.clearMockResponses();
       jest.clearAllMocks();
     });
 
-    it('can remove widgets', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('can remove widgets', async () => {
       const updateMock = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         method: 'PUT',
-        body: DashboardFixture([widgets[0]!], {id: '1', title: 'Custom Errors'}),
+        body: DashboardFixture([widgets[0]!], {
+          id: '1',
+          title: 'Custom Errors',
+        }),
       });
       render(
         <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: '1'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
+          <ViewEditDashboard />
         </OrganizationContext>,
-        {
-          router,
-          deprecatedRouterMocks: true,
-        }
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
       );
 
       await waitFor(() => expect(mockVisit).toHaveBeenCalledTimes(1));
 
-      // Enter edit mode.
-      await userEvent.click(screen.getByRole('button', {name: 'Edit Dashboard'}));
+      await activateDashboardEditMode();
 
       // Remove the second and third widgets
       await userEvent.click(
@@ -516,11 +531,57 @@ describe('Dashboards > Detail', function () {
       expect(mockVisit).toHaveBeenCalledTimes(1);
     });
 
-    it('appends dashboard-level filters to series request', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
+    it('updates the starred dashboard title after renaming', async () => {
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/dashboards/',
+        body: [DashboardFixture([], {id: '1', title: 'Custom Errors'})],
+        match: [MockApiClient.matchQuery({filter: 'onlyFavorites'})],
       });
+
+      render(
+        <OrganizationContext value={initialData.organization}>
+          <StarredDashboardTitle />
+          <ViewEditDashboard />
+        </OrganizationContext>,
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
+      );
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Starred dashboard title')).toHaveTextContent(
+          'Custom Errors'
+        );
+      });
+
+      await activateDashboardEditMode();
+      const titleInput = screen.getByRole('textbox');
+      await userEvent.clear(titleInput);
+      await userEvent.type(titleInput, 'Renamed Dashboard');
+
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/dashboards/1/',
+        method: 'PUT',
+        body: DashboardFixture(widgets, {id: '1', title: 'Renamed Dashboard'}),
+      });
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/dashboards/',
+        body: [DashboardFixture([], {id: '1', title: 'Renamed Dashboard'})],
+        match: [MockApiClient.matchQuery({filter: 'onlyFavorites'})],
+      });
+
+      await userEvent.click(screen.getByRole('button', {name: 'Save and Finish'}));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Starred dashboard title')).toHaveTextContent(
+          'Renamed Dashboard'
+        );
+      });
+    });
+
+    it('appends dashboard-level filters to series request', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(widgets, {
@@ -536,19 +597,13 @@ describe('Dashboards > Detail', function () {
 
       render(
         <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: '1'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
+          <ViewEditDashboard />
         </OrganizationContext>,
-        {
-          router,
-          deprecatedRouterMocks: true,
-        }
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
       );
 
       await waitFor(() =>
@@ -564,38 +619,23 @@ describe('Dashboards > Detail', function () {
       );
     });
 
-    it('shows add widget option', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('shows add widget option', async () => {
       render(
         <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: '1'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
+          <ViewEditDashboard />
         </OrganizationContext>,
-        {
-          router,
-          deprecatedRouterMocks: true,
-        }
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
       );
 
-      // Enter edit mode.
-      await userEvent.click(await screen.findByRole('button', {name: 'Edit Dashboard'}));
+      await activateDashboardEditMode();
       expect(await screen.findByRole('button', {name: 'Add Widget'})).toBeInTheDocument();
     });
 
-    it('shows top level release filter', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('shows top level release filter', async () => {
       const mockReleases = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [ReleaseFixture()],
@@ -603,29 +643,20 @@ describe('Dashboards > Detail', function () {
 
       initialData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
       });
 
       render(
         <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: '1'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
+          <ViewEditDashboard />
         </OrganizationContext>,
         {
-          router,
-          deprecatedRouterMocks: true,
+          ...makeDashboardRouterConfig({
+            pathname: '/organizations/org-slug/dashboard/1/',
+            route: DASHBOARD_ROUTE,
+            query: {},
+          }),
           organization: initialData.organization,
         }
       );
@@ -633,41 +664,290 @@ describe('Dashboards > Detail', function () {
       expect(mockReleases).toHaveBeenCalledTimes(1);
     });
 
-    it('hides add widget option', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
+    it('renders the redesigned dashboard breadcrumb in the top bar', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: [...organization.features, 'dashboards-import'],
       });
-      // @ts-expect-error this is assigning to readonly property...
-      types.MAX_WIDGETS = 1;
 
       render(
-        <OrganizationContext value={initialData.organization}>
-          <ViewEditDashboard
-            {...RouteComponentPropsFixture()}
-            params={{orgId: 'org-slug', dashboardId: '1'}}
-            router={initialData.router}
-            location={initialData.router.location}
-          >
-            {null}
-          </ViewEditDashboard>
-        </OrganizationContext>,
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              title: 'Custom Errors',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
         {
-          router,
-          deprecatedRouterMocks: true,
+          organization: pageFrameOrganization,
         }
       );
 
-      // Enter edit mode.
-      await userEvent.click(await screen.findByRole('button', {name: 'Edit Dashboard'}));
+      const breadcrumbs = await screen.findByRole('list');
+      expect(within(breadcrumbs).getByRole('link', {name: 'Dashboards'})).toHaveAttribute(
+        'href',
+        '/organizations/org-slug/dashboards/'
+      );
+      expect(
+        screen.getByRole('heading', {name: 'Custom Errors', level: 1})
+      ).toBeInTheDocument();
+      expect(within(breadcrumbs).queryByText('Custom Errors')).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', {name: 'Dashboard actions'}));
+      expect(await screen.findByRole('menuitemradio', {name: 'Edit'})).toBeVisible();
+      expect(screen.getByRole('menuitemradio', {name: 'Star'})).toBeVisible();
+      expect(
+        screen.getByRole('menuitemradio', {name: 'Show version history'})
+      ).toBeVisible();
+      expect(screen.getByRole('menuitemradio', {name: 'Export'})).toBeVisible();
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Duplicate'})
+      ).not.toBeInTheDocument();
+
+      // The redesigned BreadcrumbList hides its slash dividers from the a11y tree
+      // (unlike the legacy breadcrumbs, whose divider surfaced as a visible img),
+      // so there are no visible imgs in this view-only crumb.
+      expect(within(breadcrumbs).queryAllByRole('img')).toHaveLength(0);
+    });
+
+    it('keeps supported breadcrumb actions on prebuilt dashboards', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              prebuiltId: PrebuiltDashboardId.FRONTEND_SESSION_HEALTH,
+              title: 'Prebuilt Dashboard',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {
+          organization: pageFrameOrganization,
+        }
+      );
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
+      );
+
+      expect(await screen.findByRole('menuitemradio', {name: 'Star'})).toBeVisible();
+      expect(screen.getByRole('menuitemradio', {name: 'Duplicate'})).toBeVisible();
+      expect(screen.queryByRole('menuitemradio', {name: 'Edit'})).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitemradio', {name: 'Show version history'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('explains why breadcrumb duplicate is disabled at the dashboard limit', async () => {
+      registerOverride(
+        'component:dashboards-limit-provider',
+        () =>
+          function DashboardLimitProvider({children}) {
+            return typeof children === 'function'
+              ? children({
+                  dashboardsLimit: 1,
+                  hasReachedDashboardLimit: true,
+                  isLoading: false,
+                  limitMessage: 'You have reached your dashboard limit.',
+                })
+              : children;
+          }
+      );
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              prebuiltId: PrebuiltDashboardId.FRONTEND_SESSION_HEALTH,
+              title: 'Prebuilt Dashboard',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {organization: pageFrameOrganization}
+      );
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
+      );
+      const duplicate = await screen.findByRole('menuitemradio', {name: 'Duplicate'});
+      expect(duplicate).toHaveAttribute('aria-disabled', 'true');
+
+      await userEvent.hover(duplicate);
+      expect(
+        await screen.findByText('You have reached your dashboard limit.')
+      ).toBeVisible();
+    });
+
+    it('shows access controls to org managers without dashboard edit access', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+        access: ['org:read', 'org:write'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              createdBy: UserFixture({id: 'another-user'}),
+              permissions: {
+                isEditableByEveryone: false,
+                teamsWithEditAccess: [],
+              },
+              title: 'Restricted Dashboard',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {organization: pageFrameOrganization}
+      );
+
+      expect(await screen.findByText('Editors:')).toBeVisible();
+    });
+
+    it('disables the breadcrumb edit action with unsaved filters', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              projects: [1],
+              title: 'Custom Errors',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {
+          initialRouterConfig: {
+            location: {
+              pathname: '/organizations/org-slug/dashboard/1/',
+              query: {project: '2'},
+            },
+          },
+          organization: pageFrameOrganization,
+        }
+      );
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
+      );
+      const edit = await screen.findByRole('menuitemradio', {name: 'Edit'});
+      expect(edit).toHaveAttribute('aria-disabled', 'true');
+      await userEvent.hover(edit);
+      expect(await screen.findByText(UNSAVED_FILTERS_MESSAGE)).toBeVisible();
+    });
+
+    it('does not show breadcrumb actions in dashboard preview', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.PREVIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              title: 'Preview Dashboard',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {organization: pageFrameOrganization}
+      );
+
+      expect(
+        await screen.findByRole('heading', {name: 'Preview Dashboard', level: 1})
+      ).toBeVisible();
+      expect(screen.getByRole('button', {name: 'Go Back'})).toBeVisible();
+      expect(screen.getByRole('button', {name: 'Save and Finish'})).toBeVisible();
+      expect(
+        screen.queryByRole('button', {name: 'Dashboard actions'})
+      ).not.toBeInTheDocument();
+    });
+
+    it('renders the dashboard breadcrumb in the top bar', async () => {
+      const pageFrameOrganization = OrganizationFixture({
+        slug: 'org-slug',
+        features: ['dashboards-edit'],
+      });
+
+      render(
+        <TopBar.Slot.Provider>
+          <TopBar />
+          <DashboardDetail
+            initialState={DashboardState.VIEW}
+            dashboard={DashboardFixture([], {
+              id: '1',
+              title: 'Custom Errors',
+            })}
+            onDashboardUpdate={jest.fn()}
+          />
+        </TopBar.Slot.Provider>,
+        {
+          organization: pageFrameOrganization,
+        }
+      );
+
+      // The Dashboards link and view-only title are both present.
+      expect(await screen.findByRole('link', {name: 'Dashboards'})).toHaveAttribute(
+        'href',
+        '/organizations/org-slug/dashboards/'
+      );
+      expect(await screen.findByText('Custom Errors')).toBeInTheDocument();
+    });
+
+    it('hides add widget option', async () => {
+      jest.spyOn(types, 'MAX_WIDGETS', 'get').mockReturnValue(1 as 30);
+
+      render(
+        <OrganizationContext value={initialData.organization}>
+          <ViewEditDashboard />
+        </OrganizationContext>,
+        makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        })
+      );
+
+      await activateDashboardEditMode();
       expect(screen.queryByRole('button', {name: 'Add widget'})).not.toBeInTheDocument();
     });
 
-    it('renders successfully if more widgets than stored layouts', async function () {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('renders successfully if more widgets than stored layouts', async () => {
       // A case where someone has async added widgets to a dashboard
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
@@ -709,31 +989,20 @@ describe('Dashboards > Detail', function () {
         ),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
       expect(await screen.findByText('First Widget')).toBeInTheDocument();
       expect(await screen.findByText('Second Widget')).toBeInTheDocument();
     });
 
     it('does not trigger request if layout not updated', async () => {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(
@@ -759,34 +1028,23 @@ describe('Dashboards > Detail', function () {
         ),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
-      await userEvent.click(await screen.findByText('Edit Dashboard'));
+      await activateDashboardEditMode();
       await userEvent.click(await screen.findByText('Save and Finish'));
 
-      expect(screen.getByText('Edit Dashboard')).toBeInTheDocument();
+      expect(screen.getByRole('button', {name: 'Dashboard actions'})).toBeInTheDocument();
       expect(mockPut).not.toHaveBeenCalled();
     });
 
     it('renders the custom resize handler for a widget', async () => {
-      const router = RouterFixture({
-        location: initialData.router.location,
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(
@@ -812,23 +1070,18 @@ describe('Dashboards > Detail', function () {
         ),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
-      await userEvent.click(await screen.findByText('Edit Dashboard'));
+      await activateDashboardEditMode();
+      // https://github.com/typescript-eslint/typescript-eslint/issues/10722
+      // eslint-disable-next-line @typescript-eslint/non-nullable-type-assertion-style
       const widget = (await screen.findByText('First Widget')).closest(
         '.react-grid-item'
       ) as HTMLElement;
@@ -838,11 +1091,6 @@ describe('Dashboards > Detail', function () {
     });
 
     it('does not trigger an alert when the widgets have no layout and user cancels without changes', async () => {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(
@@ -868,33 +1116,22 @@ describe('Dashboards > Detail', function () {
         ),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
-      await userEvent.click(await screen.findByText('Edit Dashboard'));
+      await activateDashboardEditMode();
       await userEvent.click(await screen.findByText('Cancel'));
 
       expect(window.confirm).not.toHaveBeenCalled();
     });
 
     it('opens the widget viewer modal using the widget index specified in the url', async () => {
-      const router = RouterFixture({
-        location: {...initialData.router.location, pathname: '/widget/123/'},
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
       const widget = WidgetFixture({
         queries: [
@@ -917,21 +1154,14 @@ describe('Dashboards > Detail', function () {
         body: DashboardFixture([widget], {id: '1', title: 'Custom Errors'}),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1', widgetId: '0'}}
-          router={initialData.router}
-          location={{...initialData.router.location, pathname: '/widget/0/'}}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/widget/0/',
+          route: DASHBOARD_WIDGET_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
       await waitFor(() => {
         expect(openWidgetViewerModal).toHaveBeenCalledWith(
@@ -945,43 +1175,30 @@ describe('Dashboards > Detail', function () {
     });
 
     it('redirects user to dashboard url if widget is not found', async () => {
-      const router = RouterFixture({
-        location: {
-          ...initialData.router.location,
-          pathname: '/widget/123/',
-        },
-        params: {orgId: 'org-slug', dashboardId: '1', widgetId: '123'},
+      const {router} = render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/widget/123/',
+          routes: [DASHBOARD_WIDGET_ROUTE, DASHBOARD_ROUTE],
+          query: {},
+        }),
+        organization: initialData.organization,
       });
       const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture([], {id: '1', title: 'Custom Errors'}),
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1', widgetId: '123'}}
-          router={router}
-          location={{...initialData.router.location, pathname: '/widget/123/'}}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
+      expect(router.location.pathname).toBe(
+        '/organizations/org-slug/dashboard/1/widget/123/'
       );
 
       expect(await screen.findByText('All Releases')).toBeInTheDocument();
 
       expect(openWidgetViewerModal).not.toHaveBeenCalled();
-      expect(router.replace).toHaveBeenCalledWith(
-        expect.objectContaining({
-          pathname: '/organizations/org-slug/dashboard/1/',
-          query: {},
-        })
-      );
+
+      await waitFor(() => {
+        expect(router.location.pathname).toBe('/organizations/org-slug/dashboard/1/');
+      });
     });
 
     it('saves a new dashboard with the page filters', async () => {
@@ -990,30 +1207,18 @@ describe('Dashboards > Detail', function () {
         method: 'POST',
         body: [],
       });
-      render(
-        <CreateDashboard
-          {...RouteComponentPropsFixture()}
-          organization={initialData.organization}
-          params={{templateId: undefined}}
-          router={initialData.router}
-          location={{
-            ...initialData.router.location,
-            query: {
-              ...initialData.router.location.query,
-              statsPeriod: '7d',
-              project: [2],
-              environment: ['alpha', 'beta'],
-            },
-          }}
-        >
-          {null}
-        </CreateDashboard>,
-        {
-          router: initialData.router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<CreateDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboards/new/',
+          route: DASHBOARD_NEW_ROUTE,
+          query: {
+            statsPeriod: '7d',
+            project: ['2'],
+            environment: ['alpha', 'beta'],
+          },
+        }),
+        organization: initialData.organization,
+      });
 
       await userEvent.click(await screen.findByText('Save and Finish'));
       expect(mockPOST).toHaveBeenCalledWith(
@@ -1028,91 +1233,7 @@ describe('Dashboards > Detail', function () {
       );
     });
 
-    it('saves a template with the page filters', async () => {
-      const mockPOST = MockApiClient.addMockResponse({
-        url: '/organizations/org-slug/dashboards/',
-        method: 'POST',
-        body: [],
-      });
-      render(
-        <CreateDashboard
-          {...RouteComponentPropsFixture()}
-          organization={initialData.organization}
-          params={{templateId: 'default-template'}}
-          router={initialData.router}
-          location={{
-            ...initialData.router.location,
-            query: {
-              ...initialData.router.location.query,
-              statsPeriod: '7d',
-              project: [2],
-              environment: ['alpha', 'beta'],
-            },
-          }}
-        >
-          {null}
-        </CreateDashboard>,
-        {
-          router: initialData.router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await userEvent.click(await screen.findByText('Add Dashboard'));
-      expect(mockPOST).toHaveBeenCalledWith(
-        '/organizations/org-slug/dashboards/',
-        expect.objectContaining({
-          data: expect.objectContaining({
-            projects: [2],
-            environment: ['alpha', 'beta'],
-            period: '7d',
-          }),
-        })
-      );
-    });
-
-    it('does not render save and cancel buttons on templates', async () => {
-      MockApiClient.addMockResponse({
-        url: '/organizations/org-slug/releases/',
-        body: [
-          ReleaseFixture({
-            shortVersion: 'sentry-android-shop@1.2.0',
-            version: 'sentry-android-shop@1.2.0',
-          }),
-        ],
-      });
-      render(
-        <CreateDashboard
-          {...RouteComponentPropsFixture()}
-          organization={initialData.organization}
-          params={{templateId: 'default-template'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </CreateDashboard>,
-        {
-          router: initialData.router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await userEvent.click(await screen.findByText('24H'));
-      await userEvent.click(screen.getByText('Last 7 days'));
-      await screen.findByText('7D');
-
-      expect(screen.queryByTestId('filter-bar-cancel')).not.toBeInTheDocument();
-      expect(screen.queryByText('Save')).not.toBeInTheDocument();
-    });
-
     it('opens the widget viewer with saved dashboard filters', async () => {
-      const router = RouterFixture({
-        location: {...initialData.router.location, pathname: '/widget/1/'},
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
       const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
@@ -1121,21 +1242,14 @@ describe('Dashboards > Detail', function () {
           filters: {release: ['sentry-android-shop@1.2.0']},
         }),
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1', widgetId: '1'}}
-          router={initialData.router}
-          location={{...initialData.router.location, pathname: '/widget/1/'}}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/widget/1/',
+          route: DASHBOARD_WIDGET_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
 
       await waitFor(() => {
         expect(openWidgetViewerModal).toHaveBeenCalledWith(
@@ -1147,15 +1261,6 @@ describe('Dashboards > Detail', function () {
     });
 
     it('opens the widget viewer with unsaved dashboard filters', async () => {
-      const router = RouterFixture({
-        location: {
-          ...initialData.router.location,
-          pathname: '/widget/1/',
-          query: {release: ['unsaved-release-filter@1.2.0']},
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
       const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
@@ -1164,25 +1269,16 @@ describe('Dashboards > Detail', function () {
           filters: {release: ['sentry-android-shop@1.2.0']},
         }),
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1', widgetId: '1'}}
-          router={initialData.router}
-          location={{
-            ...initialData.router.location,
-            pathname: '/widget/1/',
-            query: {release: ['unsaved-release-filter@1.2.0']},
-          }}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/widget/1/',
+          route: DASHBOARD_WIDGET_ROUTE,
+          query: {
+            release: ['unsaved-release-filter@1.2.0'],
+          },
+        }),
+        organization: initialData.organization,
+      });
 
       await waitFor(() => {
         expect(openWidgetViewerModal).toHaveBeenCalledWith(
@@ -1193,18 +1289,34 @@ describe('Dashboards > Detail', function () {
       });
     });
 
-    it('can save dashboard filters in existing dashboard', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            statsPeriod: '7d',
-            release: ['sentry-android-shop@1.2.0'],
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
+    it('closes full screen modal when releases drawer is opened from that view', async () => {
+      const openWidgetViewerModal = jest.spyOn(modals, 'openWidgetViewerModal');
+      MockApiClient.addMockResponse({
+        url: '/organizations/org-slug/dashboards/1/',
+        body: DashboardFixture(widgets, {id: '1', title: 'Custom Errors'}),
       });
 
+      const {router} = render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/widget/0/',
+          route: DASHBOARD_WIDGET_ROUTE,
+          query: {rd: 'show', rdRelease: '1.0.0'},
+        }),
+        organization: initialData.organization,
+      });
+
+      await waitFor(() => {
+        expect(router.location.pathname).toBe('/organizations/org-slug/dashboard/1/');
+      });
+
+      // The releases drawer query param is preserved; widget viewer query fields are stripped
+      expect(router.location.query).toEqual(
+        expect.objectContaining({rd: 'show', rdRelease: '1.0.0'})
+      );
+      expect(openWidgetViewerModal).not.toHaveBeenCalled();
+    });
+
+    it('can save dashboard filters in existing dashboard', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [
@@ -1216,12 +1328,7 @@ describe('Dashboards > Detail', function () {
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1233,21 +1340,17 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {
+            statsPeriod: '7d',
+            release: ['sentry-android-shop@1.2.0'],
+          },
+        }),
+        organization: testData.organization,
+      });
 
       await userEvent.click(await screen.findByText('Save'));
 
@@ -1263,16 +1366,6 @@ describe('Dashboards > Detail', function () {
     });
 
     it('can clear dashboard filters in compact select', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            statsPeriod: '7d',
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(widgets, {
@@ -1293,12 +1386,7 @@ describe('Dashboards > Detail', function () {
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1309,59 +1397,36 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      const {router} = render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {
+            statsPeriod: '7d',
+          },
+        }),
+        organization: testData.organization,
+      });
 
-      await screen.findByText('7D');
       await userEvent.click(await screen.findByText('sentry-android-shop@1.2.0'));
       await userEvent.click(screen.getAllByText('Clear')[0]!);
       screen.getByText('All Releases');
       await userEvent.click(document.body);
 
       await waitFor(() => {
-        expect(router.push).toHaveBeenCalledWith(
+        expect(router.location.query).toEqual(
           expect.objectContaining({
-            query: expect.objectContaining({
-              release: '',
-            }),
+            release: '',
+            globalFilter: '',
           })
         );
       });
     });
 
     it('can save absolute time range in existing dashboard', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            start: '2022-07-14T07:00:00',
-            end: '2022-07-19T23:59:59',
-            utc: 'true',
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1374,21 +1439,18 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {
+            start: '2022-07-14T07:00:00',
+            end: '2022-07-19T23:59:59',
+            utc: 'true',
+          },
+        }),
+        organization: testData.organization,
+      });
 
       await userEvent.click(await screen.findByText('Save'));
 
@@ -1405,16 +1467,6 @@ describe('Dashboards > Detail', function () {
     });
 
     it('can clear dashboard filters in existing dashboard', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            statsPeriod: '7d',
-            environment: ['alpha', 'beta'],
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [
@@ -1426,12 +1478,7 @@ describe('Dashboards > Detail', function () {
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1443,52 +1490,36 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await screen.findByText('7D');
-      await userEvent.click(await screen.findByText('All Releases'));
-      await userEvent.click(screen.getByText('sentry-android-shop@1.2.0'));
-      await userEvent.keyboard('{Escape}');
-
-      await userEvent.click(screen.getByTestId('filter-bar-cancel'));
-
-      screen.getByText('All Releases');
-      expect(router.replace).toHaveBeenCalledWith(
-        expect.objectContaining({
-          query: expect.objectContaining({
-            project: undefined,
-            statsPeriod: undefined,
-            environment: undefined,
-          }),
-        })
-      );
-    });
-
-    it('disables the Edit Dashboard button when there are unsaved filters', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
+      const {router} = render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
           query: {
             statsPeriod: '7d',
             environment: ['alpha', 'beta'],
           },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
+        }),
+        organization: testData.organization,
       });
+
+      await userEvent.click(await screen.findByText('All Releases'));
+      await userEvent.click(screen.getByText('sentry-android-shop@1.2.0'));
+      await userEvent.keyboard('{Escape}');
+
+      await waitFor(() => {
+        expect(router.location.query).toEqual(
+          expect.objectContaining({
+            release: 'sentry-android-shop@1.2.0',
+          })
+        );
+      });
+
+      await userEvent.click(screen.getByTestId('filter-bar-cancel'));
+
+      screen.getByText('All Releases');
+    });
+
+    it('disables the edit-dashboard button when there are unsaved filters', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [
@@ -1501,7 +1532,6 @@ describe('Dashboards > Detail', function () {
       const testData = initializeOrg({
         organization: OrganizationFixture({
           features: [
-            'global-views',
             'dashboards-basic',
             'dashboards-edit',
             'discover-basic',
@@ -1518,40 +1548,39 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {
+            statsPeriod: '7d',
+            environment: ['alpha', 'beta'],
+          },
+        }),
+        organization: testData.organization,
+      });
 
       expect(await screen.findByText('Save')).toBeInTheDocument();
       expect(screen.getByTestId('filter-bar-cancel')).toBeInTheDocument();
-      expect(screen.getByRole('button', {name: 'Edit Dashboard'})).toBeDisabled();
+      await userEvent.click(screen.getByRole('button', {name: 'Dashboard actions'}));
+      expect(screen.getByRole('menuitemradio', {name: 'Edit'})).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      );
     });
 
     it('ignores the order of selection of page filters to render unsaved filters', async () => {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            environment: ['beta', 'alpha'],
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
       const testProjects = [
-        ProjectFixture({id: '1', name: 'first', environments: ['alpha', 'beta']}),
-        ProjectFixture({id: '2', name: 'second', environments: ['alpha', 'beta']}),
+        ProjectFixture({
+          id: '1',
+          name: 'first',
+          environments: ['alpha', 'beta'],
+        }),
+        ProjectFixture({
+          id: '2',
+          name: 'second',
+          environments: ['alpha', 'beta'],
+        }),
       ];
 
       act(() => ProjectsStore.loadInitialData(testProjects));
@@ -1571,12 +1600,7 @@ describe('Dashboards > Detail', function () {
 
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1587,24 +1611,18 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {
+            environment: ['beta', 'alpha'],
+          },
+        }),
+        organization: testData.organization,
+      });
 
-      await waitFor(() => expect(screen.queryAllByText('Loading\u2026')).toEqual([]));
-      await userEvent.click(screen.getByRole('button', {name: 'All Envs'}));
+      await userEvent.click(await screen.findByRole('button', {name: 'All Envs'}));
       expect(screen.getByRole('row', {name: 'alpha'})).toHaveAttribute(
         'aria-selected',
         'true'
@@ -1619,24 +1637,10 @@ describe('Dashboards > Detail', function () {
       expect(screen.queryByTestId('filter-bar-cancel')).not.toBeInTheDocument();
     });
 
-    it('uses releases from the URL query params', async function () {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            release: ['not-selected-1'],
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('uses releases from the URL query params', async () => {
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1647,37 +1651,21 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {release: ['not-selected-1']},
+        }),
+        organization: testData.organization,
+      });
 
       await screen.findByText(/not-selected-1/);
       screen.getByText('Save');
       screen.getByTestId('filter-bar-cancel');
     });
 
-    it('resets release in URL params', async function () {
-      const router = RouterFixture({
-        location: {
-          ...LocationFixture(),
-          query: {
-            release: ['not-selected-1'],
-          },
-        },
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('resets release in URL params', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         body: DashboardFixture(widgets, {
@@ -1690,12 +1678,7 @@ describe('Dashboards > Detail', function () {
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: {
@@ -1706,45 +1689,21 @@ describe('Dashboards > Detail', function () {
           },
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {release: ['not-selected-1']},
+        }),
+        organization: testData.organization,
+      });
       await screen.findByText(/not-selected-1/);
       await userEvent.click(screen.getByTestId('filter-bar-cancel'));
 
-      // release isn't used in the redirect
-      expect(router.replace).toHaveBeenCalledWith(
-        expect.objectContaining({
-          query: {
-            end: undefined,
-            environment: undefined,
-            project: undefined,
-            start: undefined,
-            statsPeriod: undefined,
-            utc: undefined,
-          },
-        })
-      );
+      expect(screen.queryByText('not-selected-1')).not.toBeInTheDocument();
     });
 
-    it('reflects selections in the release filter in the query params', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('reflects selections in the release filter in the query params', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [
@@ -1756,53 +1715,35 @@ describe('Dashboards > Detail', function () {
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
-          features: [
-            'global-views',
-            'dashboards-basic',
-            'dashboards-edit',
-            'discover-query',
-          ],
+          features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
         }),
         router: {
           location: LocationFixture(),
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      const {router} = render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: testData.organization,
+      });
 
       await userEvent.click(await screen.findByText('All Releases'));
       await userEvent.click(screen.getByText('sentry-android-shop@1.2.0'));
       await userEvent.click(document.body);
 
       await waitFor(() => {
-        expect(router.push).toHaveBeenCalledWith(
+        expect(router.location.query).toEqual(
           expect.objectContaining({
-            query: expect.objectContaining({
-              release: ['sentry-android-shop@1.2.0'],
-            }),
+            release: 'sentry-android-shop@1.2.0',
           })
         );
       });
     });
 
-    it('persists release selections made during search requests that do not appear in default query', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('persists release selections made during search requests that do not appear in default query', async () => {
       // Default response
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
@@ -1812,9 +1753,18 @@ describe('Dashboards > Detail', function () {
             version: 'sentry-android-shop@1.2.0',
           }),
         ],
+        match: [
+          MockApiClient.matchQuery({
+            project: [],
+            per_page: 50,
+            environment: [],
+            query: undefined,
+            sort: 'date',
+          }),
+        ],
       });
       // Mocked search results
-      MockApiClient.addMockResponse({
+      const searchMock = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/releases/',
         body: [
           ReleaseFixture({
@@ -1823,12 +1773,19 @@ describe('Dashboards > Detail', function () {
             version: 'search-result',
           }),
         ],
-        match: [MockApiClient.matchData({query: 's'})],
+        match: [
+          MockApiClient.matchQuery({
+            project: [],
+            per_page: 50,
+            environment: [],
+            query: 's',
+            sort: 'date',
+          }),
+        ],
       });
       const testData = initializeOrg({
         organization: OrganizationFixture({
           features: [
-            'global-views',
             'dashboards-basic',
             'dashboards-edit',
             'discover-basic',
@@ -1839,24 +1796,23 @@ describe('Dashboards > Detail', function () {
           location: LocationFixture(),
         },
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={testData.router}
-          location={testData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: testData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: testData.organization,
+      });
 
       await userEvent.click(await screen.findByText('All Releases'));
-      await userEvent.type(screen.getAllByPlaceholderText('Search\u2026')[2]!, 's');
+      await userEvent.type(screen.getByPlaceholderText('Search\u2026'), 's');
+
+      // Wait for debounce and search to complete
+      await waitFor(() => {
+        expect(searchMock).toHaveBeenCalled();
+      });
+
       await userEvent.click(await screen.findByRole('option', {name: 'search-result'}));
 
       // Validate that after search is cleared, search result still appears
@@ -1864,65 +1820,57 @@ describe('Dashboards > Detail', function () {
       expect(screen.getByRole('option', {name: 'search-result'})).toBeInTheDocument();
     });
 
-    it('renders edit access selector', async function () {
+    it('renders edit access selector', async () => {
       render(
         <EditAccessSelector
           dashboard={DashboardFixture([], {id: '1', title: 'Custom Errors'})}
           onChangeEditAccess={jest.fn()}
         />,
         {
-          router: initialData.router,
+          ...makeDashboardRouterConfig({
+            pathname: '/organizations/org-slug/dashboard/1/',
+            route: DASHBOARD_ROUTE,
+            query: {},
+          }),
           organization: initialData.organization,
-          deprecatedRouterMocks: true,
         }
       );
 
-      await userEvent.click(await screen.findByText('Edit Access:'));
+      await userEvent.click(await screen.findByText('Editors:'));
       expect(screen.getByText('Creator')).toBeInTheDocument();
-      expect(screen.getByText('All users')).toBeInTheDocument();
+      expect(screen.getByText('Select All')).toBeInTheDocument();
     });
 
-    it('creates and updates new permissions for dashboard with no edit perms initialized', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('creates and updates new permissions for dashboard with no edit perms initialized', async () => {
       const mockPUT = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         method: 'PUT',
         body: DashboardFixture([], {id: '1', title: 'Custom Errors'}),
       });
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-      await userEvent.click(await screen.findByText('Edit Access:'));
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
+      await userEvent.click(await screen.findByText('Editors:'));
 
-      // deselects 'All users' so only creator has edit access
-      expect(await screen.findByText('All users')).toBeEnabled();
-      expect(await screen.findByRole('option', {name: 'All users'})).toHaveAttribute(
+      // deselects 'Select All' so only creator has edit access
+      expect(await screen.findByText('Select All')).toBeEnabled();
+      expect(await screen.findByRole('option', {name: 'Select All'})).toHaveAttribute(
         'aria-selected',
         'true'
       );
-      await userEvent.click(screen.getByRole('option', {name: 'All users'}));
-      expect(await screen.findByRole('option', {name: 'All users'})).toHaveAttribute(
+      await userEvent.click(screen.getByRole('option', {name: 'Select All'}));
+      expect(await screen.findByRole('option', {name: 'Select All'})).toHaveAttribute(
         'aria-selected',
         'false'
       );
 
-      await userEvent.click(await screen.findByText('Save Changes'));
+      await userEvent.click(await screen.findByText('Apply'));
 
       await waitFor(() => {
         expect(mockPUT).toHaveBeenCalledTimes(1);
@@ -1931,17 +1879,16 @@ describe('Dashboards > Detail', function () {
         '/organizations/org-slug/dashboards/1/',
         expect.objectContaining({
           data: expect.objectContaining({
-            permissions: {isEditableByEveryone: false, teamsWithEditAccess: []},
+            permissions: {
+              isEditableByEveryone: false,
+              teamsWithEditAccess: [],
+            },
           }),
         })
       );
     });
 
-    it('creator can update permissions for dashboard', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('creator can update permissions for dashboard', async () => {
       const mockPUT = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         method: 'PUT',
@@ -1960,36 +1907,29 @@ describe('Dashboards > Detail', function () {
       const currentUser = UserFixture({id: '781629'});
       ConfigStore.set('user', currentUser);
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-      await userEvent.click(await screen.findByText('Edit Access:'));
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
+      await userEvent.click(await screen.findByText('Editors:'));
 
-      // selects 'All users' so everyone has edit access
-      expect(await screen.findByText('All users')).toBeEnabled();
-      expect(await screen.findByRole('option', {name: 'All users'})).toHaveAttribute(
+      // selects 'Select All' so everyone has edit access
+      expect(await screen.findByRole('option', {name: 'Select All'})).toBeEnabled();
+      expect(await screen.findByRole('option', {name: 'Select All'})).toHaveAttribute(
         'aria-selected',
         'false'
       );
-      await userEvent.click(screen.getByRole('option', {name: 'All users'}));
-      expect(await screen.findByRole('option', {name: 'All users'})).toHaveAttribute(
+      await userEvent.click(screen.getByRole('option', {name: 'Select All'}));
+      expect(await screen.findByRole('option', {name: 'Select All'})).toHaveAttribute(
         'aria-selected',
         'true'
       );
 
-      await userEvent.click(await screen.findByText('Save Changes'));
+      await userEvent.click(await screen.findByText('Apply'));
 
       await waitFor(() => {
         expect(mockPUT).toHaveBeenCalledTimes(1);
@@ -1998,17 +1938,16 @@ describe('Dashboards > Detail', function () {
         '/organizations/org-slug/dashboards/1/',
         expect.objectContaining({
           data: expect.objectContaining({
-            permissions: {isEditableByEveryone: true, teamsWithEditAccess: []},
+            permissions: {
+              isEditableByEveryone: true,
+              teamsWithEditAccess: [],
+            },
           }),
         })
       );
     });
 
-    it('creator can update permissions with teams for dashboard', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('creator can update permissions with teams for dashboard', async () => {
       const mockPUT = MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
         method: 'PUT',
@@ -2048,31 +1987,24 @@ describe('Dashboards > Detail', function () {
 
       TeamStore.loadInitialData(teams);
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
-          organization: initialData.organization,
-          deprecatedRouterMocks: true,
-        }
-      );
-      await userEvent.click(await screen.findByText('Edit Access:'));
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: initialData.organization,
+      });
+      await userEvent.click(await screen.findByText('Editors:'));
 
-      expect(await screen.findByText('All users')).toBeEnabled();
-      expect(await screen.findByRole('option', {name: 'All users'})).toHaveAttribute(
+      expect(await screen.findByRole('option', {name: 'Select All'})).toBeEnabled();
+      expect(await screen.findByRole('option', {name: 'Select All'})).toHaveAttribute(
         'aria-selected',
         'false'
       );
       await userEvent.click(screen.getByRole('option', {name: '#team1'}));
       await userEvent.click(screen.getByRole('option', {name: '#team2'}));
-      await userEvent.click(await screen.findByText('Save Changes'));
+      await userEvent.click(await screen.findByText('Apply'));
 
       await waitFor(() => {
         expect(mockPUT).toHaveBeenCalledTimes(1);
@@ -2081,18 +2013,16 @@ describe('Dashboards > Detail', function () {
         '/organizations/org-slug/dashboards/1/',
         expect.objectContaining({
           data: expect.objectContaining({
-            permissions: {isEditableByEveryone: false, teamsWithEditAccess: [1, 2]},
+            permissions: {
+              isEditableByEveryone: false,
+              teamsWithEditAccess: [1, 2],
+            },
           }),
         })
       );
     });
 
-    it('disables edit dashboard and add widget button if user cannot edit dashboard', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
+    it('disables edit dashboard and add widget button if user cannot edit dashboard', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/',
         body: [
@@ -2117,37 +2047,25 @@ describe('Dashboards > Detail', function () {
       const currentUser = UserFixture({id: '781629', isSuperuser: false});
       ConfigStore.set('user', currentUser);
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: {
+          features: initialData.organization.features,
+          access: ['org:read'],
+        },
+      });
 
-          organization: {
-            features: initialData.organization.features,
-            access: ['org:read'],
-          },
-
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await screen.findByText('Edit Access:');
-      expect(screen.getByRole('button', {name: 'Edit Dashboard'})).toBeDisabled();
+      await screen.findByText('Editors:');
+      await userEvent.click(screen.getByRole('button', {name: 'Dashboard actions'}));
+      expect(screen.queryByRole('menuitemradio', {name: 'Edit'})).not.toBeInTheDocument();
       expect(screen.getByRole('button', {name: 'Add Widget'})).toBeDisabled();
     });
 
-    it('disables widget edit, duplicate, and delete button when user does not have edit perms', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('disables widget edit, duplicate, and delete button when user does not have edit perms', async () => {
       const widget = {
         displayType: types.DisplayType.TABLE,
         interval: '1d',
@@ -2183,29 +2101,21 @@ describe('Dashboards > Detail', function () {
       const currentUser = UserFixture({id: '781629'});
       ConfigStore.set('user', currentUser);
 
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: {
+          features: initialData.organization.features,
+          access: ['org:read'],
+        },
+      });
 
-          organization: {
-            features: initialData.organization.features,
-            access: ['org:read'],
-          },
-
-          deprecatedRouterMocks: true,
-        }
-      );
-
-      await screen.findByText('Edit Access:');
-      expect(screen.getByRole('button', {name: 'Edit Dashboard'})).toBeDisabled();
+      await screen.findByText('Editors:');
+      await userEvent.click(screen.getByRole('button', {name: 'Dashboard actions'}));
+      expect(screen.queryByRole('menuitemradio', {name: 'Edit'})).not.toBeInTheDocument();
       expect(screen.getByRole('button', {name: 'Add Widget'})).toBeDisabled();
       await userEvent.click(await screen.findByLabelText('Widget actions'));
       expect(
@@ -2221,128 +2131,119 @@ describe('Dashboards > Detail', function () {
       );
     });
 
-    it('renders favorite button in unfavorited state', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('renders favorite button in unstarred state', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
-        body: DashboardFixture([], {id: '1', title: 'Custom Errors', isFavorited: false}),
+        body: DashboardFixture([], {
+          id: '1',
+          title: 'Custom Errors',
+          isFavorited: false,
+        }),
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: {
+          features: initialData.organization.features,
+        },
+      });
 
-          organization: {
-            features: initialData.organization.features,
-          },
-
-          deprecatedRouterMocks: true,
-        }
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
       );
-
-      const favoriteButton = await screen.findByLabelText('dashboards-favourite');
-      expect(favoriteButton).toBeInTheDocument();
-      expect(await screen.findByLabelText('Favorite')).toBeInTheDocument();
+      expect(await screen.findByRole('menuitemradio', {name: 'Star'})).toBeVisible();
     });
 
-    it('renders favorite button in favorited state', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
+    it('renders favorite button in favorited state', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
-        body: DashboardFixture([], {id: '1', title: 'Custom Errors', isFavorited: true}),
+        body: DashboardFixture([], {
+          id: '1',
+          title: 'Custom Errors',
+          isFavorited: true,
+        }),
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: {
+          features: initialData.organization.features,
+        },
+      });
 
-          organization: {
-            features: initialData.organization.features,
-          },
-
-          deprecatedRouterMocks: true,
-        }
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
       );
-
-      const favoriteButton = await screen.findByLabelText('dashboards-favourite');
-      expect(favoriteButton).toBeInTheDocument();
-      expect(await screen.findByLabelText('UnFavorite')).toBeInTheDocument();
+      expect(await screen.findByRole('menuitemradio', {name: 'Unstar'})).toBeVisible();
     });
 
-    it('toggles favorite button', async function () {
-      const router = RouterFixture({
-        location: LocationFixture(),
-        params: {orgId: 'org-slug', dashboardId: '1'},
-      });
-
+    it('toggles favorite button', async () => {
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/',
-        body: DashboardFixture([], {id: '1', title: 'Custom Errors', isFavorited: true}),
+        body: DashboardFixture([], {
+          id: '1',
+          title: 'Custom Errors',
+          isFavorited: true,
+        }),
       });
       MockApiClient.addMockResponse({
         url: '/organizations/org-slug/dashboards/1/favorite/',
         method: 'PUT',
         body: {isFavorited: false},
       });
-      render(
-        <ViewEditDashboard
-          {...RouteComponentPropsFixture()}
-          params={{orgId: 'org-slug', dashboardId: '1'}}
-          router={initialData.router}
-          location={initialData.router.location}
-        >
-          {null}
-        </ViewEditDashboard>,
-        {
-          router,
+      render(<ViewEditDashboard />, {
+        ...makeDashboardRouterConfig({
+          pathname: '/organizations/org-slug/dashboard/1/',
+          route: DASHBOARD_ROUTE,
+          query: {},
+        }),
+        organization: {
+          features: initialData.organization.features,
+        },
+      });
 
-          organization: {
-            features: initialData.organization.features,
-          },
-
-          deprecatedRouterMocks: true,
-        }
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Dashboard actions'})
       );
+      await userEvent.click(await screen.findByRole('menuitemradio', {name: 'Unstar'}));
 
-      const favoriteButton = await screen.findByLabelText('dashboards-favourite');
-      expect(favoriteButton).toBeInTheDocument();
-
-      expect(await screen.findByLabelText('UnFavorite')).toBeInTheDocument();
-      await userEvent.click(favoriteButton);
-      expect(await screen.findByLabelText('Favorite')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', {name: 'Dashboard actions'}));
+      expect(await screen.findByRole('menuitemradio', {name: 'Star'})).toBeVisible();
     });
 
-    describe('widget builder redesign', function () {
+    it('does not render save or edit features on prebuilt insights dashboards', async () => {
+      render(
+        <DashboardDetail
+          initialState={DashboardState.VIEW}
+          dashboard={DashboardFixture([], {
+            prebuiltId: PrebuiltDashboardId.FRONTEND_SESSION_HEALTH,
+          })}
+          onDashboardUpdate={jest.fn()}
+        />
+      );
+
+      await userEvent.click(await screen.findByText('24H'));
+      await userEvent.click(screen.getByText('Last 7 days'));
+      await screen.findByText('7D');
+
+      expect(screen.queryByTestId('filter-bar-cancel')).not.toBeInTheDocument();
+      expect(screen.queryByText('Save')).not.toBeInTheDocument();
+      expect(screen.queryByText('Editors:')).not.toBeInTheDocument();
+      expect(screen.queryByText('Add Widget')).not.toBeInTheDocument();
+    });
+
+    describe('widget builder redesign', () => {
       let mockUpdateDashboard!: jest.SpyInstance;
-      beforeEach(function () {
+      beforeEach(() => {
         initialData = initializeOrg({
           organization: OrganizationFixture({
-            features: [
-              'global-views',
-              'dashboards-basic',
-              'dashboards-edit',
-              'discover-query',
-            ],
+            features: ['dashboards-basic', 'dashboards-edit', 'discover-query'],
           }),
         });
 
@@ -2363,99 +2264,87 @@ describe('Dashboards > Detail', function () {
         mockUpdateDashboard.mockRestore();
       });
 
-      it('opens the widget builder slideout when clicking add widget', async function () {
+      it('opens the widget builder slideout when clicking add widget', async () => {
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.VIEW}
             dashboard={DashboardFixture([])}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
           }
         );
         await userEvent.click(await screen.findByRole('button', {name: 'Add Widget'}));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'Create Custom Widget'})
+          await screen.findByRole('menuitemradio', {
+            name: 'Create Custom Widget',
+          })
         );
         expect(await screen.findByText('Custom Widget Builder')).toBeInTheDocument();
       });
 
-      it('opens the widget builder library slideout when clicking add widget from widget library', async function () {
+      it('opens the widget builder library slideout when clicking add widget from widget library', async () => {
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.VIEW}
             dashboard={DashboardFixture([])}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
           }
         );
         await userEvent.click(await screen.findByRole('button', {name: 'Add Widget'}));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'From Widget Library'})
+          await screen.findByRole('menuitemradio', {
+            name: 'From Widget Library',
+          })
         );
         expect(await screen.findByText('Widget Library')).toBeInTheDocument();
       });
 
-      it('opens the widget builder slideout when clicking add widget in edit mode', async function () {
+      it('opens the widget builder slideout when clicking add widget in edit mode', async () => {
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.EDIT}
             dashboard={DashboardFixture([])}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
           }
         );
         await userEvent.click(await screen.findByLabelText('Add Widget'));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'Create Custom Widget'})
+          await screen.findByRole('menuitemradio', {
+            name: 'Create Custom Widget',
+          })
         );
         expect(await screen.findByText('Custom Widget Builder')).toBeInTheDocument();
       });
 
-      it('opens the widget builder library slideout when clicking add widget from widget library in edit mode', async function () {
+      it('opens the widget builder library slideout when clicking add widget from widget library in edit mode', async () => {
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.EDIT}
             dashboard={DashboardFixture([])}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
           }
         );
         await userEvent.click(await screen.findByLabelText('Add Widget'));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'From Widget Library'})
+          await screen.findByRole('menuitemradio', {
+            name: 'From Widget Library',
+          })
         );
         expect(await screen.findByText('Widget Library')).toBeInTheDocument();
       });
 
-      it('allows for editing a widget in edit mode', async function () {
+      it('allows for editing a widget in edit mode', async () => {
         const mockWidget = WidgetFixture({id: '1', title: 'Custom Widget'});
         const mockDashboard = DashboardFixture([mockWidget], {
           id: '1',
@@ -2469,21 +2358,21 @@ describe('Dashboards > Detail', function () {
         });
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.EDIT}
             dashboard={mockDashboard}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-
-            // Mock the widgetIndex param so it's available when the widget builder opens
-            router: {...initialData.router, params: {widgetIndex: '0'}},
-
-            deprecatedRouterMocks: true,
+            ...makeDashboardRouterConfig({
+              pathname: '/organizations/org-slug/dashboard/1/',
+              routes: [
+                DASHBOARD_ROUTE,
+                DASHBOARD_WIDGET_BUILDER_ROUTE,
+                DASHBOARD_NEW_WIDGET_BUILDER_ROUTE,
+              ],
+              query: {},
+            }),
           }
         );
 
@@ -2500,10 +2389,10 @@ describe('Dashboards > Detail', function () {
         });
 
         // The widget is updated in the dashboard
-        expect(screen.getByText('Updated Widget')).toBeInTheDocument();
+        expect((await screen.findAllByText('Updated Widget')).length).toBeGreaterThan(0);
       });
 
-      it('allows for creating a widget in edit mode', async function () {
+      it('allows for creating a widget in edit mode', async () => {
         const mockDashboard = DashboardFixture([], {
           id: '1',
           title: 'Custom Errors',
@@ -2516,23 +2405,29 @@ describe('Dashboards > Detail', function () {
         });
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.EDIT}
             dashboard={mockDashboard}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
+            ...makeDashboardRouterConfig({
+              pathname: '/organizations/org-slug/dashboard/1/',
+              routes: [
+                DASHBOARD_ROUTE,
+                DASHBOARD_WIDGET_BUILDER_ROUTE,
+                DASHBOARD_NEW_WIDGET_BUILDER_ROUTE,
+              ],
+              query: {},
+            }),
           }
         );
 
         await userEvent.click(await screen.findByLabelText('Add Widget'));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'Create Custom Widget'})
+          await screen.findByRole('menuitemradio', {
+            name: 'Create Custom Widget',
+          })
         );
 
         expect(await screen.findByText('Custom Widget Builder')).toBeInTheDocument();
@@ -2540,16 +2435,18 @@ describe('Dashboards > Detail', function () {
         await userEvent.click(screen.getByText('Add Widget'));
 
         // The widget builder is closed after the widget is updated
-        await waitFor(() => {
-          expect(screen.queryByText('Custom Widget Builder')).not.toBeInTheDocument();
-        });
+        expect((await screen.findAllByText('Totally new widget')).length).toBeGreaterThan(
+          0
+        );
 
         // The widget is added in the dashboard
-        expect(await screen.findByText('Totally new widget')).toBeInTheDocument();
+        expect((await screen.findAllByText('Totally new widget')).length).toBeGreaterThan(
+          0
+        );
         expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
-      it('allows for editing a widget in view mode', async function () {
+      it('allows for editing a widget in view mode', async () => {
         const mockWidget = WidgetFixture({id: '1', title: 'Custom Widget'});
         const mockDashboard = DashboardFixture([mockWidget], {
           id: '1',
@@ -2563,21 +2460,21 @@ describe('Dashboards > Detail', function () {
         });
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.VIEW}
             dashboard={mockDashboard}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-
-            // Mock the widgetIndex param so it's available when the widget builder opens
-            router: {...initialData.router, params: {widgetIndex: '0'}},
-
-            deprecatedRouterMocks: true,
+            ...makeDashboardRouterConfig({
+              pathname: '/organizations/org-slug/dashboard/1/',
+              routes: [
+                DASHBOARD_ROUTE,
+                DASHBOARD_WIDGET_BUILDER_ROUTE,
+                DASHBOARD_NEW_WIDGET_BUILDER_ROUTE,
+              ],
+              query: {},
+            }),
           }
         );
 
@@ -2598,16 +2495,16 @@ describe('Dashboards > Detail', function () {
 
         // The update action is called with the updated widget
         expect(mockUpdateDashboard).toHaveBeenCalledWith(
-          expect.anything(),
-          expect.anything(),
+          'org-slug',
           expect.objectContaining({
             widgets: [expect.objectContaining({title: 'Updated Widget Title'})],
-          })
+          }),
+          {revisionSource: undefined}
         );
         expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
-      it('allows for creating a widget in view mode', async function () {
+      it('allows for creating a widget in view mode', async () => {
         const mockDashboard = DashboardFixture([], {
           id: '1',
           title: 'Custom Errors',
@@ -2620,23 +2517,29 @@ describe('Dashboards > Detail', function () {
         });
         render(
           <DashboardDetail
-            {...RouteComponentPropsFixture()}
             initialState={DashboardState.VIEW}
             dashboard={mockDashboard}
-            dashboards={[]}
             onDashboardUpdate={jest.fn()}
-            newWidget={undefined}
-            onSetNewWidget={() => {}}
           />,
           {
             organization: initialData.organization,
-            deprecatedRouterMocks: true,
+            ...makeDashboardRouterConfig({
+              pathname: '/organizations/org-slug/dashboard/1/',
+              routes: [
+                DASHBOARD_ROUTE,
+                DASHBOARD_WIDGET_BUILDER_ROUTE,
+                DASHBOARD_NEW_WIDGET_BUILDER_ROUTE,
+              ],
+              query: {},
+            }),
           }
         );
 
         await userEvent.click(await screen.findByRole('button', {name: 'Add Widget'}));
         await userEvent.click(
-          await screen.findByRole('menuitemradio', {name: 'Create Custom Widget'})
+          await screen.findByRole('menuitemradio', {
+            name: 'Create Custom Widget',
+          })
         );
 
         expect(await screen.findByText('Custom Widget Builder')).toBeInTheDocument();
@@ -2645,76 +2548,16 @@ describe('Dashboards > Detail', function () {
           await within(screen.getByTestId('widget-slideout')).findByText('Add Widget')
         );
 
-        // The widget builder is closed after the widget is updated
-        await waitFor(() => {
-          expect(screen.queryByText('Custom Widget Builder')).not.toBeInTheDocument();
-        });
-
         // The update action is called with the new widget
         expect(mockUpdateDashboard).toHaveBeenCalledWith(
-          expect.anything(),
-          expect.anything(),
+          'org-slug',
           expect.objectContaining({
             widgets: [expect.objectContaining({title: 'Totally new widget'})],
-          })
+          }),
+          {revisionSource: undefined}
         );
         await waitFor(() => {
           expect(addLoadingMessage).toHaveBeenCalledWith('Saving widget');
-        });
-      });
-    });
-
-    describe('discover split', function () {
-      it('calls the dashboard callbacks with the correct widgetType for discover split', function () {
-        const widget = {
-          displayType: types.DisplayType.TABLE,
-          interval: '1d',
-          queries: [
-            {
-              name: 'Test Widget',
-              fields: ['count()', 'count_unique(user)', 'epm()', 'project'],
-              columns: ['project'],
-              aggregates: ['count()', 'count_unique(user)', 'epm()'],
-              conditions: '',
-              orderby: '',
-            },
-          ],
-          title: 'Transactions',
-          id: '1',
-          widgetType: types.WidgetType.DISCOVER,
-        };
-        const mockDashboard = DashboardFixture([widget], {
-          id: '1',
-          title: 'Custom Errors',
-        });
-        const mockModifiedDashboard = DashboardFixture([widget], {
-          id: '1',
-          title: 'Custom Errors',
-        });
-
-        const mockOnDashboardUpdate = jest.fn();
-        const mockStateSetter = jest
-          .fn()
-          .mockImplementation(fn => fn({modifiedDashboard: mockModifiedDashboard}));
-
-        handleUpdateDashboardSplit({
-          widgetId: '1',
-          splitDecision: types.WidgetType.ERRORS,
-          dashboard: mockDashboard,
-          modifiedDashboard: mockModifiedDashboard,
-          onDashboardUpdate: mockOnDashboardUpdate,
-          stateSetter: mockStateSetter,
-        });
-
-        expect(mockOnDashboardUpdate).toHaveBeenCalledWith({
-          ...mockDashboard,
-          widgets: [{...widget, widgetType: types.WidgetType.ERRORS}],
-        });
-        expect(mockStateSetter).toHaveReturnedWith({
-          modifiedDashboard: {
-            ...mockModifiedDashboard,
-            widgets: [{...widget, widgetType: types.WidgetType.ERRORS}],
-          },
         });
       });
     });

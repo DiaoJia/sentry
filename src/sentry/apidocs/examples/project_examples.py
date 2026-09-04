@@ -1,6 +1,6 @@
-from drf_spectacular.utils import OpenApiExample
+from typing import Any
 
-from sentry.projectoptions.defaults import DEFAULT_GROUPING_CONFIG, LEGACY_GROUPING_CONFIG
+from drf_spectacular.utils import OpenApiExample
 
 KEY_RATE_LIMIT = {
     "id": "60120449b6b1d5e45f75561e6dabd80b",
@@ -18,6 +18,9 @@ KEY_RATE_LIMIT = {
         "security": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/security/?sentry_key=a785682ddda719b7a8a4011110d75598",
         "minidump": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/minidump/?sentry_key=a785682ddda719b7a8a4011110d75598",
         "playstation": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/playstation/?sentry_key=a785682ddda719b7a8a4011110d75598",
+        "integration": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/integration/",
+        "otlp_traces": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/integration/otlp/v1/traces",
+        "otlp_logs": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/integration/otlp/v1/logs",
         "nel": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/nel/?sentry_key=a785682ddda719b7a8a4011110d75598",
         "unreal": "https://o4504765715316736.ingest.sentry.io/api/4505281256090153/unreal/a785682ddda719b7a8a4011110d75598/",
         "cdn": "https://js.sentry-cdn.com/a785682ddda719b7a8a4011110d75598.min.js",
@@ -30,6 +33,8 @@ KEY_RATE_LIMIT = {
         "hasReplay": True,
         "hasPerformance": True,
         "hasDebug": True,
+        "hasFeedback": False,
+        "hasLogsAndMetrics": False,
     },
 }
 
@@ -54,7 +59,6 @@ BASE_PROJECT = {
     "features": [
         "alert-filters",
         "custom-inbound-filters",
-        "data-forwarding",
         "discard-groups",
         "minidump",
         "rate-limits",
@@ -100,8 +104,10 @@ BASE_PROJECT = {
     "hasInsightsVitals": False,
     "hasInsightsCaches": False,
     "hasInsightsQueues": False,
-    "hasInsightsLlmMonitoring": False,
     "hasInsightsAgentMonitoring": False,
+    "hasInsightsMCP": False,
+    "hasLogs": False,
+    "hasTraceMetrics": False,
     "isInternal": False,
     "isPublic": False,
     "avatar": {"avatarType": "letter_avatar", "avatarUuid": None},
@@ -132,11 +138,11 @@ DETAILED_PROJECT = {
         "sentry:scrub_data": False,
         "sentry:token": "e84c8c0fb1c121e988558785885f9cde",
         "sentry:resolve_age": 168,
-        "sentry:grouping_config": DEFAULT_GROUPING_CONFIG,
+        "sentry:grouping_config": "newstyle:2012-12-31",
         "quotas:spike-protection-disabled": False,
         "sentry:store_crash_reports": 5,
         "digests:mail:minimum_delay": 180,
-        "sentry:secondary_grouping_config": LEGACY_GROUPING_CONFIG,
+        "sentry:secondary_grouping_config": "newstyle:2012-11-21",
         "sentry:secondary_grouping_expiry": 147555024,
         "sentry:builtin_symbol_sources": ["ios", "android", "chromium"],
         "sentry:origins": ["getsentry.com", "app.getsentry.com", "www.getsentry.com", "sentry.io"],
@@ -152,7 +158,6 @@ DETAILED_PROJECT = {
         "filters:releases": "",
         "filters:error_messages": "",
         "feedback:branding": True,
-        "sentry:dynamic_sampling_minimum_sample_rate": True,
     },
     "digestsMinDelay": 180,
     "digestsMaxDelay": 600,
@@ -170,12 +175,11 @@ DETAILED_PROJECT = {
     "verifySSL": True,
     "scrubIPAddresses": False,
     "scrapeJavaScript": True,
-    "groupingConfig": DEFAULT_GROUPING_CONFIG,
+    "groupingConfig": "newstyle:2012-12-31",
     "groupingEnhancements": "",
-    "groupingEnhancementsBase": None,
     "derivedGroupingEnhancements": "",
     "secondaryGroupingExpiry": 1687010243,
-    "secondaryGroupingConfig": LEGACY_GROUPING_CONFIG,
+    "secondaryGroupingConfig": "newstyle:2012-11-21",
     "fingerprintingRules": "",
     "organization": {
         "id": "1",
@@ -190,7 +194,6 @@ DETAILED_PROJECT = {
         "require2FA": False,
         "avatar": {"avatarType": "upload", "avatarUuid": "24f6f762f7a7473888b259c566da5adb"},
         "features": [
-            "global-views",
             "discover-basic",
             "incidents",
             "uptime",
@@ -202,50 +205,6 @@ DETAILED_PROJECT = {
         },
         "hasAuthProvider": True,
     },
-    "plugins": [
-        {
-            "id": "asana",
-            "name": "Asana",
-            "slug": "asana",
-            "shortName": "Asana",
-            "type": "issue-tracking",
-            "canDisable": True,
-            "isTestable": False,
-            "hasConfiguration": True,
-            "metadata": {},
-            "contexts": [],
-            "status": "unknown",
-            "assets": [],
-            "doc": "",
-            "firstPartyAlternative": None,
-            "deprecationDate": None,
-            "altIsSentryApp": None,
-            "enabled": True,
-            "version": "23.7.0.dev0",
-            "author": {"name": "Sentry Team", "url": "https://github.com/getsentry/sentry"},
-            "isDeprecated": False,
-            "isHidden": False,
-            "description": "\nImprove your productivity by creating tasks in Asana directly\nfrom Sentry issues. This integration also allows you to link Sentry\nissues to existing tasks in Asana.\n",
-            "features": ["issue-basic"],
-            "featureDescriptions": [
-                {
-                    "description": "Create and link Sentry issue groups directly to an Asana ticket in any of your\n            projects, providing a quick way to jump from a Sentry bug to tracked ticket.",
-                    "featureGate": "issue-basic",
-                },
-                {
-                    "description": "Link Sentry issues to existing Asana tickets.",
-                    "featureGate": "issue-basic",
-                },
-            ],
-            "resourceLinks": [
-                {"title": "Report Issue", "url": "https://github.com/getsentry/sentry/issues"},
-                {
-                    "title": "View Source",
-                    "url": "https://github.com/getsentry/sentry/tree/master/src/sentry_plugins",
-                },
-            ],
-        }
-    ],
     "platforms": ["native", "other", "python"],
     "processingIssues": 0,
     "defaultEnvironment": "prod",
@@ -260,17 +219,18 @@ DETAILED_PROJECT = {
         {"id": "boostReplayId", "active": True},
         {"id": "recalibrationRule", "active": True},
     ],
-    "dynamicSamplingMinimumSampleRate": True,
-    "eventProcessing": {"symbolicationDegraded": False},
     "symbolSources": "[]",
     "tempestFetchScreenshots": False,
-    "tempestFetchDumps": False,
+    "debugFilesRole": None,
     "isDynamicallySampled": True,
+    "enableAutoReleaseCreation": True,
     "autofixAutomationTuning": "off",
     "seerScannerAutomation": True,
+    "seerNightshiftTweaks": None,
     "highlightTags": [],
     "highlightContext": {},
     "highlightPreset": {"tags": [], "context": {}},
+    "scmSourceContextEnabled": False,
 }
 
 PROJECT_SUMMARY = {
@@ -309,11 +269,9 @@ PROJECT_SUMMARY = {
     "hasAccess": True,
     "dateCreated": "2023-03-29T15:25:21.344565Z",
     "environments": ["production"],
-    "eventProcessing": {"symbolicationDegraded": False},
     "features": [
         "alert-filters",
         "custom-inbound-filters",
-        "data-forwarding",
         "discard-groups",
         "minidump",
         "rate-limits",
@@ -341,8 +299,10 @@ PROJECT_SUMMARY = {
     "hasInsightsVitals": False,
     "hasInsightsCaches": True,
     "hasInsightsQueues": True,
-    "hasInsightsLlmMonitoring": False,
     "hasInsightsAgentMonitoring": False,
+    "hasInsightsMCP": False,
+    "hasLogs": False,
+    "hasTraceMetrics": False,
     "platform": "node-express",
     "platforms": [],
     "latestRelease": None,
@@ -377,7 +337,7 @@ SYMBOL_SOURCES = [
 ]
 
 
-def project_with_team(extra_team: bool = False):
+def project_with_team(extra_team: bool = False) -> dict[str, Any]:
     teams = [
         {
             "id": "2349234102",

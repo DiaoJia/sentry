@@ -1,22 +1,19 @@
 import {useContext, useRef} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
-import type {AriaTabPanelProps} from '@react-aria/tabs';
 import {useTabPanel} from '@react-aria/tabs';
 import {useCollection} from '@react-stately/collections';
 import {ListCollection} from '@react-stately/list';
 import type {TabListState} from '@react-stately/tabs';
 import type {CollectionBase, Node, Orientation} from '@react-types/shared';
 
-import {isChonkTheme} from 'sentry/utils/theme/withChonk';
-
 import {TabPanelItem} from './item';
+import {TabsContext} from './tabs';
 import {tabsShouldForwardProp} from './utils';
-import {TabsContext} from '.';
 
 const collectionFactory = (nodes: Iterable<Node<any>>) => new ListCollection(nodes);
 
-interface TabPanelsProps extends AriaTabPanelProps {
+interface TabPanelsProps {
   children: CollectionBase<unknown>['children'];
   className?: string;
 }
@@ -51,6 +48,7 @@ export function TabPanels(props: TabPanelsProps) {
       orientation={orientation}
       key={tabListState?.selectedKey}
     >
+      {/* eslint-disable-next-line @typescript-eslint/no-unsafe-member-access */}
       {selectedPanel?.props.children}
     </TabPanel>
   );
@@ -58,7 +56,7 @@ export function TabPanels(props: TabPanelsProps) {
 
 TabPanels.Item = TabPanelItem;
 
-interface TabPanelProps extends AriaTabPanelProps {
+interface TabPanelProps {
   state: TabListState<any>;
   children?: React.ReactNode;
   className?: string;
@@ -90,24 +88,24 @@ function TabPanel({
 const TabPanelWrap = styled('div', {shouldForwardProp: tabsShouldForwardProp})<{
   orientation: Orientation;
 }>`
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
 
   ${p =>
     p.orientation === 'horizontal'
       ? css`
           height: 100%;
-          padding-top: ${isChonkTheme(p.theme) ? p.theme.space.md : 0};
+          padding-top: ${p.theme.space.md};
         `
       : css`
           width: 100%;
-          padding-left: ${isChonkTheme(p.theme) ? p.theme.space.md : 0};
-        `};
+          padding-left: ${p.theme.space.md};
+        `}
 
   &:focus-visible {
     outline: none;
     box-shadow:
-      inset ${p => p.theme.focusBorder} 0 0 0 1px,
-      ${p => p.theme.focusBorder} 0 0 0 1px;
+      inset ${p => p.theme.tokens.focus.default} 0 0 0 1px,
+      ${p => p.theme.tokens.focus.default} 0 0 0 1px;
     z-index: 1;
   }
 `;

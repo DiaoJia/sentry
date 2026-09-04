@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 from django.http.request import HttpRequest
 from pydantic.fields import Field
 
+from sentry.auth.scope_declaration import check_scope_declaration
 from sentry.hybridcloud.rpc import RpcModel
 from sentry.users.services.user import RpcUser
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from django.contrib.auth.models import AnonymousUser
 
     from sentry.auth.provider import Provider
+    from sentry.models.authprovider import ScimTokenDisplay
 
 
 class RpcApiKey(RpcModel):
@@ -116,7 +118,7 @@ class AuthenticatedToken(RpcModel):
             project_id=getattr(token, "project_id", None),
         )
 
-    def get_audit_log_data(self) -> Mapping[str, Any]:
+    def get_audit_log_data(self) -> dict[str, Any]:
         return self.audit_log_data
 
     def get_allowed_origins(self) -> list[str]:
@@ -126,6 +128,7 @@ class AuthenticatedToken(RpcModel):
         return self.scopes
 
     def has_scope(self, scope: str) -> bool:
+        check_scope_declaration(scope)
         if self.kind == "system":
             return True
         return scope in self.get_scopes()
@@ -203,6 +206,13 @@ class RpcAuthProvider(RpcModel):
         from sentry.models.authprovider import get_scim_token
 
         return get_scim_token(self.flags.scim_enabled, self.organization_id, self.provider)
+
+    def get_scim_token_for_display(self) -> Optional["ScimTokenDisplay"]:
+        from sentry.models.authprovider import get_scim_token_for_display
+
+        return get_scim_token_for_display(
+            self.flags.scim_enabled, self.organization_id, self.provider
+        )
 
 
 class RpcAuthIdentity(RpcModel):

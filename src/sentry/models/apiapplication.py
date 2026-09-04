@@ -1,10 +1,11 @@
-import os
+import logging
+import posixpath
 import secrets
+from enum import Enum
 from typing import Any, ClassVar, Literal, Self, TypeIs
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import petname
-import sentry_sdk
 from django.contrib.postgres.fields.array import ArrayField
 from django.db import models, router, transaction
 from django.utils import timezone
@@ -23,14 +24,27 @@ from sentry.db.models import (
 from sentry.db.models.manager.base import BaseManager
 from sentry.hybridcloud.models.outbox import ControlOutbox, outbox_context
 from sentry.hybridcloud.outbox.category import OutboxCategory, OutboxScope
-from sentry.types.region import find_all_region_names
+from sentry.types.cell import find_all_cell_names
+
+logger = logging.getLogger("sentry.oauth")
 
 
-def generate_name():
+# Feature flags for ApiApplication behavior, version-gated.
+class ApiApplicationFeature(str, Enum):
+    STRICT_REDIRECT_URI = "strict-redirect-uri"
+
+
+# Map feature → minimum version that enables it.
+FEATURE_MIN_VERSION: dict[ApiApplicationFeature, int] = {
+    ApiApplicationFeature.STRICT_REDIRECT_URI: 1,
+}
+
+
+def generate_name() -> str:
     return petname.generate(2, " ", letters=10).title()
 
 
-def generate_token():
+def generate_token() -> str:
     # `client_id` on `ApiApplication` is currently limited to 64 characters
     # so we need to restrict the length of the secret
     return secrets.token_hex(nbytes=32)  # generates a 128-bit secure token
@@ -48,7 +62,11 @@ class ApiApplication(Model):
     __relocation_scope__ = RelocationScope.Global
 
     client_id = models.CharField(max_length=64, unique=True, default=generate_token)
-    client_secret = models.TextField(default=generate_token)
+    # NULL for public clients (RFC 6749 §2.1) - CLIs, native apps, SPAs
+    # Public clients cannot securely store secrets, so they use PKCE and/or
+    # refresh token rotation instead of client authentication.
+    # Use client_secret=None to create a public client.
+    client_secret = models.TextField(null=True, default=generate_token)
     owner = FlexibleForeignKey("sentry.User", null=True)
     name = models.CharField(max_length=64, blank=True, default=generate_name)
     status = BoundedPositiveIntegerField(
@@ -71,6 +89,22 @@ class ApiApplication(Model):
     # ApiApplication by default provides user level access
     # This field is true if a certain application is limited to access only a specific org
     requires_org_level_access = models.BooleanField(default=False, db_default=False)
+    # Application version for feature-gating behavioral changes.
+    # Existing apps are version 0 ("legacy"); new apps default to 0 until all
+    # breaking changes are ready, then the default will be bumped to 1
+    # ("oauth-21-draft").
+    # TODO(dcramer): When all breaking features are shipped, bump both
+    # default and db_default to 1 and add a migration to update the field
+    # defaults accordingly.
+    version = BoundedPositiveIntegerField(
+        default=0,
+        db_index=True,
+        choices=(
+            (0, _("legacy")),
+            (1, _("oauth-21-draft")),
+        ),
+        db_default=0,
+    )
 
     objects: ClassVar[BaseManager[Self]] = BaseManager(cache_fields=("client_id",))
 
@@ -80,10 +114,10 @@ class ApiApplication(Model):
 
     __repr__ = sane_repr("name", "owner_id")
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
-    def delete(self, *args, **kwargs):
+    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
         with outbox_context(transaction.atomic(router.db_for_write(ApiApplication)), flush=False):
             for outbox in self.outboxes_for_update():
                 outbox.save()
@@ -96,50 +130,138 @@ class ApiApplication(Model):
                 shard_identifier=self.id,
                 object_identifier=self.id,
                 category=OutboxCategory.API_APPLICATION_UPDATE,
-                region_name=region_name,
+                cell_name=region_name,
             )
-            for region_name in find_all_region_names()
+            for region_name in find_all_cell_names()
         ]
 
     @property
-    def is_active(self):
+    def is_active(self) -> bool:
         return self.status == ApiApplicationStatus.active
+
+    @property
+    def is_public(self) -> bool:
+        """Check if this is a public client (RFC 6749 §2.1).
+
+        Public clients (native apps, CLIs, SPAs) cannot securely store
+        credentials, so they have no client_secret. They rely on PKCE
+        for authorization code flow and refresh token rotation for
+        token refresh (RFC 9700 §4.14.2).
+
+        Public clients are created with client_secret=None.
+        """
+        return self.client_secret is None
 
     def is_allowed_response_type(self, value: object) -> TypeIs[Literal["code", "token"]]:
         return value in ("code", "token")
 
-    def normalize_url(self, value):
+    def has_feature(self, feature: ApiApplicationFeature) -> bool:
+        min_version = FEATURE_MIN_VERSION.get(feature)
+        if min_version is None:
+            return False
+        return self.version >= min_version
+
+    @staticmethod
+    def _fully_decode(value: str) -> str:
+        """Iteratively percent-decode until stable (no more encoded layers).
+
+        Stops before any lossy step: if a decode would introduce U+FFFD
+        (replacement character) from non-UTF-8 bytes, the previous
+        lossless result is returned instead.
+        """
+        decoded = value
+        while True:
+            candidate = unquote(decoded)
+            if candidate == decoded:
+                break
+            if candidate.count("\ufffd") > decoded.count("\ufffd"):
+                break
+            decoded = candidate
+        return decoded
+
+    def normalize_url(self, value: str) -> str:
         parts = urlparse(value)
-        normalized_path = os.path.normpath(parts.path)
+        decoded = self._fully_decode(parts.path)
+
+        has_trailing_slash = decoded.endswith("/")
+        normalized_path = posixpath.normpath(decoded)
         if normalized_path == ".":
             normalized_path = "/"
-        elif value.endswith("/") and not normalized_path.endswith("/"):
+        elif has_trailing_slash and not normalized_path.endswith("/"):
             normalized_path += "/"
-        return urlunparse(parts._replace(path=normalized_path))
+        return urlunparse(parts._replace(path=quote(normalized_path, safe="/")))
 
-    def is_valid_redirect_uri(self, value):
+    def is_valid_redirect_uri(self, value: str) -> bool:
+        # Spec references:
+        #   - Exact match to one of the registered redirect URIs (RFC 6749 §3.1.2.3):
+        #     https://datatracker.ietf.org/doc/html/rfc6749#section-3.1.2.3
+        #   - Native apps loopback exception (RFC 8252 §8.4):
+        #     https://datatracker.ietf.org/doc/html/rfc8252#section-8.4
+
+        decoded_path = self._fully_decode(urlparse(value).path)
+
+        # Reject null bytes — can cause string truncation in downstream servers.
+        if "\x00" in decoded_path:
+            return False
+
+        # Reject backslashes — some servers/proxies interpret \ as /, enabling
+        # path traversal that posixpath.normpath wouldn't catch.
+        if "\\" in decoded_path:
+            return False
+
         value = self.normalize_url(value)
 
-        for redirect_uri in self.redirect_uris.split("\n"):
-            ruri = self.normalize_url(redirect_uri)
+        normalized_ruris = [
+            self.normalize_url(redirect_uri) for redirect_uri in self.redirect_uris.split("\n")
+        ]
+        for ruri in normalized_ruris:
             if value == ruri:
                 return True
-            if value.startswith(ruri):
-                with sentry_sdk.isolation_scope() as scope:
-                    scope.set_context(
-                        "api_application",
-                        {
+
+        # RFC 8252 §8.4 / §7: For loopback interface redirects in native apps, accept
+        # any ephemeral port when the registered URI omits a port. Match scheme, host,
+        # path (and query) exactly, ignoring only the port.
+        try:
+            v_parts = urlparse(value)
+        except Exception:
+            v_parts = None
+        if (
+            v_parts
+            and v_parts.scheme in {"http", "https"}
+            and v_parts.hostname in {"127.0.0.1", "localhost", "::1"}
+        ):
+            for ruri in normalized_ruris:
+                try:
+                    r_parts = urlparse(ruri)
+                except Exception:
+                    continue
+                if (
+                    r_parts.scheme in {"http", "https"}
+                    and r_parts.hostname in {"127.0.0.1", "localhost", "::1"}
+                    and r_parts.port is None  # registered without a fixed port
+                    and v_parts.scheme == r_parts.scheme
+                    and v_parts.hostname == r_parts.hostname
+                    and v_parts.path == r_parts.path
+                    and v_parts.query == r_parts.query
+                ):
+                    return True
+
+        # Then: prefix-only match (legacy behavior). Log on success.
+        if not self.has_feature(ApiApplicationFeature.STRICT_REDIRECT_URI):
+            for ruri in normalized_ruris:
+                if value.startswith(ruri):
+                    logger.warning(
+                        "oauth.prefix_matched_redirect_uri",
+                        extra={
                             "client_id": self.client_id,
                             "redirect_uri": value,
-                            "allowed_redirect_uris": self.redirect_uris,
+                            "matched_prefix": ruri,
                         },
                     )
-                    message = "oauth.prefix-matched-redirect-uri"
-                    sentry_sdk.capture_message(message, level="info")
-                return True
+                    return True
         return False
 
-    def get_default_redirect_uri(self):
+    def get_default_redirect_uri(self) -> str:
         return self.redirect_uris.split()[0]
 
     def get_allowed_origins(self) -> list[str]:
@@ -147,18 +269,19 @@ class ApiApplication(Model):
             return []
         return [origin for origin in self.allowed_origins.split()]
 
-    def get_redirect_uris(self):
+    def get_redirect_uris(self) -> list[str]:
         if not self.redirect_uris:
             return []
         return [redirect_uri for redirect_uri in self.redirect_uris.split()]
 
-    def get_audit_log_data(self):
+    def get_audit_log_data(self) -> dict[str, Any]:
         return {
             "client_id": self.client_id,
             "name": self.name,
             "redirect_uris": self.redirect_uris,
             "allowed_origins": self.allowed_origins,
             "status": self.status,
+            "version": self.version,
         }
 
     @classmethod

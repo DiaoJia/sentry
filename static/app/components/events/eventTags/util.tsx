@@ -1,9 +1,10 @@
-import {type RefObject, useCallback, useLayoutEffect, useState} from 'react';
+import {useCallback, useLayoutEffect, useState, type RefObject} from 'react';
 import {useResizeObserver} from '@react-aria/utils';
 
 import type {EventTag, EventTagWithMeta} from 'sentry/types/event';
 
-export const TAGS_DOCS_LINK = `https://docs.sentry.io/platform-redirect/?next=/enriching-events/tags`;
+export const TAGS_DOCS_LINK =
+  'https://docs.sentry.io/platform-redirect/?next=/enriching-events/tags';
 
 export enum TagFilter {
   ALL = 'All',
@@ -147,12 +148,12 @@ export const TagFilterData = {
  * Combines all of the above into a single set to determine if a tag is custom
  */
 export function getSentryDefaultTags() {
-  return Object.values(TagFilterData).reduce(
-    // TODO: result.union(s) when Set.prototype.union is Baseline
-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/union
-    (result, s) => new Set([...result, ...s]),
-    new Set([])
-  );
+  return Object.values(TagFilterData).reduce((acc, set) => {
+    for (const tag of set) {
+      acc.add(tag);
+    }
+    return acc;
+  }, new Set());
 }
 
 const ISSUE_DETAILS_COLUMN_BREAKPOINTS = [

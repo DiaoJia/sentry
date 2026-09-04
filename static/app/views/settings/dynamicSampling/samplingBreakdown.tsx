@@ -1,22 +1,22 @@
-import type React from 'react';
 import {Fragment} from 'react';
 import {css, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import {PlatformIcon} from 'platformicons';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Flex} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
 import {clampPercentRate} from 'sentry/views/settings/dynamicSampling/utils/clampNumer';
 import {formatPercent} from 'sentry/views/settings/dynamicSampling/utils/formatPercent';
 import type {ProjectSampleCount} from 'sentry/views/settings/dynamicSampling/utils/useProjectSampleCounts';
 
 const ITEMS_TO_SHOW = 5;
-interface Props extends React.ComponentProps<typeof StyledPanel> {
+interface Props {
   sampleCounts: ProjectSampleCount[];
   sampleRates: Record<string, number>;
   isLoading?: boolean;
@@ -24,31 +24,21 @@ interface Props extends React.ComponentProps<typeof StyledPanel> {
 
 function OthersBadge() {
   return (
-    <div
-      css={css`
-        display: flex;
-        align-items: center;
-        gap: ${space(0.75)};
-      `}
-    >
+    <Flex align="center" gap="sm">
       <PlatformIcon
         css={css`
           width: 16px;
           height: 16px;
         `}
         platform="other"
+        alt=""
       />
       {t('other projects')}
-    </div>
+    </Flex>
   );
 }
 
-export function SamplingBreakdown({
-  sampleCounts,
-  sampleRates,
-  isLoading,
-  ...props
-}: Props) {
+export function SamplingBreakdown({sampleCounts, sampleRates, isLoading}: Props) {
   const theme = useTheme();
   const spansWithSampleRates = sampleCounts
     ?.map(item => {
@@ -59,7 +49,7 @@ export function SamplingBreakdown({
         sampledSpans,
       };
     })
-    .toSorted((a: any, b: any) => b.sampledSpans - a.sampledSpans);
+    .toSorted((a, b) => b.sampledSpans - a.sampledSpans);
 
   const hasOthers = spansWithSampleRates.length > ITEMS_TO_SHOW;
 
@@ -68,18 +58,15 @@ export function SamplingBreakdown({
     : spansWithSampleRates.slice(0, ITEMS_TO_SHOW);
   const otherSpanCount = spansWithSampleRates
     .slice(ITEMS_TO_SHOW - 1)
-    .reduce((acc: any, item: any) => acc + item.sampledSpans, 0);
-  const total = spansWithSampleRates.reduce(
-    (acc: any, item: any) => acc + item.sampledSpans,
-    0
-  );
+    .reduce((acc, item) => acc + item.sampledSpans, 0);
+  const total = spansWithSampleRates.reduce((acc, item) => acc + item.sampledSpans, 0);
 
-  const getSpanRate = (spanCount: any) => (total === 0 ? 0 : spanCount / total);
+  const getSpanRate = (spanCount: number) => (total === 0 ? 0 : spanCount / total);
   const otherRate = getSpanRate(otherSpanCount);
   const palette = theme.chart.getColorPalette(ITEMS_TO_SHOW);
 
   return (
-    <StyledPanel {...props}>
+    <StyledPanel>
       <Heading>{t('Distribution of stored spans')}</Heading>
       {isLoading ? (
         <LoadingIndicator
@@ -91,18 +78,18 @@ export function SamplingBreakdown({
       ) : sampleCounts.length > 0 ? (
         <Fragment>
           <Breakdown>
-            {topItems.map((item: any, index: any) => {
+            {topItems.map((item, index) => {
               const itemPercent = getSpanRate(item.sampledSpans);
               return (
                 <Tooltip
                   key={item.project.id}
                   overlayStyle={{maxWidth: 'none'}}
                   title={
-                    <LegendItem key={item.project.id}>
+                    <Flex align="center" gap="sm" key={item.project.id}>
                       <ProjectBadge disableLink avatarSize={16} project={item.project} />
                       {formatPercent(itemPercent, {addSymbol: true})}
                       <SubText>{formatAbbreviatedNumber(item.sampledSpans)}</SubText>
-                    </LegendItem>
+                    </Flex>
                   }
                   skipWrapper
                 >
@@ -119,11 +106,11 @@ export function SamplingBreakdown({
               <Tooltip
                 overlayStyle={{maxWidth: 'none'}}
                 title={
-                  <LegendItem>
+                  <Flex align="center" gap="sm">
                     <OthersBadge />
                     {formatPercent(otherRate, {addSymbol: true})}
                     <SubText>{formatAbbreviatedNumber(total)}</SubText>
-                  </LegendItem>
+                  </Flex>
                 }
                 skipWrapper
               >
@@ -136,22 +123,22 @@ export function SamplingBreakdown({
               </Tooltip>
             )}
           </Breakdown>
-          <Footer>
+          <Flex align="start" gap="xl">
             <Legend>
-              {topItems.map((item: any) => {
+              {topItems.map(item => {
                 const itemPercent = getSpanRate(item.sampledSpans);
                 return (
-                  <LegendItem key={item.project.id}>
+                  <Flex align="center" gap="sm" key={item.project.id}>
                     <ProjectBadge avatarSize={16} project={item.project} />
                     {formatPercent(itemPercent, {addSymbol: true})}
-                  </LegendItem>
+                  </Flex>
                 );
               })}
               {hasOthers && (
-                <LegendItem>
+                <Flex align="center" gap="sm">
                   <OthersBadge />
                   {formatPercent(otherRate, {addSymbol: true})}
-                </LegendItem>
+                </Flex>
               )}
             </Legend>
             <Total>
@@ -159,7 +146,7 @@ export function SamplingBreakdown({
               &nbsp;
               {formatAbbreviatedNumber(total)}
             </Total>
-          </Footer>
+          </Flex>
         </Fragment>
       ) : (
         <EmptyStateText>{t('No spans found in the selected period.')}</EmptyStateText>
@@ -169,60 +156,48 @@ export function SamplingBreakdown({
 }
 
 const StyledPanel = styled(Panel)`
-  padding: ${space(1.5)} ${space(2)};
-  margin-bottom: ${space(1.5)};
+  padding: ${p => p.theme.space.lg} ${p => p.theme.space.xl};
+  margin-bottom: ${p => p.theme.space.lg};
 `;
 
 const Heading = styled('h6')`
-  margin-bottom: ${space(1.5)};
-  font-size: ${p => p.theme.fontSize.md};
-`;
-
-const Footer = styled('div')`
-  display: flex;
-  gap: ${space(2)};
-  align-items: flex-start;
+  margin-bottom: ${p => p.theme.space.lg};
+  font-size: ${p => p.theme.font.size.md};
 `;
 
 const Breakdown = styled('div')`
   display: flex;
-  height: ${space(2)};
+  height: ${p => p.theme.space.xl};
   width: 100%;
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
   overflow: hidden;
-  background: ${p => p.theme.backgroundTertiary};
+  background: ${p => p.theme.tokens.background.tertiary};
 `;
 
 const Legend = styled('div')`
   display: flex;
   flex-wrap: wrap;
-  margin-top: ${space(1.5)};
-  gap: ${space(1.5)};
-  font-size: ${p => p.theme.fontSize.md};
+  margin-top: ${p => p.theme.space.lg};
+  gap: ${p => p.theme.space.lg};
+  font-size: ${p => p.theme.font.size.md};
   flex: 1;
 `;
 
 const Total = styled('div')`
   display: flex;
   align-items: center;
-  margin-top: ${space(1.5)};
-  font-size: ${p => p.theme.fontSize.md};
+  margin-top: ${p => p.theme.space.lg};
+  font-size: ${p => p.theme.font.size.md};
   flex-shrink: 0;
 `;
 
-const LegendItem = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.75)};
-`;
-
 const SubText = styled('span')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   white-space: nowrap;
 `;
 
 const EmptyStateText = styled('div')`
   text-align: center;
-  padding: ${space(0.5)} 0 ${space(3)};
-  color: ${p => p.theme.subText};
+  padding: ${p => p.theme.space.xs} 0 ${p => p.theme.space['2xl']};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

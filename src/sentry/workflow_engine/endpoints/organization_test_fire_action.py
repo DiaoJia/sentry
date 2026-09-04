@@ -9,41 +9,71 @@ from rest_framework.status import HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import OrganizationEndpoint
 from sentry.api.serializers.rest_framework import CamelSnakeSerializer
 from sentry.apidocs.constants import RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
 from sentry.apidocs.parameters import GlobalParams
 from sentry.constants import ObjectStatus
+from sentry.issues.action_log import (
+    action_context_scope,
+    resolve_action_actor,
+    resolve_action_source,
+)
+from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.notifications.notification_action.grouptype import get_test_notification_event_data
+from sentry.notifications.types import TEST_NOTIFICATION_ID
+from sentry.plugins import HIDDEN_PLUGINS
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.types.ratelimit import RateLimit, RateLimitCategory
+from sentry.workflow_engine.endpoints.organization_workflow_index import (
+    OrganizationWorkflowPermission,
+)
 from sentry.workflow_engine.endpoints.utils.test_fire_action import test_fire_action
 from sentry.workflow_engine.endpoints.validators.base.action import BaseActionValidator
-from sentry.workflow_engine.models import Action, Detector
+from sentry.workflow_engine.models import Action
 from sentry.workflow_engine.types import WorkflowEventData
 
 logger = logging.getLogger(__name__)
 
 
-class TestActionsValidator(CamelSnakeSerializer):
+class TestActionsValidator(CamelSnakeSerializer[Any]):
     actions = serializers.ListField(required=True)
+    project_slug = serializers.CharField(required=False)
 
-    def validate_actions(self, value):
+    def validate_actions(self, value: Any) -> Any:
+        validated_actions = []
         for action in value:
-            BaseActionValidator(data=action).is_valid(raise_exception=True)
-        return value
+            action_validator = BaseActionValidator(data=action, context=self.context)
+            action_validator.is_valid(raise_exception=True)
+
+            action.update(action_validator.validated_data)
+            validated_actions.append(action)
+
+        return validated_actions
 
 
 class TestFireActionErrorsResponse(TypedDict):
     actions: list[str]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationTestFireActionsEndpoint(OrganizationEndpoint):
     publish_status = {
         "POST": ApiPublishStatus.EXPERIMENTAL,
     }
-    owner = ApiOwner.ECOSYSTEM
+    owner = ApiOwner.ALERTS_MONITORS
+    permission_classes = (OrganizationWorkflowPermission,)
+    enforce_rate_limit = True
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "POST": {
+                RateLimitCategory.USER: RateLimit(limit=10, window=60),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=50, window=60),
+            }
+        }
+    )
 
     @extend_schema(
         operation_id="Test Fire Actions",
@@ -57,13 +87,13 @@ class OrganizationTestFireActionsEndpoint(OrganizationEndpoint):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def post(self, request: Request, organization) -> Response:
+    def post(self, request: Request, organization: Organization) -> Response:
         """
         Test fires a list of actions without saving them to the database.
 
         The actions will be fired against a sample event in the first project of the organization.
         """
-        serializer = TestActionsValidator(data=request.data)
+        serializer = TestActionsValidator(data=request.data, context={"organization": organization})
 
         if not serializer.is_valid():
             return Response(serializer.errors, status=HTTP_400_BAD_REQUEST)
@@ -73,17 +103,17 @@ class OrganizationTestFireActionsEndpoint(OrganizationEndpoint):
         if not request.user.is_authenticated:
             return Response(status=HTTP_401_UNAUTHORIZED)
 
-        # Get the alphabetically first project associated with the organization
-        # This is because we don't have a project when test firing actions
-        project = (
-            Project.objects.filter(
-                organization=organization,
-                teams__organizationmember__user_id=request.user.id,
-                status=ObjectStatus.ACTIVE,
-            )
-            .order_by("name")
-            .first()
-        )
+        qs = Project.objects.filter(
+            organization=organization,
+            teams__organizationmember__user_id=request.user.id,
+            status=ObjectStatus.ACTIVE,
+        ).order_by("slug")
+
+        project_slug = data.get("project_slug")
+        if project_slug:
+            qs = qs.filter(slug=project_slug)
+
+        project = qs.first()
 
         if not project:
             return Response(
@@ -91,12 +121,15 @@ class OrganizationTestFireActionsEndpoint(OrganizationEndpoint):
                 status=HTTP_400_BAD_REQUEST,
             )
 
-        status, response_data = test_fire_actions(data.get("actions", []), project)
+        with action_context_scope(
+            source=resolve_action_source(request), actor=resolve_action_actor(request)
+        ):
+            status, response_data = test_fire_actions(data.get("actions", []), project)
 
         return Response(status=status, data=response_data)
 
 
-def test_fire_actions(actions: list[dict[str, Any]], project: Project):
+def test_fire_actions(actions: list[dict[str, Any]], project: Project) -> tuple[Any, Any]:
     action_exceptions = []
 
     test_event = get_test_notification_event_data(project)
@@ -104,34 +137,31 @@ def test_fire_actions(actions: list[dict[str, Any]], project: Project):
         # This can happen if the user is rate limited
         return HTTP_400_BAD_REQUEST, {"detail": "No test event was generated"}
 
-    workflow_id = -1
+    workflow_id = TEST_NOTIFICATION_ID
     workflow_event_data = WorkflowEventData(
         event=test_event,
-    )
-
-    detector = Detector(
-        id=-1,
-        project=project,
-        name="Test Detector",
-        enabled=True,
-        type="error",
+        group=test_event.group,
     )
 
     for action_data in actions:
+        target_identifier = action_data.get("config", {}).get("target_identifier")
+        if action_data.get("type") == Action.Type.WEBHOOK and target_identifier in HIDDEN_PLUGINS:
+            action_exceptions.append(
+                f"The {target_identifier} plugin has been deprecated and cannot send notifications."
+            )
+            continue
+
         # Create a temporary Action object (not saved to database)
         action = Action(
-            id=-1,
+            id=TEST_NOTIFICATION_ID,
             type=action_data["type"],
             integration_id=action_data.get("integration_id"),
             data=action_data.get("data", {}),
             config=action_data.get("config", {}),
         )
 
-        # Annotate the action with the workflow id
-        setattr(action, "workflow_id", workflow_id)
-
         # Test fire the action and collect any exceptions
-        exceptions = test_fire_action(action, workflow_event_data, detector)
+        exceptions = test_fire_action(action, workflow_event_data, workflow_id=workflow_id)
         if exceptions:
             action_exceptions.extend(exceptions)
 

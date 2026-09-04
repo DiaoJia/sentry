@@ -4,17 +4,18 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {TeamFixture} from 'sentry-fixture/team';
 
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import {makeCloseButton} from 'sentry/components/globalModal/components';
+import {makeCloseButton} from '@sentry/scraps/modal';
+
 import InviteMembersModal from 'sentry/components/modals/inviteMembersModal';
 import {ORG_ROLES} from 'sentry/constants';
-import TeamStore from 'sentry/stores/teamStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 import type {Scope} from 'sentry/types/core';
 import type {DetailedTeam} from 'sentry/types/organization';
 
-describe('InviteMembersModal', function () {
+describe('InviteMembersModal', () => {
   const styledWrapper = styled<any>((c: {children: React.ReactNode}) => c.children);
 
   type MockApiResponseFn = (
@@ -101,7 +102,7 @@ describe('InviteMembersModal', function () {
     await selectEvent.select(roleInputs, 'Admin');
   };
 
-  it('renders', async function () {
+  it('renders', async () => {
     setupView();
     await waitFor(() => {
       expect(screen.getByRole('button', {name: 'Send invite'})).toBeInTheDocument();
@@ -114,7 +115,7 @@ describe('InviteMembersModal', function () {
     expect(screen.getByRole('menuitemradio', {name: 'Member'})).toBeChecked();
   });
 
-  it('renders for superuser', async function () {
+  it('renders for superuser', async () => {
     jest.mock('sentry/utils/isActiveSuperuser', () => ({
       isActiveSuperuser: jest.fn(),
     }));
@@ -136,13 +137,13 @@ describe('InviteMembersModal', function () {
     expect(screen.getByRole('menuitemradio', {name: 'Member'})).toBeChecked();
   });
 
-  it('renders without organization.access', async function () {
+  it('renders without organization.access', async () => {
     setupView({orgAccess: undefined});
 
     expect(await screen.findByRole('button', {name: 'Send invite'})).toBeInTheDocument();
   });
 
-  it('indicates the total invites on the invite button', async function () {
+  it('indicates the total invites on the invite button', async () => {
     setupView();
 
     expect(
@@ -156,7 +157,7 @@ describe('InviteMembersModal', function () {
     expect(screen.getByRole('button', {name: 'Send invites (2)'})).toBeInTheDocument();
   });
 
-  it('sends all successful invites without team defaults', async function () {
+  it('sends all successful invites without team defaults', async () => {
     const {mocks} = setupView({
       mockApiResponses: [defaultMockOrganizationRoles, defaultMockPostOrganizationMember],
     });
@@ -174,14 +175,14 @@ describe('InviteMembersModal', function () {
     expect(mockPostApi).toHaveBeenCalled();
 
     expect(mockPostApi).toHaveBeenCalledWith(
-      `/organizations/org-slug/members/`,
+      '/organizations/org-slug/members/',
       expect.objectContaining({
         data: {email: 'test1@test.com', role: 'admin', teams: []},
       })
     );
   });
 
-  it('sends all successful invites with team default', async function () {
+  it('sends all successful invites with team default', async () => {
     const {mocks} = setupView({
       mockApiResponses: [defaultMockOrganizationRoles, defaultMockPostOrganizationMember],
     });
@@ -194,14 +195,14 @@ describe('InviteMembersModal', function () {
     const mockPostApi = mocks[1];
     expect(mockPostApi).toHaveBeenCalled();
     expect(mockPostApi).toHaveBeenCalledWith(
-      `/organizations/org-slug/members/`,
+      '/organizations/org-slug/members/',
       expect.objectContaining({
         data: {email: 'test1@test.com', role: 'admin', teams: ['team-slug']},
       })
     );
   });
 
-  it('does not use defaults when there are multiple teams', async function () {
+  it('does not use defaults when there are multiple teams', async () => {
     const another_team = TeamFixture({id: '2', slug: 'team2'});
     setupView({orgTeams: [TeamFixture(), another_team]});
 
@@ -213,7 +214,7 @@ describe('InviteMembersModal', function () {
     expect(teamInputs[0]).toHaveValue('');
   });
 
-  it('marks failed invites', async function () {
+  it('marks failed invites', async () => {
     const failedCreateMemberMock = (
       client: typeof MockApiClient,
       orgSlug: string,
@@ -247,7 +248,7 @@ describe('InviteMembersModal', function () {
     ).toBeInTheDocument();
   });
 
-  it('can send initial email', async function () {
+  it('can send initial email', async () => {
     const initialEmail = 'test@gmail.com';
     const initialData = [{emails: new Set([initialEmail])}];
 
@@ -268,7 +269,7 @@ describe('InviteMembersModal', function () {
 
     const apiMock = mocks[1];
     expect(apiMock).toHaveBeenCalledWith(
-      `/organizations/org-slug/members/`,
+      '/organizations/org-slug/members/',
       expect.objectContaining({
         data: {email: initialEmail, role: 'member', teams: ['team-slug']},
       })
@@ -279,7 +280,7 @@ describe('InviteMembersModal', function () {
     ).toBeInTheDocument();
   });
 
-  it('can send initial email with role and team', async function () {
+  it('can send initial email with role and team', async () => {
     const initialEmail = 'test@gmail.com';
     const role = 'admin';
     const initialData = [
@@ -304,7 +305,7 @@ describe('InviteMembersModal', function () {
 
     const apiMock = mocks[1];
     expect(apiMock).toHaveBeenCalledWith(
-      `/organizations/org-slug/members/`,
+      '/organizations/org-slug/members/',
       expect.objectContaining({
         data: {email: initialEmail, role, teams: [TeamFixture().slug]},
       })
@@ -317,15 +318,15 @@ describe('InviteMembersModal', function () {
     expect(screen.queryByText(initialEmail)).not.toBeInTheDocument();
   });
 
-  describe('member invite request mode', function () {
-    it('has adjusted wording', async function () {
+  describe('member invite request mode', () => {
+    it('has adjusted wording', async () => {
       setupView({orgAccess: []});
       expect(
         await screen.findByRole('button', {name: 'Send invite request'})
       ).toBeInTheDocument();
     });
 
-    it('POSTS to the invite-request endpoint', async function () {
+    it('POSTS to the invite-request endpoint', async () => {
       const createInviteRequestMock = (
         client: typeof MockApiClient,
         orgSlug: string,

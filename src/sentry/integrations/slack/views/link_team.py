@@ -8,13 +8,15 @@ from django import forms
 from django.http import HttpRequest, HttpResponse
 from slack_sdk.errors import SlackApiError
 
+from sentry.api.utils import generate_locality_url
 from sentry.integrations.messaging.linkage import LinkTeamView
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.integration import RpcIntegration
 from sentry.integrations.slack.sdk_client import SlackSdkClient
 from sentry.integrations.slack.views.linkage import SlackLinkageView
 from sentry.models.team import Team
-from sentry.web.frontend.base import region_silo_view
+from sentry.silo.base import SiloMode
+from sentry.web.frontend.base import cell_silo_view
 from sentry.web.helpers import render_to_response
 
 from . import build_linking_url as base_build_linking_url
@@ -22,7 +24,22 @@ from . import build_linking_url as base_build_linking_url
 ALREADY_LINKED_TITLE = "Already linked"
 ALREADY_LINKED_MESSAGE = "The {slug} team has already been linked to a Slack channel."
 SUCCESS_LINKED_TITLE = "Team linked"
-SUCCESS_LINKED_MESSAGE = "The {slug} team will now receive issue alert{workflow_addon} notifications in the {channel_name} channel."
+SUCCESS_LINKED_MESSAGE = (
+    "The {team} team will now receive issue alert notifications in the {channel} channel."
+)
+
+
+def build_team_linked_message(*, team: Team, channel_id: str) -> str:
+    """Build the Slack success message after linking a team to a channel."""
+    team_url = team.organization.absolute_url(
+        f"/settings/{team.organization.slug}/teams/{team.slug}/"
+    )
+    return SUCCESS_LINKED_MESSAGE.format(
+        team=f"<{team_url}|{team.slug}>",
+        # Slack channel mentions render as clickable #channel-name.
+        channel=f"<#{channel_id}>",
+    )
+
 
 _logger = logging.getLogger(__name__)
 
@@ -41,6 +58,11 @@ def build_team_linking_url(
         channel_id=channel_id,
         channel_name=channel_name,
         response_url=response_url,
+        # TODO(cells): This is broken for a multi-cell locality as the router cannot identify
+        # the correct cell silo for routing. The endpoint should be moved to the control silo.
+        url_prefix=(
+            generate_locality_url() if SiloMode.get_current_mode() == SiloMode.CELL else None
+        ),
     )
 
 
@@ -56,7 +78,7 @@ class SelectTeamForm(forms.Form):
         team_field.widget.choices = team_field.choices
 
 
-@region_silo_view
+@cell_silo_view
 class SlackLinkTeamView(SlackLinkageView, LinkTeamView):
     """
     Django view for linking team to slack channel. Creates an entry on ExternalActor table.

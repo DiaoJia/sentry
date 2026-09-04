@@ -2,13 +2,12 @@ import {t} from 'sentry/locale';
 import type {IssueCategoryConfigMapping} from 'sentry/utils/issueTypeConfig/types';
 import {Tab} from 'sentry/views/issueDetails/types';
 
-const replayConfig: IssueCategoryConfigMapping = {
+export const replayConfig: IssueCategoryConfigMapping = {
   _categoryDefaults: {
     actions: {
       archiveUntilOccurrence: {enabled: true},
       delete: {
-        enabled: false,
-        disabledReason: t('Not yet supported for replay issues'),
+        enabled: true,
       },
       deleteAndDiscard: {
         enabled: false,
@@ -48,5 +47,3 @@ const replayConfig: IssueCategoryConfigMapping = {
     issueSummary: {enabled: false},
   },
 };
-
-export default replayConfig;

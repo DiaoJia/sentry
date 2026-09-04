@@ -1,35 +1,31 @@
 import {Fragment} from 'react';
-import styled from '@emotion/styled';
 
 import * as Layout from 'sentry/components/layouts/thirds';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import NoProjectMessage from 'sentry/components/noProjectMessage';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {TeamWithProjects} from 'sentry/types/project';
-import localStorage from 'sentry/utils/localStorage';
-import useRouteAnalyticsEventNames from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
-import useOrganization from 'sentry/utils/useOrganization';
+import {localStorageWrapper} from 'sentry/utils/localStorage';
+import {useRouteAnalyticsEventNames} from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useUserTeams} from 'sentry/utils/useUserTeams';
-import {usePrefersStackedNav} from 'sentry/views/nav/usePrefersStackedNav';
-import Header from 'sentry/views/organizationStats/header';
+import {StatsHeader as Header} from 'sentry/views/organizationStats/header';
 
-import TeamStatsControls from './controls';
-import DescriptionCard from './descriptionCard';
-import TeamIssuesAge from './teamIssuesAge';
-import TeamIssuesBreakdown from './teamIssuesBreakdown';
-import TeamResolutionTime from './teamResolutionTime';
+import {TeamStatsControls} from './controls';
+import {DescriptionCard} from './descriptionCard';
+import {TeamIssuesAge} from './teamIssuesAge';
+import {TeamIssuesBreakdown} from './teamIssuesBreakdown';
+import {TeamResolutionTime} from './teamResolutionTime';
 import {TeamUnresolvedIssues} from './teamUnresolvedIssues';
 import {dataDatetime} from './utils';
 
-type Props = RouteComponentProps;
-
-function TeamStatsIssues({location, router}: Props) {
+export default function TeamStatsIssues() {
   const organization = useOrganization();
+  const location = useLocation();
   const {teams, isLoading, isError} = useUserTeams();
-  const prefersStackedNav = usePrefersStackedNav();
 
   useRouteAnalyticsEventNames('team_insights.viewed', 'Team Insights: Viewed');
 
@@ -37,7 +33,7 @@ function TeamStatsIssues({location, router}: Props) {
   const localStorageKey = `teamInsightsSelectedTeamId:${organization.slug}`;
 
   let localTeamId: string | null | undefined =
-    query.team ?? localStorage.getItem(localStorageKey);
+    (query.team as string | undefined) ?? localStorageWrapper.getItem(localStorageKey);
   if (localTeamId && !teams.some(team => team.id === localTeamId)) {
     localTeamId = null;
   }
@@ -46,39 +42,33 @@ function TeamStatsIssues({location, router}: Props) {
     | TeamWithProjects
     | undefined;
   const projects = currentTeam?.projects ?? [];
-  const environment = query.environment;
+  const environment = query.environment as string | undefined;
 
   const {period, start, end, utc} = dataDatetime(query);
 
   if (teams.length === 0) {
-    return (
-      <NoProjectMessage organization={organization} superuserNeedsToBeProjectMember />
-    );
+    return <NoProjectMessage organization={organization} requireProjectMembership />;
   }
 
   if (isError) {
     return <LoadingError />;
   }
 
-  const BodyWrapper = prefersStackedNav ? NewLayoutBody : Body;
-
   return (
     <Fragment>
       <SentryDocumentTitle title={t('Team Issues')} orgSlug={organization.slug} />
       <Header organization={organization} activeTab="issues" />
 
-      <BodyWrapper>
+      <div>
         <TeamStatsControls
           showEnvironment
-          location={location}
-          router={router}
           currentTeam={currentTeam}
           currentEnvironment={environment}
         />
 
         {isLoading && <LoadingIndicator />}
         {!isLoading && (
-          <Layout.Main fullWidth>
+          <Layout.Main width="full">
             <DescriptionCard
               title={t('All Unresolved Issues')}
               description={t(
@@ -149,7 +139,7 @@ function TeamStatsIssues({location, router}: Props) {
             <DescriptionCard
               title={t('Time to Resolution')}
               description={t(
-                `The mean time it took for issues to be resolved by your team.`
+                'The mean time it took for issues to be resolved by your team.'
               )}
             >
               <TeamResolutionTime
@@ -163,17 +153,7 @@ function TeamStatsIssues({location, router}: Props) {
             </DescriptionCard>
           </Layout.Main>
         )}
-      </BodyWrapper>
+      </div>
     </Fragment>
   );
 }
-
-export default TeamStatsIssues;
-
-const Body = styled(Layout.Body)`
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    display: block;
-  }
-`;
-
-const NewLayoutBody = styled('div')``;

@@ -1,18 +1,22 @@
 import {MetricHistoryFixture} from 'getsentry-test/fixtures/metricHistory';
-import {PlanDetailsLookupFixture} from 'getsentry-test/fixtures/planDetailsLookup';
 import {
-  DynamicSamplingReservedBudgetFixture,
-  ReservedBudgetMetricHistoryFixture,
-  SeerReservedBudgetFixture,
-} from 'getsentry-test/fixtures/reservedBudget';
+  PlanDetailsLookupFixture,
+  type PlanIds,
+} from 'getsentry-test/fixtures/planDetailsLookup';
+import {SeerReservedBudgetFixture} from 'getsentry-test/fixtures/reservedBudget';
 
 import {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
 
 import {RESERVED_BUDGET_QUOTA} from 'getsentry/constants';
 import type {Plan, Subscription as TSubscription} from 'getsentry/types';
-import {BillingType} from 'getsentry/types';
-import {isTrialPlan} from 'getsentry/utils/billing';
+import {AddOnCategory, BillingType} from 'getsentry/types';
+
+const TRIAL_PLANS = ['am1_t', 'am2_t', 'am3_t', 'am1_t_ent', 'am2_t_ent', 'am3_t_ent'];
+
+// Derives whether a plan id is a trial plan, so the fixture can set the
+// trial-related fields the backend resolves from the subscription.
+const isTrialPlan = (plan: string) => TRIAL_PLANS.includes(plan);
 
 type Props = Partial<TSubscription> & {organization: Organization};
 
@@ -22,7 +26,7 @@ export function SubscriptionFixture(props: Props): TSubscription {
 
   // Use planDetails from params if provided, otherwise look it up
   const planDetails = (planData.planDetails ||
-    PlanDetailsLookupFixture(planData.plan)) as Plan;
+    PlanDetailsLookupFixture(planData.plan as PlanIds)) as Plan;
 
   const hasPerformance = planDetails?.categories?.includes(DataCategory.TRANSACTIONS);
   const hasReplays = planDetails?.categories?.includes(DataCategory.REPLAYS);
@@ -37,15 +41,21 @@ export function SubscriptionFixture(props: Props): TSubscription {
     DataCategory.PROFILE_DURATION_UI
   );
   const hasAttachments = planDetails?.categories?.includes(DataCategory.ATTACHMENTS);
-  const hasSeer = !!planDetails?.availableReservedBudgetTypes?.seer;
+  const hasLogBytes = planDetails?.categories?.includes(DataCategory.LOG_BYTE);
+  const hasSizeAnalyses = planDetails?.categories?.includes(DataCategory.SIZE_ANALYSIS);
+  const hasInstallableBuilds = planDetails?.categories?.includes(
+    DataCategory.INSTALLABLE_BUILD
+  );
+  const hasLegacySeer = AddOnCategory.LEGACY_SEER in planDetails.addOnCategories;
+  const hasSeer = AddOnCategory.SEER in planDetails.addOnCategories;
 
   // Create a safe default for planCategories if it doesn't exist
   const safeCategories = planDetails?.planCategories || {};
-  const defaultErrorEvents = safeCategories.errors?.[0]?.events || 5000;
 
   const isTrial = isTrialPlan(planDetails.id);
+  const isEnterpriseTrial = isTrial && planDetails.isEnterprise;
   const reservedBudgets = [];
-  if (hasSeer) {
+  if (hasLegacySeer) {
     if (isTrial) {
       reservedBudgets.push(SeerReservedBudgetFixture({reservedBudget: 150_00}));
     } else {
@@ -53,44 +63,43 @@ export function SubscriptionFixture(props: Props): TSubscription {
     }
   }
 
+  const addOns: TSubscription['addOns'] = {};
+  Object.values(planDetails.addOnCategories).forEach(addOnCategory => {
+    addOns[addOnCategory.apiName] = {
+      ...addOnCategory,
+      enabled: isTrial,
+      isAvailable: addOnCategory.apiName in planDetails.addOnCategories,
+    };
+  });
+
   return {
     customPrice: null,
-    customPriceAttachments: null,
-    customPriceErrors: null,
     customPricePcss: null,
-    customPriceTransactions: null,
-    hasDismissedForcedTrialNotice: false,
     hasDismissedTrialEndingNotice: false,
-    hasOverageNotificationsDisabled: false,
-    hasRestrictedIntegration: false,
+    hasMigratedToBillingPlatform: false,
     hadCustomDynamicSampling: false,
     id: '',
-    isBundleEligible: false,
-    isEnterpriseTrial: false,
-    isExemptFromForcedTrial: false,
-    isForcedTrial: false,
+    isEnterpriseTrial,
     isOverMemberLimit: false,
     isPartner: false,
     isSelfServePartner: false,
-    isPerformancePlanTrial: false,
     lastTrialEnd: null,
     spendAllocationEnabled: false,
     status: 'active',
     totalProjects: 0,
-    trialPlan: null,
-    trialTier: null,
+    trialPlan: isTrial ? planDetails.id : null,
     onDemandPeriodStart: '2018-09-25',
-    gracePeriodStart: null,
     trialEnd: null,
     countryCode: null,
     cancelAtPeriodEnd: false,
-    isTrial,
+    onTrialPlan: isTrial,
     paymentSource: {
       last4: '4242',
       countryCode: 'US',
       zipCode: '94242',
       expMonth: 12,
       expYear: 2077,
+      brand: 'Visa',
     },
     billingPeriodEnd: '2018-10-24',
     onDemandSpendUsed: 0,
@@ -98,12 +107,9 @@ export function SubscriptionFixture(props: Props): TSubscription {
     partner: null,
     planDetails,
     totalMembers: 1,
-    contractInterval: 'monthly',
-    canGracePeriod: true,
     totalLicenses: 1,
     billingPeriodStart: '2018-09-25',
     suspensionReason: null,
-    planTier: 'am1',
     accountBalance: -10000,
     companyName: null,
     isSuspended: false,
@@ -118,40 +124,22 @@ export function SubscriptionFixture(props: Props): TSubscription {
     usedLicenses: 1,
     membersDeactivatedFromLimit: 0,
     type: BillingType.CREDIT_CARD,
-    reservedEvents: defaultErrorEvents,
-    hasSoftCap: false,
     isPastDue: false,
     onDemandDisabled: false,
     onDemandInvoiced: false,
-    gracePeriodEnd: null,
-    contractPeriodStart: '2018-09-25',
-    prepaidEventsAllowed: 5000,
     onDemandMaxSpend: 0,
     productTrials: [],
     isManaged: false,
-    contractPeriodEnd: '2018-10-24',
     canTrial: true,
     slug: organization.slug,
     pendingChanges: null,
-    usageExceeded: false,
-    isHeroku: false,
     name: organization.name,
     billingInterval: planDetails.billingInterval || 'monthly',
-    contactInfo: null,
     dateJoined: '2018-09-10T23:58:10.167Z',
-    vatStatus: null,
-    isGracePeriod: false,
     onDemandPeriodEnd: '2018-10-24',
-    vatID: null,
-    reservedErrors: 5_000,
-    reservedTransactions: 10_000,
-    reservedAttachments: 1,
     msaUpdatedForDataConsent: false,
-    dataRetention: null,
-    hasReservedBudgets: false, // false because we don't have a PAID reserved budget
-    reservedBudgetCategories: hasSeer
-      ? [DataCategory.SEER_AUTOFIX, DataCategory.SEER_SCANNER]
-      : [],
+    orgRetention: {standard: null, downsampled: null},
+    addOns,
     reservedBudgets,
     categories: {
       errors: MetricHistoryFixture({
@@ -216,6 +204,14 @@ export function SubscriptionFixture(props: Props): TSubscription {
           order: 9,
         }),
       }),
+      ...(hasLogBytes && {
+        logBytes: MetricHistoryFixture({
+          category: DataCategory.LOG_BYTE,
+          reserved: safeCategories.logBytes?.[0]?.events || 0,
+          prepaid: safeCategories.logBytes?.[0]?.events || 0,
+          order: 12,
+        }),
+      }),
       ...(hasProfileDuration && {
         profileDuration: MetricHistoryFixture({
           category: DataCategory.PROFILE_DURATION,
@@ -232,7 +228,23 @@ export function SubscriptionFixture(props: Props): TSubscription {
           order: 11,
         }),
       }),
-      ...(hasSeer && {
+      ...(hasSizeAnalyses && {
+        sizeAnalyses: MetricHistoryFixture({
+          category: DataCategory.SIZE_ANALYSIS,
+          reserved: safeCategories.sizeAnalyses?.[0]?.events || 100,
+          prepaid: safeCategories.sizeAnalyses?.[0]?.events || 100,
+          order: 17,
+        }),
+      }),
+      ...(hasInstallableBuilds && {
+        installableBuilds: MetricHistoryFixture({
+          category: DataCategory.INSTALLABLE_BUILD,
+          reserved: safeCategories.installableBuilds?.[0]?.events || 0,
+          prepaid: safeCategories.installableBuilds?.[0]?.events || 0,
+          order: 18,
+        }),
+      }),
+      ...(hasLegacySeer && {
         seerAutofix: MetricHistoryFixture({
           category: DataCategory.SEER_AUTOFIX,
           reserved: 0,
@@ -246,7 +258,16 @@ export function SubscriptionFixture(props: Props): TSubscription {
           order: 15,
         }),
       }),
+      ...(hasSeer && {
+        seerUsers: MetricHistoryFixture({
+          category: DataCategory.SEER_USER,
+          reserved: 0,
+          prepaid: 0,
+          order: 16,
+        }),
+      }),
     },
+    effectiveRetentions: {},
     ...planData,
   };
 }
@@ -254,8 +275,12 @@ export function SubscriptionFixture(props: Props): TSubscription {
 /**
  * Returns a subscription with self-serve paid Seer reserved budget.
  */
-export function SubscriptionWithSeerFixture(props: Props): TSubscription {
+export function SubscriptionWithLegacySeerFixture(props: Props): TSubscription {
   const subscription = SubscriptionFixture(props);
+  if (!subscription.planDetails.addOnCategories[AddOnCategory.LEGACY_SEER]) {
+    return subscription;
+  }
+
   subscription.categories = {
     ...subscription.categories,
     seerAutofix: MetricHistoryFixture({
@@ -271,70 +296,40 @@ export function SubscriptionWithSeerFixture(props: Props): TSubscription {
       order: 28,
     }),
   };
-  subscription.reservedBudgetCategories = [
-    DataCategory.SEER_AUTOFIX,
-    DataCategory.SEER_SCANNER,
-  ];
+  if (subscription.categories.seerUsers) {
+    delete subscription.categories.seerUsers;
+  }
   subscription.reservedBudgets = [SeerReservedBudgetFixture({})];
-  subscription.hasReservedBudgets = true;
+  subscription.addOns = {
+    ...subscription.addOns,
+    [AddOnCategory.LEGACY_SEER]: {
+      ...(subscription.addOns?.[AddOnCategory.LEGACY_SEER] ??
+        subscription.planDetails.addOnCategories[AddOnCategory.LEGACY_SEER]),
+      enabled: true,
+      isAvailable: true,
+    },
+  };
+  if (subscription.addOns?.[AddOnCategory.SEER]) {
+    subscription.addOns[AddOnCategory.SEER].enabled = false;
+    subscription.addOns[AddOnCategory.SEER].isAvailable = false;
+    delete subscription.categories.seerUsers;
+  }
   return subscription;
 }
 
 export function InvoicedSubscriptionFixture(props: Props): TSubscription {
-  const planData = {plan: 'am2_business_ent_auf', planTier: 'am2', ...props};
-  const planDetails = PlanDetailsLookupFixture(planData.plan);
+  const planData = {plan: 'am2_business_ent_auf', ...props};
+  const planDetails = PlanDetailsLookupFixture(planData.plan as PlanIds);
   const subscription = SubscriptionFixture({
     ...props,
     planDetails,
     plan: planDetails?.id,
-    planTier: planData.planTier,
     canSelfServe: false,
     type: BillingType.INVOICED,
     channel: 'sales',
     accountBalance: 0,
     isFree: false,
   });
-
-  return subscription;
-}
-
-export function Am3DsEnterpriseSubscriptionFixture(props: Props): TSubscription {
-  const {organization: _organization, ...params} = props;
-  const planData = {plan: 'am3_business_ent_ds_auf', ...params};
-
-  const subscription = InvoicedSubscriptionFixture({
-    ...props,
-    plan: planData.plan,
-    planTier: planData.planTier,
-  });
-  subscription.hasReservedBudgets = true;
-  subscription.reservedBudgetCategories = [
-    ...(subscription.reservedBudgetCategories || []),
-    DataCategory.SPANS,
-    DataCategory.SPANS_INDEXED,
-  ];
-  subscription.reservedBudgets = [
-    ...(subscription.reservedBudgets || []),
-    DynamicSamplingReservedBudgetFixture({
-      id: '11',
-      reservedBudget: 100_000_00,
-      totalReservedSpend: 60_000_00,
-      freeBudget: 0,
-      percentUsed: 0.6,
-      categories: {
-        spans: ReservedBudgetMetricHistoryFixture({
-          reservedCpe: 1,
-          reservedSpend: 40_000_00,
-        }),
-        spansIndexed: ReservedBudgetMetricHistoryFixture({
-          reservedCpe: 2,
-          reservedSpend: 20_000_00,
-        }),
-      },
-    }),
-  ];
-  subscription.categories.spans!.reserved = RESERVED_BUDGET_QUOTA;
-  subscription.categories.spansIndexed!.reserved = RESERVED_BUDGET_QUOTA;
 
   return subscription;
 }

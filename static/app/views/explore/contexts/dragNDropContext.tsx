@@ -13,26 +13,26 @@ import {
 } from '@dnd-kit/sortable';
 
 import {
-  type Column,
   useDragNDropColumns,
+  type Column,
 } from 'sentry/views/explore/hooks/useDragNDropColumns';
 
 interface DragNDropContextProps<T> {
   children: (props: {
     deleteColumnAtIndex: (i: number) => void;
     editableColumns: Array<Column<T>>;
-    insertColumn: (column?: T) => void;
+    insertColumn: (column: T) => void;
     updateColumnAtIndex: (i: number, column: T) => void;
   }) => React.ReactNode;
   columns: T[];
-  defaultColumn: () => T;
   setColumns: (columns: T[], op: 'insert' | 'update' | 'delete' | 'reorder') => void;
+  canReorder?: (oldIndex: number, newIndex: number) => boolean;
 }
 
 export function DragNDropContext<T>({
   columns,
-  defaultColumn,
   setColumns,
+  canReorder,
   children,
 }: DragNDropContextProps<T>) {
   const {
@@ -43,8 +43,8 @@ export function DragNDropContext<T>({
     onDragEnd,
   } = useDragNDropColumns({
     columns,
-    defaultColumn,
     setColumns,
+    canReorder,
   });
 
   const sensors = useSensors(

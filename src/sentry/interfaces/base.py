@@ -67,7 +67,7 @@ class Interface:
     ephemeral = False
     grouping_variants = ["default"]
 
-    def __init__(self, **data):
+    def __init__(self, data: dict[str, Any] | None = None):
         self._data = data or {}
 
     @classproperty
@@ -79,6 +79,7 @@ class Interface:
     def external_type(cls):
         """The external name of the interface.  This is mostly the same as
         path with some small differences (message, debugmeta).
+        Also used as the display name for grouping strategy hints.
         """
         return cls.path
 
@@ -98,7 +99,7 @@ class Interface:
     def __getattr__(self, name):
         return self._data[name]
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name, value) -> None:
         if name == "_data":
             self.__dict__["_data"] = value
         else:
@@ -115,7 +116,7 @@ class Interface:
         if data is None:
             return None
 
-        return cls(**data)
+        return cls(data)
 
     def get_raw_data(self):
         """Returns the underlying raw data."""

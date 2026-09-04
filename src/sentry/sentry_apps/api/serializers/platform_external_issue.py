@@ -5,6 +5,7 @@ from django.contrib.auth.models import AnonymousUser
 
 from sentry.api.serializers import Serializer, register
 from sentry.sentry_apps.models.platformexternalissue import PlatformExternalIssue
+from sentry.sentry_apps.services.cell.model import RpcPlatformExternalIssue
 from sentry.users.models.user import User
 from sentry.users.services.user.model import RpcUser
 
@@ -18,10 +19,10 @@ class PlatformExternalIssueSerializerResponse(TypedDict):
 
 
 @register(PlatformExternalIssue)
-class PlatformExternalIssueSerializer(Serializer):
+class PlatformExternalIssueSerializer(Serializer[PlatformExternalIssueSerializerResponse]):
     def serialize(
         self,
-        obj: PlatformExternalIssue,
+        obj: PlatformExternalIssue | RpcPlatformExternalIssue,
         attrs: Mapping[str, Any],
         user: User | AnonymousUser | RpcUser,
         **kwargs: Any,

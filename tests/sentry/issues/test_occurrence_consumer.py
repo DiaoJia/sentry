@@ -12,9 +12,7 @@ import pytest
 from django.core.cache import cache
 from jsonschema import ValidationError
 
-from sentry import eventstore, options
-from sentry.eventstore.models import Event
-from sentry.eventstore.snuba.backend import SnubaEventStorage
+from sentry import options
 from sentry.issues.grouptype import PerformanceSlowDBQueryGroupType, ProfileFileIOGroupType
 from sentry.issues.issue_occurrence import IssueOccurrence
 from sentry.issues.occurrence_consumer import (
@@ -30,8 +28,11 @@ from sentry.models.group import Group, GroupStatus
 from sentry.models.groupassignee import GroupAssignee
 from sentry.ratelimits.sliding_windows import Quota
 from sentry.receivers import create_default_projects
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event
+from sentry.services.eventstore.snuba.backend import SnubaEventStorage
 from sentry.testutils.cases import SnubaTestCase, TestCase
-from sentry.testutils.helpers.datetime import before_now
+from sentry.testutils.helpers.datetime import before_now, freeze_time
 from sentry.testutils.helpers.features import with_feature
 from sentry.testutils.pytest.fixtures import django_db_all
 from sentry.types.group import PriorityLevel
@@ -149,7 +150,9 @@ class IssueOccurrenceProcessMessageTest(IssueOccurrenceTestBase):
 
     def test_invalid_occurrence_payload(self) -> None:
         message = get_test_message(self.project.id, type=300)
-        with (mock.patch("sentry.issues.occurrence_consumer.metrics") as metrics,):
+        with (
+            mock.patch("sentry.issues.occurrence_consumer.metrics") as metrics,
+        ):
             with self.feature("organizations:profile-file-io-main-thread-ingest"):
                 _process_message(message)
             metrics.incr.assert_called_once_with(
@@ -527,7 +530,7 @@ class ParseEventPayloadTest(IssueOccurrenceTestBase):
         assert kwargs["occurrence_data"]["level"] == kwargs["event_data"]["level"]
 
     def test_debug_meta(self) -> None:
-        debug_meta_cases = [
+        debug_meta_cases: list[dict[str, Any]] = [
             {"debug_meta": {}},
             {"debug_meta": None},
             {"debug_meta": {"images": []}},
@@ -599,6 +602,20 @@ class ParseEventPayloadTest(IssueOccurrenceTestBase):
         message["assignee"] = ""
         kwargs = _get_kwargs(message)
         assert kwargs["occurrence_data"]["assignee"] is None
+
+    def test_handles_missing_received(self) -> None:
+        message = deepcopy(get_test_message(self.project.id))
+        message["event"].pop("received", None)
+        self.run_test(message)
+
+    @freeze_time("2024-07-11 00:00:00")
+    def test_missing_received_fills_with_current_time(self) -> None:
+        message = deepcopy(get_test_message(self.project.id))
+        message["event"].pop("received", None)
+
+        kwargs = _get_kwargs(message)
+
+        assert kwargs["event_data"]["received"] == "2024-07-11T00:00:00+00:00"
 
     @mock.patch("sentry.issues.occurrence_consumer._process_message")
     def test_validate_cache(self, mock_process_message: mock.MagicMock) -> None:

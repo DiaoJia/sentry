@@ -27,8 +27,6 @@ class Topic(Enum):
     TRANSACTIONS_SUBSCRIPTIONS_RESULTS = "transactions-subscription-results"
     GENERIC_METRICS_SUBSCRIPTIONS_RESULTS = "generic-metrics-subscription-results"
     METRICS_SUBSCRIPTIONS_RESULTS = "metrics-subscription-results"
-    EAP_SPANS_SUBSCRIPTIONS_RESULTS = "eap-spans-subscription-results"
-    EAP_ITEMS_SUBSCRIPTIONS_RESULTS = "subscription-results-eap-items"
     INGEST_EVENTS = "ingest-events"
     INGEST_EVENTS_DLQ = "ingest-events-dlq"
     INGEST_EVENTS_BACKLOG = "ingest-events-backlog"
@@ -59,55 +57,22 @@ class Topic(Enum):
     MONITORS_CLOCK_TASKS = "monitors-clock-tasks"
     MONITORS_INCIDENT_OCCURRENCES = "monitors-incident-occurrences"
     UPTIME_RESULTS = "uptime-results"
-    SNUBA_UPTIME_RESULTS = "snuba-uptime-results"
     EVENTSTREAM_GENERIC = "generic-events"
     GENERIC_EVENTS_COMMIT_LOG = "snuba-generic-events-commit-log"
     GROUP_ATTRIBUTES = "group-attributes"
     SHARED_RESOURCES_USAGE = "shared-resources-usage"
-    SNUBA_SPANS = "snuba-spans"
-    SNUBA_OURLOGS = "snuba-ourlogs"
     SNUBA_ITEMS = "snuba-items"
+    EAP_ITEMS_SUBSCRIPTIONS_RESULTS = "subscription-results-eap-items"
+    # Nothing produces to or consumes this topic anymore -- segments go straight
+    # to process_segment_task. It stays registered because the schema still
+    # describes the payload the flusher hands to that task, and because
+    # getsentry asserts a cluster mapping exists for it.
     BUFFERED_SEGMENTS = "buffered-segments"
-    BUFFERED_SEGMENTS_DLQ = "buffered-segments-dlq"
-
-    # Taskworker topics
     TASKWORKER = "taskworker"
-    TASKWORKER_DLQ = "taskworker-dlq"
-    TASKWORKER_BILLING = "taskworker-billing"
-    TASKWORKER_BILLING_DLQ = "taskworker-billing-dlq"
     TASKWORKER_CONTROL = "taskworker-control"
-    TASKWORKER_CONTROL_DLQ = "taskworker-control-dlq"
-    TASKWORKER_CUTOVER = "taskworker-cutover"
-    TASKWORKER_EMAIL = "taskworker-email"
-    TASKWORKER_EMAIL_DLQ = "taskworker-email-dlq"
-    TASKWORKER_INGEST = "taskworker-ingest"
-    TASKWORKER_INGEST_DLQ = "taskworker-ingest-dlq"
-    TASKWORKER_INGEST_ERRORS = "taskworker-ingest-errors"
-    TASKWORKER_INGEST_ERRORS_DLQ = "taskworker-ingest-errors-dlq"
-    TASKWORKER_INGEST_TRANSACTIONS = "taskworker-ingest-transactions"
-    TASKWORKER_INGEST_TRANSACTIONS_DLQ = "taskworker-ingest-transactions-dlq"
-    TASKWORKER_INGEST_ATTACHMENTS = "taskworker-ingest-attachments"
-    TASKWORKER_INGEST_ATTACHMENTS_DLQ = "taskworker-ingest-attachments-dlq"
-    TASKWORKER_INGEST_PROFILING = "taskworker-ingest-profiling"
-    TASKWORKER_INGEST_PROFILING_DLQ = "taskworker-ingest-profiling-dlq"
-    TASKWORKER_INTERNAL = "taskworker-internal"
-    TASKWORKER_INTERNAL_DLQ = "taskworker-internal-dlq"
-    TASKWORKER_LIMITED = "taskworker-limited"
-    TASKWORKER_LIMITED_DLQ = "taskworker-limited-dlq"
-    TASKWORKER_LONG = "taskworker-long"
-    TASKWORKER_LONG_DLQ = "taskworker-long-dlq"
-    TASKWORKER_PRODUCTS = "taskworker-products"
-    TASKWORKER_PRODUCTS_DLQ = "taskworker-products-dlq"
-    TASKWORKER_SENTRYAPP = "taskworker-sentryapp"
-    TASKWORKER_SENTRYAPP_DLQ = "taskworker-sentryapp-dlq"
-    TASKWORKER_SYMBOLICATION = "taskworker-symbolication"
-    TASKWORKER_SYMBOLICATION_DLQ = "taskworker-symbolication-dlq"
-    TASKWORKER_USAGE = "taskworker-usage"
-    TASKWORKER_USAGE_DLQ = "taskworker-usage-dlq"
 
 
 class ConsumerDefinition(TypedDict, total=False):
-
     # Default topic
     topic: Required[Topic]
 
@@ -122,6 +87,10 @@ class ConsumerDefinition(TypedDict, total=False):
 
     # Hardcoded additional kwargs for strategy_factory
     static_args: Mapping[str, Any]
+
+    # Pass optional kwargs to the strategy factory
+    pass_consumer_group: bool
+    pass_kafka_slice_id: bool
 
     require_synchronization: bool
     synchronize_commit_group_default: str

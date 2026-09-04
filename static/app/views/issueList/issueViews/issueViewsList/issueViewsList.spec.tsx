@@ -11,14 +11,13 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import ConfigStore from 'sentry/stores/configStore';
 import IssueViewsList from 'sentry/views/issueList/issueViews/issueViewsList/issueViewsList';
 
 const organization = OrganizationFixture({
-  features: ['enforce-stacked-navigation', 'issue-views'],
+  features: ['issue-views'],
 });
 
-describe('IssueViewsList', function () {
+describe('IssueViewsList', () => {
   beforeEach(() => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/',
@@ -62,27 +61,15 @@ describe('IssueViewsList', function () {
         }),
       ],
     });
-
-    MockApiClient.addMockResponse({
-      url: '/organizations/org-slug/prompts-activity/',
-    });
-
-    ConfigStore.set('user', {
-      ...ConfigStore.get('user'),
-      options: {
-        ...ConfigStore.get('user').options,
-        prefersStackedNavigation: true,
-      },
-    });
   });
 
-  it('displays views from myself and others', async function () {
+  it('displays views from myself and others', async () => {
     render(<IssueViewsList />, {organization});
 
     expect(await screen.findByText('Foo')).toBeInTheDocument();
     expect(screen.getByText('Foo')).toHaveAttribute(
       'href',
-      `/organizations/org-slug/issues/views/1/`
+      '/organizations/org-slug/issues/views/1/'
     );
     expect(screen.getByText(textWithMarkupMatcher('foo is bar'))).toBeInTheDocument();
     expect(screen.getByText('env1')).toBeInTheDocument();
@@ -91,7 +78,7 @@ describe('IssueViewsList', function () {
     expect(await screen.findByText('Bar')).toBeInTheDocument();
     expect(screen.getByText('Bar')).toHaveAttribute(
       'href',
-      `/organizations/org-slug/issues/views/2/`
+      '/organizations/org-slug/issues/views/2/'
     );
     expect(screen.getByText(textWithMarkupMatcher('bar is baz'))).toBeInTheDocument();
     expect(screen.getByText('My Projects')).toBeInTheDocument();
@@ -99,7 +86,7 @@ describe('IssueViewsList', function () {
     expect(screen.getByText('7')).toBeInTheDocument();
   });
 
-  it('can sort views', async function () {
+  it('can sort views', async () => {
     const mockViewsEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/',
       match: [MockApiClient.matchQuery({createdBy: 'me'})],
@@ -121,7 +108,7 @@ describe('IssueViewsList', function () {
       ],
     });
 
-    render(<IssueViewsList />, {organization, deprecatedRouterMocks: false});
+    render(<IssueViewsList />, {organization});
 
     // By default, sorts by popularity (desc) then visited (desc) then created (desc)
     await waitFor(() => {
@@ -149,7 +136,7 @@ describe('IssueViewsList', function () {
     );
   });
 
-  it('can unstar views', async function () {
+  it('can unstar views', async () => {
     const mockStarredEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/1/starred/',
       method: 'POST',
@@ -179,7 +166,7 @@ describe('IssueViewsList', function () {
     });
   });
 
-  it('can star views', async function () {
+  it('can star views', async () => {
     const mockStarredEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/2/starred/',
       method: 'POST',
@@ -209,7 +196,7 @@ describe('IssueViewsList', function () {
     });
   });
 
-  it('handles errors when starring views', async function () {
+  it('handles errors when starring views', async () => {
     const mockStarredEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/2/starred/',
       method: 'POST',
@@ -236,7 +223,7 @@ describe('IssueViewsList', function () {
     ).toBeInTheDocument();
   });
 
-  it('can delete views', async function () {
+  it('can delete views', async () => {
     const mockDeleteEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/1/',
       method: 'DELETE',
@@ -276,7 +263,7 @@ describe('IssueViewsList', function () {
     expect(mockDeleteEndpoint).toHaveBeenCalled();
   });
 
-  it('can rename views', async function () {
+  it('can rename views', async () => {
     const mockRenameEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/1/',
       method: 'PUT',
@@ -312,7 +299,7 @@ describe('IssueViewsList', function () {
     );
   });
 
-  it('can duplicate views', async function () {
+  it('can duplicate views', async () => {
     const mockCreateEndpoint = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/group-search-views/',
       method: 'POST',

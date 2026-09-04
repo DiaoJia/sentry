@@ -5,37 +5,59 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import ProjectAlertRulePermission, ProjectEndpoint
+from sentry.api.helpers.deprecation import deprecated
 from sentry.api.serializers.rest_framework import DummyRuleSerializer
-from sentry.eventstore.models import GroupEvent
-from sentry.grouping.grouptype import ErrorGroupType
+from sentry.constants import ALERTS_API_DEPRECATION_DATE, ALERTS_API_DEPRECATION_KEY
+from sentry.issues.action_log import (
+    action_context_scope,
+    resolve_action_actor,
+    resolve_action_source,
+)
 from sentry.models.rule import Rule
-from sentry.rules.processing.processor import activate_downstream_actions
-from sentry.shared_integrations.exceptions import IntegrationFormError
+from sentry.notifications.types import TEST_NOTIFICATION_ID
+from sentry.plugins import HIDDEN_PLUGINS
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.services.eventstore.models import GroupEvent
+from sentry.shared_integrations.exceptions import (
+    IntegrationConfigurationError,
+    IntegrationFormError,
+)
+from sentry.types.ratelimit import RateLimit, RateLimitCategory
 from sentry.utils.samples import create_sample_event
 from sentry.workflow_engine.endpoints.utils.test_fire_action import test_fire_action
 from sentry.workflow_engine.migration_helpers.rule_action import (
     translate_rule_data_actions_to_notification_actions,
 )
-from sentry.workflow_engine.models import Detector, Workflow
+from sentry.workflow_engine.models import Action, Workflow
 from sentry.workflow_engine.types import WorkflowEventData
 
 logger = logging.getLogger(__name__)
 
+REPORTABLE_ERROR_TYPES = (IntegrationFormError, IntegrationConfigurationError)
 
-@region_silo_endpoint
+
+@cell_silo_endpoint
 class ProjectRuleActionsEndpoint(ProjectEndpoint):
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
     }
     owner = ApiOwner.ISSUES
-
     permission_classes = (ProjectAlertRulePermission,)
+    enforce_rate_limit = True
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "POST": {
+                RateLimitCategory.USER: RateLimit(limit=10, window=60),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=50, window=60),
+            }
+        }
+    )
 
+    @deprecated(ALERTS_API_DEPRECATION_DATE, key=ALERTS_API_DEPRECATION_KEY)
     def post(self, request: Request, project) -> Response:
         """
         Creates a dummy event/group and activates the actions given by request body
@@ -69,67 +91,22 @@ class ProjectRuleActionsEndpoint(ProjectEndpoint):
                 "frequency": 30,
             }
         )
-        rule = Rule(id=-1, project=project, data=data, label=data.get("name"))
+        rule = Rule(id=TEST_NOTIFICATION_ID, project=project, data=data, label=data.get("name"))
 
+        # Cast to GroupEvent rather than Event to match expected types
         test_event = create_sample_event(
             project, platform=project.platform, default="javascript", tagged=True
         )
 
-        if features.has("organizations:workflow-engine-test-notifications", project.organization):
-            return self.execute_future_on_test_event_workflow_engine(test_event, rule)
+        group_event = GroupEvent.from_event(
+            event=test_event,
+            group=test_event.group,
+        )
 
-        return self.execute_future_on_test_event(test_event, rule)
-
-    def execute_future_on_test_event(
-        self,
-        test_event: GroupEvent,
-        rule: Rule,
-    ) -> Response:
-        """
-        A slightly modified version of utils.safe.safe_execute that handles
-        IntegrationFormErrors, and returns a body with `{ actions: [<error info>] }`.
-
-        This is used in our Alert Rule UI to display errors to the user.
-        """
-        action_exceptions = []
-        for callback, futures in activate_downstream_actions(rule, test_event).values():
-            try:
-                callback(test_event, futures)
-            except Exception as exc:
-                callback_name = getattr(callback, "__name__", str(callback))
-                cls_name = callback.__class__.__name__
-                logger = logging.getLogger(f"sentry.test_rule.{cls_name.lower()}")
-
-                # safe_execute logs these as exceptions, which can result in
-                # noisy sentry issues, so log with a warning instead.
-                if isinstance(exc, IntegrationFormError):
-                    logger.warning(
-                        "%s.test_alert.integration_error", callback_name, extra={"exc": exc}
-                    )
-
-                    # IntegrationFormErrors should be safe to propagate via the API
-                    action_exceptions.append(str(exc))
-                else:
-                    # If we encounter some unexpected exception, we probably
-                    # don't want to continue executing more callbacks.
-                    logger.warning(
-                        "%s.test_alert.unexpected_exception", callback_name, exc_info=True
-                    )
-                    error_id = sentry_sdk.capture_exception(exc)
-                    action_exceptions.append(
-                        f"An unexpected error occurred. Error ID: '{error_id}'"
-                    )
-
-                break
-
-        status = None
-        data = None
-        # Presence of "actions" here means we have exceptions to surface to the user
-        if len(action_exceptions) > 0:
-            status = 400
-            data = {"actions": action_exceptions}
-
-        return Response(status=status, data=data)
+        with action_context_scope(
+            source=resolve_action_source(request), actor=resolve_action_actor(request)
+        ):
+            return self.execute_future_on_test_event_workflow_engine(group_event, rule)
 
     def execute_future_on_test_event_workflow_engine(
         self,
@@ -141,40 +118,51 @@ class ProjectRuleActionsEndpoint(ProjectEndpoint):
         This method will lookup the corresponding workflow for a given rule then invoke the notification action.
         """
         action_exceptions = []
-        actions = rule.data.get("actions", [])
+        actions_data = rule.data.get("actions", [])
 
         workflow = Workflow(
-            id=-1,
+            id=TEST_NOTIFICATION_ID,
             name="Test Workflow",
             organization=rule.project.organization,
         )
 
-        detector = Detector(
-            id=-1,
-            project=rule.project,
-            name=rule.label,
-            enabled=True,
-            type=ErrorGroupType.slug,
-        )
-
         event_data = WorkflowEventData(
             event=test_event,
+            group=test_event.group,
         )
 
-        for action_blob in actions:
-            try:
-                action = translate_rule_data_actions_to_notification_actions(
-                    [action_blob], skip_failures=False
-                )[0]
-                action.id = -1
-                # Annotate the action with the workflow id
-                setattr(action, "workflow_id", workflow.id)
-            except Exception as e:
-                action_exceptions.append(str(e))
-                sentry_sdk.capture_exception(e)
+        for action_blob in actions_data:
+            if (
+                action_blob.get("id")
+                == "sentry.rules.actions.notify_event_service.NotifyEventServiceAction"
+                and action_blob.get("service") in HIDDEN_PLUGINS
+            ):
+                service = action_blob.get("service")
+                action_exceptions.append(
+                    f"The {service} plugin has been deprecated and cannot send notifications."
+                )
                 continue
 
-            action_exceptions.extend(test_fire_action(action, event_data, detector))
+            try:
+                notification_actions_data = translate_rule_data_actions_to_notification_actions(
+                    [action_blob], skip_failures=False, project=rule.project
+                )
+                # An action can translate to nothing (e.g. a NotifyEventAction on a project without
+                # legacy webhooks enabled), leaving no action to test-fire, so skip it.
+                if not notification_actions_data:
+                    continue
+                actions = [Action(**action_data) for action_data in notification_actions_data]
+                action = actions[0]
+                action.id = TEST_NOTIFICATION_ID
+            except REPORTABLE_ERROR_TYPES as e:
+                action_exceptions.append(str(e))
+                continue
+            except Exception as e:
+                error_id = sentry_sdk.capture_exception(e)
+                action_exceptions.append(f"An unexpected error occurred. Error ID: '{error_id}'")
+                continue
+
+            action_exceptions.extend(test_fire_action(action, event_data, workflow_id=workflow.id))
 
         status = None
         data = None

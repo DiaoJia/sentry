@@ -271,12 +271,10 @@ describe('flamegraph', () => {
     );
 
     expect(flamegraph.frames[1]!.frame.name).toBe('f0');
-    expect(flamegraph.frames[1]!.frame.totalWeight).toBe(1);
     expect(flamegraph.frames[1]!.start).toBe(2);
     expect(flamegraph.frames[1]!.end).toBe(3);
 
     expect(flamegraph.frames[0]!.frame.name).toBe('f1');
-    expect(flamegraph.frames[0]!.frame.totalWeight).toBe(2);
     expect(flamegraph.frames[0]!.start).toBe(0);
     expect(flamegraph.frames[0]!.end).toBe(2);
   });
@@ -353,6 +351,6 @@ describe('flamegraph', () => {
   });
 
   it('Empty', () => {
-    expect(Flamegraph.Empty().configSpace.equals(new Rect(0, 0, 1_000, 0))).toBe(true);
+    expect(Flamegraph.empty().configSpace.equals(new Rect(0, 0, 1_000, 0))).toBe(true);
   });
 });

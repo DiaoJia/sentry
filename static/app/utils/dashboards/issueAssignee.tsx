@@ -1,35 +1,67 @@
+import {useCallback, useMemo, useState} from 'react';
+
 import {
   AssigneeSelector,
   useHandleAssigneeChange,
 } from 'sentry/components/group/assigneeSelector';
-import GroupStore from 'sentry/stores/groupStore';
-import MemberListStore from 'sentry/stores/memberListStore';
-import {useLegacyStore} from 'sentry/stores/useLegacyStore';
 import type {Group} from 'sentry/types/group';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 interface IssueAssigneeProps {
   groupId: string;
+  projectId: string;
+  projectSlug: string;
+  assignedTo?: Group['assignedTo'];
+  owners?: Group['owners'];
 }
 
-export function IssueAssignee({groupId}: IssueAssigneeProps) {
+export function IssueAssignee({
+  groupId,
+  projectId,
+  projectSlug,
+  assignedTo,
+  owners,
+}: IssueAssigneeProps) {
   const organization = useOrganization();
-  const groups = useLegacyStore(GroupStore);
-  const group = groups.find(item => item.id === groupId) as Group | undefined;
-  const memberListState = useLegacyStore(MemberListStore);
-  const {handleAssigneeChange, assigneeLoading} = useHandleAssigneeChange({
-    group: group!,
-    organization,
-  });
+  const [assignedToOverride, setAssignedToOverride] = useState<{
+    assignedTo: Group['assignedTo'];
+    groupId: IssueAssigneeProps['groupId'];
+  } | null>(null);
 
-  if (!group) {
-    return null;
-  }
+  const currentAssignedTo =
+    assignedToOverride?.groupId === groupId
+      ? assignedToOverride.assignedTo
+      : (assignedTo ?? null);
+
+  const group = useMemo(
+    () => ({
+      id: groupId,
+      assignedTo: currentAssignedTo,
+      owners,
+      project: {
+        id: projectId,
+        slug: projectSlug,
+      },
+    }),
+    [currentAssignedTo, groupId, owners, projectId, projectSlug]
+  );
+
+  const onSuccess = useCallback(
+    (nextAssignedTo: Group['assignedTo']) => {
+      setAssignedToOverride({groupId, assignedTo: nextAssignedTo});
+    },
+    [groupId]
+  );
+
+  const {handleAssigneeChange, assigneeLoading} = useHandleAssigneeChange({
+    group,
+    organization,
+    onSuccess,
+  });
 
   return (
     <AssigneeSelector
       group={group}
-      memberList={memberListState.members}
       assigneeLoading={assigneeLoading}
       handleAssigneeChange={handleAssigneeChange}
     />

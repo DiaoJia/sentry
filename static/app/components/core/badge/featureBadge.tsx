@@ -1,61 +1,92 @@
 import styled from '@emotion/styled';
 
-import {Badge, type BadgeProps} from 'sentry/components/core/badge';
-import {Tooltip, type TooltipProps} from 'sentry/components/core/tooltip';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {chonkStyled} from 'sentry/utils/theme/theme.chonk';
-import {withChonk} from 'sentry/utils/theme/withChonk';
+import {Tooltip, type TooltipProps} from '@sentry/scraps/tooltip';
+import {useTranslation} from '@sentry/scraps/translationContext';
+import {useIsInsideInteractiveElement} from '@sentry/scraps/useIsInsideInteractiveElement';
 
-const defaultTitles: Record<FeatureBadgeProps['type'], string> = {
-  alpha: t('This feature is internal and available for QA purposes'),
-  beta: t('This feature is available for early adopters and may change'),
-  new: t('This feature is new! Try it out and let us know what you think'),
-  experimental: t(
-    'This feature is experimental! Try it out and let us know what you think. No promises!'
-  ),
-};
+import {IconBroadcast} from 'sentry/icons/iconBroadcast';
+import {IconBug} from 'sentry/icons/iconBug';
+import {IconLab} from 'sentry/icons/iconLab';
+import type {TagVariant} from 'sentry/utils/theme';
 
-const labels: Record<FeatureBadgeProps['type'], string> = {
-  alpha: t('alpha'),
-  beta: t('beta'),
-  new: t('new'),
-  experimental: t('experimental'),
-};
+import {Tag} from './tag';
 
-export interface FeatureBadgeProps extends Omit<BadgeProps, 'children'> {
-  type: 'alpha' | 'beta' | 'new' | 'experimental';
-  tooltipProps?: Partial<TooltipProps>;
+function useDefaultTitle(type: FeatureBadgeProps['type']) {
+  const {t} = useTranslation();
+  switch (type) {
+    case 'alpha':
+      return t('This feature is internal and available for QA purposes');
+    case 'beta':
+      return t('This feature is in beta and may change');
+    case 'new':
+      return t('This feature is new! Try it out and let us know what you think');
+    case 'experimental':
+      return t(
+        'This feature is experimental! Try it out and let us know what you think. No promises!'
+      );
+    case 'debug':
+      return t('This UI is for debugging purposes only');
+  }
 }
 
-function InnerFeatureBadge({type, tooltipProps, ...props}: FeatureBadgeProps) {
-  const title = tooltipProps?.title ?? defaultTitles[type] ?? '';
+const variantMap: Record<FeatureBadgeProps['type'], TagVariant> = {
+  alpha: 'promotion',
+  beta: 'warning',
+  new: 'success',
+  experimental: 'muted',
+  debug: 'danger',
+};
+
+const iconMap: Record<FeatureBadgeProps['type'], React.ReactNode> = {
+  alpha: <IconLab isSolid size="xs" aria-hidden />,
+  beta: <IconLab isSolid size="xs" aria-hidden />,
+  new: <IconBroadcast size="xs" aria-hidden />,
+  experimental: <IconLab isSolid size="xs" aria-hidden />,
+  debug: <IconBug size="xs" aria-hidden />,
+};
+
+export interface FeatureBadgeProps {
+  type: 'alpha' | 'beta' | 'new' | 'experimental' | 'debug';
+  tooltipProps?: Omit<Partial<TooltipProps>, 'isHoverable' | 'skipWrapper'>;
+}
+
+export function FeatureBadge({type, tooltipProps}: FeatureBadgeProps) {
+  const defaultTitle = useDefaultTitle(type);
+  const title = tooltipProps?.title ?? defaultTitle;
+
+  const {ref, isInsideInteractiveElement, isInteractiveElementFocusVisible} =
+    useIsInsideInteractiveElement<HTMLDivElement>(undefined);
 
   return (
-    <Tooltip title={title} position="right" {...tooltipProps} skipWrapper>
-      <StyledBadge type={type} {...props}>
-        {labels[type]}
-      </StyledBadge>
+    <Tooltip
+      title={title}
+      position="right"
+      {...tooltipProps}
+      isHoverable
+      skipWrapper
+      forceVisible={
+        isInteractiveElementFocusVisible ? 'delayed' : tooltipProps?.forceVisible
+      }
+    >
+      <SquareTag
+        tabIndex={isInsideInteractiveElement ? undefined : 0}
+        variant={variantMap[type]}
+        aria-label={type}
+        ref={ref}
+      >
+        {iconMap[type]}
+      </SquareTag>
     </Tooltip>
   );
 }
 
-/**
- * Requires the result of styled(Badge) to be exported as it
- * is in some cases targeted with a child selector.
- */
-export const FeatureBadge = styled(InnerFeatureBadge)``;
+const SquareTag = styled(Tag)`
+  width: 20px;
+  flex-shrink: 0;
+  padding: 0;
+  justify-content: center;
 
-const ChonkStyledBadge = chonkStyled(Badge)`
-  text-transform: capitalize;
+  &:focus-visible {
+    ${p => p.theme.focusRing()}
+  }
 `;
-
-const StyledBadge = withChonk(
-  styled(Badge)`
-    margin: 0;
-    padding: 0 ${space(0.75)};
-    height: ${space(2)};
-    vertical-align: middle;
-  `,
-  ChonkStyledBadge
-);

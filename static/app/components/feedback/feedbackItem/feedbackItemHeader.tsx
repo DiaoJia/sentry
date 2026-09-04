@@ -1,14 +1,16 @@
 import {useRef} from 'react';
 import styled from '@emotion/styled';
 
-import {Flex} from 'sentry/components/core/layout';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import FeedbackActions from 'sentry/components/feedback/feedbackItem/feedbackActions';
-import FeedbackShortId from 'sentry/components/feedback/feedbackItem/feedbackShortId';
-import FeedbackViewers from 'sentry/components/feedback/feedbackItem/feedbackViewers';
-import {StreamlinedExternalIssueList} from 'sentry/components/group/externalIssuesList/streamlinedExternalIssueList';
+import {Button} from '@sentry/scraps/button';
+import {Container, Flex} from '@sentry/scraps/layout';
+
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {FeedbackActions} from 'sentry/components/feedback/feedbackItem/feedbackActions';
+import {FeedbackShortId} from 'sentry/components/feedback/feedbackItem/feedbackShortId';
+import {FeedbackViewers} from 'sentry/components/feedback/feedbackItem/feedbackViewers';
+import {ExternalIssueList} from 'sentry/components/group/externalIssuesList';
+import {IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Event} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
 import type {FeedbackIssue} from 'sentry/utils/feedback/types';
@@ -17,6 +19,7 @@ import {useDimensions} from 'sentry/utils/useDimensions';
 interface Props {
   eventData: Event | undefined;
   feedbackItem: FeedbackIssue;
+  onBackToList?: () => void;
 }
 
 type Dimensions = ReturnType<typeof useDimensions>;
@@ -30,14 +33,27 @@ function dimensionsToSize({width}: Dimensions) {
   return 'large';
 }
 
-export default function FeedbackItemHeader({eventData, feedbackItem}: Props) {
+export function FeedbackItemHeader({eventData, feedbackItem, onBackToList}: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const dimensions = useDimensions({elementRef: wrapperRef});
 
   return (
     <VerticalSpacing ref={wrapperRef}>
-      <Flex wrap="wrap" flex="1 1 auto" gap={space(1)} justify="space-between">
-        <FeedbackShortId feedbackItem={feedbackItem} />
+      <Flex wrap="wrap" flex="1 1 auto" gap="md" justify="between">
+        <Flex gap="md" align="center">
+          {onBackToList && (
+            <Container display={{zero: 'block', '3xl': 'none'}}>
+              <Button
+                variant="primary"
+                icon={<IconArrow direction="left" size="xs" />}
+                onClick={onBackToList}
+                size="zero"
+                aria-label={t('Back to list')}
+              />
+            </Container>
+          )}
+          <FeedbackShortId feedbackItem={feedbackItem} />
+        </Flex>
         <FeedbackActions
           eventData={eventData}
           feedbackItem={feedbackItem}
@@ -48,15 +64,16 @@ export default function FeedbackItemHeader({eventData, feedbackItem}: Props) {
 
       {eventData && feedbackItem.project ? (
         <ErrorBoundary mini>
-          <Flex wrap="wrap" justify="space-between" align="center" gap={space(1)}>
-            <StreamlinedExternalIssueList
-              group={feedbackItem as unknown as Group}
-              project={feedbackItem.project}
-              event={eventData}
-            />
+          <Flex wrap="wrap" justify="between" align="center" gap="md">
+            <Flex direction="row" gap="md" flex="1 1 auto">
+              <ExternalIssueList
+                group={feedbackItem as unknown as Group}
+                event={eventData}
+              />
+            </Flex>
             {feedbackItem.seenBy.length ? (
-              <Flex justify="flex-end">
-                <Flex gap={space(1)} align="center">
+              <Flex justify="end">
+                <Flex gap="md" align="center">
                   <SeenBy>{t('Seen by')}</SeenBy>
                   <FeedbackViewers feedbackItem={feedbackItem} />
                 </Flex>
@@ -72,12 +89,12 @@ export default function FeedbackItemHeader({eventData, feedbackItem}: Props) {
 const VerticalSpacing = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(1)};
-  padding: ${space(1)} ${space(2)};
-  border-bottom: 1px solid ${p => p.theme.innerBorder};
+  gap: ${p => p.theme.space.md};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.secondary};
 `;
 
 const SeenBy = styled('span')`
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
 `;

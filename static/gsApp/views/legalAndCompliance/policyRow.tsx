@@ -4,16 +4,15 @@ import {css, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import moment from 'moment-timezone';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Flex, Grid, type FlexProps} from '@sentry/scraps/layout';
+import {useModal} from '@sentry/scraps/modal';
+
 import {t, tct} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
+import {ConfigStore} from 'sentry/stores/configStore';
 import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
 import {safeURL} from 'sentry/utils/url/safeURL';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 import type {Policy, Subscription} from 'getsentry/types';
 import {PolicyStatus} from 'getsentry/views/legalAndCompliance/policyStatus';
@@ -38,6 +37,8 @@ export function PolicyRow({
   onAccept,
   subscription,
 }: PolicyRowProps) {
+  const {openModal} = useModal();
+
   const theme = useTheme();
   const organization = useOrganization();
 
@@ -49,7 +50,12 @@ export function PolicyRow({
   const activeSuperUser = isActiveSuperuser();
   const hasBillingAccess = organization.access.includes('org:billing');
 
-  const policyUrl = policy.url ? safeURL(policy.url) : null;
+  const rawPolicyUrl = policy.url ? safeURL(policy.url) : null;
+  // Only allow http/https URLs to prevent javascript: and data: URL injection
+  const policyUrl =
+    rawPolicyUrl?.protocol === 'http:' || rawPolicyUrl?.protocol === 'https:'
+      ? rawPolicyUrl
+      : null;
   // userCurrentVersion filters version select dropdown to only the current version + latest version
   if (policyUrl && policy.consent) {
     policyUrl.searchParams.set('userCurrentVersion', policy.consent.acceptedVersion);
@@ -62,7 +68,7 @@ export function PolicyRow({
     const name = 'sentryPolicy';
     const width = 600;
     const height = 600;
-    const url = policy.url;
+    const url = policyUrl?.toString() ?? null;
 
     // this attempts to center the dialog
     const innerWidth = window.innerWidth
@@ -97,12 +103,12 @@ export function PolicyRow({
         <Fragment>
           <Header>
             {curPolicy.slug === policy.slug ? (
-              <PolicyHeader>
+              <Flex justify="between" align="center">
                 <h5>{curPolicy.name}</h5>
                 <Button size="sm" onClick={showPolicy}>
                   {t('Download')}
                 </Button>
-              </PolicyHeader>
+              </Flex>
             ) : (
               <div style={{textAlign: 'center'}}>
                 {tct("You must first agree to Sentry's [policy]", {
@@ -140,20 +146,20 @@ export function PolicyRow({
           </Body>
           <Footer>
             {curPolicy.hasSignature ? (
-              <PolicyActions>
+              <Flex justify="between" align="center" flexGrow={1}>
                 <small>
                   {tct('You are agreeing as [email]', {
                     email: <strong>{user.email}</strong>,
                   })}
                 </small>
 
-                <ButtonBar gap={1}>
+                <Grid flow="column" align="center" gap="md">
                   <Button size="sm" onClick={closeModal}>
                     {t('Cancel')}
                   </Button>
                   <Button
                     size="sm"
-                    priority="primary"
+                    variant="primary"
                     onClick={() => {
                       onAccept(curPolicy);
                       closeModal();
@@ -161,8 +167,8 @@ export function PolicyRow({
                   >
                     {t('I Accept')}
                   </Button>
-                </ButtonBar>
-              </PolicyActions>
+                </Grid>
+              </Flex>
             ) : (
               <Button size="sm" onClick={closeModal}>
                 {t('Close')}
@@ -194,7 +200,7 @@ export function PolicyRow({
   return (
     <PanelItemPolicy>
       <div>
-        <PolicyTitle style={{marginBottom: showUpdated ? space(0.5) : 0}}>
+        <PolicyTitle style={{marginBottom: showUpdated ? theme.space.xs : 0}}>
           {policy.slug === 'terms' ? 'Terms of Service' : policy.name}
         </PolicyTitle>
         <PolicySubtext>{getPolicySubstatus()}</PolicySubtext>
@@ -213,21 +219,21 @@ export function PolicyRow({
             hasBillingAccess ? (
             <Button
               size="sm"
-              priority="primary"
+              variant="primary"
               onClick={showModal}
               disabled={activeSuperUser || !hasBillingAccess}
-              title={
-                activeSuperUser
+              tooltipProps={{
+                title: activeSuperUser
                   ? t("Superusers can't consent to policies")
                   : hasBillingAccess
                     ? undefined
-                    : t("You don't have access to accept policies.")
-              }
+                    : t("You don't have access to accept policies."),
+              }}
             >
               {t('Review and Accept')}
             </Button>
           ) : (
-            <LinkButton size="sm" external href={policy.url}>
+            <LinkButton size="sm" external href={policyUrl.toString()}>
               {t('Review')}
             </LinkButton>
           ))}
@@ -239,43 +245,28 @@ export function PolicyRow({
 const PolicyFrame = styled('iframe')`
   height: 300px;
   width: 100%;
-  border: 1px solid ${p => p.theme.innerBorder};
+  border: 1px solid ${p => p.theme.tokens.border.secondary};
   border-radius: 3px;
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;
 
 const PolicySubtext = styled('div')`
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const PolicyTitle = styled('h6')`
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    font-size: ${p => p.theme.fontSize.lg};
+  @media (max-width: ${p => p.theme.breakpoints.sm}) {
+    font-size: ${p => p.theme.font.size.lg};
   }
 `;
 
-const PolicyHeader = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;
-
-const PolicyActions = styled('div')`
-  flex-grow: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;
-
 const modalCss = (theme: Theme) => css`
-  @media (min-width: ${theme.breakpoints.small}) {
+  @media (min-width: ${theme.breakpoints.sm}) {
     width: 80%;
     max-width: 1200px;
   }
 `;
-export const PolicyStatusRow = styled('div')`
-  display: flex;
-  align-items: center;
-  height: 100%;
-`;
+export function PolicyStatusRow(props: FlexProps) {
+  return <Flex align="center" height="100%" {...props} />;
+}

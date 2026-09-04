@@ -1,43 +1,51 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {Fragment, useCallback, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
+import {useQueryClient} from '@tanstack/react-query';
+
+import {Container} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import type {SelectValue} from '@sentry/scraps/select';
+import {Heading} from '@sentry/scraps/text';
 
 import {addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import type {RequestOptions, ResponseMeta} from 'sentry/api';
-import {ExternalForm} from 'sentry/components/externalIssues/externalForm';
-import {useAsyncOptionsCache} from 'sentry/components/externalIssues/useAsyncOptionsCache';
-import {useDynamicFields} from 'sentry/components/externalIssues/useDynamicFields';
-import type {ExternalIssueFormErrors} from 'sentry/components/externalIssues/utils';
+import {BackendJsonSubmitForm} from 'sentry/components/backendJsonFormAdapter/backendJsonSubmitForm';
+import type {
+  JsonFormAdapterChoice,
+  JsonFormAdapterChoiceValue,
+  JsonFormAdapterFieldConfig,
+} from 'sentry/components/backendJsonFormAdapter/types';
 import {
-  getConfigName,
-  getFieldProps,
-  getOptions,
-  hasErrorInFields,
-  loadAsyncThenFetchAllFields,
-} from 'sentry/components/externalIssues/utils';
-import type {FormProps} from 'sentry/components/forms/form';
-import FormModel from 'sentry/components/forms/model';
+  applySavedDefaultToField,
+  getSavedChoicesMap,
+  STATIC_TICKET_FIELDS,
+} from 'sentry/components/externalIssues/ticketRuleModalUtils';
+import {useDynamicFields} from 'sentry/components/externalIssues/useDynamicFields';
+import {getConfigName} from 'sentry/components/externalIssues/utils';
 import type {FieldValue} from 'sentry/components/forms/types';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {TicketActionData} from 'sentry/types/alerts';
 import type {Choices} from 'sentry/types/core';
-import type {IntegrationIssueConfig, IssueConfigField} from 'sentry/types/integrations';
-import {defined} from 'sentry/utils';
-import {
-  type ApiQueryKey,
-  setApiQueryData,
-  useApiQuery,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import type {IntegrationIssueConfig} from 'sentry/types/integrations';
+import {parseQueryKey} from 'sentry/utils/api/apiQueryKey';
+import type {ApiQueryKey} from 'sentry/utils/api/apiQueryKey';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 const IGNORED_FIELDS = ['Sprint'];
+
+function mergeChoices(
+  ...choiceGroups: Array<readonly JsonFormAdapterChoice[]>
+): JsonFormAdapterChoice[] {
+  return [
+    ...new Map(choiceGroups.flat().map(choice => [String(choice[0]), choice])).values(),
+  ];
+}
 
 interface TicketRuleModalProps extends ModalRenderProps {
   instance: TicketActionData;
@@ -59,12 +67,17 @@ function makeIntegrationIssueConfigTicketRuleQueryKey({
   query?: Record<string, string>;
 }): ApiQueryKey {
   return [
-    `/organizations/${orgSlug}/integrations/${integrationId}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/integrations/$integrationId/', {
+      path: {
+        organizationIdOrSlug: orgSlug,
+        integrationId,
+      },
+    }),
     {query: {ignored: IGNORED_FIELDS, ...query}},
   ];
 }
 
-export default function TicketRuleModal({
+export function TicketRuleModal({
   instance,
   link,
   onSubmitAction,
@@ -72,10 +85,10 @@ export default function TicketRuleModal({
   closeModal,
   Header,
   Body,
+  Footer,
 }: TicketRuleModalProps) {
   const action = 'create';
   const title = t('Issue Link Settings');
-  const [model] = useState(() => new FormModel());
   const queryClient = useQueryClient();
   const api = useApi({persistInFlight: true});
   const organization = useOrganization();
@@ -83,33 +96,39 @@ export default function TicketRuleModal({
   // override any inputs with these instance values.
   const [showInstanceValues, setShowInstanceValues] = useState(true);
 
-  const [hasUpdatedCache, setHasUpdatedCache] = useState(false);
-  const [issueConfigFieldsCache, setIssueConfigFieldsCache] = useState<
-    IssueConfigField[]
-  >(() => {
-    return Object.values(instance?.dynamic_form_fields || {});
-  });
-
-  const initialOptionsCache = useMemo(() => {
-    return Object.fromEntries(
-      issueConfigFieldsCache
-        .filter(field => field.url)
-        .map(field => [field.name, field.choices as Choices])
-    );
-  }, [issueConfigFieldsCache]);
-
-  const {cache, updateCache} = useAsyncOptionsCache(initialOptionsCache);
   const [isDynamicallyRefetching, setIsDynamicallyRefetching] = useState(false);
 
-  const endpointString = makeIntegrationIssueConfigTicketRuleQueryKey({
-    orgSlug: organization.slug,
-    integrationId: instance.integration,
-  })[0];
+  // Track async select options fetched via search so they can be persisted
+  // in the rule config when the form is submitted.
+  const [asyncOptionsCache, setAsyncOptionsCache] = useState<
+    Record<string, JsonFormAdapterChoice[]>
+  >({});
+  const handleAsyncOptionsFetched = useCallback(
+    (fieldName: string, options: Array<SelectValue<JsonFormAdapterChoiceValue>>) => {
+      const fetchedChoices = options.map((option): JsonFormAdapterChoice => {
+        const label =
+          typeof option.label === 'string' ? option.label : String(option.value);
+        return [option.value, label];
+      });
+      setAsyncOptionsCache(prev => ({
+        ...prev,
+        [fieldName]: mergeChoices(prev[fieldName] ?? [], fetchedChoices),
+      }));
+    },
+    []
+  );
+
+  const {url: endpointString} = parseQueryKey(
+    makeIntegrationIssueConfigTicketRuleQueryKey({
+      orgSlug: organization.slug,
+      integrationId: instance.integration,
+    })
+  );
 
   const initialConfigQuery = useMemo(() => {
     return (instance.dynamic_form_fields || [])
       .filter(field => field.updatesForm)
-      .filter(field => instance.hasOwnProperty(field.name))
+      .filter(field => Object.hasOwn(instance, field.name))
       .reduce(
         (accumulator, {name}) => {
           // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
@@ -134,17 +153,10 @@ export default function TicketRuleModal({
     {staleTime: Infinity, retry: false, refetchOnMount: 'always'}
   );
 
-  // After the first fetch, update this config cache state
-  useEffect(() => {
-    if (isPending || !defined(integrationDetails) || hasUpdatedCache) {
-      return;
-    }
-    const newConfigCache = integrationDetails[getConfigName(action)];
-    if (newConfigCache) {
-      setIssueConfigFieldsCache(newConfigCache);
-      setHasUpdatedCache(true);
-    }
-  }, [isPending, integrationDetails, action, hasUpdatedCache]);
+  // Dynamic reloads can change the schema, so always submit the latest field config.
+  const issueConfigFields =
+    integrationDetails?.[getConfigName(action)] ??
+    Object.values(instance?.dynamic_form_fields || {});
 
   const {dynamicFieldValues, setDynamicFieldValue} = useDynamicFields({
     action,
@@ -152,10 +164,10 @@ export default function TicketRuleModal({
   });
 
   const validAndSavableFieldNames = useMemo(() => {
-    return issueConfigFieldsCache
-      .filter(field => field.hasOwnProperty('name'))
+    return issueConfigFields
+      .filter(field => Object.hasOwn(field, 'name'))
       .map(field => field.name);
-  }, [issueConfigFieldsCache]);
+  }, [issueConfigFields]);
 
   /**
    * XXX: This function seems illegal but it's necessary.
@@ -166,40 +178,35 @@ export default function TicketRuleModal({
    * `useApiQuery`, and instead manually call the api, and update the cache ourselves.
    */
   const refetchWithDynamicFields = useCallback(
-    (dynamicValues: Record<string, FieldValue>) => {
+    async (dynamicValues: Record<string, FieldValue>) => {
       setIsDynamicallyRefetching(true);
-      const requestOptions: RequestOptions = {
-        method: 'GET',
-        query: {action, ...dynamicValues},
-        success: (
-          data: IntegrationIssueConfig,
-          _textStatus: string | undefined,
-          _responseMeta: ResponseMeta | undefined
-        ) => {
-          setApiQueryData(
-            queryClient,
-            makeIntegrationIssueConfigTicketRuleQueryKey({
-              orgSlug: organization.slug,
-              integrationId: instance.integration,
-              query: initialConfigQuery,
-            }),
-            existingData => (data ? data : existingData)
-          );
-          setIsDynamicallyRefetching(false);
-        },
-        error: (err: any) => {
-          // This behavior comes from the DeprecatedAsyncComponent
-          if (err?.responseText) {
-            Sentry.addBreadcrumb({
-              message: err.responseText,
-              category: 'xhr',
-              level: 'error',
-            });
-          }
-          setIsDynamicallyRefetching(false);
-        },
-      };
-      return api.request(endpointString, requestOptions);
+      try {
+        const [data] = await api.requestPromise(endpointString, {
+          method: 'GET',
+          query: {action, ...dynamicValues},
+          includeAllArgs: true,
+        });
+        setApiQueryData(
+          queryClient,
+          makeIntegrationIssueConfigTicketRuleQueryKey({
+            orgSlug: organization.slug,
+            integrationId: instance.integration,
+            query: initialConfigQuery,
+          }),
+          (existingData: IntegrationIssueConfig | undefined) =>
+            data ? data : existingData
+        );
+      } catch (err: any) {
+        if (err?.responseText) {
+          Sentry.addBreadcrumb({
+            message: err.responseText,
+            category: 'xhr',
+            level: 'error',
+          });
+        }
+      } finally {
+        setIsDynamicallyRefetching(false);
+      }
     },
     [
       action,
@@ -216,15 +223,15 @@ export default function TicketRuleModal({
    * Clean up the form data before saving it to state.
    */
   const cleanData = useCallback(
-    (data: Record<string, string>) => {
+    (data: Record<string, unknown>) => {
       const formData: {
         [key: string]: any;
         integration?: string | number;
       } = {};
-      if (instance?.hasOwnProperty('integration')) {
+      if (instance && Object.hasOwn(instance, 'integration')) {
         formData.integration = instance.integration;
       }
-      formData.dynamic_form_fields = issueConfigFieldsCache;
+      formData.dynamic_form_fields = issueConfigFields;
       for (const [key, value] of Object.entries(data)) {
         if (validAndSavableFieldNames.includes(key)) {
           formData[key] = value;
@@ -232,143 +239,117 @@ export default function TicketRuleModal({
       }
       return formData;
     },
-    [validAndSavableFieldNames, issueConfigFieldsCache, instance]
+    [validAndSavableFieldNames, issueConfigFields, instance]
   );
 
-  const onFormSubmit = useCallback<Required<FormProps>['onSubmit']>(
-    (data, _success, _error, e, modelParam) => {
-      // This is a "fake form", so don't actually POST to an endpoint.
-      e.preventDefault();
-      e.stopPropagation();
-
-      if (modelParam.validateForm()) {
-        onSubmitAction(cleanData(data), cache);
-        addSuccessMessage(t('Changes applied.'));
-        closeModal();
+  const handleSubmit = useCallback(
+    (values: Record<string, unknown>) => {
+      // Build a cache of field choices so the parent can persist them.
+      // Start with static choices from the config, then overlay search results
+      // captured via onAsyncOptionsFetched.
+      const fieldOptionsCache: Record<string, Choices> = {};
+      const config = integrationDetails?.[getConfigName(action)] || [];
+      for (const field of config) {
+        if (
+          (field.type === 'select' || field.type === 'choice') &&
+          field.url &&
+          field.choices
+        ) {
+          fieldOptionsCache[field.name] = field.choices;
+        }
       }
+      // Merge async search results (overwrites static choices for the same field)
+      for (const [fieldName, choices] of Object.entries(asyncOptionsCache)) {
+        fieldOptionsCache[fieldName] = choices;
+      }
+
+      onSubmitAction(cleanData(values), fieldOptionsCache);
+      addSuccessMessage(t('Changes applied.'));
+      closeModal();
     },
-    [cleanData, cache, onSubmitAction, closeModal]
+    [cleanData, onSubmitAction, closeModal, integrationDetails, asyncOptionsCache]
   );
+
+  const [lastChangedField, setLastChangedField] = useState<Record<string, unknown>>({});
 
   const onFieldChange = useCallback(
-    (fieldName: string, value: FieldValue) => {
+    (fieldName: string, value: unknown) => {
       setShowInstanceValues(false);
-      if (dynamicFieldValues.hasOwnProperty(fieldName)) {
-        setDynamicFieldValue(fieldName, value);
-        refetchWithDynamicFields({...dynamicFieldValues, [fieldName]: value});
+      if (Object.hasOwn(dynamicFieldValues, fieldName)) {
+        setLastChangedField({[fieldName]: value});
+        setDynamicFieldValue(fieldName, value as FieldValue);
+        refetchWithDynamicFields({
+          ...dynamicFieldValues,
+          [fieldName]: value as FieldValue,
+        });
       }
     },
     [dynamicFieldValues, refetchWithDynamicFields, setDynamicFieldValue]
-  );
-
-  // Even if we pass onFieldChange as a prop, the model only uses the first instance.
-  // In order to use the correct dynamicFieldValues, we need to set it whenever this function is changed.
-  useEffect(() => {
-    model.setFormOptions({onFieldChange});
-  }, [model, onFieldChange]);
-
-  const getTicketRuleFieldProps = useCallback(
-    (field: IssueConfigField) => {
-      return getFieldProps({
-        field,
-        loadOptions: (input: string) =>
-          getOptions({
-            field,
-            input,
-            dynamicFieldValues,
-            model,
-            successCallback: updateCache,
-          }),
-      });
-    },
-    [updateCache, dynamicFieldValues, model]
   );
 
   /**
    * Set the initial data from the Rule, replace `title` and `description` with
    * disabled inputs, and use the cached dynamic choices.
    */
-  const cleanFields: IssueConfigField[] = useMemo(() => {
-    const fields: IssueConfigField[] = [
-      {
-        name: 'title',
-        label: 'Title',
-        type: 'string',
-        default: 'This will be the same as the Sentry Issue.',
-        disabled: true,
-      } as IssueConfigField,
-      {
-        name: 'description',
-        label: 'Description',
-        type: 'string',
-        default: 'This will be generated from the Sentry Issue details.',
-        disabled: true,
-      } as IssueConfigField,
-    ];
+  const cleanFields = useMemo((): JsonFormAdapterFieldConfig[] => {
+    const savedChoicesMap = getSavedChoicesMap(instance);
+    const configFields = (integrationDetails?.[getConfigName(action)] || []).map(
+      field => {
+        const cachedChoices = asyncOptionsCache[field.name];
+        // Keep backend and prior search options so later searches cannot hide the selection.
+        if (
+          (field.type === 'select' || field.type === 'choice') &&
+          field.url &&
+          cachedChoices
+        ) {
+          return {
+            ...field,
+            choices: mergeChoices(field.choices ?? [], cachedChoices),
+          };
+        }
+        return field;
+      }
+    );
 
-    const cleanedFields = loadAsyncThenFetchAllFields({
-      configName: getConfigName(action),
-      integrationDetails: integrationDetails || null,
-      fetchedFieldOptionsCache: cache,
-    })
+    const cleanedFields = configFields
       // Don't overwrite the default values for title and description.
-      .filter(field => !fields.map(f => f.name).includes(field.name))
+      .filter(field => !STATIC_TICKET_FIELDS.some(f => f.name === field.name))
       .map(field => {
-        // We only need to do the below operation if the form has not been modified.
         if (!showInstanceValues) {
           return field;
         }
-        // Overwrite defaults with previously selected values if they exist.
-        // Certain fields such as priority (for Jira) have their options change
-        // because they depend on another field such as Project, so we need to
-        // check if the last selected value is in the list of available field choices.
-        const prevChoice = instance?.[field.name];
-        // Note that field.choices is an array of tuples, where each tuple
-        // contains a numeric id and string label, eg. ("10000", "EX") or ("1", "Bug")
 
-        if (!prevChoice) {
-          return field;
-        }
-
-        let shouldDefaultChoice = true;
-
-        if (field.choices) {
-          shouldDefaultChoice = !!(Array.isArray(prevChoice)
-            ? prevChoice.every(value => field.choices?.some(tuple => tuple[0] === value))
-            : // Single-select fields have a single value, eg: 'a'
-              field.choices?.some(item => item[0] === prevChoice));
-        }
-
-        if (shouldDefaultChoice) {
-          field.default = prevChoice;
-        }
-
-        return field;
+        return applySavedDefaultToField({
+          field,
+          savedValue: instance?.[field.name],
+          savedChoicesMap,
+        });
       });
-    return [...fields, ...cleanedFields];
-  }, [instance, integrationDetails, cache, showInstanceValues]);
+    return [...STATIC_TICKET_FIELDS, ...cleanedFields];
+  }, [instance, integrationDetails, showInstanceValues, asyncOptionsCache]);
 
-  const formErrors: ExternalIssueFormErrors = useMemo(() => {
-    const errors: ExternalIssueFormErrors = {};
+  const formErrors = useMemo(() => {
+    const errors: Record<string, React.ReactNode> = {};
     for (const field of cleanFields) {
-      // If the field is a select and has a default value, make sure that the
-      // default value exists in the choices. Skip check if the default is not
-      // set, an empty string, or an empty array.
       if (
-        field.type === 'select' &&
+        (field.type === 'select' || field.type === 'choice') &&
         field.default &&
         !(Array.isArray(field.default) && !field.default.length)
       ) {
-        const fieldChoices = (field.choices || []) as Choices;
+        // Skip validation for async select fields — their choices are
+        // fetched dynamically and won't contain the saved value until searched.
+        if ('url' in field && field.url) {
+          continue;
+        }
+        const fieldChoices = field.choices || [];
         const found = fieldChoices.find(([value, _]) =>
           Array.isArray(field.default)
-            ? field.default.includes(value)
+            ? (field.default as unknown[]).includes(value)
             : value === field.default
         );
 
         if (!found) {
           errors[field.name] = (
-            // eslint-disable-next-line @typescript-eslint/no-base-to-string
             <FieldErrorLabel>{`Could not fetch saved option for ${field.label}. Please reselect.`}</FieldErrorLabel>
           );
         }
@@ -377,19 +358,16 @@ export default function TicketRuleModal({
     return errors;
   }, [cleanFields]);
 
-  const initialData = useMemo(() => {
-    return cleanFields.reduce<Record<string, FieldValue>>(
-      (accumulator, field: IssueConfigField) => {
-        accumulator[field.name] = field.default;
-        return accumulator;
-      },
-      {}
-    );
+  const hasFormErrors = useMemo(() => {
+    return cleanFields.some(field => field.name === 'error' && field.type === 'blank');
   }, [cleanFields]);
 
-  const hasFormErrors = useMemo(() => {
-    return hasErrorInFields({fields: cleanFields});
-  }, [cleanFields]);
+  // Key changes when field config changes, forcing the form to remount with fresh defaults.
+  // Includes field names and defaults so the form resets even when only defaults change.
+  const formKey = useMemo(
+    () => cleanFields.map(f => `${f.name}:${JSON.stringify(f.default)}`).join(','),
+    [cleanFields]
+  );
 
   if (isPending) {
     return <LoadingIndicator />;
@@ -405,27 +383,12 @@ export default function TicketRuleModal({
   }
 
   return (
-    <ExternalForm
-      Header={Header}
-      Body={Body}
-      formFields={cleanFields}
-      errors={formErrors}
-      isLoading={isPending || isDynamicallyRefetching}
-      formProps={{
-        initialData,
-        footerClass: 'modal-footer',
-        onFieldChange,
-        submitDisabled: isPending || hasFormErrors,
-        model,
-        cancelLabel: t('Close'),
-        onCancel: closeModal,
-        onSubmit: onFormSubmit,
-        submitLabel: t('Apply Changes'),
-      }}
-      title={title}
-      navTabs={null}
-      bodyText={
-        <BodyText>
+    <Fragment>
+      <Header closeButton>
+        <Heading as="h4">{title}</Heading>
+      </Header>
+      <Body>
+        <Container marginBottom="2xl">
           {link
             ? tct(
                 'When this alert is triggered [ticketType] will be created with the following fields. It will also [linkToDocs:stay in sync] with the new Sentry Issue.',
@@ -435,18 +398,33 @@ export default function TicketRuleModal({
                 'When this alert is triggered [ticketType] will be created with the following fields.',
                 {ticketType}
               )}
-        </BodyText>
-      }
-      getFieldProps={getTicketRuleFieldProps}
-    />
+        </Container>
+        {Object.entries(formErrors).map(([name, errorNode]) => (
+          <Fragment key={name}>{errorNode}</Fragment>
+        ))}
+        <BackendJsonSubmitForm
+          key={formKey}
+          fields={cleanFields}
+          onSubmit={handleSubmit}
+          initialValues={lastChangedField}
+          submitLabel={t('Apply Changes')}
+          submitDisabled={hasFormErrors}
+          isLoading={isDynamicallyRefetching}
+          dynamicFieldValues={dynamicFieldValues}
+          onAsyncOptionsFetched={handleAsyncOptionsFetched}
+          onFieldChange={onFieldChange}
+          footer={({SubmitButton, disabled}) => (
+            <Footer>
+              <SubmitButton disabled={disabled}>{t('Apply Changes')}</SubmitButton>
+            </Footer>
+          )}
+        />
+      </Body>
+    </Fragment>
   );
 }
 
-const BodyText = styled('div')`
-  margin-bottom: ${space(3)};
-`;
-
 const FieldErrorLabel = styled('label')`
-  padding-bottom: ${space(2)};
-  color: ${p => p.theme.errorText};
+  padding-bottom: ${p => p.theme.space.xl};
+  color: ${p => p.theme.tokens.content.danger};
 `;

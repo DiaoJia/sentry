@@ -28,7 +28,6 @@ def build_incident_attachment(
     organization: Organization,
     notification_uuid: str | None = None,
 ) -> dict[str, Any]:
-
     data = incident_attachment_info(
         metric_issue_context=metric_issue_context,
         alert_context=alert_context,
@@ -74,7 +73,9 @@ def attach_custom_priority(
     return data
 
 
-def get_team(team_id: int | str | None, org_integration: RpcOrganizationIntegration | None):
+def get_team(
+    team_id: int | str | None, org_integration: RpcOrganizationIntegration | None
+) -> dict[str, str] | None:
     if not org_integration:
         return None
     teams = org_integration.config.get("team_table")

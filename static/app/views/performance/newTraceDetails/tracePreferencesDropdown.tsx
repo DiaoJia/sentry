@@ -1,40 +1,46 @@
 import {useCallback, useMemo} from 'react';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {CompactSelect, type SelectOption} from 'sentry/components/core/compactSelect';
-import type {DropdownButtonProps} from 'sentry/components/dropdownButton';
-import ExternalLink from 'sentry/components/links/externalLink';
+import {
+  CompactSelect,
+  MenuComponents,
+  type SelectOption,
+} from '@sentry/scraps/compactSelect';
+import {ExternalLink} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+
 import {IconSettings} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {Project} from 'sentry/types/project';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
+import {getAttributeValue} from 'sentry/utils/fields/getAttributeValue';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {OurLogKnownFieldKey} from 'sentry/views/explore/logs/types';
 import {traceAnalytics} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
 import type {TraceRootEventQueryResults} from 'sentry/views/performance/newTraceDetails/traceApi/useTraceRootEvent';
 import {isTraceItemDetailsResponse} from 'sentry/views/performance/newTraceDetails/traceApi/utils';
 import {getCustomInstrumentationLink} from 'sentry/views/performance/newTraceDetails/traceConfigurations';
-import {findSpanAttributeValue} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 import {TraceShortcutsModal} from 'sentry/views/performance/newTraceDetails/traceShortcutsModal';
-
-const CompactSelectTriggerProps: DropdownButtonProps = {
-  icon: <IconSettings />,
-  showChevron: false,
-  size: 'xs' as const,
-  'aria-label': t('Trace Preferences'),
-};
+import {TRACE_WATERFALL_TIME_COMPRESSION_FEATURE} from 'sentry/views/performance/newTraceDetails/traceState/tracePreferences';
 
 interface TracePreferencesDropdownProps {
   autogroup: boolean;
+  compressedTimeline: boolean;
   missingInstrumentation: boolean;
   onAutogroupChange: () => void;
+  onCompressedTimelineChange: () => void;
   onMissingInstrumentationChange: () => void;
   rootEventResults: TraceRootEventQueryResults;
 }
 
 export function TracePreferencesDropdown(props: TracePreferencesDropdownProps) {
+  const {openModal} = useModal();
+
   const organization = useOrganization();
   const {projects} = useProjects();
+  const hasCompressedTimelineFeature = organization.features.includes(
+    TRACE_WATERFALL_TIME_COMPRESSION_FEATURE
+  );
 
   const traceProject = getTraceProject(projects, props.rootEventResults);
   const selectOptions: Array<SelectOption<string>> = [
@@ -56,8 +62,15 @@ export function TracePreferencesDropdown(props: TracePreferencesDropdownProps) {
       ),
     },
   ];
+  if (hasCompressedTimelineFeature) {
+    selectOptions.push({
+      label: t('Compressed Timeline'),
+      value: 'compressed-timeline',
+      details: t('Collapses long inactive gaps in the waterfall timeline.'),
+    });
+  }
 
-  const values: string[] = useMemo(() => {
+  const values = useMemo(() => {
     const value: string[] = [];
     if (props.autogroup) {
       value.push('autogroup');
@@ -65,11 +78,20 @@ export function TracePreferencesDropdown(props: TracePreferencesDropdownProps) {
     if (props.missingInstrumentation) {
       value.push('no-instrumentation');
     }
+    if (hasCompressedTimelineFeature && props.compressedTimeline) {
+      value.push('compressed-timeline');
+    }
     return value;
-  }, [props.autogroup, props.missingInstrumentation]);
+  }, [
+    hasCompressedTimelineFeature,
+    props.autogroup,
+    props.compressedTimeline,
+    props.missingInstrumentation,
+  ]);
 
   const onAutogroupChange = props.onAutogroupChange;
   const onMissingInstrumentationChange = props.onMissingInstrumentationChange;
+  const onCompressedTimelineChange = props.onCompressedTimelineChange;
 
   const onChange = useCallback(
     (newValues: Array<SelectOption<string>>) => {
@@ -83,6 +105,9 @@ export function TracePreferencesDropdown(props: TracePreferencesDropdownProps) {
         if (newOption === 'no-instrumentation') {
           onMissingInstrumentationChange();
         }
+        if (newOption === 'compressed-timeline') {
+          onCompressedTimelineChange();
+        }
       }
 
       if (values.length > newValuesArray.length) {
@@ -93,32 +118,43 @@ export function TracePreferencesDropdown(props: TracePreferencesDropdownProps) {
         if (removedOption === 'no-instrumentation') {
           onMissingInstrumentationChange();
         }
+        if (removedOption === 'compressed-timeline') {
+          onCompressedTimelineChange();
+        }
       }
     },
-    [values, onAutogroupChange, onMissingInstrumentationChange]
-  );
-
-  const menuFooter = (
-    <a
-      onClick={() => {
-        traceAnalytics.trackViewShortcuts(organization);
-        openModal(p => <TraceShortcutsModal {...p} />);
-      }}
-    >
-      {t('See Shortcuts')}
-    </a>
+    [
+      values,
+      onAutogroupChange,
+      onCompressedTimelineChange,
+      onMissingInstrumentationChange,
+    ]
   );
 
   return (
     <CompactSelect
       multiple
       value={values}
-      // Force the trigger to be so that we only render the icon
-      triggerLabel=""
-      triggerProps={CompactSelectTriggerProps}
+      trigger={triggerProps => (
+        <OverlayTrigger.IconButton
+          {...triggerProps}
+          size="xs"
+          aria-label={t('Trace Preferences')}
+          icon={<IconSettings />}
+        />
+      )}
       options={selectOptions}
+      menuFooter={
+        <MenuComponents.CTAButton
+          onClick={() => {
+            traceAnalytics.trackViewShortcuts(organization);
+            openModal(p => <TraceShortcutsModal {...p} />);
+          }}
+        >
+          {t('See Shortcuts')}
+        </MenuComponents.CTAButton>
+      }
       onChange={onChange}
-      menuFooter={menuFooter}
       menuWidth={300}
     />
   );
@@ -137,7 +173,7 @@ function getTraceProject(
     const projectId =
       OurLogKnownFieldKey.PROJECT_ID in attributes
         ? attributes[OurLogKnownFieldKey.PROJECT_ID]
-        : findSpanAttributeValue(attributes, 'project_id');
+        : getAttributeValue(attributes, 'project_id')?.toString();
     return projects.find(p => p.id === projectId);
   }
 

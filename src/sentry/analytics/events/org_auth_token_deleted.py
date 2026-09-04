@@ -1,13 +1,10 @@
 from sentry import analytics
 
 
+@analytics.eventclass("org_auth_token.deleted")
 class OrgAuthTokenDeleted(analytics.Event):
-    type = "org_auth_token.deleted"
-
-    attributes = (
-        analytics.Attribute("user_id"),
-        analytics.Attribute("organization_id"),
-    )
+    user_id: int | None = None
+    organization_id: int
 
 
 analytics.register(OrgAuthTokenDeleted)

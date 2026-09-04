@@ -1,0 +1,247 @@
+import type React from 'react';
+import {useRef} from 'react';
+
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {SplitPanel} from '@sentry/scraps/splitPanel';
+
+import {useDimensions} from 'sentry/utils/useDimensions';
+import {useLocalStorageState} from 'sentry/utils/useLocalStorageState';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import type {AITraceSpanNode} from 'sentry/views/insights/pages/agents/utils/types';
+
+const LEFT_PANEL_MIN = 400;
+const RIGHT_PANEL_MIN = 400;
+const DIVIDER_WIDTH = 1;
+const DEFAULT_STORAGE_KEY = 'conversation-split-size';
+
+const CONTENT_MIN_WIDTH = 400;
+const DETAIL_MIN_WIDTH = 400;
+const MAX_CONTENT_WIDTH = 2000;
+const SPLIT_LAYOUT_STORAGE_KEY = 'conversation-split-layout-size';
+
+/**
+ * Resizable two-column layout for conversation views.
+ * Left panel holds messages/spans, right panel holds span details.
+ * Uses SplitPanel for drag-to-resize with persisted size.
+ */
+export function ConversationSplitLayout({
+  left,
+  right,
+  sizeStorageKey = DEFAULT_STORAGE_KEY,
+}: {
+  left: React.ReactNode;
+  right: React.ReactNode;
+  sizeStorageKey?: string;
+}) {
+  const measureRef = useRef<HTMLDivElement>(null);
+  const {width} = useDimensions({elementRef: measureRef});
+
+  // Wait for the container to be measured before mounting the SplitPanel.
+  // useLocalStorageState captures its default on first mount, so we need
+  // width > 0 to compute a sensible half-width default for fresh visits.
+  return (
+    <Flex ref={measureRef} flex="1" minHeight="0" overflow="hidden">
+      {width > 0 ? (
+        <MeasuredSplitPanel width={width} sizeStorageKey={sizeStorageKey}>
+          {{left, right}}
+        </MeasuredSplitPanel>
+      ) : null}
+    </Flex>
+  );
+}
+
+function MeasuredSplitPanel({
+  children: {left, right},
+  sizeStorageKey,
+  width,
+}: {
+  children: {left: React.ReactNode; right: React.ReactNode};
+  sizeStorageKey: string;
+  width: number;
+}) {
+  // The sized pane's max is derived inside SplitPanel from `fillMinSize`, so we
+  // only need a sensible half-width default here.
+  const defaultLeft = Math.max(LEFT_PANEL_MIN, (width - DIVIDER_WIDTH) * 0.5);
+
+  const [storedSize, setStoredSize] = useLocalStorageState(sizeStorageKey, defaultLeft);
+
+  return (
+    <SplitPanel
+      defaultSize={defaultLeft}
+      initialSize={storedSize}
+      minSize={LEFT_PANEL_MIN}
+      fillMinSize={RIGHT_PANEL_MIN}
+      onResizeEnd={({endSize}) => setStoredSize(endSize)}
+      sized={left}
+      fill={right}
+    />
+  );
+}
+
+export function ConversationLeftPanel({children}: {children: React.ReactNode}) {
+  return (
+    <Stack flex={1} minWidth="0" minHeight="0" overflow="hidden">
+      {children}
+    </Stack>
+  );
+}
+
+export function SpanDetailCard({
+  children,
+  embedded,
+  ref,
+}: {
+  children: React.ReactNode;
+  embedded?: boolean;
+  ref?: React.Ref<HTMLDivElement>;
+}) {
+  return (
+    <Stack
+      ref={ref}
+      background="primary"
+      border={embedded ? undefined : 'primary'}
+      radius={embedded ? undefined : 'md'}
+      padding="xl"
+      gap="lg"
+      flex="1"
+      minWidth="0"
+      minHeight="0"
+      height="100%"
+      overflowY="auto"
+      overflowX="hidden"
+    >
+      {children}
+    </Stack>
+  );
+}
+
+export function ConversationContentLayout({
+  left,
+  right,
+  leftPadding = 'md',
+  contentRef,
+}: {
+  left: React.ReactNode;
+  contentRef?: React.Ref<HTMLDivElement>;
+  leftPadding?: React.ComponentProps<typeof Container>['padding'];
+  right?: React.ReactNode;
+}) {
+  return (
+    <Flex flex="1" minWidth="0" minHeight="0" overflow="hidden">
+      <ConversationLeftPanel>
+        <Container
+          containerType="inline-size"
+          flex="1"
+          minHeight="0"
+          width="100%"
+          background="secondary"
+        >
+          <Flex height="100%" width="100%" minHeight="0" minWidth="0">
+            <MeasuredContentSplit
+              detail={right}
+              content={
+                <Container
+                  ref={contentRef}
+                  flex="1"
+                  minWidth="0"
+                  minHeight="0"
+                  padding={leftPadding}
+                  background="primary"
+                  border="primary"
+                  radius="md"
+                  overflowX="hidden"
+                  overflowY="auto"
+                >
+                  {left}
+                </Container>
+              }
+            />
+          </Flex>
+        </Container>
+      </ConversationLeftPanel>
+    </Flex>
+  );
+}
+
+function MeasuredContentSplit({
+  content,
+  detail,
+}: {
+  content: React.ReactNode;
+  detail?: React.ReactNode;
+}) {
+  const [storedSize, setStoredSize] = useLocalStorageState(
+    SPLIT_LAYOUT_STORAGE_KEY,
+    MAX_CONTENT_WIDTH
+  );
+
+  return (
+    <SplitPanel
+      orientation={{zero: 'vertical', '2xl': 'horizontal'}}
+      defaultSize={MAX_CONTENT_WIDTH}
+      initialSize={storedSize}
+      minSize={CONTENT_MIN_WIDTH}
+      maxSize={MAX_CONTENT_WIDTH}
+      fillMinSize={DETAIL_MIN_WIDTH}
+      onResizeEnd={({endSize}) => setStoredSize(endSize)}
+      sized={
+        <Stack
+          flex="1"
+          minWidth="0"
+          minHeight="0"
+          paddingRight={{zero: '0', '2xl': 'md'}}
+          paddingBottom={{zero: 'md', '2xl': '0'}}
+          maxWidth={`${MAX_CONTENT_WIDTH}px`}
+        >
+          {content}
+        </Stack>
+      }
+      fill={
+        detail ? (
+          <Stack
+            flex="1"
+            minWidth="0"
+            minHeight="0"
+            paddingLeft={{zero: '0', '2xl': 'md'}}
+            paddingTop={{zero: 'md', '2xl': '0'}}
+          >
+            {detail}
+          </Stack>
+        ) : undefined
+      }
+    />
+  );
+}
+
+export function ConversationDetailPanel({
+  selectedNode,
+  nodeTraceMap,
+  initiallyCollapseAiIO = true,
+}: {
+  nodeTraceMap: Map<string, string>;
+  initiallyCollapseAiIO?: boolean;
+  selectedNode?: AITraceSpanNode;
+}) {
+  const organization = useOrganization();
+  return (
+    <Stack
+      flex={1}
+      minHeight="0"
+      background="primary"
+      overflowY="auto"
+      overflowX="hidden"
+    >
+      {selectedNode?.renderDetails({
+        node: selectedNode,
+        manager: null,
+        onParentClick: () => {},
+        onTabScrollToNode: () => {},
+        organization,
+        replay: null,
+        traceId: nodeTraceMap.get(selectedNode.id) ?? '',
+        hideNodeActions: true,
+        initiallyCollapseAiIO,
+      })}
+    </Stack>
+  );
+}

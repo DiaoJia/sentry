@@ -1,11 +1,11 @@
 from django.http import Http404, HttpRequest, HttpResponseRedirect
 from django.urls import reverse
 
-from sentry import eventstore
-from sentry.web.frontend.base import ProjectView, region_silo_view
+from sentry.services import eventstore
+from sentry.web.frontend.base import ProjectView, cell_silo_view
 
 
-@region_silo_view
+@cell_silo_view
 class ProjectEventRedirect(ProjectView):
     required_scope = "event:read"
 

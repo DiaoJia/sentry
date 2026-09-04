@@ -7,19 +7,15 @@ import {
   StackTracePreviewContent,
 } from 'sentry/components/groupPreviewTooltip/stackTracePreview';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Event} from 'sentry/types/event';
+import type {Event, EventTransaction} from 'sentry/types/event';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import type EventView from 'sentry/utils/discover/eventView';
-import getDuration from 'sentry/utils/duration/getDuration';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import type {EventView} from 'sentry/utils/discover/eventView';
+import {getDuration} from 'sentry/utils/duration/getDuration';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import {
-  getStatusBodyText,
-  HttpStatus,
-} from 'sentry/views/performance/transactionDetails/eventMetas';
 
-import ActionDropDown, {ContextValueType} from './actionDropdown';
+import {ActionDropDown, ContextValueType} from './actionDropdown';
 import {NoContext} from './quickContextWrapper';
 import {
   ContextBody,
@@ -39,11 +35,20 @@ interface EventContextProps extends BaseContextProps {
   projects?: Project[];
 }
 
-function EventContext(props: EventContextProps) {
+export function EventContext(props: EventContextProps) {
   const {organization, dataRow, eventView, location} = props;
   const {isPending, isError, data} = useApiQuery<Event>(
     [
-      `/organizations/${organization.slug}/events/${dataRow['project.name']}:${dataRow.id}/`,
+      getApiUrl(
+        '/organizations/$organizationIdOrSlug/events/$projectIdOrSlug:$eventId/',
+        {
+          path: {
+            organizationIdOrSlug: organization.slug,
+            projectIdOrSlug: dataRow['project.name'],
+            eventId: dataRow.id,
+          },
+        }
+      ),
     ],
     {
       staleTime: tenSecondInMs,
@@ -155,18 +160,45 @@ function EventContext(props: EventContextProps) {
     </NoContextWrapper>
   );
 }
+
+function HttpStatus({event}: {event: Event}) {
+  const {tags} = event;
+
+  const emptyStatus = <Fragment>{'\u2014'}</Fragment>;
+
+  if (!Array.isArray(tags)) {
+    return emptyStatus;
+  }
+
+  const tag = tags.find(tagObject => tagObject.key === 'http.status_code');
+
+  if (!tag) {
+    return emptyStatus;
+  }
+
+  return <Fragment>HTTP {tag.value}</Fragment>;
+}
+
+function getStatusBodyText(event: EventTransaction): string {
+  return event.contexts?.trace?.status ?? '\u2014';
+}
+
 const ErrorTitleContainer = styled(ContextContainer)`
-  padding: ${space(1.5)};
+  padding: ${p => p.theme.space.lg};
 `;
 
 const ErrorTitleBody = styled(ContextBody)`
   margin: 0;
   max-width: 450px;
-  ${p => p.theme.overflowEllipsis}
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const EventContextBody = styled(ContextBody)`
-  font-size: ${p => p.theme.fontSize.xl};
+  font-size: ${p => p.theme.font.size.xl};
   margin: 0;
   align-items: flex-start;
   flex-direction: column;
@@ -174,7 +206,7 @@ const EventContextBody = styled(ContextBody)`
 
 const EventContextContainer = styled(ContextContainer)`
   & + & {
-    margin-top: ${space(2)};
+    margin-top: ${p => p.theme.space.xl};
   }
 `;
 
@@ -187,11 +219,9 @@ const StackTraceWrapper = styled('div')`
     margin-bottom: 0;
     border: 0;
   }
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
 `;
 
 const HttpStatusWrapper = styled('span')`
-  margin-left: ${space(0.5)};
+  margin-left: ${p => p.theme.space.xs};
 `;
-
-export default EventContext;

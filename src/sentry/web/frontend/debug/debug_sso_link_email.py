@@ -1,21 +1,26 @@
-from django.http import HttpRequest, HttpResponse
+from typing import Any
+
+from django.http import HttpResponse
 from django.views.generic import View
 
 from sentry.auth.providers.dummy import DummyProvider
 from sentry.models.organization import Organization
+from sentry.utils.auth import AuthenticatedHttpRequest
+from sentry.web.frontend.base import internal_cell_silo_view
 
 from .mail import MailPreview
 
 
-def get_context(request):
+def get_context(request: AuthenticatedHttpRequest) -> dict[str, Any]:
     org = Organization(name="My Company")
     provider = DummyProvider()
 
     return {"organization": org, "actor_email": request.user.email, "provider": provider}
 
 
+@internal_cell_silo_view
 class DebugSsoLinkedEmailView(View):
-    def get(self, request: HttpRequest) -> HttpResponse:
+    def get(self, request: AuthenticatedHttpRequest) -> HttpResponse:
         context = get_context(request)
 
         return MailPreview(
@@ -25,8 +30,9 @@ class DebugSsoLinkedEmailView(View):
         ).render(request)
 
 
+@internal_cell_silo_view
 class DebugSsoUnlinkedEmailView(View):
-    def get(self, request: HttpRequest) -> HttpResponse:
+    def get(self, request: AuthenticatedHttpRequest) -> HttpResponse:
         context = get_context(request)
         context["has_password"] = True
 
@@ -37,8 +43,9 @@ class DebugSsoUnlinkedEmailView(View):
         ).render(request)
 
 
+@internal_cell_silo_view
 class DebugSsoUnlinkedNoPasswordEmailView(View):
-    def get(self, request: HttpRequest) -> HttpResponse:
+    def get(self, request: AuthenticatedHttpRequest) -> HttpResponse:
         context = get_context(request)
         context["has_password"] = False
 

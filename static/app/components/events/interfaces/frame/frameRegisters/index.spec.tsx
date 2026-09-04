@@ -1,73 +1,74 @@
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import {FrameRegisters} from 'sentry/components/events/interfaces/frame/frameRegisters';
-import {FrameRegisterValue} from 'sentry/components/events/interfaces/frame/frameRegisters/value';
 
-describe('FrameRegisters', function () {
-  it('should render registers', function () {
-    const registers = {
-      r10: '0x00007fff9300bf70',
-      r11: '0xffffffffffffffff',
-      r12: '0x0000000000000000',
-    };
-
-    render(<FrameRegisters registers={registers} />);
-    expect(screen.getByText('r10')).toBeInTheDocument();
-    expect(screen.getByText('0x00007fff9300bf70')).toBeInTheDocument();
-  });
-
-  it('should skip registers without a value', function () {
+describe('FrameRegisters', () => {
+  const defaultProps = {
+    deviceArch: undefined,
+    meta: undefined,
+  };
+  it('renders defined registers and skips registers without a value', () => {
     const registers = {
       r10: '0x00007fff9300bf70',
       r11: null,
       r12: '0x0000000000000000',
     };
 
-    render(<FrameRegisters registers={registers} />);
+    render(<FrameRegisters {...defaultProps} registers={registers} />);
+    expect(screen.getByText('Registers')).toBeInTheDocument();
     expect(screen.getByText('r10')).toBeInTheDocument();
     expect(screen.getByText('0x00007fff9300bf70')).toBeInTheDocument();
     expect(screen.queryByText('r11')).not.toBeInTheDocument();
   });
-});
 
-describe('FrameRegistersValue', function () {
-  const hexadecimalValue = '0x000000000000000a';
-  const numericValue = 10;
-
-  describe('with string value', function () {
-    it('should display the hexadecimal value and toggle to numeric value', async function () {
-      render(<FrameRegisterValue value={hexadecimalValue} />);
-      expect(screen.getByText(hexadecimalValue)).toBeInTheDocument();
-      await userEvent.click(
-        screen.getByRole('button', {name: 'Toggle register value format'})
-      );
-      expect(screen.queryByText(hexadecimalValue)).not.toBeInTheDocument();
-      expect(screen.getByText(numericValue)).toBeInTheDocument();
+  it('changes every register and copies the displayed value', async () => {
+    Object.assign(navigator, {
+      clipboard: {writeText: jest.fn().mockResolvedValue('')},
     });
+
+    const registers = {
+      r0: '0x000000000000000a',
+      r1: '0x000000000000000b',
+    };
+
+    render(<FrameRegisters {...defaultProps} registers={registers} />);
+    await userEvent.click(screen.getByRole('radio', {name: 'Decimal'}));
+
+    expect(screen.getByText('10')).toBeInTheDocument();
+    expect(screen.getByText('11')).toBeInTheDocument();
+    await userEvent.click(
+      screen.getAllByRole('button', {name: 'Copy register value to clipboard'})[0]!
+    );
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('10');
   });
 
-  describe('with numeric value', function () {
-    it('should display the hexadecimal value and toggle to numeric value', async function () {
-      render(<FrameRegisterValue value={numericValue} />);
-      expect(screen.getByText(hexadecimalValue)).toBeInTheDocument();
-      await userEvent.click(
-        screen.getByRole('button', {name: 'Toggle register value format'})
-      );
-      expect(screen.queryByText(hexadecimalValue)).not.toBeInTheDocument();
-      expect(screen.getByText(numericValue)).toBeInTheDocument();
-    });
+  it('renders an unknown register value unchanged', () => {
+    render(<FrameRegisters {...defaultProps} registers={{custom: 'xyz'}} />);
+
+    expect(screen.getByText('xyz')).toBeInTheDocument();
   });
 
-  describe('with unknown value', function () {
-    const unknownValue = 'xyz';
+  it('does not offer to copy an annotated register value', () => {
+    render(
+      <FrameRegisters
+        {...defaultProps}
+        registers={{r0: '0x000000000000000a', r1: ''}}
+        meta={{
+          r1: {
+            '': {
+              chunks: [{type: 'redaction', text: '', rule_id: 'project:0'}],
+              len: 16,
+              rem: [['project:0', 's', 0, 0]],
+            },
+          },
+        }}
+      />
+    );
 
-    it('should display the hexadecimal value and toggle to numeric value', async function () {
-      render(<FrameRegisterValue value={unknownValue} />);
-      expect(screen.getByText(unknownValue)).toBeInTheDocument();
-      await userEvent.click(
-        screen.getByRole('button', {name: 'Toggle register value format'})
-      );
-      expect(screen.getByText(unknownValue)).toBeInTheDocument();
-    });
+    expect(screen.getByText(/redacted/)).toBeInTheDocument();
+    expect(
+      screen.getAllByRole('button', {name: 'Copy register value to clipboard'})
+    ).toHaveLength(1);
   });
 });

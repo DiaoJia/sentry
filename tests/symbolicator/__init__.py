@@ -1,5 +1,8 @@
 import re
+from typing import Any
 
+from sentry.db.models.fields.node import NodeData
+from sentry.testutils.pytest.fixtures import InstaSnapshotter
 from sentry.utils.safe import get_path
 
 
@@ -35,6 +38,7 @@ def strip_stacktrace(stacktrace):
 
 
 STRIP_TRAILING_ADDR_RE = re.compile(" ?/ 0x[0-9a-fA-F]+$")
+SNAPSHOT_CONTEXTS_TO_STRIP = frozenset(("reprocessing", "trace"))
 
 
 def strip_trailing_addr(value):
@@ -59,7 +63,7 @@ def strip_stacktrace_container(container):
     return container
 
 
-def insta_snapshot_native_stacktrace_data(self, event, **kwargs):
+def insta_snapshot_native_stacktrace_data(self, event: NodeData, **kwargs: Any):
     # limit amount of data going into a snapshot so that they don't break all
     # the time due to unrelated changes.
     self.insta_snapshot(
@@ -79,7 +83,9 @@ def insta_snapshot_native_stacktrace_data(self, event, **kwargs):
             },
             "debug_meta": event.get("debug_meta"),
             "contexts": {
-                k: v for k, v in (event.get("contexts") or {}).items() if k != "reprocessing"
+                k: v
+                for k, v in (event.get("contexts") or {}).items()
+                if k not in SNAPSHOT_CONTEXTS_TO_STRIP
             }
             or None,
             "errors": [e for e in event.get("errors") or () if e.get("name") != "timestamp"],
@@ -88,7 +94,9 @@ def insta_snapshot_native_stacktrace_data(self, event, **kwargs):
     )
 
 
-def insta_snapshot_javascript_stacktrace_data(insta_snapshot, event):
+def insta_snapshot_javascript_stacktrace_data(
+    insta_snapshot: InstaSnapshotter, event: NodeData
+) -> None:
     # limit amount of data going into a snapshot so that they don't break all
     # the time due to unrelated changes.
     insta_snapshot(

@@ -4,12 +4,12 @@ import logging
 from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
-from django import forms
 from django.http.request import HttpRequest
-from django.http.response import HttpResponseBase
 from django.utils.translation import gettext_lazy as _
+from rest_framework.fields import CharField, ChoiceField
 from rest_framework.serializers import ValidationError
 
+from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
 from sentry.constants import ObjectStatus
 from sentry.integrations.base import (
     FeatureDescription,
@@ -23,17 +23,17 @@ from sentry.integrations.models.integration import Integration
 from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.integrations.on_call.metrics import OnCallIntegrationsHaltReason, OnCallInteractionType
 from sentry.integrations.opsgenie.metrics import record_event
-from sentry.integrations.opsgenie.tasks import migrate_opsgenie_plugin
-from sentry.integrations.pipeline_types import IntegrationPipelineT, IntegrationPipelineViewT
+from sentry.integrations.pipeline import IntegrationPipeline
 from sentry.integrations.types import IntegrationProviderSlug
 from sentry.organizations.services.organization.model import RpcOrganization
+from sentry.pipeline.types import PipelineStepResult
+from sentry.pipeline.views.base import ApiPipelineSteps
 from sentry.shared_integrations.exceptions import (
     ApiError,
     ApiRateLimitedError,
     ApiUnauthorized,
     IntegrationError,
 )
-from sentry.web.helpers import render_to_response
 
 from .client import OpsgenieClient
 from .utils import get_team
@@ -76,51 +76,8 @@ metadata = IntegrationMetadata(
 OPSGENIE_BASE_URL_TO_DOMAIN_NAME = {
     "https://api.opsgenie.com/": "app.opsgenie.com",
     "https://api.eu.opsgenie.com/": "app.eu.opsgenie.com",
+    "https://api.atlassian.com/jsm/ops/integration/": "atlassian.net",
 }
-
-
-class InstallationForm(forms.Form):
-    base_url = forms.ChoiceField(
-        label=_("Base URL"),
-        choices=[
-            ("https://api.opsgenie.com/", "api.opsgenie.com"),
-            ("https://api.eu.opsgenie.com/", "api.eu.opsgenie.com"),
-        ],
-    )
-    provider = forms.CharField(
-        label=_("Account Name"),
-        help_text=_("Example: 'acme' for https://acme.app.opsgenie.com/"),
-        widget=forms.TextInput(),
-    )
-
-    api_key = forms.CharField(
-        label=("Opsgenie Integration Key"),
-        help_text=_(
-            "Optionally, add your first integration key for sending alerts. You can rename this key later."
-        ),
-        widget=forms.TextInput(),
-        required=False,
-    )
-
-
-class InstallationConfigView(IntegrationPipelineViewT):
-    def dispatch(self, request: HttpRequest, pipeline: IntegrationPipelineT) -> HttpResponseBase:
-        if request.method == "POST":
-            form = InstallationForm(request.POST)
-            if form.is_valid():
-                form_data = form.cleaned_data
-
-                pipeline.bind_state("installation_data", form_data)
-
-                return pipeline.next_step()
-        else:
-            form = InstallationForm()
-
-        return render_to_response(
-            template="sentry/integrations/opsgenie-config.html",
-            context={"form": form},
-            request=request,
-        )
 
 
 class OpsgenieIntegration(IntegrationInstallation):
@@ -135,7 +92,7 @@ class OpsgenieIntegration(IntegrationInstallation):
             integration_key=team["integration_key"],
         )
 
-    def get_client(self) -> Any:  # type: ignore[explicit-override]
+    def get_client(self) -> Any:
         raise NotImplementedError("Use get_keyring_client instead.")
 
     def get_organization_config(self) -> Sequence[Any]:
@@ -157,12 +114,14 @@ class OpsgenieIntegration(IntegrationInstallation):
 
         return fields
 
-    def update_organization_config(self, data: MutableMapping[str, Any]) -> None:
+    def update_organization_config(
+        self, data: MutableMapping[str, Any]
+    ) -> Mapping[str, Any] | None:
         from sentry.integrations.services.integration import integration_service
 
         # add the integration ID to a newly added row
         if not self.org_integration:
-            return
+            return None
 
         teams = data["team_table"]
         unsaved_teams = [team for team in teams if team["id"] == ""]
@@ -222,13 +181,42 @@ class OpsgenieIntegration(IntegrationInstallation):
 
         return super().update_organization_config(data)
 
-    def schedule_migrate_opsgenie_plugin(self):
-        migrate_opsgenie_plugin.apply_async(
-            kwargs={
-                "integration_id": self.model.id,
-                "organization_id": self.organization_id,
-            }
-        )
+    def _get_debug_metadata_keys(self) -> list[str]:
+        return ["base_url", "domain_name"]
+
+
+BASE_URL_CHOICES = [
+    ("https://api.opsgenie.com/", "api.opsgenie.com"),
+    ("https://api.eu.opsgenie.com/", "api.eu.opsgenie.com"),
+    ("https://api.atlassian.com/jsm/ops/integration/", "api.atlassian.com (JSM)"),
+]
+
+
+class OpsgenieInstallationApiSerializer(CamelSnakeSerializer):
+    base_url = ChoiceField(choices=BASE_URL_CHOICES, required=True)
+    provider = CharField(required=True)
+    api_key = CharField(required=False, allow_blank=True, default="")
+
+
+class OpsgenieInstallationApiStep:
+    step_name = "installation_config"
+
+    def get_step_data(self, pipeline: IntegrationPipeline, request: HttpRequest) -> dict[str, Any]:
+        return {
+            "baseUrlChoices": [{"value": url, "label": label} for url, label in BASE_URL_CHOICES],
+        }
+
+    def get_serializer_cls(self) -> type:
+        return OpsgenieInstallationApiSerializer
+
+    def handle_post(
+        self,
+        validated_data: dict[str, str],
+        pipeline: IntegrationPipeline,
+        request: HttpRequest,
+    ) -> PipelineStepResult:
+        pipeline.bind_state("installation_data", validated_data)
+        return PipelineStepResult.advance()
 
 
 class OpsgenieIntegrationProvider(IntegrationProvider):
@@ -236,6 +224,7 @@ class OpsgenieIntegrationProvider(IntegrationProvider):
     name = "Opsgenie"
     metadata = metadata
     integration_cls = OpsgenieIntegration
+    overwrite_existing_integration = False
     features = frozenset(
         [
             IntegrationFeatures.ENTERPRISE_INCIDENT_MANAGEMENT,
@@ -243,8 +232,8 @@ class OpsgenieIntegrationProvider(IntegrationProvider):
         ]
     )
 
-    def get_pipeline_views(self) -> Sequence[IntegrationPipelineViewT]:
-        return [InstallationConfigView()]
+    def get_pipeline_api_steps(self) -> ApiPipelineSteps[IntegrationPipeline]:
+        return [OpsgenieInstallationApiStep()]
 
     def build_integration(self, state: Mapping[str, Any]) -> IntegrationData:
         api_key = state["installation_data"]["api_key"]
@@ -254,10 +243,10 @@ class OpsgenieIntegrationProvider(IntegrationProvider):
             "name": name,
             "external_id": name,
             "metadata": {
-                "api_key": api_key,
                 "base_url": base_url,
                 "domain_name": f"{name}.{OPSGENIE_BASE_URL_TO_DOMAIN_NAME[base_url]}",
             },
+            "post_install_data": {"api_key": api_key},
         }
 
     def post_install(
@@ -274,10 +263,10 @@ class OpsgenieIntegrationProvider(IntegrationProvider):
                 )
 
             except OrganizationIntegration.DoesNotExist:
-                logger.exception("The Opsgenie post_install step failed.")
+                logger.warning("The Opsgenie post_install step failed.")
                 return
 
-            key = integration.metadata["api_key"]
+            key = extra["api_key"]
             team_table = []
             if key:
                 team_name = "my-first-key"

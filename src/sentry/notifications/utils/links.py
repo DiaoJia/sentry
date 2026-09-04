@@ -4,13 +4,15 @@ from typing import Any
 
 from django.utils.http import urlencode
 
-from sentry import features
 from sentry.incidents.models.alert_rule import AlertRuleTriggerAction
 from sentry.models.group import Group
 from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.models.rule import Rule
-from sentry.notifications.utils.rules import get_key_from_rule_data
+from sentry.notifications.utils.rules import (
+    get_key_from_rule_data,
+    split_rules_by_rule_workflow_id,
+)
 from sentry.types.rules import NotificationRuleDetails
 
 """
@@ -20,11 +22,11 @@ We can use this as a basepoint to build out our templating system in the future
 """
 
 
-def create_link_to_workflow(organization_id: int, workflow_id: str) -> str:
+def create_link_to_workflow(organization_slug: str, workflow_id: str) -> str:
     """
     Create a link to a workflow
     """
-    return f"/organizations/{organization_id}/issues/automations/{workflow_id}/"
+    return f"/organizations/{organization_slug}/monitors/alerts/{workflow_id}/"
 
 
 def get_email_link_extra_params(
@@ -99,40 +101,40 @@ def get_integration_link(
     )
 
 
-def get_issue_replay_link(group: Group, sentry_query_params: str = ""):
+def get_issue_replay_link(group: Group, sentry_query_params: str = "") -> str:
     return str(group.get_absolute_url() + "replays/" + sentry_query_params)
 
 
 def get_rules(
-    rules: Sequence[Rule], organization: Organization, project: Project
-) -> Sequence[NotificationRuleDetails]:
-    if features.has("organizations:workflow-engine-ui-links", organization):
-        return get_workflow_links(rules, organization, project)
-    elif features.has("organizations:workflow-engine-trigger-actions", organization):
-        return get_rules_with_legacy_ids(rules, organization, project)
-    return [
-        NotificationRuleDetails(
-            rule.id,
-            rule.label,
-            f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule.id}/",
-            f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule.id}/details/",
-        )
-        for rule in rules
-    ]
+    rules: Sequence[Rule], organization: Organization, project: Project, type_id: int | None = None
+) -> list[NotificationRuleDetails]:
+    rules_and_workflows = split_rules_by_rule_workflow_id(rules)
+
+    return get_workflow_links(
+        rules_and_workflows.workflow_rules, organization, project
+    ) + get_rules_with_legacy_ids(rules_and_workflows.rules, organization, project)
+
+
+def _fetch_rule_id(rule: Rule, type_id: int | None = None) -> int:
+    # Try to fetch the legacy rule id, if it fails, return the rule id
+    # This allows us to support both legacy and new rule ids
+    try:
+        return int(get_key_from_rule_data(rule, "legacy_rule_id"))
+    except AssertionError:
+        return rule.id
 
 
 def get_rules_with_legacy_ids(
     rules: Sequence[Rule], organization: Organization, project: Project
-) -> Sequence[NotificationRuleDetails]:
+) -> list[NotificationRuleDetails]:
     rules_with_legacy_ids = []
     for rule in rules:
-        rule_id = int(get_key_from_rule_data(rule, "legacy_rule_id"))
+        rule_id = _fetch_rule_id(rule)
         rules_with_legacy_ids.append(
             NotificationRuleDetails(
                 rule_id,
                 rule.label,
-                f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule_id}/",
-                f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule_id}/details/",
+                f"/organizations/{organization.slug}/issues/alerts/rules/{project.slug}/{rule_id}/details/",
             )
         )
     return rules_with_legacy_ids
@@ -140,7 +142,7 @@ def get_rules_with_legacy_ids(
 
 def get_workflow_links(
     rules: Sequence[Rule], organization: Organization, project: Project
-) -> Sequence[NotificationRuleDetails]:
+) -> list[NotificationRuleDetails]:
     workflow_links = []
     for rule in rules:
         workflow_id = get_key_from_rule_data(rule, "workflow_id")
@@ -148,22 +150,7 @@ def get_workflow_links(
             NotificationRuleDetails(
                 int(workflow_id),
                 rule.label,
-                create_link_to_workflow(organization.id, workflow_id),
-                # TODO(iamrajjoshi): Add status url (whatever it is)
-                create_link_to_workflow(organization.id, workflow_id),
+                create_link_to_workflow(organization.slug, workflow_id),
             )
         )
     return workflow_links
-
-
-def get_snooze_url(
-    rule: Rule,
-    organization: Organization,
-    project: Project,
-    sentry_query_params: str,
-) -> str:
-    if features.has("organizations:workflow-engine-trigger-actions", organization):
-        rule_id = int(get_key_from_rule_data(rule, "legacy_rule_id"))
-    else:
-        rule_id = rule.id
-    return f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule_id}/details/{sentry_query_params}&{urlencode({'mute': '1'})}"

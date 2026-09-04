@@ -16,17 +16,20 @@ from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.base import Endpoint
 from sentry.api.exceptions import BadRequest
+from sentry.api.utils import to_valid_int_id
 from sentry.integrations.base import IntegrationDomain
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.source_code_management.webhook import SCMWebhook
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.integrations.utils.metrics import IntegrationWebhookEvent, IntegrationWebhookEventType
+from sentry.integrations.utils.webhook_viewer_context import webhook_viewer_context
 from sentry.models.commit import Commit
 from sentry.models.commitauthor import CommitAuthor
 from sentry.models.organization import Organization
 from sentry.models.repository import Repository
 from sentry.plugins.providers import IntegrationRepositoryProvider
 from sentry.shared_integrations.exceptions import ApiHostError, ApiUnauthorized, IntegrationError
-from sentry.web.frontend.base import region_silo_view
+from sentry.web.frontend.base import cell_silo_view
 
 logger = logging.getLogger("sentry.webhooks")
 
@@ -36,7 +39,7 @@ PROVIDER_NAME = "integrations:bitbucket_server"
 class BitbucketServerWebhook(SCMWebhook, ABC):
     @property
     def provider(self):
-        return "bitbucket_server"
+        return IntegrationProviderSlug.BITBUCKET_SERVER.value
 
     def update_repo_data(self, repo, event):
         """
@@ -62,84 +65,95 @@ class PushEventWebhook(BitbucketServerWebhook):
         ):
             raise ValueError("Organization and integration_id must be provided")
 
-        try:
-            repo = Repository.objects.get(
-                organization_id=organization.id,
-                provider=PROVIDER_NAME,
-                external_id=str(event["repository"]["id"]),
-            )
-        except Repository.DoesNotExist:
-            raise Http404()
-
-        provider = repo.get_provider()
-        try:
-            installation = provider.get_installation(integration_id, organization.id)
-        except Integration.DoesNotExist:
-            raise Http404()
-
-        try:
-            client = installation.get_client()
-        except IntegrationError:
-            raise BadRequest()
-
-        # while we're here, make sure repo data is up to date
-        self.update_repo_data(repo, event)
-
-        [project_name, repo_name] = repo.name.split("/")
-
-        for change in event["changes"]:
-            from_hash = None if change.get("fromHash") == "0" * 40 else change.get("fromHash")
+        with IntegrationWebhookEvent(
+            interaction_type=self.event_type,
+            domain=IntegrationDomain.SOURCE_CODE_MANAGEMENT,
+            provider_key=self.provider,
+        ).capture() as lifecycle:
             try:
-                commits = client.get_commits(
-                    project_name, repo_name, from_hash, change.get("toHash")
+                repo = Repository.objects.get(
+                    organization_id=organization.id,
+                    provider=PROVIDER_NAME,
+                    external_id=str(event["repository"]["id"]),
                 )
-            except ApiHostError:
-                raise BadRequest(detail="Unable to reach host")
-            except ApiUnauthorized:
+            except Repository.DoesNotExist as e:
+                lifecycle.record_halt(halt_reason=e)
+                raise Http404()
+
+            provider = repo.get_provider()
+            try:
+                installation = provider.get_installation(integration_id, organization.id)
+            except Integration.DoesNotExist as e:
+                lifecycle.record_halt(halt_reason=e)
+                raise Http404()
+
+            try:
+                client = installation.get_client()
+            except IntegrationError as e:
+                lifecycle.record_halt(halt_reason=e)
                 raise BadRequest()
-            except Exception as e:
-                sentry_sdk.capture_exception(e)
-                raise
 
-            for commit in commits:
-                if IntegrationRepositoryProvider.should_ignore_commit(commit["message"]):
+            # while we're here, make sure repo data is up to date
+            self.update_repo_data(repo, event)
+
+            [project_name, repo_name] = repo.name.split("/")
+
+            for change in event["changes"]:
+                to_hash = change.get("toHash")
+                if to_hash == "0" * 40:
                     continue
-
-                author_email = commit["author"]["emailAddress"]
-
-                # its optional, lets just throw it out for now
-                if author_email is None or len(author_email) > 75:
-                    author = None
-                elif author_email not in authors:
-                    authors[author_email] = author = CommitAuthor.objects.get_or_create(
-                        organization_id=organization.id,
-                        email=author_email,
-                        defaults={"name": commit["author"]["name"]},
-                    )[0]
-                else:
-                    author = authors[author_email]
+                from_hash = None if change.get("fromHash") == "0" * 40 else change.get("fromHash")
                 try:
-                    with transaction.atomic(router.db_for_write(Commit)):
-                        Commit.objects.create(
-                            repository_id=repo.id,
+                    commits = client.get_commits(project_name, repo_name, from_hash, to_hash)
+                except ApiHostError as e:
+                    lifecycle.record_halt(halt_reason=e)
+                    raise BadRequest(detail="Unable to reach host")
+                except ApiUnauthorized as e:
+                    lifecycle.record_halt(halt_reason=e)
+                    raise BadRequest()
+                except Exception as e:
+                    sentry_sdk.capture_exception(e)
+                    raise
+
+                for commit in commits:
+                    if IntegrationRepositoryProvider.should_ignore_commit(commit["message"]):
+                        continue
+
+                    author_email = commit["author"]["emailAddress"]
+
+                    # its optional, lets just throw it out for now
+                    if author_email is None or len(author_email) > 75:
+                        author = None
+                    elif author_email not in authors:
+                        authors[author_email] = author = CommitAuthor.objects.get_or_create(
                             organization_id=organization.id,
-                            key=commit["id"],
-                            message=commit["message"],
-                            author=author,
-                            date_added=datetime.fromtimestamp(
-                                commit["authorTimestamp"] / 1000, timezone.utc
-                            ),
-                        )
+                            email=author_email,
+                            defaults={"name": commit["author"]["name"]},
+                        )[0]
+                    else:
+                        author = authors[author_email]
+                    try:
+                        with transaction.atomic(router.db_for_write(Commit)):
+                            Commit.objects.create(
+                                repository_id=repo.id,
+                                organization_id=organization.id,
+                                key=commit["id"],
+                                message=commit["message"],
+                                author=author,
+                                date_added=datetime.fromtimestamp(
+                                    commit["authorTimestamp"] / 1000, timezone.utc
+                                ),
+                            )
 
-                except IntegrityError:
-                    pass
+                    except IntegrityError:
+                        pass
 
 
-@region_silo_view
+@cell_silo_view
 class BitbucketServerWebhookEndpoint(Endpoint):
     authentication_classes = ()
     permission_classes = ()
-    owner = ApiOwner.ECOSYSTEM
+    owner = ApiOwner.CODING_WORKFLOWS
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
     }
@@ -156,20 +170,24 @@ class BitbucketServerWebhookEndpoint(Endpoint):
 
         return super().dispatch(request, *args, **kwargs)
 
-    def post(self, request: HttpRequest, organization_id, integration_id) -> HttpResponseBase:
+    def post(
+        self, request: HttpRequest, organization_id: str, integration_id: str
+    ) -> HttpResponseBase:
+        org_id = to_valid_int_id("organization_id", organization_id, raise_404=True)
+        integ_id = to_valid_int_id("integration_id", integration_id, raise_404=True)
         try:
-            organization: Organization = Organization.objects.get_from_cache(id=organization_id)
+            organization: Organization = Organization.objects.get_from_cache(id=org_id)
         except Organization.DoesNotExist:
-            logger.exception(
+            logger.warning(
                 "%s.webhook.invalid-organization",
                 PROVIDER_NAME,
-                extra={"organization_id": organization_id, "integration_id": integration_id},
+                extra={"organization_id": org_id, "integration_id": integ_id},
             )
             return HttpResponse(status=400)
 
         body = bytes(request.body)
         if not body:
-            logger.error(
+            logger.warning(
                 "%s.webhook.missing-body", PROVIDER_NAME, extra={"organization_id": organization.id}
             )
             return HttpResponse(status=400)
@@ -177,10 +195,10 @@ class BitbucketServerWebhookEndpoint(Endpoint):
         try:
             handler = self.get_handler(request.META["HTTP_X_EVENT_KEY"])
         except KeyError:
-            logger.exception(
+            logger.warning(
                 "%s.webhook.missing-event",
                 PROVIDER_NAME,
-                extra={"organization_id": organization.id, "integration_id": integration_id},
+                extra={"organization_id": organization.id, "integration_id": integ_id},
             )
             return HttpResponse(status=400)
 
@@ -190,20 +208,16 @@ class BitbucketServerWebhookEndpoint(Endpoint):
         try:
             event = orjson.loads(body)
         except orjson.JSONDecodeError:
-            logger.exception(
+            logger.warning(
                 "%s.webhook.invalid-json",
                 PROVIDER_NAME,
-                extra={"organization_id": organization.id, "integration_id": integration_id},
+                extra={"organization_id": organization.id, "integration_id": integ_id},
             )
             return HttpResponse(status=400)
 
         event_handler = handler()
 
-        with IntegrationWebhookEvent(
-            interaction_type=event_handler.event_type,
-            domain=IntegrationDomain.SOURCE_CODE_MANAGEMENT,
-            provider_key=event_handler.provider,
-        ).capture():
-            event_handler(event, organization=organization, integration_id=integration_id)
+        with webhook_viewer_context(organization.id):
+            event_handler(event, organization=organization, integration_id=integ_id)
 
         return HttpResponse(status=204)

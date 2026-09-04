@@ -1,13 +1,12 @@
 import upperFirst from 'lodash/upperFirst';
 
 import {DATA_CATEGORY_INFO} from 'sentry/constants';
-import type {DataCategoryExact} from 'sentry/types/core';
-import {DataCategory} from 'sentry/types/core';
-import type {Organization} from 'sentry/types/organization';
-import oxfordizeArray from 'sentry/utils/oxfordizeArray';
+import {t} from 'sentry/locale';
+import {DataCategory, DataCategoryExact} from 'sentry/types/core';
+import {oxfordizeArray} from 'sentry/utils/oxfordizeArray';
 import {toTitleCase} from 'sentry/utils/string/toTitleCase';
 
-import {BILLED_DATA_CATEGORY_INFO} from 'getsentry/constants';
+import {BILLED_DATA_CATEGORY_INFO, UNLIMITED_RESERVED} from 'getsentry/constants';
 import type {
   BilledDataCategoryInfo,
   BillingMetricHistory,
@@ -18,6 +17,7 @@ import type {
   ReservedBudgetCategory,
   Subscription,
 } from 'getsentry/types';
+import {MILLISECONDS_IN_HOUR} from 'getsentry/utils/billing';
 
 /**
  * Returns the data category info defined in DATA_CATEGORY_INFO for the given category,
@@ -41,8 +41,7 @@ export function getCategoryInfoFromPlural(
  */
 export function getCreditDataCategory(credit: RecurringCredit): DataCategory | null {
   const category =
-    (DATA_CATEGORY_INFO[credit.type as string as DataCategoryExact]
-      ?.plural as DataCategory) || null;
+    DATA_CATEGORY_INFO[credit.type as string as DataCategoryExact]?.plural || null;
   if (!category) {
     return null;
   }
@@ -70,10 +69,10 @@ export function getPlanCategoryName({
   const displayNames = plan?.categoryDisplayNames?.[category];
   const categoryName =
     category === DataCategory.SPANS && hadCustomDynamicSampling
-      ? 'accepted spans'
+      ? t('accepted spans')
       : displayNames
         ? displayNames.plural
-        : category;
+        : (getCategoryInfoFromPlural(category)?.titleName?.toLowerCase() ?? category);
   return title
     ? toTitleCase(categoryName, {allowInnerUpperCase: true})
     : capitalize
@@ -94,10 +93,11 @@ export function getSingularCategoryName({
   const displayNames = plan?.categoryDisplayNames?.[category];
   const categoryName =
     category === DataCategory.SPANS && hadCustomDynamicSampling
-      ? 'accepted span'
+      ? t('accepted span')
       : displayNames
         ? displayNames.singular
-        : category.substring(0, category.length - 1);
+        : (getCategoryInfoFromPlural(category)?.displayName ??
+          category.substring(0, category.length - 1));
   return title
     ? toTitleCase(categoryName, {allowInnerUpperCase: true})
     : capitalize
@@ -119,6 +119,46 @@ export function getReservedBudgetCategoryFromCategories(
         categories.length === budgetInfo.dataCategories.length &&
         categories.every(category => budgetInfo.dataCategories.includes(category))
     ) ?? null
+  );
+}
+
+/**
+ * Whether a category is part of a reserved budget.
+ * This will also return true for categories that can
+ * only be bought as part of a reserved budget (ie. Seer
+ * categories without having bought Seer).
+ */
+export function isPartOfReservedBudget(
+  category: DataCategory,
+  reservedBudgets: ReservedBudget[]
+): boolean {
+  return reservedBudgets.some(budget => budget.dataCategories.includes(category));
+}
+
+/**
+ * Whether a category belongs to a reserved budget available on the plan (e.g.
+ * Seer's seerAutofix/seerScanner). Such categories are configured through their
+ * reserved budget rather than a per-category reserved-volume slider, so they are
+ * excluded from the checkout volume sliders.
+ */
+export function isReservedBudgetCategory(category: DataCategory, plan: Plan): boolean {
+  return Object.values(plan?.availableReservedBudgetTypes ?? {}).some(budgetInfo =>
+    budgetInfo.dataCategories.includes(category)
+  );
+}
+
+/**
+ * Whether a category is reservable in checkout — i.e. it has a real reserved
+ * tier (its first reserved bucket is a non-zero or unlimited amount, rather than
+ * a PAYG-only 0) and isn't billed through a reserved budget. Mirrors the
+ * server's is_checkout_category, and is the set shown in the admin reserved
+ * volume controls. Categories whose only reserved option is 0 (e.g. continuous
+ * profiling, Seer users) are excluded.
+ */
+export function isCheckoutCategory(category: DataCategory, plan: Plan): boolean {
+  return (
+    (plan.planCategories[category]?.[0]?.events ?? 0) !== 0 &&
+    !isReservedBudgetCategory(category, plan)
   );
 }
 
@@ -224,43 +264,27 @@ export function sortCategoriesWithKeys(
   );
 }
 
-/**
- * Whether the subscription plan includes a data category.
- */
-function hasCategory(subscription: Subscription, category: DataCategory) {
-  return hasPlanCategory(subscription.planDetails, category);
-}
-
-function hasPlanCategory(plan: Plan, category: DataCategory) {
-  return plan.categories.includes(category);
-}
-
-/**
- * Whether an organization has access to a data category.
- *
- * NOTE: Includes accounts that have free access to a data category through
- * custom feature handlers and plan trial. Used for usage UI.
- */
-export function hasCategoryFeature(
-  category: DataCategory,
-  subscription: Subscription,
-  organization: Organization
-) {
-  if (hasCategory(subscription, category)) {
-    return true;
-  }
-
-  const feature = getCategoryInfoFromPlural(category)?.feature;
-  if (!feature) {
-    return false;
-  }
-  return feature ? organization.features.includes(feature) : true;
-}
-
 export function isContinuousProfiling(category: DataCategory | string) {
   return (
     category === DataCategory.PROFILE_DURATION ||
     category === DataCategory.PROFILE_DURATION_UI
+  );
+}
+
+export function isByteCategory(category: DataCategory | string) {
+  return (
+    category === DataCategory.ATTACHMENTS ||
+    category === DataCategory.LOG_BYTE ||
+    category === DataCategory.TRACE_METRIC_BYTE
+  );
+}
+
+/**
+ * Whether the category is an emerge category (size analysis or build distribution).
+ */
+export function isEmergeCategory(category: DataCategory | string) {
+  return (
+    category === DataCategory.SIZE_ANALYSIS || category === DataCategory.INSTALLABLE_BUILD
   );
 }
 
@@ -274,6 +298,76 @@ export function getChunkCategoryFromDuration(category: DataCategory) {
   return '';
 }
 
-export function isSeer(category: DataCategory): boolean {
-  return category === DataCategory.SEER_AUTOFIX || category === DataCategory.SEER_SCANNER;
+function formatWithHours(
+  quantityInMilliseconds: number,
+  formattedHours: string,
+  options: Pick<CategoryNameProps, 'title'>
+) {
+  const quantityInHours =
+    quantityInMilliseconds === UNLIMITED_RESERVED
+      ? quantityInMilliseconds
+      : quantityInMilliseconds / MILLISECONDS_IN_HOUR;
+  if (quantityInHours === 1) {
+    return `${formattedHours} ${options.title ? t('Hour') : t('hour')}`;
+  }
+  return `${formattedHours} ${options.title ? t('Hours') : t('hours')}`;
+}
+
+/**
+ * Format category usage or reserved quantity with the appropriate display name.
+ */
+export function formatCategoryQuantityWithDisplayName({
+  dataCategory,
+  quantity,
+  formattedQuantity,
+  subscription,
+  planOverride,
+  options,
+}: {
+  dataCategory: DataCategory;
+  formattedQuantity: string;
+  options: Omit<CategoryNameProps, 'category'>;
+  quantity: number;
+  subscription: Subscription;
+  planOverride?: Plan;
+}) {
+  if (isContinuousProfiling(dataCategory)) {
+    return formatWithHours(quantity, formattedQuantity, options);
+  }
+  const plan = planOverride ?? subscription.planDetails;
+  if (quantity === 1) {
+    const displayName = getSingularCategoryName({
+      plan,
+      category: dataCategory,
+      capitalize: options.capitalize,
+      title: options.title,
+      hadCustomDynamicSampling: options.hadCustomDynamicSampling,
+    });
+    return `${formattedQuantity} ${displayName}`;
+  }
+
+  const displayName = getPlanCategoryName({
+    plan,
+    category: dataCategory,
+    capitalize: options.capitalize,
+    title: options.title,
+    hadCustomDynamicSampling: options.hadCustomDynamicSampling,
+  });
+  return `${formattedQuantity} ${displayName}`;
+}
+
+/**
+ * Calculate the accumulated variable spend for active contributors, in cents.
+ */
+export function calculateSeerUserSpend(metricHistory: BillingMetricHistory) {
+  const {category, usage, reserved, prepaid} = metricHistory;
+  if (category !== DataCategory.SEER_USER) {
+    return 0;
+  }
+  if (reserved !== 0) {
+    // if they have reserved or unlimited seats, we assume there is no variable spend
+    return 0;
+  }
+  // TODO(seer): serialize pricing info
+  return Math.max(0, usage - prepaid) * 40_00;
 }

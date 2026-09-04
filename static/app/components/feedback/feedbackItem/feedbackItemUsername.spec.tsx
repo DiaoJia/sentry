@@ -2,10 +2,27 @@ import {FeedbackIssueFixture} from 'sentry-fixture/feedbackIssue';
 
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import FeedbackItemUsername from 'sentry/components/feedback/feedbackItem/feedbackItemUsername';
+import {FeedbackItemUsername} from 'sentry/components/feedback/feedbackItem/feedbackItemUsername';
 
 describe('FeedbackItemUsername', () => {
+  let seerSetupMock: any;
+
+  const mockSeerSetup = () => {
+    return MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/seer/setup-check/',
+      body: {
+        billing: {
+          hasAutofixQuota: false,
+          hasScannerQuota: false,
+        },
+      },
+    });
+  };
+
   beforeEach(() => {
+    MockApiClient.clearMockResponses();
+    seerSetupMock = mockSeerSetup();
+
     Object.assign(navigator, {
       clipboard: {
         writeText: jest.fn().mockResolvedValue(''),
@@ -115,5 +132,83 @@ describe('FeedbackItemUsername', () => {
     });
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Foo Bar <foo@bar.com>');
+  });
+
+  describe('AI summary functionality', () => {
+    it('should display summary and include it in email subject when AI summary is enabled', async () => {
+      seerSetupMock = mockSeerSetup();
+
+      const issue = FeedbackIssueFixture({
+        metadata: {
+          name: 'Foo Bar',
+          contact_email: 'foo@bar.com',
+          summary: 'Login issue with payment flow',
+        },
+      });
+
+      render(<FeedbackItemUsername feedbackIssue={issue} />, {
+        organization: {
+          features: ['gen-ai-features'],
+        },
+      });
+
+      await waitFor(() => {
+        expect(seerSetupMock).toHaveBeenCalled();
+      });
+
+      expect(screen.getByText('Login issue with payment flow')).toBeInTheDocument();
+
+      const mailtoButton = screen.getByRole('button');
+      expect(mailtoButton).toHaveAttribute(
+        'href',
+        expect.stringContaining('Login%20issue%20with%20payment%20flow')
+      );
+    });
+
+    it.each([
+      {
+        description: 'AI features are disabled',
+        features: [] as string[],
+        summary: 'Login issue with payment flow',
+      },
+      {
+        description: 'AI features enabled but summary is null',
+        features: ['gen-ai-features'],
+        summary: null,
+      },
+    ])(
+      'should not display summary or include it in email subject when $description',
+      async ({features, summary}) => {
+        seerSetupMock = mockSeerSetup();
+
+        const issue = FeedbackIssueFixture({
+          metadata: {
+            name: 'Foo Bar',
+            contact_email: 'foo@bar.com',
+            summary,
+          },
+        });
+
+        render(<FeedbackItemUsername feedbackIssue={issue} />, {
+          organization: {
+            features,
+          },
+        });
+
+        await waitFor(() => {
+          expect(seerSetupMock).toHaveBeenCalled();
+        });
+
+        if (summary) {
+          expect(screen.queryByText(summary)).not.toBeInTheDocument();
+        }
+
+        const mailtoButton = screen.getByRole('button');
+        expect(mailtoButton).toHaveAttribute(
+          'href',
+          expect.not.stringContaining('Login%20issue%20with%20payment%20flow')
+        );
+      }
+    );
   });
 });

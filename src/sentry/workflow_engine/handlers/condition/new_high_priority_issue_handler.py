@@ -11,12 +11,9 @@ from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
 class NewHighPriorityIssueConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.WORKFLOW_TRIGGER
     comparison_json_schema = {"type": "boolean"}
+    label_template = "Sentry marks a new issue as high priority"
 
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
         is_new = is_new_event(event_data)
-        event = event_data.event
-        if not event.project.flags.has_high_priority_alerts:
-            return is_new
-
-        return is_new and event.group.priority == PriorityLevel.HIGH
+        return is_new and event_data.group.priority == PriorityLevel.HIGH

@@ -1,16 +1,26 @@
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import SourceField from 'sentry/views/settings/components/dataScrubbing/modals/form/sourceField';
+import {SourceField} from 'sentry/views/settings/components/dataScrubbing/modals/form/sourceField';
 import {
   binarySuggestions,
   unarySuggestions,
   valueSuggestions,
 } from 'sentry/views/settings/components/dataScrubbing/utils';
 
-describe('Source', function () {
-  it('default render', function () {
+const defaultFieldProps = {
+  'aria-describedby': 'source-hint',
+  'aria-invalid': false,
+  disabled: false,
+  id: 'source',
+  name: 'source',
+  onBlur: jest.fn(),
+};
+
+describe('Source', () => {
+  it('default render', () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -21,9 +31,10 @@ describe('Source', function () {
     expect(screen.getByRole('textbox', {name: 'Source'})).toHaveValue('$string');
   });
 
-  it('display defaultSuggestions if input is empty and focused', async function () {
+  it('display defaultSuggestions if input is empty and focused', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -39,9 +50,10 @@ describe('Source', function () {
     expect(suggestions).toHaveLength(18);
   });
 
-  it('display defaultSuggestions if input is empty, focused and has length 3', async function () {
+  it('display defaultSuggestions if input is empty, focused and has length 3', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -57,9 +69,10 @@ describe('Source', function () {
     expect(suggestions).toHaveLength(18);
   });
 
-  it('display binaryOperatorSuggestions if penultimateFieldValue has type string', async function () {
+  it('display binaryOperatorSuggestions if penultimateFieldValue has type string', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -79,9 +92,10 @@ describe('Source', function () {
     expect(suggestions[1]).toHaveTextContent(binarySuggestions[1]!.value);
   });
 
-  it('display defaultSuggestions + unaryOperatorSuggestions, if penultimateFieldValue has type binary', async function () {
+  it('display defaultSuggestions + unaryOperatorSuggestions, if penultimateFieldValue has type binary', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -99,9 +113,10 @@ describe('Source', function () {
     expect(suggestions[17]).toHaveTextContent(unarySuggestions[0]!.value);
   });
 
-  it('display binaryOperatorSuggestions if penultimateFieldValue has type value', async function () {
+  it('display binaryOperatorSuggestions if penultimateFieldValue has type value', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -124,6 +139,7 @@ describe('Source', function () {
   it('display binaryOperatorSuggestions if penultimateFieldValue is of typeof Array', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -146,6 +162,7 @@ describe('Source', function () {
   it('display defaultSuggestions if penultimateFieldValue has type unary', async () => {
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={jest.fn()}
@@ -166,11 +183,12 @@ describe('Source', function () {
     );
   });
 
-  it('click on a suggestion should be possible', async function () {
+  it('click on a suggestion should be possible', async () => {
     const handleOnChange = jest.fn();
 
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={handleOnChange}
@@ -187,12 +205,13 @@ describe('Source', function () {
     expect(handleOnChange).toHaveBeenCalledWith('foo && password');
   });
 
-  it('suggestions keyDown and keyUp should work', async function () {
+  it('suggestions keyDown and keyUp should work', async () => {
     const handleOnChange = jest.fn();
     Element.prototype.scrollIntoView = jest.fn();
 
     render(
       <SourceField
+        fieldProps={defaultFieldProps}
         isRegExMatchesSelected={false}
         suggestions={valueSuggestions}
         onChange={handleOnChange}
@@ -216,5 +235,90 @@ describe('Source', function () {
     await userEvent.keyboard('{ArrowDown}{ArrowUp}{Enter}');
 
     expect(handleOnChange).toHaveBeenNthCalledWith(3, 'foo &&');
+  });
+
+  it('pressing Enter does not crash when suggestions are not visible', async () => {
+    const handleOnChange = jest.fn();
+
+    render(
+      <SourceField
+        fieldProps={defaultFieldProps}
+        isRegExMatchesSelected={false}
+        suggestions={valueSuggestions}
+        onChange={handleOnChange}
+        value="$string"
+      />
+    );
+
+    const input = screen.getByRole('textbox', {name: 'Source'});
+
+    // Focus the input to show suggestions, then select one to close the dropdown
+    await userEvent.click(input);
+    await userEvent.keyboard('{Enter}');
+
+    // Suggestions dropdown should now be hidden after selecting
+    expect(screen.queryByTestId('source-suggestions')).not.toBeInTheDocument();
+
+    // Pressing Enter again with suggestions hidden should not crash
+    await userEvent.keyboard('{Enter}');
+  });
+
+  it('pressing Enter allows form submission when suggestions are not visible', async () => {
+    Element.prototype.scrollIntoView = jest.fn();
+    const handleSubmit = jest.fn(e => e.preventDefault());
+
+    render(
+      <form onSubmit={handleSubmit}>
+        <SourceField
+          fieldProps={defaultFieldProps}
+          isRegExMatchesSelected={false}
+          suggestions={valueSuggestions}
+          onChange={jest.fn()}
+          value="foo "
+        />
+        <button type="submit">Submit</button>
+      </form>
+    );
+
+    const input = screen.getByRole('textbox', {name: 'Source'});
+
+    // Open suggestions and select one via Enter — this should NOT submit the form
+    await userEvent.click(input);
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+    expect(handleSubmit).not.toHaveBeenCalled();
+
+    // Suggestions should now be hidden
+    expect(screen.queryByTestId('source-suggestions')).not.toBeInTheDocument();
+
+    // Press Enter again with suggestions hidden — this SHOULD submit the form
+    await userEvent.click(input);
+    await userEvent.keyboard('{Enter}');
+    expect(handleSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('pressing Enter to select a suggestion does not submit the parent form', async () => {
+    const handleOnChange = jest.fn();
+    const handleSubmit = jest.fn();
+    Element.prototype.scrollIntoView = jest.fn();
+
+    render(
+      <form onSubmit={handleSubmit}>
+        <SourceField
+          fieldProps={defaultFieldProps}
+          isRegExMatchesSelected={false}
+          suggestions={valueSuggestions}
+          onChange={handleOnChange}
+          value="foo "
+        />
+      </form>
+    );
+
+    await userEvent.click(screen.getByRole('textbox', {name: 'Source'}));
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+
+    // Suggestion was selected
+    expect(handleOnChange).toHaveBeenCalledWith('foo ||');
+    // Form was NOT submitted
+    expect(handleSubmit).not.toHaveBeenCalled();
   });
 });

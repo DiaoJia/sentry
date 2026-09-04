@@ -37,6 +37,15 @@ class AuthenticatorInterfaceSerializerResponse(TypedDict):
     authId: NotRequired[str]
     createdAt: NotRequired[datetime]
     lastUsedAt: NotRequired[datetime | None]
+    # Interface-specific extensions populated by enroll/details endpoints
+    # after calling serialize(); kept as NotRequired so the base serializer
+    # output remains a structurally valid AuthenticatorInterfaceSerializerResponse.
+    form: NotRequired[list[dict[str, Any]]]
+    secret: NotRequired[str]
+    qrcode: NotRequired[str]
+    challenge: NotRequired[dict[str, Any]]
+    codes: NotRequired[list[str]]
+    devices: NotRequired[list[dict[str, Any]]]
 
 
 @register(AuthenticatorInterface)
@@ -87,9 +96,9 @@ class SmsInterfaceSerializer(AuthenticatorInterfaceSerializer):
         **kwargs: Any,
     ) -> SmsInterfaceSerializerResponse:
         data = cast(SmsInterfaceSerializerResponse, super().serialize(obj, attrs, user))
-        assert isinstance(
-            obj, SmsInterface
-        ), "Interface must be SmsInterface to serialize phone number"
+        assert isinstance(obj, SmsInterface), (
+            "Interface must be SmsInterface to serialize phone number"
+        )
         data["phone"] = obj.phone_number
         return data
 

@@ -1,24 +1,72 @@
 import moment from 'moment-timezone';
 
-import {OrganizationAvatar} from 'sentry/components/core/avatar/organizationAvatar';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import Link from 'sentry/components/links/link';
+import {OrganizationAvatar} from '@sentry/scraps/avatar';
+import {Tag} from '@sentry/scraps/badge';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
-import CustomerContact from 'admin/components/customerContact';
-import CustomerName from 'admin/components/customerName';
-import CustomerStatus from 'admin/components/customerStatus';
-import PercentChange from 'admin/components/percentChange';
-import ResultGrid from 'admin/components/resultGrid';
+import {CustomerContact} from 'admin/components/customerContact';
+import {CustomerName} from 'admin/components/customerName';
+import {CustomerStatus} from 'admin/components/customerStatus';
+import {PercentChange} from 'admin/components/percentChange';
+import {ResultGrid} from 'admin/components/resultGrid';
 import type {Subscription} from 'getsentry/types';
 import {displayPrice} from 'getsentry/views/amCheckout/utils';
 
 type ResultGridProps = React.ComponentProps<typeof ResultGrid>;
 
 type Props = Omit<Partial<ResultGridProps>, 'endpoint'> &
-  Pick<ResultGridProps, 'endpoint'> & {
-    modifyOrgMembershipbutton?: React.ReactNode;
-  };
+  Pick<ResultGridProps, 'endpoint'>;
+
+const growth = (current: number | undefined, prev: number | undefined) =>
+  current === undefined || !prev ? 0 : current / prev - 1;
+
+/**
+ * Mirrors the server's sort keys so the all-regions view can keep merged
+ * results ordered client-side. Returns the value the key sorts on, descending.
+ */
+const sortValueForRow = (row: Subscription, sortBy: string): number => {
+  switch (sortBy) {
+    case 'date':
+      return new Date(row.dateJoined).getTime();
+    case 'members':
+      return row.totalMembers ?? 0;
+    case 'events.30d':
+      return row.stats?.events30d ?? 0;
+    case 'events.30d.growth':
+      return growth(row.stats?.events30d, row.stats?.eventsPrev30d);
+    case 'events.24h':
+      return row.stats?.events24h ?? 0;
+    case 'events.24h.growth':
+      return growth(row.stats?.events24h, row.stats?.eventsPrev24h);
+    case 'projects':
+      return row.totalProjects ?? 0;
+    default:
+      return 0;
+  }
+};
+
+const columns = [
+  <th key="customer">Customer</th>,
+  <th key="events" style={{width: 130, textAlign: 'center'}}>
+    Events (30d)
+  </th>,
+  <th key="members" style={{width: 85, textAlign: 'center'}}>
+    Members
+  </th>,
+  <th key="status" style={{width: 150, textAlign: 'center'}}>
+    Status
+  </th>,
+  <th key="ondemand" style={{width: 100, textAlign: 'center'}}>
+    OnDemand
+  </th>,
+  <th key="acv" style={{width: 100, textAlign: 'center'}}>
+    ACV
+  </th>,
+  <th key="joined" style={{width: 150, textAlign: 'right'}}>
+    Joined
+  </th>,
+];
 
 const getRow = (row: Subscription) => [
   <td key="customer">
@@ -38,11 +86,9 @@ const getRow = (row: Subscription) => [
             </span>
           )}
         </small>
-        {row.isGracePeriod && <Tag type="warning">Grace Period</Tag>}
-        {row.usageExceeded && <Tag type="warning">Capacity Limit</Tag>}
         {row.isSuspended && (
           <Tooltip title={row.suspensionReason}>
-            <Tag type="error">Suspended</Tag>
+            <Tag variant="danger">Suspended</Tag>
           </Tooltip>
         )}
       </div>
@@ -78,34 +124,24 @@ const getRow = (row: Subscription) => [
   </td>,
 ];
 
-function CustomerGrid(props: Props) {
+export function CustomerGrid(props: Props) {
   return (
     <ResultGrid
       inPanel
-      isRegional
+      isCellScoped
+      probeAcrossRegions
+      // An exact match is an org whose slug equals the searched term, so we can
+      // surface the cross-region hint even when only similar slugs come back in
+      // the current region. `query` arrives trimmed + lower-cased; org slugs are
+      // always lower-case, so a direct comparison is correct.
+      exactMatchQuery={(row: Subscription, query: string) => row.slug === query}
       path="/_admin/customers/"
       method="GET"
-      columns={[
-        <th key="customer">Customer</th>,
-        <th key="events" style={{width: 130, textAlign: 'center'}}>
-          Events (30d)
-        </th>,
-        <th key="members" style={{width: 85, textAlign: 'center'}}>
-          Members
-        </th>,
-        <th key="status" style={{width: 150, textAlign: 'center'}}>
-          Status
-        </th>,
-        <th key="ondemand" style={{width: 100, textAlign: 'center'}}>
-          OnDemand
-        </th>,
-        <th key="acv" style={{width: 100, textAlign: 'center'}}>
-          ACV
-        </th>,
-        <th key="joined" style={{width: 150, textAlign: 'right'}}>
-          Joined
-        </th>,
-      ]}
+      sortValueForRow={sortValueForRow}
+      columns={columns}
+      // Keep the contextual Region column with the other metadata, between
+      // ACV and Joined.
+      regionColumnIndex={columns.length - 1}
       columnsForRow={getRow}
       hasSearch
       filters={{
@@ -149,22 +185,8 @@ function CustomerGrid(props: Props) {
             ['1', 'Yes'],
           ],
         },
-        gracePeriod: {
-          name: 'Grace Period',
-          options: [
-            ['0', 'No'],
-            ['1', 'Yes'],
-          ],
-        },
         suspended: {
           name: 'Suspended',
-          options: [
-            ['0', 'No'],
-            ['1', 'Yes'],
-          ],
-        },
-        usageExceeded: {
-          name: 'Usage Exceeded',
           options: [
             ['0', 'No'],
             ['1', 'Yes'],
@@ -206,10 +228,7 @@ function CustomerGrid(props: Props) {
         // ['ondemand.spend', 'OnDemand (Spend)'],
       ]}
       defaultSort="members"
-      buttonGroup={props.modifyOrgMembershipbutton}
       {...props}
     />
   );
 }
-
-export default CustomerGrid;

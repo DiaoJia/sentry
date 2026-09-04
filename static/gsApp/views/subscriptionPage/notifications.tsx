@@ -1,39 +1,31 @@
-import {Fragment, useEffect, useState} from 'react';
-import styled from '@emotion/styled';
-import isEqual from 'lodash/isEqual';
+import {useQuery} from '@tanstack/react-query';
+import {z} from 'zod';
 
-import {
-  addErrorMessage,
-  addLoadingMessage,
-  addSuccessMessage,
-} from 'sentry/actionCreators/indicator';
-import {AlertLink} from 'sentry/components/core/alert/alertLink';
-import {Button} from 'sentry/components/core/button';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import FieldGroup from 'sentry/components/forms/fieldGroup';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelFooter from 'sentry/components/panels/panelFooter';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import {IconAdd, IconDelete, IconInfo} from 'sentry/icons';
+import {AlertLink} from '@sentry/scraps/alert';
+import {defaultFormOptions, FieldGroup, useScrapsForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
+
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Redirect} from 'sentry/components/redirect';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {IconInfo} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
 import type {Subscription} from 'getsentry/types';
 import {displayBudgetName} from 'getsentry/utils/billing';
-import ContactBillingMembers from 'getsentry/views/contactBillingMembers';
+import {ContactBillingMembers} from 'getsentry/views/contactBillingMembers';
+import {SubscriptionPageContainer} from 'getsentry/views/subscriptionPage/components/subscriptionPageContainer';
+import {hasSpendVisibilityNotificationsFeature} from 'getsentry/views/subscriptionPage/utils';
 
-import SubscriptionHeader from './subscriptionHeader';
-import {trackSubscriptionView} from './utils';
-
-interface SubscriptionNotificationsProps extends RouteComponentProps<unknown, unknown> {
+interface SubscriptionNotificationsProps {
   subscription: Subscription;
 }
 
@@ -42,324 +34,174 @@ type ThresholdsType = {
   reservedPercent: number[];
 };
 
-const OPTIONS = [
-  {label: '90%', value: 90},
-  {label: '80%', value: 80},
-  {label: '70%', value: 70},
-  {label: '60%', value: 60},
-  {label: '50%', value: 50},
-  {label: '40%', value: 40},
-  {label: '30%', value: 30},
-  {label: '20%', value: 20},
-  {label: '10%', value: 10},
-];
-
-const MAX_THRESHOLDS = OPTIONS.length;
-
-function isThresholdsEqual(value: ThresholdsType, other: ThresholdsType): boolean {
-  return isEqual(value, other);
+function getThresholdsSchema(onDemandEnabled: boolean) {
+  return z.object({
+    reservedPercent: z.array(z.number()).min(1, t('At least one threshold is required')),
+    perProductOndemandPercent: onDemandEnabled
+      ? z.array(z.number()).min(1, t('At least one threshold is required'))
+      : z.array(z.number()),
+  });
 }
+
+const THRESHOLD_OPTIONS = [90, 80, 70, 60, 50, 40, 30, 20, 10].map(value => ({
+  label: `${value}%`,
+  value,
+}));
 
 function SubscriptionNotifications({subscription}: SubscriptionNotificationsProps) {
   const organization = useOrganization();
-  const api = useApi();
-  useEffect(() => {
-    trackSubscriptionView(organization, subscription, 'notifications');
-  }, [organization, subscription]);
 
   const {
     data: backendThresholds,
     isPending,
     refetch,
     isError,
-  } = useApiQuery<ThresholdsType>(
-    [`/customers/${organization.slug}/spend-notifications/`],
-    {
-      staleTime: 0,
-      gcTime: 0,
-    }
-  );
-
-  const [notificationThresholds, setNotificationThresholds] = useState<
-    ThresholdsType | undefined
-  >(undefined);
-
-  useEffect(() => {
-    if (!isPending && backendThresholds && !notificationThresholds) {
-      setNotificationThresholds(backendThresholds);
-    }
-  }, [backendThresholds, isPending, notificationThresholds]);
+  } = useQuery({
+    ...apiOptions.as<ThresholdsType>()(
+      '/customers/$organizationIdOrSlug/spend-notifications/',
+      {
+        path: {organizationIdOrSlug: organization.slug},
+        staleTime: 0,
+      }
+    ),
+    gcTime: 0,
+  });
 
   const hasBillingPerms = organization.access?.includes('org:billing');
-  if (!hasBillingPerms) {
-    return <ContactBillingMembers />;
-  }
 
-  if (isPending || !backendThresholds || !notificationThresholds) {
-    return (
-      <Fragment>
-        <SubscriptionHeader subscription={subscription} organization={organization} />
-        <LoadingIndicator />
-      </Fragment>
-    );
+  if (!hasSpendVisibilityNotificationsFeature(organization)) {
+    return <Redirect to={`/settings/${organization.slug}/billing/overview/`} />;
   }
-
-  if (isError) {
-    return <LoadingError onRetry={refetch} />;
-  }
-
-  const onDemandEnabled = subscription.planDetails.allowOnDemand;
 
   return (
-    <Fragment>
-      <SubscriptionHeader organization={organization} subscription={subscription} />
-      <PageDescription>
-        {t("Configure the thresholds for your organization's spend notifications.")}
-      </PageDescription>
-      <Panel>
-        <PanelHeader>{t('Notification thresholds')}</PanelHeader>
-        <PanelBody>
-          <GenericConsumptionGroup
-            label={t('Subscription Consumption')}
-            help={t(
-              "Receive notifications when your organization's usage exceeds a threshold (% of monthly subscription)"
-            )}
-            thresholds={notificationThresholds.reservedPercent}
-            removeThreshold={indexToRemove => {
-              setNotificationThresholds({
-                ...notificationThresholds,
-                reservedPercent: notificationThresholds.reservedPercent.filter(
-                  (_, index) => index !== indexToRemove
-                ),
-              });
-            }}
-            updateThreshold={(indexToUpdate, value) => {
-              setNotificationThresholds({
-                ...notificationThresholds,
-                reservedPercent: notificationThresholds.reservedPercent.map(
-                  (threshold, index) => (index === indexToUpdate ? value : threshold)
-                ),
-              });
-            }}
-            addThreshold={value => {
-              setNotificationThresholds({
-                ...notificationThresholds,
-                reservedPercent: [...notificationThresholds.reservedPercent, value],
-              });
-            }}
-          />
-          {onDemandEnabled && (
-            <GenericConsumptionGroup
-              label={t(
-                '%s Consumption',
-                displayBudgetName(subscription.planDetails, {title: true})
-              )}
-              help={t(
-                "Receive notifications when your organization's usage exceeds a threshold (%% of monthly %s)",
-                displayBudgetName(subscription.planDetails, {
-                  title: true,
-                  withBudget: true,
-                })
-              )}
-              thresholds={notificationThresholds.perProductOndemandPercent}
-              removeThreshold={indexToRemove => {
-                setNotificationThresholds({
-                  ...notificationThresholds,
-                  perProductOndemandPercent:
-                    notificationThresholds.perProductOndemandPercent.filter(
-                      (_, index) => index !== indexToRemove
-                    ),
-                });
-              }}
-              updateThreshold={(indexToUpdate, value) => {
-                setNotificationThresholds({
-                  ...notificationThresholds,
-                  perProductOndemandPercent:
-                    notificationThresholds.perProductOndemandPercent.map(
-                      (threshold, index) => (index === indexToUpdate ? value : threshold)
-                    ),
-                });
-              }}
-              addThreshold={value => {
-                setNotificationThresholds({
-                  ...notificationThresholds,
-                  perProductOndemandPercent: [
-                    ...notificationThresholds.perProductOndemandPercent,
-                    value,
-                  ],
-                });
-              }}
-            />
-          )}
-        </PanelBody>
-        <NotificationsFooter>
-          <Button
-            disabled={isThresholdsEqual(backendThresholds, notificationThresholds)}
-            onClick={() => {
-              setNotificationThresholds(backendThresholds);
-            }}
-          >
-            {t('Reset')}
-          </Button>
-          <Button
-            priority="primary"
-            disabled={isThresholdsEqual(backendThresholds, notificationThresholds)}
-            onClick={() => {
-              addLoadingMessage(t('Saving threshold notifications\u2026'));
-              api
-                .requestPromise(`/customers/${organization.slug}/spend-notifications/`, {
-                  method: 'POST',
-                  data: notificationThresholds,
-                })
-                .then(response => {
-                  addSuccessMessage(t('Threshold notifications saved successfully.'));
-                  setNotificationThresholds(response);
-                  refetch();
-                })
-                .catch(() => {
-                  addErrorMessage(t('Unable to save threshold notifications.'));
-                });
-            }}
-          >
-            {t('Save Changes')}
-          </Button>
-        </NotificationsFooter>
-      </Panel>
-      <AlertLink
-        to="/settings/account/notifications/quota/"
-        type="info"
-        trailingItems={<IconInfo />}
-      >
-        {t(
-          'To adjust your personal billing notification settings, please go to Fine Tune Alerts in your account settings.'
+    <SubscriptionPageContainer>
+      <SentryDocumentTitle
+        title={t('Manage Spend Notifications')}
+        orgSlug={organization.slug}
+      />
+      <SettingsPageHeader
+        title={t('Manage Spend Notifications')}
+        subtitle={t(
+          "Receive notifications when your organization's usage exceeds a threshold"
         )}
-      </AlertLink>
-    </Fragment>
+      />
+      <Stack gap="2xl">
+        <AlertLink
+          to="/settings/account/notifications/quota/"
+          variant="info"
+          trailingItems={<IconInfo />}
+        >
+          {t(
+            'To adjust your personal billing notification settings, please go to Fine Tune Alerts in your account settings.'
+          )}
+        </AlertLink>
+        {hasBillingPerms ? (
+          isPending ? (
+            <LoadingIndicator />
+          ) : isError ? (
+            <LoadingError onRetry={refetch} />
+          ) : (
+            <ThresholdsForm
+              backendThresholds={backendThresholds}
+              subscription={subscription}
+              onSuccess={refetch}
+            />
+          )
+        ) : (
+          <ContactBillingMembers />
+        )}
+      </Stack>
+    </SubscriptionPageContainer>
   );
 }
 
-type GenericConsumptionGroupProps = {
-  addThreshold: (value: number) => void;
-  help: string;
-  label: string;
-  removeThreshold: (index: number) => void;
-  thresholds: number[];
-  updateThreshold: (index: number, value: number) => void;
-};
+function ThresholdsForm({
+  backendThresholds,
+  subscription,
+  onSuccess,
+}: {
+  backendThresholds: ThresholdsType;
+  onSuccess: () => Promise<unknown>;
+  subscription: Subscription;
+}) {
+  const organization = useOrganization();
+  const onDemandEnabled = subscription.planDetails.allowOnDemand;
 
-function GenericConsumptionGroup(props: GenericConsumptionGroupProps) {
-  const {thresholds, removeThreshold, updateThreshold, addThreshold, label, help} = props;
-
-  const [newThresholdValue, setNewThresholdValue] = useState<number | undefined>(
-    undefined
-  );
-
-  const availableOptions = OPTIONS.filter(option => !thresholds.includes(option.value));
-  const availableThresholdValues = availableOptions.map(option => option.value);
-
-  const disableRemoveButton = thresholds.length <= 1;
-  const hideAddButton = thresholds.length >= MAX_THRESHOLDS;
-
-  useEffect(() => {
-    if (
-      newThresholdValue !== undefined &&
-      !availableThresholdValues.includes(newThresholdValue)
-    ) {
-      setNewThresholdValue(undefined);
-    }
-  }, [newThresholdValue, availableThresholdValues]);
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: backendThresholds,
+    validators: {onDynamic: getThresholdsSchema(onDemandEnabled)},
+    onSubmit: async ({value}) => {
+      try {
+        await fetchMutation({
+          url: getApiUrl('/customers/$organizationIdOrSlug/spend-notifications/', {
+            path: {organizationIdOrSlug: organization.slug},
+          }),
+          method: 'POST',
+          data: value,
+        });
+        addSuccessMessage(t('Threshold notifications saved successfully.'));
+        await onSuccess();
+        form.reset();
+      } catch {
+        addErrorMessage(t('Unable to save threshold notifications.'));
+      }
+    },
+  });
 
   return (
-    <ConsumptionGroup label={label} help={help}>
-      <SelectGroup>
-        {thresholds.map((threshold, index) => {
-          return (
-            <SelectGroupRow key={index}>
-              <StyledCompactSelect
-                triggerLabel={`${threshold}%`}
-                triggerProps={{style: {width: '100%', fontWeight: 'normal'}}}
-                value={undefined}
-                options={availableOptions}
-                onChange={value => {
-                  updateThreshold(index, value.value as number);
-                }}
+    <form.AppForm form={form}>
+      <FieldGroup title={t('Notification Thresholds')}>
+        <form.AppField name="reservedPercent">
+          {field => (
+            <field.Layout.Row
+              label={t('Subscription consumption')}
+              hintText={t('Applies to all reserved volumes in your subscription')}
+            >
+              <field.Select
+                multiple
+                clearable
+                value={field.state.value}
+                options={THRESHOLD_OPTIONS}
+                onChange={field.handleChange}
               />
-              <Button
-                priority="default"
-                onClick={() => {
-                  removeThreshold(index);
-                }}
-                icon={<IconDelete />}
-                disabled={disableRemoveButton}
-                aria-label={t('Remove notification threshold')}
-              />
-            </SelectGroupRow>
-          );
-        })}
-        {hideAddButton ? null : (
-          <SelectGroupRow>
-            <StyledCompactSelect
-              triggerLabel={
-                newThresholdValue === undefined
-                  ? t('Add threshold')
-                  : `${newThresholdValue}%`
-              }
-              triggerProps={{style: {width: '100%', fontWeight: 'normal'}}}
-              value={undefined}
-              options={availableOptions}
-              onChange={value => {
-                setNewThresholdValue(value.value as number);
-              }}
-            />
-            <Button
-              priority="primary"
-              onClick={() => {
-                if (newThresholdValue !== undefined) {
-                  setNewThresholdValue(undefined);
-                  addThreshold(newThresholdValue);
+            </field.Layout.Row>
+          )}
+        </form.AppField>
+        {onDemandEnabled && (
+          <form.AppField name="perProductOndemandPercent">
+            {field => (
+              <field.Layout.Row
+                label={t(
+                  '%s consumption',
+                  displayBudgetName(subscription.planDetails, {title: true})
+                )}
+                hintText={
+                  '% ' +
+                  t(
+                    'of %s usage, up to your set limit',
+                    displayBudgetName(subscription.planDetails)
+                  )
                 }
-              }}
-              icon={<IconAdd />}
-              disabled={newThresholdValue === undefined}
-              aria-label={t('Add notification threshold')}
-            />
-          </SelectGroupRow>
+              >
+                <field.Select
+                  multiple
+                  clearable
+                  value={field.state.value}
+                  options={THRESHOLD_OPTIONS}
+                  onChange={field.handleChange}
+                />
+              </field.Layout.Row>
+            )}
+          </form.AppField>
         )}
-      </SelectGroup>
-    </ConsumptionGroup>
+        <Flex gap="md" justify="end">
+          <form.ResetButton>{t('Reset')}</form.ResetButton>
+          <form.SubmitButton>{t('Save changes')}</form.SubmitButton>
+        </Flex>
+      </FieldGroup>
+    </form.AppForm>
   );
 }
 
 export default withSubscription(SubscriptionNotifications);
-
-const PageDescription = styled('p')`
-  font-size: ${p => p.theme.fontSize.md};
-  margin-bottom: ${space(2)};
-`;
-
-const NotificationsFooter = styled(PanelFooter)`
-  padding: ${space(2)};
-  display: flex;
-  justify-content: flex-end;
-  gap: ${space(1)};
-  align-items: center;
-`;
-
-const ConsumptionGroup = styled(FieldGroup)`
-  align-items: flex-start;
-`;
-
-const StyledCompactSelect = styled(CompactSelect)`
-  width: 100%;
-`;
-
-const SelectGroup = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(1)};
-`;
-
-const SelectGroupRow = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-`;

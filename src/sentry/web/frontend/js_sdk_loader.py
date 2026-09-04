@@ -1,25 +1,45 @@
 from __future__ import annotations
 
 import time
-from typing import NotRequired, TypedDict
+from typing import Any, Callable, NotRequired, TypedDict
 
 from django.conf import settings
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseBase
 from django.views.generic import View
 from packaging.version import Version
 from rest_framework.request import Request
 
 from sentry import analytics
+from sentry.hybridcloud.apigateway.cell_request_resolvers import (
+    CellRequestResolver,
+)
 from sentry.loader.browsersdkversion import get_browser_sdk_version
 from sentry.loader.dynamic_sdk_options import DynamicSdkLoaderOption, get_dynamic_sdk_loader_option
 from sentry.models.project import Project
 from sentry.models.projectkey import ProjectKey
+from sentry.models.projectkeymapping import ProjectKeyMapping
+from sentry.types.cell import Cell, get_cell_by_name
 from sentry.utils import metrics
-from sentry.web.frontend.base import region_silo_view
+from sentry.web.frontend.analytics import JsSdkLoaderRendered
+from sentry.web.frontend.base import cell_silo_view
 from sentry.web.helpers import render_to_response
 
 CACHE_CONTROL = (
     "public, max-age=3600, s-maxage=60, stale-while-revalidate=315360000, stale-if-error=315360000"
+)
+
+# The SDK APIs that the loader exposes as stubs, so that calls made before the actual
+# SDK bundle is loaded can be queued up and replayed afterwards. Since these stubs have
+# to match the API surface of the SDK version we serve, APIs that only exist in some
+# versions are added conditionally in `_get_queueable_apis`.
+QUEUEABLE_SDK_APIS = (
+    "init",
+    "addBreadcrumb",
+    "captureMessage",
+    "captureException",
+    "captureEvent",
+    "withScope",
+    "showReportDialog",
 )
 
 
@@ -29,6 +49,8 @@ class SdkConfig(TypedDict):
     replaysSessionSampleRate: NotRequired[float]
     replaysOnErrorSampleRate: NotRequired[float]
     debug: NotRequired[bool]
+    autoInjectFeedback: NotRequired[bool]
+    enableLogs: NotRequired[bool]
 
 
 class LoaderInternalConfig(TypedDict):
@@ -37,6 +59,12 @@ class LoaderInternalConfig(TypedDict):
     hasPerformance: bool
     hasReplay: bool
     hasDebug: bool
+    hasFeedback: bool
+    hasLogsAndMetrics: bool
+    userEnabledPerformance: bool
+    userEnabledReplay: bool
+    userEnabledFeedback: bool
+    userEnabledLogsAndMetrics: bool
 
 
 class LoaderContext(TypedDict):
@@ -44,9 +72,29 @@ class LoaderContext(TypedDict):
     config: NotRequired[SdkConfig]
     jsSdkUrl: NotRequired[str]
     publicKey: NotRequired[str | None]
+    queueableApis: NotRequired[list[str]]
 
 
-@region_silo_view
+class SdkPublicKeyResolver(CellRequestResolver):
+    def resolve(
+        self,
+        request: Request,
+        view_func: Callable[..., HttpResponseBase],
+        view_kwargs: dict[str, Any],
+    ) -> Cell | None:
+        public_key = view_kwargs.get("public_key")
+        if not public_key:
+            return None
+
+        try:
+            project_mapping = ProjectKeyMapping.objects.get(public_key=public_key)
+        except ProjectKeyMapping.DoesNotExist:
+            return None
+
+        return get_cell_by_name(project_mapping.cell_name)
+
+
+@cell_silo_view(cell_resolver=SdkPublicKeyResolver())
 class JavaScriptSdkLoader(View):
     def _get_loader_config(
         self, key: ProjectKey | None, sdk_version: Version | None
@@ -60,20 +108,76 @@ class JavaScriptSdkLoader(View):
                 "hasPerformance": False,
                 "hasReplay": False,
                 "hasDebug": False,
+                "hasFeedback": False,
+                "hasLogsAndMetrics": False,
+                "userEnabledPerformance": False,
+                "userEnabledReplay": False,
+                "userEnabledFeedback": False,
+                "userEnabledLogsAndMetrics": False,
             }
 
         is_v7_sdk = sdk_version >= Version("7.0.0") and sdk_version < Version("8.0.0")
         is_greater_or_equal_v7_sdk = sdk_version >= Version("7.0.0")
+        is_greater_or_equal_v10_sdk = sdk_version >= Version("10.0.0")
 
         is_lazy = True
         bundle_kind_modifier = ""
         has_replay = get_dynamic_sdk_loader_option(key, DynamicSdkLoaderOption.HAS_REPLAY)
         has_performance = get_dynamic_sdk_loader_option(key, DynamicSdkLoaderOption.HAS_PERFORMANCE)
         has_debug = get_dynamic_sdk_loader_option(key, DynamicSdkLoaderOption.HAS_DEBUG)
+        has_feedback = get_dynamic_sdk_loader_option(key, DynamicSdkLoaderOption.HAS_FEEDBACK)
+        has_logs_and_metrics = get_dynamic_sdk_loader_option(
+            key, DynamicSdkLoaderOption.HAS_LOGS_AND_METRICS
+        )
+
+        # Store the user's original preferences before we modify them for bundle selection.
+        # We only want to enable features that the user explicitly requested.
+        user_enabled_performance = has_performance
+        user_enabled_replay = has_replay
+        user_enabled_feedback = has_feedback
+        user_enabled_logs_and_metrics = has_logs_and_metrics
 
         # The order in which these modifiers are added is important, as the
         # bundle name is built up from left to right.
         # https://docs.sentry.io/platforms/javascript/install/cdn/
+
+        # Available bundles:
+        # - bundle (base)
+        # - bundle.feedback
+        # - bundle.logs.metrics
+        # - bundle.replay
+        # - bundle.replay.feedback
+        # - bundle.replay.logs.metrics
+        # - bundle.tracing
+        # - bundle.tracing.logs.metrics
+        # - bundle.tracing.replay
+        # - bundle.tracing.replay.feedback
+        # - bundle.tracing.replay.feedback.logs.metrics
+        # - bundle.tracing.replay.logs.metrics
+        #
+        # Note: There is NO bundle.tracing.feedback (tracing + feedback without replay).
+        # If feedback is combined with tracing (without replay), we must use the full bundle.
+        #
+        # Note: There is NO bundle.feedback.logs.metrics, bundle.tracing.feedback.logs.metrics,
+        # or bundle.replay.feedback.logs.metrics. If feedback is combined with logs+metrics,
+        # we must use the full bundle (tracing.replay.feedback.logs.metrics).
+
+        # Feedback bundles require SDK >= 7.85.0, but the frontend only allows selecting
+        # major versions (7.x, 8.x), which resolve to versions that support feedback.
+
+        # When feedback is combined with tracing (but not replay), we must serve the full bundle
+        # which includes tracing, replay, and feedback. Update the flags accordingly.
+        feedback_with_tracing_no_replay = has_feedback and has_performance and not has_replay
+        if is_greater_or_equal_v7_sdk and feedback_with_tracing_no_replay:
+            has_replay = True
+
+        # Logs and metrics bundles require SDK >= 10.0.0.
+        # When logs+metrics is combined with feedback, we must serve the full bundle
+        # (tracing.replay.feedback.logs.metrics) because there's no feedback.logs.metrics bundle.
+        logs_metrics_with_feedback = has_logs_and_metrics and has_feedback
+        if is_greater_or_equal_v10_sdk and logs_metrics_with_feedback:
+            has_performance = True
+            has_replay = True
 
         # We depend on fixes in the tracing bundle that are only available in v7
         if is_greater_or_equal_v7_sdk and has_performance:
@@ -85,12 +189,24 @@ class JavaScriptSdkLoader(View):
             bundle_kind_modifier += ".replay"
             is_lazy = False
 
+        if is_greater_or_equal_v7_sdk and has_feedback:
+            bundle_kind_modifier += ".feedback"
+            is_lazy = False
+
+        if is_greater_or_equal_v10_sdk and has_logs_and_metrics:
+            bundle_kind_modifier += ".logs.metrics"
+            is_lazy = False
+        else:
+            # If SDK < 10.0.0, disable logs+metrics feature even if user requested it
+            has_logs_and_metrics = False
+            user_enabled_logs_and_metrics = False
+
         # In JavaScript SDK version 7, the default bundle code is ES6, however, in the loader we
         # want to provide the ES5 version. This is why we need to modify the requested bundle name here.
         #
-        # If we are loading replay, do not add the es5 modifier, as those bundles are
-        # ES6 only.
-        if is_v7_sdk and not has_replay:
+        # If we are loading replay or feedback, do not add the es5 modifier, as those bundles are ES6 only.
+        # Note: logs+metrics bundles don't exist for v7 (they require v10+)
+        if is_v7_sdk and not has_replay and not has_feedback:
             bundle_kind_modifier += ".es5"
 
         if has_debug:
@@ -102,7 +218,23 @@ class JavaScriptSdkLoader(View):
             "hasPerformance": has_performance,
             "hasReplay": has_replay,
             "hasDebug": has_debug,
+            "hasFeedback": has_feedback,
+            "hasLogsAndMetrics": has_logs_and_metrics,
+            "userEnabledPerformance": user_enabled_performance,
+            "userEnabledReplay": user_enabled_replay,
+            "userEnabledFeedback": user_enabled_feedback,
+            "userEnabledLogsAndMetrics": user_enabled_logs_and_metrics,
         }
+
+    def _get_queueable_apis(self, sdk_version: Version) -> list[str]:
+        """Returns the names of the APIs the loader should stub out for this SDK version"""
+        apis = list(QUEUEABLE_SDK_APIS)
+
+        # `configureScope` was removed in v8 in favour of `getCurrentScope()`
+        if sdk_version < Version("8.0.0"):
+            apis.append("configureScope")
+
+        return apis
 
     def _get_context(
         self,
@@ -111,7 +243,7 @@ class JavaScriptSdkLoader(View):
         loader_config: LoaderInternalConfig,
     ) -> tuple[LoaderContext, str | None]:
         """Sets context information needed to render the loader"""
-        if not key:
+        if not key or not sdk_version:
             return (
                 {
                     "isLazy": True,
@@ -141,12 +273,20 @@ class JavaScriptSdkLoader(View):
         if loader_config["hasDebug"]:
             config["debug"] = True
 
-        if loader_config["hasPerformance"]:
+        # Only enable feature configs if the user explicitly enabled them, not just because
+        # we're loading a bundle that includes those features for compatibility reasons.
+        if loader_config["userEnabledPerformance"]:
             config["tracesSampleRate"] = 1
 
-        if loader_config["hasReplay"]:
+        if loader_config["userEnabledReplay"]:
             config["replaysSessionSampleRate"] = 0.1
             config["replaysOnErrorSampleRate"] = 1
+
+        if loader_config["userEnabledFeedback"]:
+            config["autoInjectFeedback"] = True
+
+        if loader_config["userEnabledLogsAndMetrics"]:
+            config["enableLogs"] = True
 
         return (
             {
@@ -154,6 +294,7 @@ class JavaScriptSdkLoader(View):
                 "jsSdkUrl": sdk_url,
                 "publicKey": key.public_key,
                 "isLazy": loader_config["isLazy"],
+                "queueableApis": self._get_queueable_apis(sdk_version),
             },
             sdk_url,
         )
@@ -190,15 +331,18 @@ class JavaScriptSdkLoader(View):
 
         (
             analytics.record(
-                "js_sdk_loader.rendered",
-                organization_id=key.project.organization_id,
-                project_id=key.project_id,
-                is_lazy=loader_config["isLazy"],
-                has_performance=loader_config["hasPerformance"],
-                has_replay=loader_config["hasReplay"],
-                has_debug=loader_config["hasDebug"],
-                sdk_version=sdk_version,
-                tmpl=tmpl,
+                JsSdkLoaderRendered(
+                    organization_id=key.project.organization_id,
+                    project_id=key.project_id,
+                    is_lazy=loader_config["isLazy"],
+                    has_performance=loader_config["hasPerformance"],
+                    has_replay=loader_config["hasReplay"],
+                    has_debug=loader_config["hasDebug"],
+                    has_feedback=loader_config["hasFeedback"],
+                    has_logs_and_metrics=loader_config["hasLogsAndMetrics"],
+                    sdk_version=str(sdk_version) if sdk_version else None,
+                    tmpl=tmpl,
+                )
             )
             if key
             else None

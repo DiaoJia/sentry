@@ -5,8 +5,8 @@ import {EventOrGroupType, ProfileContextKey} from 'sentry/types/event';
 import type {KeyValueListData} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
 import {getDateFromTimestamp} from 'sentry/utils/dates';
+import {defined} from 'sentry/utils/defined';
 import {
   generateContinuousProfileFlamechartRouteWithQuery,
   generateProfileFlamechartRoute,
@@ -20,8 +20,8 @@ export function getProfileContextData({
   meta,
 }: {
   data: ProfileContext;
-  event: Event;
   organization: Organization;
+  event?: Event;
   meta?: Record<keyof ProfileContext, any>;
   project?: Project;
 }): KeyValueListData {
@@ -53,7 +53,7 @@ function getProfileIdEntry(
 ) {
   const profileId = data.profile_id || '';
   if (!profileId) {
-    return undefined;
+    return;
   }
   const link = project?.slug
     ? generateProfileFlamechartRoute({
@@ -72,17 +72,17 @@ function getProfileIdEntry(
 
 function getProfilerIdEntry(
   data: ProfileContext,
-  event: Event,
+  event: Event | undefined,
   organization: Organization,
   project?: Project
 ) {
   const profilerId = data.profiler_id || '';
   if (!profilerId) {
-    return undefined;
+    return;
   }
   const [start, end] = getStartEnd(event);
   const link =
-    project?.slug && start && end
+    event && project?.slug && start && end
       ? generateContinuousProfileFlamechartRouteWithQuery({
           organization,
           projectSlug: project.slug,
@@ -102,8 +102,8 @@ function getProfilerIdEntry(
   };
 }
 
-function getStartEnd(event: any): [string | null, string | null] {
-  if (!isTransaction(event)) {
+function getStartEnd(event: Event | undefined): [string | null, string | null] {
+  if (!event || !isTransaction(event)) {
     return [null, null];
   }
 

@@ -6,13 +6,13 @@ import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen, waitFor} from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import OrganizationAuditLog from 'sentry/views/settings/organizationAuditLog';
 
-describe('OrganizationAuditLog', function () {
-  it('renders', async function () {
+describe('OrganizationAuditLog', () => {
+  it('renders', async () => {
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/audit-logs/`,
+      url: '/organizations/org-slug/audit-logs/',
       method: 'GET',
       body: {
         rows: AuditLogsFixture(),
@@ -20,14 +20,7 @@ describe('OrganizationAuditLog', function () {
       },
     });
 
-    const {router} = initializeOrg({
-      projects: [],
-      router: {
-        params: {orgId: 'org-slug'},
-      },
-    });
-
-    render(<OrganizationAuditLog location={router.location} />);
+    render(<OrganizationAuditLog />);
 
     expect(await screen.findByText('project.edit')).toBeInTheDocument();
     expect(screen.getByText('org.edit')).toBeInTheDocument();
@@ -42,17 +35,13 @@ describe('OrganizationAuditLog', function () {
     ).toBeInTheDocument();
   });
 
-  it('Displays pretty dynamic sampling logs', async function () {
-    const {router, project, projects, organization} = initializeOrg({
-      router: {
-        params: {orgId: 'org-slug'},
-      },
-    });
+  it('Displays pretty dynamic sampling logs', async () => {
+    const {project, projects, organization} = initializeOrg();
 
     ProjectsStore.loadInitialData(projects);
 
     MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/audit-logs/`,
+      url: '/organizations/org-slug/audit-logs/',
       method: 'GET',
       body: {
         rows: [
@@ -93,7 +82,7 @@ describe('OrganizationAuditLog', function () {
       },
     });
 
-    render(<OrganizationAuditLog location={router.location} />);
+    render(<OrganizationAuditLog />);
 
     // Enabled dynamic sampling priority
     expect(await screen.findByText('sampling_priority.enabled')).toBeInTheDocument();
@@ -124,9 +113,9 @@ describe('OrganizationAuditLog', function () {
     }
   });
 
-  it('Handles absolute date range', async function () {
+  it('Handles absolute date range', async () => {
     const absoluteDateMockResponse = MockApiClient.addMockResponse({
-      url: `/organizations/org-slug/audit-logs/`,
+      url: '/organizations/org-slug/audit-logs/',
       method: 'GET',
       body: {
         rows: AuditLogsFixture(),
@@ -134,20 +123,18 @@ describe('OrganizationAuditLog', function () {
       },
     });
 
-    const {router} = initializeOrg({
-      projects: [],
-      router: {
-        params: {orgId: 'org-slug'},
+    render(<OrganizationAuditLog />, {
+      initialRouterConfig: {
         location: {
+          pathname: '/organizations/org-slug/audit-log/',
           query: {
             start: '2018-02-01T00:00:00.000Z',
             end: '2018-02-28T23:59:59.999Z',
           },
         },
+        route: '/organizations/:orgId/audit-log/',
       },
     });
-
-    render(<OrganizationAuditLog location={router.location} />);
 
     await waitFor(() => {
       expect(absoluteDateMockResponse).toHaveBeenCalledWith(

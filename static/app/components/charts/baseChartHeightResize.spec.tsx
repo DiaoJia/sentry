@@ -1,9 +1,9 @@
 import {render} from 'sentry-test/reactTestingLibrary';
 
-import BaseChart from 'sentry/components/charts/baseChart';
+import {BaseChart} from 'sentry/components/charts/baseChart';
 
 jest.mock('echarts-for-react/lib/core', () => {
-  // We need to do this because `jest.mock` gets hoisted by babel and `React` is not
+  // We need to do this because `jest.mock` gets hoisted before imports and `React` is not
   // guaranteed to be in scope
   const ReactActual = require('react');
 
@@ -23,7 +23,7 @@ function TestContainer({children}: {children: React.ReactNode}) {
   );
 }
 
-describe('BaseChart', function () {
+describe('BaseChart', () => {
   it('can scale to full parent height when given autoHeightResize', () => {
     render(
       <TestContainer>

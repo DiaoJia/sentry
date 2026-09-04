@@ -1,26 +1,36 @@
-import {Fragment, useMemo, useState} from 'react';
+import {Fragment, useMemo} from 'react';
 import styled from '@emotion/styled';
-import {uuid4} from '@sentry/core';
 
-import {Select} from 'sentry/components/core/select';
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+import {Select, components as selectComponents} from '@sentry/scraps/select';
+
+import {IconAdd} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import {
-  type Action,
   ActionGroup,
+  ActionType,
+  type Action,
   type ActionHandler,
 } from 'sentry/types/workflowEngine/actions';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {
   ActionNodeContext,
   actionNodesMap,
   useActionNodeContext,
 } from 'sentry/views/automations/components/actionNodes';
-import AutomationBuilderRow from 'sentry/views/automations/components/automationBuilderRow';
+import {useAutomationBuilderContext} from 'sentry/views/automations/components/automationBuilderContext';
+import {useAutomationBuilderErrorContext} from 'sentry/views/automations/components/automationBuilderErrorContext';
+import {AutomationBuilderRow} from 'sentry/views/automations/components/automationBuilderRow';
 import {useAvailableActionsQuery} from 'sentry/views/automations/hooks';
+import {useConnectedDetectors} from 'sentry/views/automations/hooks/useConnectedDetectors';
+import {getIncompatibleActionWarnings} from 'sentry/views/automations/utils/getIncompatibleActionWarning';
 
 interface ActionNodeListProps {
   actions: Action[];
-  group: string;
-  onAddRow: (actionId: string, actionHandler: ActionHandler) => void;
+  conditionGroupId: string;
+  onAddRow: (actionHandler: ActionHandler) => void;
   onDeleteRow: (id: string) => void;
   placeholder: string;
   updateAction: (id: string, params: Record<string, any>) => void;
@@ -31,18 +41,39 @@ interface Option {
   value: ActionHandler;
 }
 
-export default function ActionNodeList({
-  group,
+function getActionHandler(
+  action: Action,
+  availableActions: ActionHandler[]
+): ActionHandler | undefined {
+  if (action.type === ActionType.SENTRY_APP) {
+    return availableActions.find(handler => {
+      if (handler.type !== ActionType.SENTRY_APP) {
+        return false;
+      }
+      const {targetIdentifier} = action.config;
+      const sentryApp = handler.sentryApp;
+
+      return targetIdentifier === sentryApp?.id;
+    });
+  }
+  return availableActions.find(handler => handler.type === action.type);
+}
+
+export function ActionNodeList({
+  conditionGroupId,
   placeholder,
   actions,
   onAddRow,
   onDeleteRow,
   updateAction,
 }: ActionNodeListProps) {
-  const {data: availableActions = []} = useAvailableActionsQuery();
-  const [actionHandlerMap, setActionHandlerMap] = useState<Record<string, ActionHandler>>(
-    {}
-  );
+  const organization = useOrganization();
+  const {data: availableActions = [], isLoading: isLoadingActions} =
+    useAvailableActionsQuery();
+  const {errors, removeError} = useAutomationBuilderErrorContext();
+  const {connectedDetectors} = useConnectedDetectors();
+  const {state} = useAutomationBuilderContext();
+  const triggerConditions = state.triggers.conditions ?? [];
 
   const options = useMemo(() => {
     const notificationActions: Option[] = [];
@@ -50,6 +81,9 @@ export default function ActionNodeList({
     const otherActions: Option[] = [];
 
     availableActions.forEach(action => {
+      if (action.type === ActionType.PLUGIN) {
+        return;
+      }
       const label =
         actionNodesMap.get(action.type)?.label || action.sentryApp?.name || action.type;
       const newAction = {
@@ -88,22 +122,53 @@ export default function ActionNodeList({
   return (
     <Fragment>
       {actions.map(action => {
-        const handler = actionHandlerMap[action.id];
-        if (!handler) {
+        if (isLoadingActions) {
           return null;
         }
+        const handler = getActionHandler(action, availableActions);
+        if (!handler) {
+          const actionLabel = actionNodesMap.get(action.type)?.label;
+          return (
+            <AutomationBuilderRow
+              key={`actionFilters.${conditionGroupId}.action.${action.id}`}
+              onDelete={() => {
+                onDeleteRow(action.id);
+              }}
+              hasError
+              errorMessage={
+                actionLabel
+                  ? t(
+                      'The %s action is no longer available. Please remove and reconfigure this action.',
+                      actionLabel
+                    )
+                  : t(
+                      'The integration is no longer available. Please remove and reconfigure this action.'
+                    )
+              }
+            >
+              {actionLabel ?? t('Unknown integration')}
+            </AutomationBuilderRow>
+          );
+        }
+        const error = errors?.[action.id];
+        const warningMessages = getIncompatibleActionWarnings(action, {
+          connectedDetectors,
+          triggerConditions,
+        });
         return (
           <AutomationBuilderRow
-            key={`${group}.action.${action.id}`}
+            key={`actionFilters.${conditionGroupId}.action.${action.id}`}
             onDelete={() => {
               onDeleteRow(action.id);
-              setActionHandlerMap(({[action.id]: _, ...rest}) => rest);
             }}
+            hasError={!!error}
+            errorMessage={error}
+            warningMessages={warningMessages}
           >
             <ActionNodeContext.Provider
               value={{
                 action,
-                actionId: `${group}.action.${action.id}`,
+                actionId: `actionFilters.${conditionGroupId}.action.${action.id}`,
                 onUpdate: newAction => updateAction(action.id, newAction),
                 handler,
               }}
@@ -114,18 +179,38 @@ export default function ActionNodeList({
         );
       })}
       <StyledSelectControl
+        aria-label={t('Add action')}
         options={options}
         onChange={(obj: any) => {
-          const actionId = uuid4();
-          onAddRow(actionId, obj.value);
-          setActionHandlerMap(currActionHandlerMap => ({
-            ...currActionHandlerMap,
-            [actionId]: obj.value,
-          }));
+          onAddRow(obj.value);
+          removeError(conditionGroupId);
         }}
         placeholder={placeholder}
         value={null}
+        components={{
+          Menu: ({children, ...props}) => (
+            <selectComponents.Menu {...props}>
+              <Fragment>
+                {children}
+                <Container padding="md" borderTop="muted">
+                  <LinkButton
+                    size="xs"
+                    variant="secondary"
+                    icon={<IconAdd />}
+                    href={`/settings/${organization.slug}/integrations/`}
+                    external
+                  >
+                    {t('Add another integration')}
+                  </LinkButton>
+                </Container>
+              </Fragment>
+            </selectComponents.Menu>
+          ),
+        }}
       />
+      {errors[conditionGroupId] && (
+        <Alert variant="danger">{errors[conditionGroupId]}</Alert>
+      )}
     </Fragment>
   );
 }

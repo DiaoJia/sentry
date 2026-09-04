@@ -94,13 +94,37 @@ EVENT_DATA_ALLOWLIST = {
         "device": {
             "family": Allow.SIMPLE_TYPE,
             "model": Allow.SIMPLE_TYPE,
+            "model_id": Allow.SIMPLE_TYPE,
             "arch": Allow.SIMPLE_TYPE,
             "simulator": Allow.SIMPLE_TYPE,
+            "manufacturer": Allow.SIMPLE_TYPE,
+            "brand": Allow.SIMPLE_TYPE,
+            "memory_size": Allow.SIMPLE_TYPE,
+            "processor_count": Allow.SIMPLE_TYPE,
+            "processor_frequency": Allow.SIMPLE_TYPE,
         },
         "os": {
             "name": Allow.SIMPLE_TYPE,
             "version": Allow.SIMPLE_TYPE,
             "build": Allow.SIMPLE_TYPE,
+            "kernel_version": Allow.SIMPLE_TYPE,
+            "rooted": Allow.SIMPLE_TYPE,
+        },
+        "app": {
+            "in_foreground": Allow.SIMPLE_TYPE,
+        },
+        "art": {
+            "gc.total_count": Allow.SIMPLE_TYPE,
+            "gc.total_time": Allow.SIMPLE_TYPE,
+            "gc.blocking_count": Allow.SIMPLE_TYPE,
+            "gc.blocking_time": Allow.SIMPLE_TYPE,
+            "gc.pre_oome_count": Allow.SIMPLE_TYPE,
+            "gc.waiting_time": Allow.SIMPLE_TYPE,
+            "memory.free": Allow.SIMPLE_TYPE,
+            "memory.free_until_gc": Allow.SIMPLE_TYPE,
+            "memory.free_until_oome": Allow.SIMPLE_TYPE,
+            "memory.total": Allow.SIMPLE_TYPE,
+            "memory.max": Allow.SIMPLE_TYPE,
         },
     },
 }
@@ -114,16 +138,32 @@ def strip_event_data(
     and the method only keeps SDK frames and system library frames.
     """
 
-    frames = get_path(event_data, "exception", "values", -1, "stacktrace", "frames")
-    if not frames:
+    last_exception = get_path(
+        event_data,
+        "exception",
+        "values",
+        -1,
+    )
+    if not last_exception:
         return {}
+
+    # The SDK crash detector only detects crashes based on the last exception value.
+    # Therefore, if the last exception doesn't contain a stacktrace something is off and
+    # we can drop the whole event.
+    last_exception_frames = get_path(last_exception, "stacktrace", "frames")
+    if not last_exception_frames:
+        return {}
+
+    event_data_copy = dict(event_data)
 
     # We strip the frames first because applying the allowlist removes fields that are needed
     # for deciding wether to keep a frame or not.
-    stripped_frames = _strip_frames(frames, sdk_crash_detector)
+    stripped_frames = _strip_frames(last_exception_frames, sdk_crash_detector)
+    last_exception["stacktrace"]["frames"] = stripped_frames
 
-    event_data_copy = dict(event_data)
-    event_data_copy["exception"]["values"][0]["stacktrace"]["frames"] = stripped_frames
+    # We only keep the last exception. We need to adopt the allowlist and stripping event data logic
+    # to support multiple exceptions.
+    event_data_copy["exception"]["values"] = [last_exception]
 
     stripped_event_data = _strip_event_data_with_allowlist(event_data_copy, EVENT_DATA_ALLOWLIST)
 

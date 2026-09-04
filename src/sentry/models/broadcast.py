@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.db import models
 from django.utils import timezone
@@ -7,7 +7,7 @@ from sentry.backup.scopes import RelocationScope
 from sentry.db.models import FlexibleForeignKey, Model, control_silo_model, sane_repr
 
 
-def default_expiration():
+def default_expiration() -> datetime:
     return timezone.now() + timedelta(days=7)
 
 
@@ -17,6 +17,7 @@ BROADCAST_CATEGORIES = [
     ("blog", "Blog Post"),
     ("event", "Event"),
     ("video", "Video"),
+    ("sdk_update", "SDK Update"),
 ]
 
 
@@ -34,6 +35,10 @@ class Broadcast(Model):
     media_url = models.URLField(null=True, blank=True)
     category = models.CharField(choices=BROADCAST_CATEGORIES, max_length=32, null=True, blank=True)
     created_by_id = FlexibleForeignKey("sentry.User", null=True, on_delete=models.SET_NULL)
+    # When True, the hourly changelog sync job in getsentry skips updates to this
+    # broadcast. Flipped automatically when an admin edits a sync-managed field
+    # on a changelog-sourced broadcast; can be cleared to re-enable sync.
+    sync_locked = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         app_label = "sentry"

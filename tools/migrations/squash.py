@@ -11,7 +11,7 @@ _GIST_EXT = """\
         # would be nice but it doesn't support hints :(
         # django.contrib.postgres.operations.BtreeGistExtension(),
         SafeRunSQL(
-            sql="CREATE EXTENSION btree_gist;",
+            sql="CREATE EXTENSION IF NOT EXISTS btree_gist;",
             reverse_sql="",
             hints={{"tables": [{table!r}]}},
         ),
@@ -73,13 +73,15 @@ def _migration_root(app: str) -> str:
         return "src/sentry/migrations"
     elif app == "social_auth":
         return "src/social_auth/migrations"
+    elif app == "nodestore":
+        return "src/sentry/services/nodestore/migrations"
     else:
         return f"src/sentry/{app}/migrations"
 
 
 def _migrations(root: str) -> Generator[str]:
     for fname in os.listdir(root):
-        if fname.startswith("0") and fname.endswith(".py"):
+        if fname[0].isdigit() and fname.endswith(".py"):
             yield fname
 
 
@@ -123,12 +125,13 @@ def _dependencies(app: App, tree: ast.AST) -> Generator[tuple[ast.Tuple, str]]:
                         yield elt, cand
 
 
-def _target_line(target: str, squashed: dict[str, App]) -> str:
-    return f'        ("{target}", "{squashed[target].squash_name}"),'
+def _target_line(target: str, all_apps: dict[str, App]) -> str:
+    return f'        ("{target}", "{all_apps[target].squash_name}"),'
 
 
 @contextlib.contextmanager
 def _cleared_deps(already_squashed: list[App], squash: dict[str, App]) -> Generator[None]:
+    all_apps = {app.name: app for app in already_squashed} | squash
     all_fixups = []
     for app in already_squashed:
         with open(app.squash_fname, encoding="UTF-8") as f:
@@ -155,7 +158,7 @@ def _cleared_deps(already_squashed: list[App], squash: dict[str, App]) -> Genera
             with open(fname, "w", encoding="UTF-8") as f:
                 f.writelines(
                     (
-                        _target_line(fixups[i], squash) if i in fixups else line
+                        _target_line(fixups[i], all_apps) if i in fixups else line
                         for i, line in enumerate(lines, start=1)
                     )
                 )
@@ -194,7 +197,11 @@ class FixupVisitor(ast.NodeVisitor):
                 and kw.value.func.attr == "ExclusionConstraint"
             ):
                 model_name_kw = _get_kw(node.keywords, "model_name")
-                assert model_name_kw is not None and isinstance(model_name_kw.value, ast.Constant)
+                assert (
+                    model_name_kw is not None
+                    and isinstance(model_name_kw.value, ast.Constant)
+                    and isinstance(model_name_kw.value.value, str)
+                )
                 table = _EXCLUSION_TABLES[model_name_kw.value.value]
                 self.first_exclude_constraint = (table, node.lineno)
 
@@ -202,7 +209,11 @@ class FixupVisitor(ast.NodeVisitor):
 
 
 def _fixup(app: App, squash: dict[str, App]) -> None:
-    os.rename(os.path.join(app.root, "0001_squash.py"), app.squash_fname)
+    squashed = os.path.join(app.root, "0001_squash.py")
+    if not os.path.exists(squashed):
+        return  # all models were deleted in the app
+
+    os.rename(squashed, app.squash_fname)
 
     with open(app.squash_fname, encoding="UTF-8") as f:
         lines = list(f)
@@ -252,7 +263,8 @@ def _write_lockfile(apps: list[App]) -> None:
     with open("migrations_lockfile.txt", "w", encoding="UTF-8") as f:
         f.writelines(lines[:6])
         for app in apps:
-            f.write(f"\n{app.name}: {app.squash_name}\n")
+            if os.path.exists(app.squash_fname):
+                f.write(f"\n{app.name}: {app.squash_name}\n")
 
 
 def main() -> int:

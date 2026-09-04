@@ -59,9 +59,9 @@ class DatabaseBackedOrganizationMappingService(OrganizationMappingService):
             )
             return False
 
-        if not update.region_name:
+        if not update.cell_name:
             capture_exception(
-                OrganizationMappingConsistencyException("Organization mapping must have a region")
+                OrganizationMappingConsistencyException("Organization mapping must have a cell")
             )
             return False
 
@@ -81,11 +81,11 @@ class DatabaseBackedOrganizationMappingService(OrganizationMappingService):
             )
             return False
 
-        org_slug_regions_set = {org_slug.region_name for org_slug in org_slugs}
-        if update.region_name not in org_slug_regions_set:
+        org_slug_cells_set = {org_slug.cell_name for org_slug in org_slugs}
+        if update.cell_name not in org_slug_cells_set:
             capture_exception(
                 OrganizationMappingConsistencyException(
-                    "Mismatched Slug Reservation and Organization Regions"
+                    "Mismatched Slug Reservation and Organization Cells"
                 )
             )
             return False
@@ -112,7 +112,7 @@ class DatabaseBackedOrganizationMappingService(OrganizationMappingService):
         ).first()
         if org_slug_reservation is None:
             OrganizationSlugReservation(
-                region_name=mapping_update.region_name,
+                cell_name=mapping_update.cell_name,
                 slug=mapping_update.slug,
                 organization_id=organization_id,
                 user_id=-1,
@@ -125,15 +125,14 @@ class DatabaseBackedOrganizationMappingService(OrganizationMappingService):
             name=update.name,
             status=update.status,
             slug=update.slug,
-            region_name=update.region_name,
+            cell_name=update.cell_name,
+            date_created=update.date_created,
             require_2fa=update.requires_2fa,
             early_adopter=update.early_adopter,
             allow_joinleave=update.allow_joinleave,
             enhanced_privacy=update.enhanced_privacy,
             disable_shared_issues=update.disable_shared_issues,
             disable_new_visibility_features=update.disable_new_visibility_features,
-            require_email_verification=update.require_email_verification,
-            codecov_access=update.codecov_access,
             disable_member_project_creation=update.disable_member_project_creation,
             prevent_superuser_access=update.prevent_superuser_access,
             disable_member_invite=update.disable_member_invite,

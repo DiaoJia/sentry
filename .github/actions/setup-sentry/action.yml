@@ -15,6 +15,14 @@ inputs:
     description: 'Mode to bring up by new devservices'
     required: false
     default: 'default'
+  skip-devservices:
+    description: 'Skip bringing up devservices'
+    required: false
+    default: 'false'
+  devservices-timeout-minutes:
+    description: 'Maximum minutes for devservices up'
+    required: false
+    default: '10'
 
 outputs:
   matrix-instance-number:
@@ -38,9 +46,11 @@ runs:
         # isn't right because job-total will be 3x larger and you'd never run 2/3 of the tests.
         # MATRIX_INSTANCE_TOTAL: ${{ strategy.job-total }}
       run: |
+        echo "SENTRY_SKIP_SERVICE_VALIDATION=1" >> $GITHUB_ENV
+
+        # for actions/setup-python which always runs pip install
         echo "PIP_DISABLE_PIP_VERSION_CHECK=on" >> $GITHUB_ENV
         echo "PIP_INDEX_URL=https://pypi.devinfra.sentry.io/simple" >> $GITHUB_ENV
-        echo "SENTRY_SKIP_BACKEND_VALIDATION=1" >> $GITHUB_ENV
 
         ### node configuration ###
         echo "NODE_ENV=development" >> $GITHUB_ENV
@@ -48,7 +58,6 @@ runs:
         ### pytest configuration ###
         echo "PY_COLORS=1" >> "$GITHUB_ENV"
         echo "PYTEST_ADDOPTS=--reruns=5 --durations=10 --fail-slow=60s" >> $GITHUB_ENV
-        echo "COVERAGE_CORE=sysmon" >> "$GITHUB_ENV"
 
         ### pytest-sentry configuration ###
         if [ "$GITHUB_REPOSITORY" = "getsentry/sentry" ]; then
@@ -79,11 +88,26 @@ runs:
           echo "TOTAL_TEST_GROUPS=$MATRIX_INSTANCE_TOTAL" >> $GITHUB_ENV
         fi
 
+    - name: Clear Python cache
+      shell: bash --noprofile --norc -eo pipefail -ux {0}
+      env:
+        WORKDIR: ${{ inputs.workdir }}
+      run: |
+        cd "$WORKDIR"
+        find . -not -path './.venv/*' -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+        find . -not -path './.venv/*' -type f -name "*.pyc" -delete 2>/dev/null || true
+
+    - uses: astral-sh/setup-uv@884ad927a57e558e7a70b92f2bccf9198a4be546 # v6
+      with:
+        version: '0.9.28'
+        # we just cache the venv-dir directly in action-setup-venv
+        enable-cache: false
+
     - uses: getsentry/action-setup-venv@3a832a9604b3e1a4202ae559248f26867b467cc7 # v2.1.1
       with:
         python-version: ${{ inputs.python-version }}
-        cache-dependency-path: ${{ inputs.workdir }}/requirements-dev-frozen.txt
-        install-cmd: cd ${{ inputs.workdir }} && pip install -r requirements-dev-frozen.txt
+        cache-dependency-path: ${{ inputs.workdir }}/uv.lock
+        install-cmd: cd ${{ inputs.workdir }} && uv sync --frozen --active
 
     - name: Set up outputs
       id: config
@@ -106,17 +130,31 @@ runs:
         python3 -m tools.fast_editable --path .
 
     - name: Start new devservices
+      if: ${{ inputs.skip-devservices != 'true' }}
       shell: bash --noprofile --norc -eo pipefail -ux {0}
       env:
         WORKDIR: ${{ inputs.workdir }}
         ENABLE_AUTORUN_MIGRATION_SEARCH_ISSUES: '1'
+        DEVSERVICES_TIMEOUT: ${{ inputs.devservices-timeout-minutes }}
+        DEVSERVICES_MODE: ${{ inputs.mode }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         sentry init
+
+        # Prevent git from spawning background gc/maintenance processes during
+        # dependency clones, which races with shutil.copytree (git 2.54 regression).
+        git config --global gc.auto 0
+        git config --global maintenance.auto 0
+        git config --global fetch.writeCommitGraph false
 
         # This is necessary to bring up devservices with appropriate sentry config
         cd "$WORKDIR"
 
-        devservices up --mode ${{ inputs.mode }}
+        timeout "${DEVSERVICES_TIMEOUT}m" devservices up --mode "$DEVSERVICES_MODE"
+
+        git config --global --unset gc.auto
+        git config --global --unset maintenance.auto
+        git config --global --unset fetch.writeCommitGraph
 
         # have tests listen on the docker gateway ip so loopback can occur
         echo "DJANGO_LIVE_TEST_SERVER_ADDRESS=$(docker network inspect bridge --format='{{(index .IPAM.Config 0).Gateway}}')" >> "$GITHUB_ENV"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -16,18 +17,31 @@ from sentry.backup.scopes import RelocationScope
 from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
-    GzippedDictField,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base import BaseManager
 from sentry.integrations.types import IntegrationProviderSlug
+from sentry.issues.action_log import publish_action_from_context, publish_actions_from_context_bulk
 from sentry.issues.grouptype import get_group_type_by_type_id
 from sentry.tasks import activity
-from sentry.types.activity import CHOICES, STATUS_CHANGE_ACTIVITY_TYPES, ActivityType
+from sentry.types.activity import (
+    CHOICES,
+    HIDDEN_ACTIVITY_TYPES,
+    STATUS_CHANGE_ACTIVITY_TYPES,
+    ActivityType,
+)
 from sentry.types.group import PriorityLevel
+from sentry.utils.action_log.activity_translator import (
+    activity_action_idempotency_key,
+    activity_to_action,
+)
+from sentry.utils.env import in_test_environment
+from sentry.workflow_engine.handlers.registry import invoke_workflow_activity_handlers
+from sentry.workflow_engine.types import DetectorId
 
 if TYPE_CHECKING:
     from sentry.models.group import Group
@@ -41,13 +55,15 @@ _default_logger = logging.getLogger(__name__)
 class ActivityManager(BaseManager["Activity"]):
     def get_activities_for_group(self, group: Group, num: int) -> Sequence[Activity]:
         activities = []
-        activity_qs = self.filter(group=group).order_by("-datetime")
+        # Internal-signal activities (e.g. SMART_ASSIGNMENT_COMPLETED) exist only to drive
+        # workflow handlers; they have no frontend rendering and must be kept out of the feed.
+        activity_qs = (
+            self.filter(group=group)
+            .exclude(type__in=[t.value for t in HIDDEN_ACTIVITY_TYPES])
+            .order_by("-datetime")
+        )
 
-        # Check if 'initial_priority' is available
-        initial_priority_value = group.get_event_metadata().get(
-            "initial_priority", None
-        ) or group.get_event_metadata().get("initial_priority", None)
-
+        initial_priority_value = group.get_event_metadata().get("initial_priority")
         initial_priority = (
             PriorityLevel(initial_priority_value).to_str() if initial_priority_value else None
         )
@@ -87,6 +103,9 @@ class ActivityManager(BaseManager["Activity"]):
         user_id: int | None = None,
         data: Mapping[str, Any] | None = None,
         send_notification: bool = True,
+        datetime: datetime | None = None,
+        detector_id: DetectorId | None = None,
+        ident: str | int | None = None,
     ) -> Activity:
         if user:
             user_id = user.id
@@ -98,15 +117,79 @@ class ActivityManager(BaseManager["Activity"]):
         }
         if user_id is not None:
             activity_args["user_id"] = user_id
+        if datetime is not None:
+            activity_args["datetime"] = datetime
+        if ident is not None:
+            activity_args["ident"] = ident
         activity = self.create(**activity_args)
 
         if send_notification:
             activity.send_notification()
 
+        invoke_workflow_activity_handlers(group, activity, detector_id)
+
         return activity
 
+    def create_without_group_action(self, **kwargs: Any) -> Activity:
+        return super().create(**kwargs)
 
-@region_silo_model
+    def create(self, **kwargs: Any) -> Activity:
+        activity: Activity = super().create(**kwargs)
+
+        group_id = kwargs.get("group_id")
+        if group_id is None:
+            group = kwargs.get("group")
+            if group is not None:
+                group_id = group.id
+
+        if group_id is not None:
+            try:
+                group_action = activity_to_action(activity)
+                if group_action is not None:
+                    publish_action_from_context(
+                        group_action,
+                        group_id=group_id,
+                        project=activity.project,
+                        idempotency_key=activity_action_idempotency_key(activity),
+                    )
+            except Exception:
+                _default_logger.info("Failed to translate activity %d to GALE", activity.id)
+                if in_test_environment():
+                    raise
+
+        return activity
+
+    def bulk_create(self, *args: Any) -> list[Activity]:
+        activities: list[Activity] = super().bulk_create(*args)
+
+        try:
+            actions_with_activities = [
+                (activity_to_action(activity), activity) for activity in activities
+            ]
+            group_actions = [
+                # This loads the group just to fetch the ID, which isn't ideal... but we need the
+                # group ID for each activity, which can be different. No real way around it.
+                # Thankfully, this function is rarely-used (and isn't in any perf-sensitive paths)
+                (aa[0], aa[1].project, aa[1].group.id, activity_action_idempotency_key(aa[1]))
+                for aa in actions_with_activities
+                if aa[0] is not None and aa[1].group is not None
+            ]
+            publish_actions_from_context_bulk(
+                group_actions,
+            )
+
+        except Exception:
+            _default_logger.info(
+                "Failed to translate activities %s to GALE",
+                ", ".join([str(a.id) for a in activities]),
+            )
+            if in_test_environment():
+                raise
+
+        return activities
+
+
+@cell_silo_model
 class Activity(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -118,14 +201,17 @@ class Activity(Model):
     # if the user is not set, it's assumed to be the system
     user_id = HybridCloudForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete="SET_NULL")
     datetime = models.DateTimeField(default=timezone.now)
-    data: models.Field[dict[str, Any] | None, dict[str, Any]] = GzippedDictField(null=True)
+    data = LegacyTextJSONField(default=dict, null=True)
 
     objects: ClassVar[ActivityManager] = ActivityManager()
 
     class Meta:
         app_label = "sentry"
         db_table = "sentry_activity"
-        indexes = (models.Index(fields=("project", "datetime")),)
+        indexes = (
+            models.Index(fields=("project", "datetime")),
+            models.Index(fields=("project", "type")),
+        )
 
     __repr__ = sane_repr("project_id", "group_id", "event_id", "user_id", "type", "ident")
 
@@ -199,13 +285,18 @@ class Activity(Model):
         if self.group:
             group_type = get_group_type_by_type_id(self.group.type)
             has_status_change_notifications = group_type.enable_status_change_workflow_notifications
+            has_workflow_notifications = group_type.enable_workflow_notifications
             is_status_change = self.type in {
                 activity.value for activity in STATUS_CHANGE_ACTIVITY_TYPES
             }
 
             # Skip sending the activity notification if the group type does not
             # support status change workflow notifications
-            if is_status_change and not has_status_change_notifications:
+            if (
+                is_status_change
+                and not has_status_change_notifications
+                or not has_workflow_notifications
+            ):
                 return
 
         activity.send_activity_notifications.delay(self.id)
@@ -220,3 +311,4 @@ class ActivityIntegration(Enum):
     MSTEAMS = IntegrationProviderSlug.MSTEAMS.value
     DISCORD = IntegrationProviderSlug.DISCORD.value
     SUSPECT_COMMITTER = "suspectCommitter"
+    SEER_SUGGESTED = "seerSuggested"

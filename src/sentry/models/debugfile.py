@@ -12,44 +12,82 @@ import tempfile
 import uuid
 import zipfile
 from collections.abc import Container, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar
+from datetime import datetime
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    ClassVar,
+)
 
 from django.db import models
-from django.db.models import Q
+from django.db.models import ProtectedError, Q
 from django.db.models.functions import Now
+from django.http import HttpRequest
 from django.utils import timezone
 from symbolic.debuginfo import Archive, BcSymbolMap, Object, UuidMapping, normalize_debug_id
 from symbolic.exceptions import ObjectErrorUnsupportedObject, SymbolicError
 
-from sentry import options
+from sentry import features, options
 from sentry.backup.scopes import RelocationScope
 from sentry.constants import KNOWN_DIF_FORMATS
 from sentry.db.models import (
     BoundedBigIntegerField,
     FlexibleForeignKey,
-    JSONField,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base import BaseManager
 from sentry.models.files.file import File
 from sentry.models.files.utils import clear_cached_files
-from sentry.utils import json
+from sentry.objectstore import UsecaseId, get_download_redirect_url, get_session
+from sentry.objectstore.metrics import measure_storage_operation
+from sentry.utils import json, metrics
+from sentry.utils.retries import ConditionalRetryPolicy
 from sentry.utils.zip import safe_extract_zip
 
 if TYPE_CHECKING:
+    from objectstore_client import Session
+
     from sentry.models.project import Project
 
 logger = logging.getLogger(__name__)
 
-# How long we cache a conversion failure by checksum in cache.  Currently
-# 10 minutes is assumed to be a reasonable value here.
-CONVERSION_ERROR_TTL = 60 * 10
-
 DIF_MIMETYPES = {v: k for k, v in KNOWN_DIF_FORMATS.items()}
 
 _proguard_file_re = re.compile(r"/proguard/(?:mapping-)?(.*?)\.txt$")
+
+
+def _dif_file_extension(file_format: str, file_type: str | None) -> str:
+    if file_format == "breakpad":
+        return ".sym"
+    if file_format == "macho":
+        return ".debug" if file_type == "dbg" else ""
+    if file_format == "proguard":
+        return ".txt"
+    if file_format == "elf":
+        return "" if file_type == "exe" else ".debug"
+    if file_format == "pe":
+        return ".exe" if file_type == "exe" else ".dll"
+    if file_format == "pdb" or file_format == "portablepdb":
+        return ".pdb"
+    if file_format == "sourcebundle":
+        return ".src.zip"
+    if file_format == "wasm":
+        return ".wasm"
+    if file_format == "bcsymbolmap":
+        return ".bcsymbolmap"
+    if file_format == "uuidmap":
+        return ".plist"
+    if file_format == "il2cpp":
+        return ".json"
+    if file_format == "dartsymbolmap":
+        return ".json"
+
+    return ""
 
 
 class BadDif(Exception):
@@ -91,7 +129,7 @@ class ProjectDebugFileManager(BaseManager["ProjectDebugFile"]):
         # because otherwise this would be a circular import:
         from sentry.debug_files.debug_files import maybe_renew_debug_files
 
-        maybe_renew_debug_files(query, difs)
+        maybe_renew_debug_files(difs)
 
         difs_by_id: dict[str, list[ProjectDebugFile]] = {}
         for dif in difs:
@@ -119,19 +157,30 @@ class ProjectDebugFileManager(BaseManager["ProjectDebugFile"]):
         return rv
 
 
-@region_silo_model
+@cell_silo_model
 class ProjectDebugFile(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
-    file = FlexibleForeignKey("sentry.File")
+    # When the migration to Objectstore is complete, this can be removed.
+    file = FlexibleForeignKey("sentry.File", null=True, on_delete=models.PROTECT)
     checksum = models.CharField(max_length=40, null=True, db_index=True)
     object_name = models.TextField()
     cpu_name = models.CharField(max_length=40)
     project_id = BoundedBigIntegerField(null=True, db_index=True)
     debug_id = models.CharField(max_length=64, db_column="uuid")
     code_id = models.CharField(max_length=64, null=True)
-    data: models.Field[dict[str, Any] | None, dict[str, Any] | None] = JSONField(null=True)
+    data = LegacyTextJSONField(default=dict, null=True)
     date_accessed = models.DateTimeField(default=timezone.now, db_default=Now())
+
+    # The following fields are present if and only if the file is stored in Objectstore.
+    # Key of the file in Objectstore.
+    storage_path = models.TextField(null=True)
+    # Mirrors `file.headers["Content-Type"]` for files stored in Objectstore.
+    content_type = models.TextField(null=True)
+    # Mirrors `file.size` for files stored in Objectstore.
+    file_size = BoundedBigIntegerField(null=True)
+    # Mirrors `file.timestamp` for files stored in Objectstore.
+    date_created = models.DateTimeField(null=True)
 
     objects: ClassVar[ProjectDebugFileManager] = ProjectDebugFileManager()
 
@@ -147,9 +196,53 @@ class ProjectDebugFile(Model):
 
     __repr__ = sane_repr("object_name", "cpu_name", "debug_id")
 
+    def uses_objectstore_for_read(self) -> bool:
+        if self.storage_path is None:
+            return False
+        if self.file is None:
+            return True
+
+        from sentry.models.project import Project
+
+        organization = Project.objects.get_from_cache(id=self.project_id).organization
+        return features.has("organizations:objectstore-debugfiles-read", organization)
+
+    def get_checksum(self) -> str:
+        if self.uses_objectstore_for_read():
+            assert self.checksum is not None
+            return self.checksum
+        if self.file is not None:
+            assert self.file.checksum is not None
+            return self.file.checksum
+        raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
+    def get_content_type(self) -> str:
+        if self.uses_objectstore_for_read():
+            assert self.content_type is not None
+            return str(self.content_type)
+        if self.file is not None:
+            return self.file.headers.get("Content-Type", "unknown")
+        raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
+    def get_file_size(self) -> int:
+        if self.uses_objectstore_for_read():
+            assert self.file_size is not None
+            return int(self.file_size)
+        if self.file is not None:
+            return self.file.size
+        raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
+    def get_date_created(self) -> datetime:
+        if self.uses_objectstore_for_read():
+            assert self.date_created is not None
+            return self.date_created
+        if self.file is not None:
+            return self.file.timestamp
+        raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
     @property
     def file_format(self) -> str:
-        ct = self.file.headers.get("Content-Type", "unknown").lower()
+        ct = self.get_content_type().lower()
         return KNOWN_DIF_FORMATS.get(ct, "unknown")
 
     @property
@@ -166,38 +259,120 @@ class ProjectDebugFile(Model):
 
     @property
     def file_extension(self) -> str:
-        if self.file_format == "breakpad":
-            return ".sym"
-        if self.file_format == "macho":
-            return "" if self.file_type == "exe" else ".dSYM"
-        if self.file_format == "proguard":
-            return ".txt"
-        if self.file_format == "elf":
-            return "" if self.file_type == "exe" else ".debug"
-        if self.file_format == "pe":
-            return ".exe" if self.file_type == "exe" else ".dll"
-        if self.file_format == "pdb" or self.file_format == "portablepdb":
-            return ".pdb"
-        if self.file_format == "sourcebundle":
-            return ".src.zip"
-        if self.file_format == "wasm":
-            return ".wasm"
-        if self.file_format == "bcsymbolmap":
-            return ".bcsymbolmap"
-        if self.file_format == "uuidmap":
-            return ".plist"
-        if self.file_format == "il2cpp":
-            return ".json"
-
-        return ""
+        return _dif_file_extension(self.file_format, self.file_type)
 
     @property
     def features(self) -> frozenset[str]:
         return frozenset((self.data or {}).get("features", []))
 
+    def get_objectstore_session(self) -> Session:
+        from sentry.models.project import Project
+
+        try:
+            project = Project.objects.get_from_cache(id=self.project_id)
+            return get_session(UsecaseId.DEBUG_FILES, project)
+        except Project.DoesNotExist:
+            logger.exception("Project doesn't exist, probably deleted")
+            raise
+
+    def get_file(self) -> IO[bytes]:
+        """Returns the underlying contents as a file-like object. The caller is responsible for closing it."""
+
+        if self.uses_objectstore_for_read():
+            assert self.storage_path is not None
+            try:
+                response = self.get_objectstore_session().get(self.storage_path)
+                if response is None:
+                    raise FileNotFoundError("Debug file does not exist in objectstore")
+                return response.payload
+            except Exception:
+                logger.exception("Failed to read debug file from Objectstore")
+                raise
+        if self.file is not None:
+            with measure_storage_operation("get", "debug_files", self.get_file_size()):
+                return self.file.getfile()
+        raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
+    def get_objectstore_presigned_url(self, request: HttpRequest) -> str:
+        """
+        Returns the URL that `request` should be redirected to in order to download this debug file
+        directly from Objectstore.
+
+        This function should only be called if this debug file is Objectstore-backed, it will raise an exception otherwise.
+        """
+        from sentry.models.project import Project
+
+        if self.storage_path is None:
+            raise ValueError("debug file is not stored in Objectstore")
+
+        session = self.get_objectstore_session()
+        org_id = Project.objects.get_from_cache(id=self.project_id).organization_id
+        return get_download_redirect_url(request, session, org_id, self.storage_path)
+
+    def save_to(self, path: str) -> None:
+        if self.uses_objectstore_for_read():
+            assert self.storage_path is not None
+            path = os.path.abspath(path)
+            base = os.path.dirname(path)
+            os.makedirs(base, exist_ok=True)
+
+            tmp = None
+            tmp_path = None
+            try:
+                # Get the payload and save it to a temporary file.
+                response = self.get_objectstore_session().get(self.storage_path)
+                if response is None:
+                    raise FileNotFoundError("Debug file does not exist in objectstore")
+                stream = response.payload
+                try:
+                    tmp = tempfile.NamedTemporaryFile(dir=base, delete=False)
+                    tmp_path = tmp.name
+                    shutil.copyfileobj(stream, tmp)
+                    tmp.flush()
+                    tmp.close()
+                    tmp = None
+                finally:
+                    stream.close()
+
+                if not os.path.exists(path):
+                    os.rename(tmp_path, path)
+                else:
+                    # Someone else has already materialized this cached file.
+                    # Keep the previous one, clean up our temporary one.
+                    os.remove(tmp_path)
+                tmp_path = None
+            finally:
+                if tmp is not None:
+                    tmp.close()
+                if tmp_path is not None:
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+        elif self.file is not None:
+            self.file.save_to(path)
+        else:
+            raise ValueError("ProjectDebugFile has neither file nor storage_path")
+
     def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
         ret = super().delete(*args, **kwargs)
-        self.file.delete()
+
+        if self.storage_path is not None:
+            # Objectstore-backed files cannot be referenced by multiple debug file rows.
+            try:
+                self.get_objectstore_session().delete(self.storage_path)
+            except Exception:
+                logger.exception("Failed to delete ProjectDebugFile, will be cleaned up by TTI")
+        if self.file is not None:
+            # If another debug file row still references this File, keep the File.
+            # Concurrent last-reference deletes can still leave an unreferenced File
+            # row behind, but no surviving ProjectDebugFile should point to a deleted
+            # File.
+            try:
+                self.file.delete()
+            except ProtectedError:
+                pass
+
         return ret
 
 
@@ -217,7 +392,7 @@ def clean_redundant_difs(project: Project, debug_id: str) -> None:
     uuidmap_seen = False
     il2cpp_seen = False
     for i, dif in enumerate(difs):
-        mime_type = dif.file.headers.get("Content-Type")
+        mime_type = dif.get_content_type()
         if mime_type == DIF_MIMETYPES["bcsymbolmap"]:
             if not bcsymbolmap_seen:
                 bcsymbolmap_seen = True
@@ -243,27 +418,24 @@ def clean_redundant_difs(project: Project, debug_id: str) -> None:
                 all_features.update(dif.features)
 
 
-def create_dif_from_id(
-    project: Project,
-    meta: DifMeta,
-    fileobj: BinaryIO | None = None,
-    file: File | None = None,
-) -> tuple[ProjectDebugFile, bool]:
-    """Creates the :class:`ProjectDebugFile` entry for the provided DIF.
+def detect_single_dif_from_path(
+    path: str,
+    name: str | None = None,
+    debug_id: str | None = None,
+) -> DifMeta:
+    """Like :func:`detect_dif_from_path`, but requires exactly one architecture."""
+    result = detect_dif_from_path(path, name=name, debug_id=debug_id)
 
-    This creates the :class:`ProjectDebugFile` entry for the DIF provided in `meta` (a
-    :class:`DifMeta` object).  If the correct entry already exists this simply returns the
-    existing entry.
+    if len(result) != 1:
+        raise BadDif("Object contains %s architectures (1 expected)" % len(result))
 
-    It intentionally does not validate the file, only will ensure a :class:`File` entry
-    exists and set its `ContentType` according to the provided :class:DifMeta`.
+    return result[0]
 
-    Returns a tuple of `(dif, created)` where `dif` is the `ProjectDebugFile` instance and
-    `created` is a bool.
-    """
+
+def _get_dif_object_name(meta: DifMeta) -> str:
     if meta.file_format == "proguard":
-        object_name = "proguard-mapping"
-    elif meta.file_format in (
+        return "proguard-mapping"
+    if meta.file_format in (
         "macho",
         "elf",
         "pdb",
@@ -274,28 +446,21 @@ def create_dif_from_id(
         "bcsymbolmap",
         "uuidmap",
         "il2cpp",
+        "dartsymbolmap",
     ):
-        object_name = meta.name
-    elif meta.file_format == "breakpad":
-        object_name = meta.name[:-4] if meta.name.endswith(".sym") else meta.name
-    else:
-        raise TypeError(f"unknown dif type {meta.file_format!r}")
+        return meta.name
+    if meta.file_format == "breakpad":
+        return meta.name[:-4] if meta.name.endswith(".sym") else meta.name
+    raise TypeError(f"unknown dif type {meta.file_format!r}")
 
-    if file is not None:
-        checksum = file.checksum
-    elif fileobj is not None:
-        h = hashlib.sha1()
-        while True:
-            chunk = fileobj.read(16384)
-            if not chunk:
-                break
-            h.update(chunk)
-        checksum = h.hexdigest()
-        fileobj.seek(0, 0)
-    else:
-        raise RuntimeError("missing file object")
 
-    dif = (
+def get_dif_download_filename(meta: DifMeta) -> str:
+    file_type = (meta.data or {}).get("type")
+    return f"{os.path.basename(meta.debug_id)}{_dif_file_extension(meta.file_format, file_type)}"
+
+
+def find_existing_dif(project: Project, meta: DifMeta, checksum: str) -> ProjectDebugFile | None:
+    return (
         ProjectDebugFile.objects.select_related("file")
         .filter(
             project_id=project.id, debug_id=meta.debug_id, checksum=checksum, data__isnull=False
@@ -304,31 +469,176 @@ def create_dif_from_id(
         .first()
     )
 
+
+def _get_fileobj_checksum_and_size(fileobj: IO[bytes]) -> tuple[str, int]:
+    file_size = 0
+    hasher = hashlib.sha1()
+    while True:
+        chunk = fileobj.read(16384)
+        if not chunk:
+            break
+        hasher.update(chunk)
+        file_size += len(chunk)
+    fileobj.seek(0)
+    return hasher.hexdigest(), file_size
+
+
+def create_dif_from_file(
+    project: Project,
+    meta: DifMeta,
+    file: File,
+) -> tuple[ProjectDebugFile, bool]:
+    """Creates a legacy-backed ``ProjectDebugFile`` from an existing ``File``.
+
+    Use this when the DIF has already been written to Sentry's legacy ``File`` storage. The
+    existing ``File`` is retained. If the double-write flag is enabled, its contents are also
+    uploaded to Objectstore, but an Objectstore upload failure does not prevent creation of the
+    legacy-backed DIF. To create an Objectstore-only DIF from a file-like object, use
+    ``create_dif_from_fileobj`` instead.
+    """
+    file_size = file.size
+    assert file_size is not None
+    checksum = file.checksum
+    assert checksum is not None
+
+    dif = find_existing_dif(project, meta, checksum)
+
     if dif is not None:
         return dif, False
 
-    if file is None:
-        file = File.objects.create(
-            name=meta.debug_id,
-            type="project.dif",
-            headers={"Content-Type": DIF_MIMETYPES[meta.file_format]},
-        )
-        file.putfile(fileobj)
-    else:
-        file.type = "project.dif"
-        file.headers["Content-Type"] = DIF_MIMETYPES[meta.file_format]
-        file.save()
+    object_name = _get_dif_object_name(meta)
+    content_type = DIF_MIMETYPES[meta.file_format]
 
-    dif = ProjectDebugFile.objects.create(
-        file=file,
-        checksum=file.checksum,
-        debug_id=meta.debug_id,
-        code_id=meta.code_id,
-        cpu_name=meta.arch,
-        object_name=object_name,
-        project_id=project.id,
-        data=meta.data,
+    file.type = "project.dif"
+    file.headers["Content-Type"] = content_type
+    file.save()
+
+    metrics.distribution(
+        "storage.put.size",
+        file_size,
+        tags={"usecase": "debug_files", "compression": "none"},
+        unit="byte",
     )
+
+    objectstore_metadata: dict[str, Any] = {}
+    session: Session | None = None
+    storage_path: str | None = None
+    if features.has("organizations:objectstore-debugfiles-write", project.organization):
+        session = get_session(UsecaseId.DEBUG_FILES, project)
+        try:
+            with file.getfile() as source:
+                storage_path = session.put(
+                    source,
+                    content_type=content_type,
+                    filename=get_dif_download_filename(meta),
+                )
+        except Exception:
+            logger.exception("Failed to dual-write debug file to Objectstore")
+        else:
+            objectstore_metadata = {
+                "storage_path": storage_path,
+                "content_type": content_type,
+                "file_size": file_size,
+                "date_created": timezone.now(),
+            }
+
+    try:
+        dif = ProjectDebugFile.objects.create(
+            file=file,
+            checksum=checksum,
+            debug_id=meta.debug_id,
+            code_id=meta.code_id,
+            cpu_name=meta.arch,
+            object_name=object_name,
+            project_id=project.id,
+            data=meta.data,
+            **objectstore_metadata,
+        )
+    except Exception:
+        if storage_path is not None:
+            assert session is not None
+            try:
+                session.delete(storage_path)
+            except Exception:
+                logger.exception("Failed to clean up Objectstore debug file after database error")
+        raise
+
+    # The DIF we've just created might actually be removed here again. But since
+    # this can happen at any time in near or distant future, we don't care and
+    # assume a successful upload. The DIF will be reported to the uploader and
+    # reprocessing can start.
+    clean_redundant_difs(project, meta.debug_id)
+
+    return dif, True
+
+
+def create_dif_from_fileobj(
+    project: Project, meta: DifMeta, fileobj: IO[bytes]
+) -> tuple[ProjectDebugFile, bool]:
+    """Creates an Objectstore-backed ``ProjectDebugFile`` from a file-like object.
+
+    Use this when the DIF content is available in a readable file object and should be stored
+    only in Objectstore. To create a DIF from an existing legacy ``File``, use
+    ``create_dif_from_file`` instead. This function intentionally does not check feature flags:
+    callers must only use it when exclusive Objectstore writes are enabled. Objectstore upload
+    failures are fatal.
+    """
+    checksum, file_size = _get_fileobj_checksum_and_size(fileobj)
+
+    dif = find_existing_dif(project, meta, checksum)
+
+    if dif is not None:
+        return dif, False
+
+    object_name = _get_dif_object_name(meta)
+    content_type = DIF_MIMETYPES[meta.file_format]
+    session = get_session(UsecaseId.DEBUG_FILES, project)
+    storage_path: str | None = None
+
+    def upload() -> str:
+        fileobj.seek(0)
+        return session.put(
+            fileobj,
+            content_type=content_type,
+            filename=get_dif_download_filename(meta),
+        )
+
+    try:
+        storage_path = ConditionalRetryPolicy(
+            test_function=lambda attempt_number, _: attempt_number <= 2,
+            delay_function=lambda attempt_number: 3**attempt_number,
+        )(upload)
+    except Exception:
+        logger.exception("Failed to write debug file to Objectstore")
+        raise
+
+    objectstore_metadata = {
+        "storage_path": storage_path,
+        "content_type": content_type,
+        "file_size": file_size,
+        "date_created": timezone.now(),
+    }
+
+    try:
+        dif = ProjectDebugFile.objects.create(
+            file=None,
+            checksum=checksum,
+            debug_id=meta.debug_id,
+            code_id=meta.code_id,
+            cpu_name=meta.arch,
+            object_name=object_name,
+            project_id=project.id,
+            data=meta.data,
+            **objectstore_metadata,
+        )
+    except Exception:
+        if storage_path is not None:
+            assert session is not None
+            try:
+                session.delete(storage_path)
+            except Exception:
+                logger.exception("Failed to clean up Objectstore debug file after database error")
+        raise
 
     # The DIF we've just created might actually be removed here again. But since
     # this can happen at any time in near or distant future, we don't care and
@@ -355,7 +665,34 @@ def _analyze_progard_filename(filename: str | None) -> str | None:
         return None
 
 
-@region_silo_model
+def get_debug_id_from_dif_request(name: str | None, debug_id: str | None) -> str | None:
+    """Returns the effective debug ID from assemble request metadata.
+
+    Most DIF uploads provide an explicit ``debug_id``. ProGuard mappings instead
+    encode it in the request ``name`` such as ``/proguard/mapping-<uuid>.txt``.
+    """
+    try:
+        normalized_id = normalize_debug_id(debug_id)
+    except SymbolicError:
+        normalized_id = None
+
+    return normalized_id or _analyze_progard_filename(name)
+
+
+def build_proguard_reupload_dif_meta(source_dif: ProjectDebugFile, debug_id: str) -> DifMeta:
+    """Builds trusted ProGuard metadata for cloning a row with a new debug ID."""
+    return DifMeta(
+        file_format="proguard",
+        arch=source_dif.cpu_name,
+        debug_id=debug_id,
+        code_id=source_dif.code_id,
+        path=source_dif.object_name,
+        name=source_dif.object_name,
+        data=source_dif.data,
+    )
+
+
+@cell_silo_model
 class ProguardArtifactRelease(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -440,6 +777,7 @@ class DifKind(enum.Enum):
     BcSymbolMap = enum.auto()
     UuidMap = enum.auto()
     Il2Cpp = enum.auto()
+    DartSymbolMap = enum.auto()
     # TODO(flub): should we include proguard?  The tradeoff is that we'd be matching the
     # regex of it twice.  That cost is probably not too great to worry about.
 
@@ -457,6 +795,8 @@ def determine_dif_kind(path: str) -> DifKind:
             return DifKind.UuidMap
         elif data.startswith(b"{"):  # lol
             return DifKind.Il2Cpp
+        elif data.startswith(b"["):
+            return DifKind.DartSymbolMap
         else:
             return DifKind.Object
 
@@ -548,6 +888,38 @@ def detect_dif_from_path(
             return [
                 DifMeta(file_format="il2cpp", arch="any", debug_id=debug_id, name=name, path=path)
             ]
+    elif dif_kind == DifKind.DartSymbolMap:
+        if debug_id is None:
+            raise BadDif("Missing debug_id for dartsymbolmap")
+        try:
+            with open(path, "rb") as fp:
+                data = json.load(fp)
+                # Validate it's an array with even number of elements
+                if not isinstance(data, list):
+                    raise BadDif("dartsymbolmap must be a JSON array")
+                if len(data) % 2 != 0:
+                    raise BadDif("dartsymbolmap array must have an even number of elements")
+        except json.JSONDecodeError as e:
+            logger.debug("File failed to load as dartsymbolmap: %s", path)
+            raise BadDif("Invalid dartsymbolmap: %s" % e)
+        except BadDif:
+            raise
+        except Exception as e:
+            logger.debug("File failed validation as dartsymbolmap: %s", path)
+            raise BadDif("Invalid dartsymbolmap format: %s" % e)
+        else:
+            logger.debug("File loaded as dartsymbolmap: %s", path)
+            data = {"features": ["mapping"]}
+            return [
+                DifMeta(
+                    file_format="dartsymbolmap",
+                    arch="any",
+                    debug_id=debug_id,
+                    name=name,
+                    path=path,
+                    data=data,
+                )
+            ]
     else:
         # native debug information files (MachO, ELF or Breakpad)
         try:
@@ -575,10 +947,34 @@ def create_debug_file_from_dif(
     """Create a ProjectDebugFile from a dif (Debug Information File) and
     return an array of created objects.
     """
+    exclusive_objectstore_write = features.has(
+        "organizations:objectstore-debugfiles-exclusive-write", project.organization
+    )
     rv = []
     for meta in to_create:
         with open(meta.path, "rb") as f:
-            dif, created = create_dif_from_id(project, meta, fileobj=f)
+            if exclusive_objectstore_write:
+                dif, created = create_dif_from_fileobj(project, meta, f)
+            else:
+                checksum, _ = _get_fileobj_checksum_and_size(f)
+                if find_existing_dif(project, meta, checksum) is not None:
+                    continue
+                file = File.objects.create(
+                    name=meta.debug_id,
+                    type="project.dif",
+                    headers={"Content-Type": DIF_MIMETYPES[meta.file_format]},
+                )
+                file.putfile(f)
+                try:
+                    dif, created = create_dif_from_file(project, meta, file)
+                except Exception:
+                    try:
+                        file.delete()
+                    except ProtectedError:
+                        pass
+                    raise
+                if not created:
+                    file.delete()
             if created:
                 rv.append(dif)
     return rv
@@ -640,7 +1036,7 @@ class DIFCache:
             except OSError as e:
                 if e.errno != errno.ENOENT:
                     raise
-                dif.file.save_to(dif_path)
+                dif.save_to(dif_path)
             rv[debug_id] = dif_path
 
         return rv

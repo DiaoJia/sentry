@@ -1,0 +1,91 @@
+from unittest import mock
+
+from sentry.issues.ingest import hash_fingerprint
+from sentry.issues.occurrence_consumer import _process_message
+from sentry.issues.status_change_consumer import update_status
+from sentry.issues.status_change_message import StatusChangeMessageData
+from sentry.models.group import GroupStatus
+from sentry.models.grouphash import GroupHash
+from sentry.testutils.cases import TestCase
+from sentry.types.activity import ActivityType
+from sentry.types.group import GroupSubStatus
+from tests.sentry.issues.test_status_change_consumer import get_test_message_status_change
+
+
+class IssuePlatformIntegrationTests(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.detector = self.create_detector(project=self.project)
+        self.group = self.create_group(
+            project=self.project,
+            status=GroupStatus.UNRESOLVED,
+            substatus=GroupSubStatus.ESCALATING,
+        )
+        self.fingerprint = f"detector:{self.detector.id}"
+        self.hashed_fingerprint = hash_fingerprint([self.fingerprint])
+        GroupHash.objects.create(
+            project=self.project,
+            hash=self.hashed_fingerprint[0],
+            group=self.group,
+        )
+
+    def test_handler_invoked__when_update_status_called(self) -> None:
+        """
+        Integration test to ensure the `update_status` method trigger workflow_engine
+        """
+        message = get_test_message_status_change(
+            project_id=self.project.id,
+            fingerprint=[self.fingerprint],
+            detector_id=self.detector.id,
+        )
+
+        with mock.patch("sentry.workflow_engine.tasks.workflows.metrics.incr") as mock_incr:
+            with self.tasks():
+                _process_message(message)
+
+            mock_incr.assert_any_call(
+                "workflow_engine.tasks.process_workflows.activity_update.executed",
+                tags={
+                    "activity_type": ActivityType.SET_RESOLVED.value,
+                    "detector_type": self.detector.type,
+                },
+                sample_rate=1.0,
+            )
+
+    def test_handler_invoked__when_resolved(self) -> None:
+        """
+        Integration test to ensure the `update_status` method trigger workflow_engine
+        and increment the metric.
+        """
+        message = StatusChangeMessageData(
+            id="test_message_id",
+            project_id=self.project.id,
+            new_status=GroupStatus.RESOLVED,
+            new_substatus=None,
+            fingerprint=[self.fingerprint],
+            detector_id=self.detector.id,
+            activity_data={"test": "test"},
+        )
+
+        with mock.patch("sentry.workflow_engine.tasks.workflows.metrics.incr") as mock_incr:
+            with self.tasks():
+                update_status(self.group, message)
+            mock_incr.assert_any_call(
+                "workflow_engine.tasks.process_workflows.activity_update.executed",
+                tags={
+                    "activity_type": ActivityType.SET_RESOLVED.value,
+                    "detector_type": self.detector.type,
+                },
+                sample_rate=1.0,
+            )
+
+    def _resolved_message(self) -> StatusChangeMessageData:
+        return StatusChangeMessageData(
+            id="test_message_id",
+            project_id=self.project.id,
+            new_status=GroupStatus.RESOLVED,
+            new_substatus=None,
+            fingerprint=[self.fingerprint],
+            detector_id=self.detector.id,
+            activity_data={"test": "test"},
+        )

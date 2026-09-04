@@ -1,13 +1,12 @@
 import {duration} from 'moment-timezone';
 
-import type {HydratedReplayRecord} from 'sentry/views/replays/types';
+import type {HydratedReplayRecord} from 'sentry/views/explore/replays/types';
 
 export function ReplayRecordFixture(
   replayRecord: Partial<HydratedReplayRecord> = {}
 ): HydratedReplayRecord {
   return {
     activity: 0,
-    clicks: [],
     browser: {
       name: 'Other',
       version: '',

@@ -1,12 +1,13 @@
 import {Breadcrumbs} from 'sentry/components/breadcrumbs';
-import IdBadge from 'sentry/components/idBadge';
+import {IdBadge} from 'sentry/components/idBadge';
 import * as Layout from 'sentry/components/layouts/thirds';
 import {t} from 'sentry/locale';
-import useOrganization from 'sentry/utils/useOrganization';
-import {makeAlertsPathname} from 'sentry/views/alerts/pathnames';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeMonitorBasePathname} from 'sentry/views/detectors/pathnames';
 import type {Monitor} from 'sentry/views/insights/crons/types';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
-import MonitorHeaderActions from './monitorHeaderActions';
+import {MonitorHeaderActions} from './monitorHeaderActions';
 
 interface Props {
   monitor: Monitor;
@@ -18,8 +19,8 @@ export function MonitorHeader({monitor, orgSlug, onUpdate}: Props) {
   const organization = useOrganization();
   const crumbs = [
     {
-      label: t('Alerts'),
-      to: makeAlertsPathname({path: `/rules/`, organization}),
+      label: t('Monitors'),
+      to: makeMonitorBasePathname(organization.slug),
       preservePageFilters: true,
     },
     {
@@ -41,9 +42,9 @@ export function MonitorHeader({monitor, orgSlug, onUpdate}: Props) {
           {monitor.name}
         </Layout.Title>
       </Layout.HeaderContent>
-      <Layout.HeaderActions>
+      <TopBar.Slot name="actions">
         <MonitorHeaderActions orgSlug={orgSlug} monitor={monitor} onUpdate={onUpdate} />
-      </Layout.HeaderActions>
+      </TopBar.Slot>
     </Layout.Header>
   );
 }

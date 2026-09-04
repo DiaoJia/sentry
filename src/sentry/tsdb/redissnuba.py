@@ -40,18 +40,12 @@ method_specifications = {
     "record_multi": (WRITE, lambda callargs: {model for model, key, values in callargs["items"]}),
     "merge_distinct_counts": (WRITE, single_model_argument),
     "delete_distinct_counts": (WRITE, multiple_model_argument),
-    "record_frequency_multi": (
-        WRITE,
-        lambda callargs: {model for model, data in callargs["requests"]},
-    ),
-    "merge_frequencies": (WRITE, single_model_argument),
-    "delete_frequencies": (WRITE, multiple_model_argument),
     "flush": (WRITE, dont_do_this),
 }
 
-assert (
-    set(method_specifications) == BaseTSDB.__read_methods__ | BaseTSDB.__write_methods__
-), "all read and write methods must have a specification defined"
+assert set(method_specifications) == BaseTSDB.__read_methods__ | BaseTSDB.__write_methods__, (
+    "all read and write methods must have a specification defined"
+)
 
 model_backends = {
     # model: (read, write)
@@ -81,7 +75,9 @@ def make_method(key):
         backend = selector_func(key, callargs, self.switchover_timestamp)
 
         sentry_sdk.set_tag("tsdb.backend", backend)
+        sentry_sdk.set_attribute("tsdb.backend", backend)
         sentry_sdk.set_tag("tsdb.method", key)
+        sentry_sdk.set_attribute("tsdb.method", key)
 
         return getattr(self.backends[backend], key)(*a, **kw)
 

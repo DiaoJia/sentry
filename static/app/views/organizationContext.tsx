@@ -1,4 +1,4 @@
-import {createContext, type ReactNode, useEffect, useRef} from 'react';
+import {useEffect, useRef, type ReactNode} from 'react';
 import * as Sentry from '@sentry/react';
 
 import {switchOrganization} from 'sentry/actionCreators/organizations';
@@ -8,26 +8,22 @@ import {
   useBootstrapProjectsQuery,
   useBootstrapTeamsQuery,
 } from 'sentry/bootstrap/bootstrapRequests';
+import {PageFiltersStore} from 'sentry/components/pageFilters/store';
 import {DEPLOY_PREVIEW_CONFIG} from 'sentry/constants';
-import ConfigStore from 'sentry/stores/configStore';
-import OrganizationsStore from 'sentry/stores/organizationsStore';
-import OrganizationStore from 'sentry/stores/organizationStore';
-import PageFiltersStore from 'sentry/stores/pageFiltersStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import TeamStore from 'sentry/stores/teamStore';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {TeamStore} from 'sentry/stores/teamStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import type {Organization} from 'sentry/types/organization';
 import type {User} from 'sentry/types/user';
+import {shutdownIntercom} from 'sentry/utils/intercom';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 import {useParams} from 'sentry/utils/useParams';
 
 interface Props {
   children: ReactNode;
 }
-
-/**
- * Holds the current organization if loaded.
- */
-export const OrganizationContext = createContext<Organization | null>(null);
 
 /**
  * Record if the organization was bootstrapped in the last 10 minutes
@@ -40,6 +36,7 @@ function setRecentBootstrapTag(orgSlug: string) {
       ? Date.now() - Number(previousBootstrapTime) < 10 * 60 * 1000
       : false;
     Sentry.setTag('is_recent_boot', isRecentBoot);
+    Sentry.setAttribute('is_recent_boot', isRecentBoot);
     localStorage.setItem(previousBootstrapKey, `${Date.now()}`);
   } catch {
     // Ignore errors
@@ -53,7 +50,7 @@ export function OrganizationContextProvider({children}: Props) {
   const configStore = useLegacyStore(ConfigStore);
   const {organizations} = useLegacyStore(OrganizationsStore);
   const {organization, error} = useLegacyStore(OrganizationStore);
-  const lastOrganizationSlug: string | null =
+  const lastOrganizationSlug =
     configStore.lastOrganization ?? organizations[0]?.slug ?? null;
   const params = useParams<{orgId?: string}>();
   const spanRef = useRef<Sentry.Span | null>(null);
@@ -147,6 +144,8 @@ export function OrganizationContextProvider({children}: Props) {
       // Also avoid: org1 -> undefined -> org1
       if (lastOrgId.current) {
         switchOrganization();
+        // Shutdown Intercom so it re-initializes with new org context on next use
+        shutdownIntercom();
       }
 
       lastOrgId.current = orgSlug;

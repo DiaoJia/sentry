@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.utils import timezone
@@ -11,14 +11,18 @@ from sentry.api.serializers.snuba import SnubaTSResultSerializer
 from sentry.incidents.models.alert_rule import AlertRuleThresholdType
 from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.search.eap.trace_metrics.config import TraceMetricsSearchResolverConfig
 from sentry.search.eap.types import SearchResolverConfig
 from sentry.search.events.types import SnubaParams
-from sentry.seer.anomaly_detection.types import AnomalyType, TimeSeriesPoint
-from sentry.snuba import metrics_performance, spans_rpc
+from sentry.seer.anomaly_detection.types import TimeSeriesPoint
+from sentry.snuba import metrics_performance
 from sentry.snuba.metrics.extraction import MetricSpecType
 from sentry.snuba.models import SnubaQuery, SnubaQueryEventType
+from sentry.snuba.ourlogs import OurLogs
 from sentry.snuba.referrer import Referrer
 from sentry.snuba.sessions_v2 import QueryDefinition
+from sentry.snuba.spans_rpc import Spans
+from sentry.snuba.trace_metrics import TraceMetrics
 from sentry.snuba.utils import DATASET_OPTIONS, get_dataset
 from sentry.utils.snuba import SnubaTSResult
 
@@ -31,32 +35,6 @@ SNUBA_QUERY_EVENT_TYPE_TO_STRING = {
 }
 
 
-def has_anomaly(anomaly: TimeSeriesPoint, label: str) -> bool:
-    """
-    Helper function to determine whether we care about an anomaly based on the
-    anomaly type and trigger type.
-
-    """
-    from sentry.incidents.logic import WARNING_TRIGGER_LABEL
-
-    anomaly_type = anomaly.get("anomaly", {}).get("anomaly_type")
-
-    if anomaly_type == AnomalyType.HIGH_CONFIDENCE.value or (
-        label == WARNING_TRIGGER_LABEL and anomaly_type == AnomalyType.LOW_CONFIDENCE.value
-    ):
-        return True
-    return False
-
-
-def anomaly_has_confidence(anomaly: TimeSeriesPoint) -> bool:
-    """
-    Helper function to determine whether we have the 7+ days of data necessary
-    to detect anomalies/send alerts for dynamic alert rules.
-    """
-    anomaly_type = anomaly.get("anomaly", {}).get("anomaly_type")
-    return anomaly_type != AnomalyType.NO_DATA.value
-
-
 def translate_direction(direction: int) -> str:
     """
     Temporary translation map to Seer's expected values
@@ -67,6 +45,21 @@ def translate_direction(direction: int) -> str:
         AlertRuleThresholdType.ABOVE_AND_BELOW: "both",
     }
     return direction_map[AlertRuleThresholdType(direction)]
+
+
+def get_aggregate_type(aggregate: str | None) -> str | None:
+    """
+    Determine aggregate type for static threshold application.
+
+    Returns "count" for count-based aggregates (count(), count_unique(), etc.)
+    and "other" for all other aggregate types. Returns None if no aggregate provided.
+    """
+    if not aggregate:
+        return None
+    aggregate_lower = aggregate.lower()
+    if aggregate_lower.startswith("count"):
+        return "count"
+    return "other"
 
 
 def get_event_types(
@@ -131,7 +124,6 @@ def get_crash_free_historical_data(
         params=params,
         offset=None,
         limit=None,
-        query_config=release_health.backend.sessions_query_config(organization),
     )
     result = release_health.backend.run_sessions_query(
         organization.id, query, span_op="sessions.anomaly_detection"
@@ -204,23 +196,41 @@ def format_historical_data(
         return format_crash_free_data(data)
 
     return format_snuba_ts_data(
-        data, query_columns, organization, transform_alias_to_input_format=dataset == spans_rpc
+        data,
+        query_columns,
+        organization,
+        transform_alias_to_input_format=dataset in (Spans, TraceMetrics),
     )
 
 
-def get_dataset_from_label(dataset_label: str):
-    if dataset_label == "events":
-        # DATASET_OPTIONS expects the name 'errors'
-        dataset_label = "errors"
-    elif dataset_label == "events_analytics_platform":
-        dataset_label = "spans"
-    elif dataset_label in ["generic_metrics", "transactions"]:
-        # XXX: performance alerts dataset differs locally vs in prod
-        dataset_label = "metricsEnhanced"
+def get_dataset_from_label_and_event_types(
+    dataset_label: str, event_types: list[SnubaQueryEventType.EventType] | None = None
+):
+    dataset_label = get_dataset_name_from_label_and_event_types(dataset_label, event_types)
     dataset = get_dataset(dataset_label)
     if dataset is None:
         raise ParseError(detail=f"dataset must be one of: {', '.join(DATASET_OPTIONS.keys())}")
     return dataset
+
+
+def get_dataset_name_from_label_and_event_types(
+    dataset_label: str, event_types: list[SnubaQueryEventType.EventType] | None = None
+) -> str:
+    if dataset_label == "events":
+        # DATASET_OPTIONS expects the name 'errors'
+        dataset_label = "errors"
+    elif dataset_label == "events_analytics_platform":
+        if event_types and SnubaQueryEventType.EventType.TRACE_ITEM_LOG in event_types:
+            dataset_label = "logs"
+        elif event_types and SnubaQueryEventType.EventType.TRACE_ITEM_METRIC in event_types:
+            dataset_label = "tracemetrics"
+        else:
+            dataset_label = "spans"
+    elif dataset_label in ["generic_metrics", "transactions"]:
+        # XXX: performance alerts dataset differs locally vs in prod
+        dataset_label = "metricsEnhanced"
+
+    return dataset_label
 
 
 def fetch_historical_data(
@@ -245,8 +255,8 @@ def fetch_historical_data(
     if start is None:
         start = end - timedelta(days=NUM_DAYS)
     granularity = snuba_query.time_window
-
-    dataset = get_dataset_from_label(snuba_query.dataset)
+    event_types = get_event_types(snuba_query, event_types)
+    dataset = get_dataset_from_label_and_event_types(snuba_query.dataset, event_types)
 
     if not project or not dataset or not organization:
         return None
@@ -267,18 +277,8 @@ def fetch_historical_data(
 
     if dataset == metrics_performance:
         return get_crash_free_historical_data(start, end, project, organization, granularity)
-    elif dataset == spans_rpc:
-        # EAP timeseries don't round time buckets to the nearest time window but seer expects
-        # that. So for example, if start was 7:01 with a 15 min interval, EAP would
-        # bucket it as 7:01, 7:16 etc. Force rounding the start and end times so we
-        # get the buckets seer expects.
-        rounded_end = int(end.timestamp() / granularity) * granularity
-        rounded_start = int(start.timestamp() / granularity) * granularity
-
-        snuba_params.end = datetime.fromtimestamp(rounded_end, UTC)
-        snuba_params.start = datetime.fromtimestamp(rounded_start, UTC)
-
-        results = spans_rpc.run_timeseries_query(
+    elif dataset == Spans:
+        results = Spans.run_timeseries_query(
             params=snuba_params,
             query_string=snuba_query.query,
             y_axes=query_columns,
@@ -294,8 +294,42 @@ def fetch_historical_data(
             sampling_mode="NORMAL",
         )
         return results
+    elif dataset == OurLogs:
+        results = OurLogs.run_timeseries_query(
+            params=snuba_params,
+            query_string=snuba_query.query,
+            y_axes=query_columns,
+            referrer=(
+                Referrer.ANOMALY_DETECTION_HISTORICAL_DATA_QUERY.value
+                if is_store_data_request
+                else Referrer.ANOMALY_DETECTION_RETURN_HISTORICAL_ANOMALIES.value
+            ),
+            config=SearchResolverConfig(
+                auto_fields=False,
+                use_aggregate_conditions=False,
+            ),
+            sampling_mode="NORMAL",
+        )
+        return results
+    elif dataset == TraceMetrics:
+        results = TraceMetrics.run_timeseries_query(
+            params=snuba_params,
+            query_string=snuba_query.query,
+            y_axes=query_columns,
+            referrer=(
+                Referrer.ANOMALY_DETECTION_HISTORICAL_DATA_QUERY.value
+                if is_store_data_request
+                else Referrer.ANOMALY_DETECTION_RETURN_HISTORICAL_ANOMALIES.value
+            ),
+            config=TraceMetricsSearchResolverConfig(
+                metric=None,
+                auto_fields=False,
+                use_aggregate_conditions=False,
+            ),
+            sampling_mode="NORMAL",
+        )
+        return results
     else:
-        event_types = get_event_types(snuba_query, event_types)
         snuba_query_string = get_snuba_query_string(snuba_query, event_types)
         historical_data = dataset.timeseries_query(
             selected_columns=query_columns,

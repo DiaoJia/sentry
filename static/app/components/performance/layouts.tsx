@@ -1,33 +1,28 @@
-import {css} from '@emotion/react';
-import styled from '@emotion/styled';
-
-import {space} from 'sentry/styles/space';
+import {Grid, type GridProps} from '@sentry/scraps/layout';
 
 /**
  * Common performance layouts
  */
 
-export const PerformanceLayoutBodyRow = styled('div')<{
+type PerformanceLayoutBodyRowProps = Omit<GridProps, 'columns'> & {
   minSize: number;
   columns?: number;
-}>`
-  display: grid;
-  grid-template-columns: 1fr;
-  grid-column-gap: ${space(2)};
-  grid-row-gap: ${space(2)};
+};
 
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    grid-template-columns: repeat(2, 1fr);
-  }
+export function PerformanceLayoutBodyRow({
+  minSize,
+  columns,
+  ...props
+}: PerformanceLayoutBodyRowProps) {
+  const largeColumns = columns
+    ? `repeat(${columns}, 1fr)`
+    : `repeat(auto-fit, minmax(${minSize}px, 1fr))`;
 
-  @media (min-width: ${p => p.theme.breakpoints.medium}) {
-    ${p =>
-      p.columns
-        ? css`
-            grid-template-columns: repeat(${p.columns}, 1fr);
-          `
-        : css`
-            grid-template-columns: repeat(auto-fit, minmax(${p.minSize}px, 1fr));
-          `}
-  }
-`;
+  return (
+    <Grid
+      {...props}
+      gap="xl"
+      columns={{zero: '1fr', xl: 'repeat(2, 1fr)', '3xl': largeColumns}}
+    />
+  );
+}

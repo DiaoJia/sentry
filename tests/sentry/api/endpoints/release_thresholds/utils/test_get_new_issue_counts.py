@@ -14,7 +14,7 @@ from sentry.testutils.cases import TestCase
 
 
 class GetNewIssueCountTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.org = self.create_organization()
         self.project1 = self.create_project(name="foo", organization=self.org)
@@ -77,7 +77,7 @@ class GetNewIssueCountTest(TestCase):
             first_seen=self.now - timedelta(minutes=30),
         )
 
-    def test_success_fetches_new_issue_counts(self):
+    def test_success_fetches_new_issue_counts(self) -> None:
         # standard threshold
         t1: EnrichedThreshold = {
             "id": "1",
@@ -85,13 +85,13 @@ class GetNewIssueCountTest(TestCase):
             "release": self.release1.version,
             "start": self.now - timedelta(hours=1),
             "end": self.now,
-            "date": self.now,
+            "date_added": self.now,
             "environment": None,
             "is_healthy": False,
             "key": "",
             "project": serialize(self.project1),
             "project_slug": self.project1.slug,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 1,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
@@ -104,13 +104,13 @@ class GetNewIssueCountTest(TestCase):
             "release": self.release1.version,
             "start": self.now - timedelta(hours=1),
             "end": self.now,
-            "date": self.now,
+            "date_added": self.now,
             "environment": {"name": "canary"},
             "is_healthy": False,
             "key": "",
             "project": serialize(self.project1),
             "project_slug": self.project1.slug,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 1,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method
@@ -123,13 +123,13 @@ class GetNewIssueCountTest(TestCase):
             "release": self.release1.version,
             "start": self.now,
             "end": self.now + timedelta(hours=1),
-            "date": self.now,
+            "date_added": self.now,
             "environment": None,
             "is_healthy": False,
             "key": "",
             "project": serialize(self.project1),
             "project_slug": self.project1.slug,
-            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT,
+            "threshold_type": ReleaseThresholdType.NEW_ISSUE_COUNT_STR,
             "trigger_type": TriggerType.OVER_STR,
             "value": 1,
             "window_in_seconds": 60,  # NOTE: window_in_seconds only used to determine start/end. Not utilized in validation method

@@ -1,32 +1,37 @@
 import {Component, Fragment, useContext, useEffect} from 'react';
-import styled from '@emotion/styled';
+import {css} from '@emotion/react';
 import type {Location, LocationDescriptor} from 'history';
 
-import GuideAnchor from 'sentry/components/assistant/guideAnchor';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import DiscoverButton from 'sentry/components/discoverButton';
-import {InvestigationRuleCreation} from 'sentry/components/dynamicSampling/investigationRule';
-import type {CursorHandler} from 'sentry/components/pagination';
-import Pagination from 'sentry/components/pagination';
+import {LinkButton} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Container, Grid} from '@sentry/scraps/layout';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import type {CursorHandler} from '@sentry/scraps/pagination';
+import {Pagination} from '@sentry/scraps/pagination';
+
+import {GuideAnchor} from 'sentry/components/assistant/guideAnchor';
+import {DiscoverButton} from 'sentry/components/discoverButton';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import {parseCursor} from 'sentry/utils/cursor';
 import {DemoTourElement, DemoTourStep} from 'sentry/utils/demoMode/demoTours';
 import type {TableDataRow} from 'sentry/utils/discover/discoverQuery';
-import DiscoverQuery from 'sentry/utils/discover/discoverQuery';
-import type EventView from 'sentry/utils/discover/eventView';
+import {DiscoverQuery} from 'sentry/utils/discover/discoverQuery';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import type {Sort} from 'sentry/utils/discover/fields';
+import {isAggregateField, parseFunction} from 'sentry/utils/discover/fields';
 import {SavedQueryDatasets} from 'sentry/utils/discover/types';
+import {getFieldDefinition} from 'sentry/utils/fields';
 import {TrendsEventsDiscoverQuery} from 'sentry/utils/performance/trends/trendsDiscoverQuery';
 import {decodeScalar} from 'sentry/utils/queryString';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
 import type {Actions} from 'sentry/views/discover/table/cellAction';
 import type {TableColumn} from 'sentry/views/discover/table/types';
-import {decodeColumnOrder} from 'sentry/views/discover/utils';
+import {decodeColumnOrder, getDiscoverDeprecation} from 'sentry/views/discover/utils';
+import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
+import {getExploreUrl} from 'sentry/views/explore/utils';
 import type {DomainView, DomainViewFilters} from 'sentry/views/insights/pages/useFilters';
 import type {SpanOperationBreakdownFilter} from 'sentry/views/performance/transactionSummary/filter';
 import {mapShowTransactionToPercentile} from 'sentry/views/performance/transactionSummary/transactionEvents/utils';
@@ -35,9 +40,68 @@ import type {TransactionFilterOptions} from 'sentry/views/performance/transactio
 import {DisplayModes} from 'sentry/views/performance/transactionSummary/utils';
 import type {TrendChangeType, TrendView} from 'sentry/views/performance/trends/types';
 
-import TransactionsTable from './transactionsTable';
+import {TransactionsTable} from './transactionsTable';
 
 const DEFAULT_TRANSACTION_LIMIT = 5;
+
+/**
+ * Normalize an aggregate yAxis so it carries an explicit column argument where
+ * the spans dataset requires one (e.g. `p50()` -> `p50(span.duration)`).
+ */
+function normalizeExploreYAxis(yAxis: string): string {
+  const parsed = parseFunction(yAxis);
+  if (!parsed || parsed.arguments.length > 0) {
+    return yAxis;
+  }
+
+  const definition = getFieldDefinition(parsed.name, 'span');
+  const columnParameter = definition?.parameters?.find(
+    parameter => parameter.kind === 'column'
+  );
+  if (columnParameter?.defaultValue) {
+    return `${parsed.name}(${columnParameter.defaultValue})`;
+  }
+
+  return yAxis;
+}
+
+/**
+ * Build an Explore > Traces URL that reproduces the aggregate view described by
+ * the given (spans dataset) EventView.
+ */
+function getExploreTarget(eventView: EventView, organization: Organization): string {
+  const fields = eventView.getFields();
+  const groupBy = fields.filter(field => !isAggregateField(field));
+  const yAxes = fields.filter(isAggregateField).map(normalizeExploreYAxis);
+
+  const sort = eventView.sorts[0];
+  let aggregateSort: string | undefined;
+  if (sort) {
+    const sortedYAxis = yAxes.find(yAxis => parseFunction(yAxis)?.name === sort.field);
+    if (sortedYAxis) {
+      aggregateSort = `${sort.kind === 'desc' ? '-' : ''}${sortedYAxis}`;
+    }
+  }
+
+  // Explore's search cannot express aggregate (HAVING) conditions such as
+  // `epm():>0.01`.
+  const search = new MutableSearch(eventView.query);
+  Object.keys(search.filters).forEach(key => {
+    if (isAggregateField(key)) {
+      search.removeFilter(key);
+    }
+  });
+
+  return getExploreUrl({
+    organization,
+    selection: eventView.getPageFilters(),
+    mode: Mode.AGGREGATE,
+    query: search.formatString(),
+    groupBy,
+    visualize: yAxes.length > 0 ? [{yAxes}] : undefined,
+    aggregateSort,
+  });
+}
 
 export type DropdownOption = {
   /**
@@ -77,6 +141,7 @@ type Props = {
    */
   limit: number;
   location: Location;
+  navigate: ReactRouter3Navigate;
   /**
    * The available options for the dropdown.
    */
@@ -118,14 +183,13 @@ type Props = {
   /**
    * The callback for when View All Events is clicked.
    */
-  handleOpenAllEventsClick?: (e: React.MouseEvent<Element>) => void;
+  handleOpenAllEventsClick?: (e: React.MouseEvent) => void;
   /**
    * The callback for when Open in Discover is clicked.
    */
-  handleOpenInDiscoverClick?: (e: React.MouseEvent<Element>) => void;
+  handleOpenInDiscoverClick?: (e: React.MouseEvent) => void;
   referrer?: string;
   showTransactions?: TransactionFilterOptions;
-  supportsInvestigationRule?: boolean;
   /**
    * A list of preferred table headers to use over the field names.
    */
@@ -192,14 +256,22 @@ function TableRender({
 
   return (
     <Fragment>
-      <Header>
+      <Grid
+        align="center"
+        columns={{zero: '1fr', md: '1fr auto'}}
+        gap="md"
+        marginBottom="md"
+      >
         {header}
-        <StyledPagination
+        <Pagination
           pageLinks={pageLinks}
           onCursor={onCursor}
           size={paginationCursorSize}
+          css={css`
+            margin: 0;
+          `}
         />
-      </Header>
+      </Grid>
       <DemoTourElement
         id={DemoTourStep.PERFORMANCE_TRANSACTION_SUMMARY_TABLE}
         title={t('Breakdown event spans')}
@@ -207,19 +279,23 @@ function TableRender({
           'Select an Event ID from a list of slow transactions to uncover slow spans.'
         )}
       >
-        <TransactionsTable
-          eventView={eventView}
-          organization={organization}
-          location={location}
-          isLoading={isLoading}
-          tableData={tableData}
-          columnOrder={columnOrder}
-          titles={titles}
-          generateLink={generateLink}
-          handleCellAction={handleCellAction}
-          useAggregateAlias={useAggregateAlias}
-          referrer={referrer}
-        />
+        {props => (
+          <div {...props}>
+            <TransactionsTable
+              eventView={eventView}
+              organization={organization}
+              location={location}
+              isLoading={isLoading}
+              tableData={tableData}
+              columnOrder={columnOrder}
+              titles={titles}
+              generateLink={generateLink}
+              handleCellAction={handleCellAction}
+              useAggregateAlias={useAggregateAlias}
+              referrer={referrer}
+            />
+          </div>
+        )}
       </DemoTourElement>
     </Fragment>
   );
@@ -232,8 +308,8 @@ class _TransactionsList extends Component<Props> {
   };
 
   handleCursor: CursorHandler = (cursor, pathname, query) => {
-    const {cursorName} = this.props;
-    browserHistory.push({
+    const {cursorName, navigate} = this.props;
+    navigate({
       pathname,
       query: {...query, [cursorName]: cursor},
     });
@@ -265,17 +341,7 @@ class _TransactionsList extends Component<Props> {
     return generatePerformanceTransactionEventsView?.() ?? this.getEventView();
   }
 
-  renderHeader({
-    cursor,
-    numSamples,
-    supportsInvestigationRule,
-    view,
-  }: {
-    numSamples: number | null | undefined;
-    cursor?: string | undefined;
-    supportsInvestigationRule?: boolean;
-    view?: DomainView;
-  }): React.ReactNode {
+  renderHeader({view}: {view?: DomainView}): React.ReactNode {
     const {
       organization,
       selected,
@@ -285,30 +351,27 @@ class _TransactionsList extends Component<Props> {
       handleOpenInDiscoverClick,
       showTransactions,
       breakdown,
-      eventView,
     } = this.props;
-    const cursorOffset = parseCursor(cursor)?.offset ?? 0;
-    numSamples = numSamples ?? null;
-    const totalNumSamples = numSamples === null ? null : numSamples + cursorOffset;
     return (
-      <Fragment>
-        <div>
-          <CompactSelect
-            triggerProps={{prefix: t('Filter'), size: 'xs'}}
-            value={selected.value}
-            options={options}
-            onChange={opt => handleDropdownChange(opt.value)}
-          />
-        </div>
-        {supportsInvestigationRule && (
-          <InvestigationRuleWrapper>
-            <InvestigationRuleCreation
-              buttonProps={{size: 'xs'}}
-              eventView={eventView}
-              numSamples={totalNumSamples}
+      <Grid columns={{zero: '1fr', md: 'repeat(2, max-content)'}} gap="md">
+        <Container width={{zero: '100%', md: 'max-content'}}>
+          {containerProps => (
+            <CompactSelect
+              {...containerProps}
+              trigger={triggerProps => (
+                <OverlayTrigger.Button
+                  {...triggerProps}
+                  prefix={t('Filter')}
+                  size="xs"
+                  style={{width: '100%'}}
+                />
+              )}
+              value={selected.value}
+              options={options}
+              onChange={opt => handleDropdownChange(opt.value)}
             />
-          </InvestigationRuleWrapper>
-        )}
+          )}
+        </Container>
         {!this.isTrend() &&
           (handleOpenAllEventsClick ? (
             <GuideAnchor target="release_transactions_open_in_transaction_events">
@@ -332,21 +395,27 @@ class _TransactionsList extends Component<Props> {
             <GuideAnchor target="release_transactions_open_in_discover">
               <DiscoverButton
                 onClick={handleOpenInDiscoverClick}
-                to={this.generateDiscoverEventView().getResultsViewUrlTarget(
-                  organization,
-                  false,
-                  hasDatasetSelector(organization)
-                    ? SavedQueryDatasets.TRANSACTIONS
-                    : undefined
-                )}
+                to={
+                  getDiscoverDeprecation(organization)
+                    ? getExploreTarget(this.generateDiscoverEventView(), organization)
+                    : this.generateDiscoverEventView().getResultsViewUrlTarget(
+                        organization,
+                        false,
+                        hasDatasetSelector(organization)
+                          ? SavedQueryDatasets.TRANSACTIONS
+                          : undefined
+                      )
+                }
                 size="xs"
                 data-test-id="discover-open"
               >
-                {t('Open in Discover')}
+                {getDiscoverDeprecation(organization)
+                  ? t('Open in Explore')
+                  : t('Open in Discover')}
               </DiscoverButton>
             </GuideAnchor>
           ))}
-      </Fragment>
+      </Grid>
     );
   }
 
@@ -391,10 +460,7 @@ class _TransactionsList extends Component<Props> {
           isLoading
           pageLinks={null}
           tableData={null}
-          header={this.renderHeader({
-            numSamples: null,
-            view: domainViewFilters?.view,
-          })}
+          header={this.renderHeader({view: domainViewFilters?.view})}
         />
       );
     }
@@ -414,12 +480,7 @@ class _TransactionsList extends Component<Props> {
             isLoading={isLoading}
             pageLinks={pageLinks}
             tableData={tableData}
-            header={this.renderHeader({
-              numSamples: tableData?.data?.length ?? null,
-              supportsInvestigationRule: this.props.supportsInvestigationRule,
-              cursor,
-              view: domainViewFilters?.view,
-            })}
+            header={this.renderHeader({view: domainViewFilters?.view})}
           />
         )}
       </DiscoverQuery>
@@ -465,11 +526,7 @@ class _TransactionsList extends Component<Props> {
             pageLinks={pageLinks}
             onCursor={this.handleCursor}
             paginationCursorSize="sm"
-            header={this.renderHeader({
-              numSamples: null,
-              supportsInvestigationRule: false,
-              view: domainViewFilters?.view,
-            })}
+            header={this.renderHeader({view: domainViewFilters?.view})}
             titles={['transaction', 'percentage', 'difference']}
             columnOrder={decodeColumnOrder([
               {field: 'transaction'},
@@ -498,28 +555,12 @@ class _TransactionsList extends Component<Props> {
   }
 }
 
-const Header = styled('div')`
-  display: grid;
-  grid-template-columns: 1fr auto auto auto;
-  margin-bottom: ${space(1)};
-  align-items: center;
-`;
-
-const StyledPagination = styled(Pagination)`
-  margin: 0 0 0 ${space(1)};
-`;
-
-const InvestigationRuleWrapper = styled('div')`
-  margin-right: ${space(1)};
-`;
-
-function TransactionsList(
-  props: Omit<Props, 'cursorName' | 'limit'> & {
+export function TransactionsList(
+  props: Omit<Props, 'cursorName' | 'limit' | 'navigate'> & {
     cursorName?: Props['cursorName'];
     limit?: Props['limit'];
   }
 ) {
-  return <_TransactionsList {...props} />;
+  const navigate = useNavigate();
+  return <_TransactionsList {...props} navigate={navigate} />;
 }
-
-export default TransactionsList;

@@ -1,23 +1,23 @@
-import {render} from 'sentry-test/reactTestingLibrary';
+import {render, screen, within} from 'sentry-test/reactTestingLibrary';
 
 import SplitDiff from 'sentry/components/splitDiff';
 
-describe('SplitDiff', function () {
-  beforeEach(function () {});
+describe('SplitDiff', () => {
+  it('shows differing content on each side for changed lines', () => {
+    const base = `foo
+bar`;
+    const target = `foo
+baz`;
 
-  afterEach(function () {});
-
-  it('renders', function () {
-    render(<SplitDiff base="restaurant" target="aura" />);
-  });
-
-  it('renders with newlines', function () {
-    const base = `this is my restaurant
-    and restaurant
-    common`;
-    const target = `aura
-    and your aura
-    common`;
     render(<SplitDiff base={base} target={target} />);
+
+    const diff = screen.getByTestId('split-diff');
+    const leftCells = within(diff).getAllByTestId('split-diff-left-cell');
+    const rightCells = within(diff).getAllByTestId('split-diff-right-cell');
+
+    expect(leftCells[0]).toHaveTextContent('foo');
+    expect(rightCells[0]).toHaveTextContent('foo');
+    expect(leftCells[1]).toHaveTextContent('bar');
+    expect(rightCells[1]).toHaveTextContent('baz');
   });
 });

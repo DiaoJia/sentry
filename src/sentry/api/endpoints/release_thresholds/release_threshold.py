@@ -1,3 +1,5 @@
+from typing import TypedDict
+
 from django.http import HttpResponse
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -5,7 +7,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectReleasePermission
 from sentry.api.serializers import serialize
 from sentry.api.serializers.rest_framework.environment import EnvironmentField
@@ -19,28 +21,36 @@ from sentry.models.release_threshold.constants import TriggerType as ReleaseThre
 from sentry.models.release_threshold.release_threshold import ReleaseThreshold
 
 
-class ReleaseThresholdPOSTSerializer(serializers.Serializer):
+class ReleaseThresholdPOSTData(TypedDict, total=False):
+    threshold_type: int
+    trigger_type: int
+    value: int
+    window_in_seconds: int
+    environment: object
+
+
+class ReleaseThresholdPOSTSerializer(serializers.Serializer[ReleaseThresholdPOSTData]):
     threshold_type = serializers.ChoiceField(choices=ReleaseThresholdType.as_str_choices())
     trigger_type = serializers.ChoiceField(choices=ReleaseThresholdTriggerType.as_str_choices())
     value = serializers.IntegerField(required=True, min_value=0)
     window_in_seconds = serializers.IntegerField(required=True, min_value=0)
     environment = EnvironmentField(required=False, allow_null=True)
 
-    def validate_threshold_type(self, threshold_type: str):
+    def validate_threshold_type(self, threshold_type: str) -> int:
         if threshold_type not in THRESHOLD_TYPE_STR_TO_INT:
             raise serializers.ValidationError("Invalid threshold type")
         return THRESHOLD_TYPE_STR_TO_INT[threshold_type]
 
-    def validate_trigger_type(self, trigger_type: str):
+    def validate_trigger_type(self, trigger_type: str) -> int:
         if trigger_type not in TRIGGER_TYPE_STRING_TO_INT:
             raise serializers.ValidationError("Invalid trigger type")
         return TRIGGER_TYPE_STRING_TO_INT[trigger_type]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class ReleaseThresholdEndpoint(ProjectEndpoint):
     permission_classes = (ProjectReleasePermission,)
-    owner: ApiOwner = ApiOwner.ENTERPRISE
+    owner: ApiOwner = ApiOwner.REPLAY
     publish_status = {
         "GET": ApiPublishStatus.EXPERIMENTAL,
         "POST": ApiPublishStatus.EXPERIMENTAL,

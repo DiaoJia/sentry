@@ -11,28 +11,18 @@ import {
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
 import * as indicators from 'sentry/actionCreators/indicator';
-import OrganizationsStore from 'sentry/stores/organizationsStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
 import type {OrgAuthToken} from 'sentry/types/user';
-import {OrganizationAuthTokensIndex} from 'sentry/views/settings/organizationAuthTokens';
+import OrganizationAuthTokensIndex from 'sentry/views/settings/organizationAuthTokens';
 
-describe('OrganizationAuthTokensIndex', function () {
+describe('OrganizationAuthTokensIndex', () => {
   const ENDPOINT = '/organizations/org-slug/org-auth-tokens/';
   const PROJECTS_ENDPOINT = '/organizations/org-slug/projects/';
-  const {organization, project, router} = initializeOrg();
+  const {organization, project} = initializeOrg();
 
-  const defaultProps = {
-    organization,
-    router,
-    location: router.location,
-    params: {orgId: organization.slug},
-    routes: router.routes,
-    route: {},
-    routeParams: router.params,
-  };
+  let projectsMock: jest.Mock;
 
-  let projectsMock: jest.Mock<any>;
-
-  beforeEach(function () {
+  beforeEach(() => {
     OrganizationsStore.addOrReplace(organization);
 
     projectsMock = MockApiClient.addMockResponse({
@@ -42,11 +32,11 @@ describe('OrganizationAuthTokensIndex', function () {
     });
   });
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('shows tokens', async function () {
+  it('shows tokens', async () => {
     const tokens: OrgAuthToken[] = [
       {
         id: '1',
@@ -72,7 +62,7 @@ describe('OrganizationAuthTokensIndex', function () {
       body: tokens,
     });
 
-    render(<OrganizationAuthTokensIndex {...defaultProps} />);
+    render(<OrganizationAuthTokensIndex />, {organization});
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
@@ -88,18 +78,23 @@ describe('OrganizationAuthTokensIndex', function () {
 
     expect(screen.queryByTestId('loading-error')).not.toBeInTheDocument();
     expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('empty-state')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("You haven't created any authentication tokens yet.")
+    ).not.toBeInTheDocument();
 
     expect(mock).toHaveBeenCalledTimes(1);
     expect(mock).toHaveBeenCalledWith(ENDPOINT, expect.objectContaining({method: 'GET'}));
     expect(projectsMock).toHaveBeenCalledTimes(1);
     expect(projectsMock).toHaveBeenCalledWith(
       PROJECTS_ENDPOINT,
-      expect.objectContaining({method: 'GET', query: {query: `id:${project.id}`}})
+      expect.objectContaining({
+        method: 'GET',
+        query: {collapse: ['latestDeploys', 'unusedFeatures'], query: `id:${project.id}`},
+      })
     );
   });
 
-  it('shows unused tokens', async function () {
+  it('shows unused tokens', async () => {
     const tokens: OrgAuthToken[] = [
       {
         id: '1',
@@ -123,7 +118,7 @@ describe('OrganizationAuthTokensIndex', function () {
       body: tokens,
     });
 
-    render(<OrganizationAuthTokensIndex {...defaultProps} />);
+    render(<OrganizationAuthTokensIndex />, {organization});
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
@@ -133,25 +128,27 @@ describe('OrganizationAuthTokensIndex', function () {
     expect(screen.getAllByText('never used')).toHaveLength(2);
   });
 
-  it('handle error when loading tokens', async function () {
+  it('handle error when loading tokens', async () => {
     const mock = MockApiClient.addMockResponse({
       url: ENDPOINT,
       method: 'GET',
       statusCode: 400,
     });
 
-    render(<OrganizationAuthTokensIndex {...defaultProps} />);
+    render(<OrganizationAuthTokensIndex />, {organization});
 
     expect(await screen.findByTestId('loading-error')).toHaveTextContent(
       'Failed to load organization tokens.'
     );
     expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('empty-state')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("You haven't created any authentication tokens yet.")
+    ).not.toBeInTheDocument();
 
     expect(mock).toHaveBeenCalledTimes(1);
   });
 
-  it('shows empty state', async function () {
+  it('shows empty state', async () => {
     const tokens: OrgAuthToken[] = [];
 
     MockApiClient.addMockResponse({
@@ -160,17 +157,19 @@ describe('OrganizationAuthTokensIndex', function () {
       body: tokens,
     });
 
-    render(<OrganizationAuthTokensIndex {...defaultProps} />);
+    render(<OrganizationAuthTokensIndex />, {organization});
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
-    expect(screen.getByTestId('empty-state')).toBeInTheDocument();
+    expect(
+      screen.getByText("You haven't created any authentication tokens yet.")
+    ).toBeInTheDocument();
     expect(screen.queryByTestId('loading-error')).not.toBeInTheDocument();
     expect(screen.queryByTestId('loading-indicator')).not.toBeInTheDocument();
   });
 
-  describe('revoking', function () {
-    it('allows to revoke tokens', async function () {
+  describe('revoking', () => {
+    it('allows to revoke tokens', async () => {
       jest.spyOn(indicators, 'addSuccessMessage');
 
       const tokens: OrgAuthToken[] = [
@@ -208,7 +207,7 @@ describe('OrganizationAuthTokensIndex', function () {
         method: 'DELETE',
       });
 
-      render(<OrganizationAuthTokensIndex {...defaultProps} />);
+      render(<OrganizationAuthTokensIndex />, {organization});
       renderGlobalModal();
 
       expect(await screen.findByText('My Token 1')).toBeInTheDocument();
@@ -232,7 +231,7 @@ describe('OrganizationAuthTokensIndex', function () {
       expect(deleteMock).toHaveBeenCalledTimes(1);
     });
 
-    it('handles API error when revoking token', async function () {
+    it('handles API error when revoking token', async () => {
       jest.spyOn(indicators, 'addErrorMessage');
 
       const tokens: OrgAuthToken[] = [
@@ -257,7 +256,7 @@ describe('OrganizationAuthTokensIndex', function () {
         statusCode: 400,
       });
 
-      render(<OrganizationAuthTokensIndex {...defaultProps} />);
+      render(<OrganizationAuthTokensIndex />, {organization});
       renderGlobalModal();
 
       expect(await screen.findByText('My Token 1')).toBeInTheDocument();
@@ -277,7 +276,7 @@ describe('OrganizationAuthTokensIndex', function () {
       expect(deleteMock).toHaveBeenCalledTimes(1);
     });
 
-    it('does not allow to revoke without permission', async function () {
+    it('does not allow to revoke without permission', async () => {
       const org = OrganizationFixture({
         access: ['org:read'],
       });
@@ -292,18 +291,13 @@ describe('OrganizationAuthTokensIndex', function () {
         },
       ];
 
-      const props = {
-        ...defaultProps,
-        organization: org,
-      };
-
       MockApiClient.addMockResponse({
         url: ENDPOINT,
         method: 'GET',
         body: tokens,
       });
 
-      render(<OrganizationAuthTokensIndex {...props} />, {organization: org});
+      render(<OrganizationAuthTokensIndex />, {organization: org});
 
       expect(await screen.findByText('My Token 1')).toBeInTheDocument();
 

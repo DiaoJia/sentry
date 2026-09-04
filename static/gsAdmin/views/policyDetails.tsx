@@ -1,36 +1,47 @@
 import moment from 'moment-timezone';
 
-import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import {openModal} from 'sentry/actionCreators/modal';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import ConfigStore from 'sentry/stores/configStore';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
 
-import DetailLabel from 'admin/components/detailLabel';
-import DetailList from 'admin/components/detailList';
-import DetailsContainer from 'admin/components/detailsContainer';
-import DetailsPage from 'admin/components/detailsPage';
-import PolicyRevisionModal from 'admin/components/policies/policyRevisionModal';
-import PolicyRevisions from 'admin/components/policies/policyRevisions';
+import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApiQuery} from 'sentry/utils/queryClient';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useApi} from 'sentry/utils/useApi';
+import {useParams} from 'sentry/utils/useParams';
+
+import {DetailLabel} from 'admin/components/detailLabel';
+import {DetailList} from 'admin/components/detailList';
+import {DetailsContainer} from 'admin/components/detailsContainer';
+import {DetailsPage} from 'admin/components/detailsPage';
+import {PolicyRevisionModal} from 'admin/components/policies/policyRevisionModal';
+import {PolicyRevisions} from 'admin/components/policies/policyRevisions';
 import type {Policy, PolicyRevision} from 'getsentry/types';
 
-type PolicyDetailsProps = RouteComponentProps<{policySlug: string}, unknown>;
+export function PolicyDetails() {
+  const {openModal} = useModal();
 
-function PolicyDetails({params}: PolicyDetailsProps) {
   const api = useApi();
+  const {policySlug} = useParams<{policySlug: string}>();
 
   const {
     data: policy,
     isPending,
     isError,
     refetch,
-  } = useApiQuery<Policy>([`/policies/${params.policySlug}/`], {
-    staleTime: 0,
-  });
+  } = useApiQuery<Policy>(
+    [
+      getApiUrl('/policies/$policySlug/', {
+        path: {policySlug},
+      }),
+    ],
+    {
+      staleTime: 0,
+    }
+  );
 
   if (isPending) {
     return <LoadingIndicator />;
@@ -49,7 +60,7 @@ function PolicyDetails({params}: PolicyDetailsProps) {
         method: 'PUT',
         data,
       });
-      window.location.reload();
+      testableWindowLocation.reload();
     } catch {
       addErrorMessage('There was an error when updating the current policy version.');
     }
@@ -113,5 +124,3 @@ function PolicyDetails({params}: PolicyDetailsProps) {
     />
   );
 }
-
-export default PolicyDetails;

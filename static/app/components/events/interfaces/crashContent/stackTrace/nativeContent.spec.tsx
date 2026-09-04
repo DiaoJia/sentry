@@ -9,10 +9,10 @@ import {RepositoryProjectPathConfigFixture} from 'sentry-fixture/repositoryProje
 
 import {render, screen, userEvent, within} from 'sentry-test/reactTestingLibrary';
 
-import StackTraceContent from 'sentry/components/events/interfaces/crashContent/stackTrace/content';
+import {Content as StackTraceContent} from 'sentry/components/events/interfaces/crashContent/stackTrace/content';
 import {NativeContent} from 'sentry/components/events/interfaces/crashContent/stackTrace/nativeContent';
 import {SymbolicatorStatus} from 'sentry/components/events/interfaces/types';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import {EventOrGroupType} from 'sentry/types/event';
 import type {StacktraceType} from 'sentry/types/stacktrace';
 
@@ -48,7 +48,7 @@ function renderedComponent(
     />
   );
 }
-describe('Native StackTrace', function () {
+describe('Native StackTrace', () => {
   beforeEach(() => {
     MockApiClient.clearMockResponses();
     const promptResponse = {
@@ -65,7 +65,7 @@ describe('Native StackTrace', function () {
     });
     ProjectsStore.loadInitialData([project]);
   });
-  it('does not render non in app tags', function () {
+  it('does not render non in app tags', () => {
     const dataFrames = [...data.frames];
     dataFrames[0] = {...dataFrames[0]!, inApp: false};
 
@@ -81,7 +81,7 @@ describe('Native StackTrace', function () {
     expect(screen.queryByText('System')).not.toBeInTheDocument();
   });
 
-  it('displays a toggle button when there is more than one non-inapp frame', function () {
+  it('displays a toggle button when there is more than one non-inapp frame', () => {
     const dataFrames = [...data.frames];
     dataFrames[0] = {...dataFrames[0]!, inApp: true};
 
@@ -98,7 +98,7 @@ describe('Native StackTrace', function () {
     expect(screen.getByText('Show 3 more frames')).toBeInTheDocument();
   });
 
-  it('shows/hides frames when toggle button clicked', async function () {
+  it('shows/hides frames when toggle button clicked', async () => {
     const dataFrames = [...data.frames];
     dataFrames[0] = {...dataFrames[0]!, inApp: true};
     dataFrames[1] = {...dataFrames[1]!, function: 'non-in-app-frame'};
@@ -121,7 +121,7 @@ describe('Native StackTrace', function () {
     expect(screen.getByText('non-in-app-frame')).toBeInTheDocument();
   });
 
-  it('does not display a toggle button when there is only one non-inapp frame', function () {
+  it('does not display a toggle button when there is only one non-inapp frame', () => {
     const dataFrames = [...data.frames];
     dataFrames[0] = {...dataFrames[0]!, inApp: true};
     dataFrames[2] = {...dataFrames[2]!, inApp: true};
@@ -140,7 +140,7 @@ describe('Native StackTrace', function () {
     expect(screen.queryByText(/Show .* more frames*/)).not.toBeInTheDocument();
   });
 
-  it('displays correct icons from frame symbolicatorStatus when image does not exist', function () {
+  it('displays correct icons from frame symbolicatorStatus when image does not exist', () => {
     const newData = {
       ...data,
       frames: [
@@ -160,13 +160,7 @@ describe('Native StackTrace', function () {
     };
 
     render(
-      <NativeContent
-        data={newData}
-        platform="cocoa"
-        event={event}
-        includeSystemFrames
-        newestFirst={false}
-      />
+      <NativeContent data={newData} platform="cocoa" event={event} newestFirst={false} />
     );
 
     const frames = screen.getAllByTestId('stack-trace-frame');
@@ -180,7 +174,7 @@ describe('Native StackTrace', function () {
     expect(within(frames[2]!).queryByTestId(/symbolication/)).not.toBeInTheDocument();
   });
 
-  it('expands the first in app frame', function () {
+  it('expands the first in app frame', () => {
     const newData = {
       ...data,
       frames: [
@@ -202,15 +196,7 @@ describe('Native StackTrace', function () {
       ],
     };
 
-    render(
-      <NativeContent
-        data={newData}
-        platform="cocoa"
-        event={event}
-        includeSystemFrames
-        newestFirst
-      />
-    );
+    render(<NativeContent data={newData} platform="cocoa" event={event} newestFirst />);
 
     expect(screen.getByRole('button', {name: 'Collapse Context'})).toBeInTheDocument();
     const collapsed = screen.getAllByRole('button', {name: 'Expand Context'});

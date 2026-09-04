@@ -1,8 +1,9 @@
-import type {CSSProperties} from 'react';
 import {Fragment, useCallback, useEffect, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 import * as Sentry from '@sentry/react';
 import {vec2} from 'gl-matrix';
+
+import type {CSS} from '@sentry/scraps/cssTypes';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
 import {t} from 'sentry/locale';
@@ -19,7 +20,7 @@ import {
 } from 'sentry/utils/profiling/gl/utils';
 import {UIFramesRenderer2D} from 'sentry/utils/profiling/renderers/UIFramesRenderer2D';
 import {UIFramesRendererWebGL} from 'sentry/utils/profiling/renderers/uiFramesRendererWebGL';
-import type {UIFrameNode, UIFrames} from 'sentry/utils/profiling/uiFrames';
+import type {UIFrames} from 'sentry/utils/profiling/uiFrames';
 
 import {useCanvasScroll} from './interactions/useCanvasScroll';
 import {useCanvasZoomOrScroll} from './interactions/useCanvasZoomOrScroll';
@@ -85,7 +86,7 @@ export function FlamegraphUIFrames({
     return renderer;
   }, [uiFramesCanvasRef, uiFrames, flamegraphTheme]);
 
-  const hoveredNode: UIFrameNode[] | null = useMemo(() => {
+  const hoveredNode = useMemo(() => {
     if (!configSpaceCursor || !uiFramesRenderer || !uiFramesView?.configSpace) {
       return null;
     }
@@ -94,7 +95,7 @@ export function FlamegraphUIFrames({
 
   useEffect(() => {
     if (!uiFramesCanvas || !uiFramesView || !uiFramesRenderer) {
-      return undefined;
+      return;
     }
 
     const drawUIFrames = () => {
@@ -305,7 +306,7 @@ export function FlamegraphUIFrames({
   );
 }
 
-const Canvas = styled('canvas')<{cursor?: CSSProperties['cursor']}>`
+const Canvas = styled('canvas')<{cursor?: CSS['cursor']}>`
   width: 100%;
   height: 100%;
   position: absolute;

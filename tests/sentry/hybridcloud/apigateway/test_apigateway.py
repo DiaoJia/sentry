@@ -1,3 +1,4 @@
+from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 
 import pytest
@@ -14,7 +15,7 @@ from sentry.testutils.silo import control_silo_test
 from sentry.utils import json
 
 
-@control_silo_test(regions=[ApiGatewayTestCase.REGION], include_monolith_run=True)
+@control_silo_test(cells=[ApiGatewayTestCase.CELL], include_monolith_run=True)
 class ApiGatewayTest(ApiGatewayTestCase):
     @responses.activate
     def test_simple(self) -> None:
@@ -22,7 +23,7 @@ class ApiGatewayTest(ApiGatewayTestCase):
         headers = dict(example="this")
         responses.add_callback(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/region/",
+            f"{self.CELL.address}/organizations/{self.organization.slug}/region/",
             verify_request_params(query_params, headers),
         )
 
@@ -44,8 +45,8 @@ class ApiGatewayTest(ApiGatewayTestCase):
     def test_proxy_does_not_resolve_redirect(self) -> None:
         responses.add(
             responses.POST,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/region/",
-            headers={"Location": "https://zombo.com"},
+            f"{self.CELL.address}/organizations/{self.organization.slug}/region/",
+            adding_headers={"Location": "https://zombo.com"},
             status=302,
         )
 
@@ -62,28 +63,28 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert response_payload == b""
 
     @responses.activate
-    def test_region_pinned_urls_are_defined(self) -> None:
+    def test_cell_pinned_urls_are_defined(self) -> None:
         resolver = get_resolver()
         # Ensure that all urls in REGION_PINNED_URL_NAMES exist in api/urls.py
         for name in settings.REGION_PINNED_URL_NAMES:
             if "api" not in name:
                 continue
             route = resolver.reverse_dict.get(name)
-            assert (
-                route
-            ), f"REGION_PINNED_URL_NAMES contains {name}, but no route is registered with that name"
+            assert route, (
+                f"REGION_PINNED_URL_NAMES contains {name}, but no route is registered with that name"
+            )
 
     @responses.activate
     def test_proxy_check_org_slug_url(self) -> None:
         """Test the logic of when a request should be proxied"""
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/region/",
+            f"{self.CELL.address}/organizations/{self.organization.slug}/region/",
             json={"proxy": True},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/control/",
+            f"{self.CELL.address}/organizations/{self.organization.slug}/control/",
             json={"proxy": True},
         )
 
@@ -104,7 +105,7 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
 
-        with override_settings(SILO_MODE=SiloMode.REGION, MIDDLEWARE=tuple(self.middleware)):
+        with override_settings(SILO_MODE=SiloMode.CELL, MIDDLEWARE=tuple(self.middleware)):
             resp = self.client.get(region_url)
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
@@ -114,22 +115,22 @@ class ApiGatewayTest(ApiGatewayTestCase):
         """Test the logic of when a request should be proxied"""
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/region/",
+            f"{self.CELL.address}/organizations/{self.organization.slug}/region/",
             json={"proxy": True},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.slug}/control/",
+            f"{self.CELL.address}/organizations/{self.organization.slug}/control/",
             json={"proxy": True},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.id}/region/",
+            f"{self.CELL.address}/organizations/{self.organization.id}/region/",
             json={"proxy": True},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/organizations/{self.organization.id}/control/",
+            f"{self.CELL.address}/organizations/{self.organization.id}/control/",
             json={"proxy": True},
         )
 
@@ -158,7 +159,7 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
 
-        with override_settings(SILO_MODE=SiloMode.REGION, MIDDLEWARE=tuple(self.middleware)):
+        with override_settings(SILO_MODE=SiloMode.CELL, MIDDLEWARE=tuple(self.middleware)):
             resp = self.client.get(region_url_slug)
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
@@ -173,46 +174,60 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
 
-        with override_settings(SILO_MODE=SiloMode.REGION, MIDDLEWARE=tuple(self.middleware)):
+        with override_settings(SILO_MODE=SiloMode.CELL, MIDDLEWARE=tuple(self.middleware)):
             resp = self.client.get(region_url_id)
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
 
     @responses.activate
-    def test_proxy_check_region_pinned_url(self) -> None:
+    @patch("sentry.hybridcloud.apigateway.apigateway.metrics")
+    def test_proxy_check_region_pinned_url(self, mock_metrics: Mock) -> None:
+        project_key = self.create_project_key(self.project)
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/builtin-symbol-sources/",
+            f"{self.CELL.address}/js-sdk-loader/{project_key.public_key}.js",
             json={"proxy": True},
         )
 
         # No /api/0 as we only include sentry.api.urls.urlpatterns
         # and not sentry.web.urls which includes the version prefix
-        region_pinned = "/builtin-symbol-sources/"
+        region_pinned = f"/js-sdk-loader/{project_key.public_key}.js"
         control_url = reverse(
             "control-endpoint", kwargs={"organization_slug": self.organization.slug}
         )
 
         with override_settings(SILO_MODE=SiloMode.CONTROL, MIDDLEWARE=tuple(self.middleware)):
-            resp = self.client.get(region_pinned)
-            assert resp.status_code == 200
-            resp_json = json.loads(close_streaming_response(resp))
-            assert resp_json["proxy"] is True
+            with override_settings(ROOT_URLCONF="sentry.web.urls"):
+                resp = self.client.get(region_pinned)
+                assert resp.status_code == 200
+                resp_json = json.loads(close_streaming_response(resp))
+                assert resp_json["proxy"] is True
 
             resp = self.client.get(control_url)
             assert resp.status_code == 200
             assert resp.data["proxy"] is False
 
+        # The js-sdk-loader endpoint resolves its cell via a cell resolver, so
+        # this proxied request goes through the cell_resolver branch.
+        cell_resolver_calls = [
+            c
+            for c in mock_metrics.incr.mock_calls
+            if c.args
+            and c.args[0] == "apigateway.proxy_request"
+            and c.kwargs.get("tags", {}).get("kind") == "cell_resolver"
+        ]
+        assert cell_resolver_calls
+
     @responses.activate
-    def test_proxy_check_region_pinned_url_with_params(self) -> None:
+    def test_proxy_check_cell_pinned_url_with_params(self) -> None:
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/relays/register/",
+            f"{self.CELL.address}/relays/register/",
             json={"proxy": True},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/relays/abc123/",
+            f"{self.CELL.address}/relays/abc123/",
             json={"proxy": True, "details": True},
         )
 
@@ -229,16 +244,17 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert resp_json["details"] is True
 
     @responses.activate
-    def test_proxy_check_region_pinned_issue_urls(self) -> None:
+    @patch("sentry.hybridcloud.apigateway.apigateway.metrics")
+    def test_proxy_check_cell_pinned_issue_urls(self, mock_metrics: Mock) -> None:
         issue = self.create_group()
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/issues/{issue.id}/",
+            f"{self.CELL.address}/issues/{issue.id}/",
             json={"proxy": True, "id": issue.id},
         )
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/issues/{issue.id}/events/",
+            f"{self.CELL.address}/issues/{issue.id}/events/",
             json={"proxy": True, "id": issue.id, "events": True},
         )
 
@@ -260,11 +276,22 @@ class ApiGatewayTest(ApiGatewayTestCase):
             assert resp_json["proxy"] is True
             assert resp_json["events"]
 
+        # Issue URLs are region-pinned without a cell resolver, so these proxied
+        # requests go through the regionpin branch.
+        regionpin_calls = [
+            c
+            for c in mock_metrics.incr.mock_calls
+            if c.args
+            and c.args[0] == "apigateway.proxy_request"
+            and c.kwargs.get("tags", {}).get("kind") == "regionpin"
+        ]
+        assert regionpin_calls
+
     @responses.activate
     def test_proxy_error_embed_dsn(self) -> None:
         responses.add(
             responses.GET,
-            f"{self.REGION.address}/api/embed/error-page/",
+            f"{self.CELL.address}/api/embed/error-page/",
             json={"proxy": True, "name": "error-embed"},
         )
         with override_settings(SILO_MODE=SiloMode.CONTROL, MIDDLEWARE=tuple(self.middleware)):
@@ -320,92 +347,3 @@ class ApiGatewayTest(ApiGatewayTestCase):
         resp_json = json.loads(close_streaming_response(resp))
         assert resp_json["proxy"] is True
         assert resp_json["name"] == expected_name
-
-    @responses.activate
-    def test_proxy_sentryapp_installation_path(self) -> None:
-        sentry_app = self.create_sentry_app()
-        install = self.create_sentry_app_installation(
-            slug=sentry_app.slug, organization=self.organization
-        )
-
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-app-installations/{install.uuid}/external-requests/",
-            json={"proxy": True, "name": "external-requests"},
-        )
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-app-installations/{install.uuid}/external-issues/",
-            json={"proxy": True, "name": "external-issues"},
-        )
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-app-installations/{install.uuid}/external-issue-actions/",
-            json={"proxy": True, "name": "external-issue-actions"},
-        )
-
-        with override_settings(MIDDLEWARE=tuple(self.middleware)):
-            resp = self.client.get(f"/sentry-app-installations/{install.uuid}/external-requests/")
-            self._check_response(resp, "external-requests")
-
-            resp = self.client.get(f"/sentry-app-installations/{install.uuid}/external-issues/")
-            self._check_response(resp, "external-issues")
-
-            resp = self.client.get(
-                f"/sentry-app-installations/{install.uuid}/external-issue-actions/"
-            )
-            self._check_response(resp, "external-issue-actions")
-
-    @responses.activate
-    def test_proxy_sentryapp_path(self) -> None:
-        sentry_app = self.create_sentry_app()
-
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-apps/{sentry_app.slug}/interaction/",
-            json={"proxy": True, "name": "interaction"},
-        )
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-apps/{sentry_app.slug}/requests/",
-            json={"proxy": True, "name": "requests"},
-        )
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-apps/{sentry_app.id}/interaction/",
-            json={"proxy": True, "name": "interaction"},
-        )
-        responses.add(
-            responses.GET,
-            f"{self.REGION.address}/sentry-apps/{sentry_app.id}/requests/",
-            json={"proxy": True, "name": "requests"},
-        )
-
-        with override_settings(MIDDLEWARE=tuple(self.middleware)):
-            resp = self.client.get(f"/sentry-apps/{sentry_app.slug}/interaction/")
-            self._check_response(resp, "interaction")
-
-            resp = self.client.get(f"/sentry-apps/{sentry_app.slug}/requests/")
-            self._check_response(resp, "requests")
-
-            resp = self.client.get(f"/sentry-apps/{sentry_app.id}/interaction/")
-            self._check_response(resp, "interaction")
-
-            resp = self.client.get(f"/sentry-apps/{sentry_app.id}/requests/")
-            self._check_response(resp, "requests")
-
-    @responses.activate
-    def test_proxy_sentryapp_installation_path_invalid(self) -> None:
-        if SiloMode.get_current_mode() == SiloMode.MONOLITH:
-            return
-
-        # No responses configured so that requests will fail if they are made.
-        with override_settings(MIDDLEWARE=tuple(self.middleware)):
-            resp = self.client.get("/sentry-app-installations/abc123/external-requests/")
-            assert resp.status_code == 404
-
-            resp = self.client.get("/sentry-app-installations/abc123/external-issues/")
-            assert resp.status_code == 404
-
-            resp = self.client.get("/sentry-app-installations/abc123/external-issue-actions/")
-            assert resp.status_code == 404

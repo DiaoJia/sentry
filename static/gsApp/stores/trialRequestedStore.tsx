@@ -1,6 +1,6 @@
 import Reflux from 'reflux';
 
-import TrialRequestedActions from 'getsentry/actions/trialRequestedActions';
+import {TrialRequestedActions} from 'getsentry/actions/trialRequestedActions';
 
 type State = {
   requested: boolean;
@@ -8,12 +8,13 @@ type State = {
 
 type TrialRequestedStoreInterface = {
   getTrialRequstedState: () => State['requested'];
+  state: State;
 };
 
 const storeConfig: Reflux.StoreDefinition & TrialRequestedStoreInterface = {
   state: {
     requested: false,
-  } as State,
+  },
 
   init() {
     this.listenTo(TrialRequestedActions.requested, this.onRequested);
@@ -35,7 +36,5 @@ const storeConfig: Reflux.StoreDefinition & TrialRequestedStoreInterface = {
   },
 };
 
-const TrialRequestedStore = Reflux.createStore(storeConfig) as Reflux.Store &
+export const TrialRequestedStore = Reflux.createStore(storeConfig) as Reflux.Store &
   TrialRequestedStoreInterface;
-
-export default TrialRequestedStore;

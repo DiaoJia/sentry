@@ -1,36 +1,95 @@
-import {useContext, useEffect, useMemo, useRef, useState} from 'react';
+import {
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {AriaTabListOptions} from '@react-aria/tabs';
 import {useTabList} from '@react-aria/tabs';
 import {useCollection} from '@react-stately/collections';
 import {ListCollection} from '@react-stately/list';
-import type {TabListStateOptions} from '@react-stately/tabs';
+import type {TabListState, TabListStateOptions} from '@react-stately/tabs';
 import {useTabListState} from '@react-stately/tabs';
 import type {Node, Orientation} from '@react-types/shared';
 
-import type {SelectOption} from 'sentry/components/core/compactSelect';
-import {CompactSelect} from 'sentry/components/core/compactSelect';
-import DropdownButton from 'sentry/components/dropdownButton';
+import type {SelectOption} from '@sentry/scraps/compactSelect';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {Container} from '@sentry/scraps/layout';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import {useTranslation} from '@sentry/scraps/translationContext';
+
 import {IconEllipsis} from 'sentry/icons';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {withChonk} from 'sentry/utils/theme/withChonk';
 import {useNavigate} from 'sentry/utils/useNavigate';
 
-import {TabsContext} from './index';
 import type {TabListItemProps} from './item';
 import {TabListItem} from './item';
 import {Tab} from './tab';
-import type {BaseTabProps} from './tab.chonk';
-import {ChonkStyledTabListWrap} from './tabList.chonk';
+import type {TabProps} from './tab';
+import {TabsContext} from './tabs';
 import {tabsShouldForwardProp} from './utils';
 
+const StyledTabListWrap = styled('ul', {
+  shouldForwardProp: tabsShouldForwardProp,
+})<{
+  orientation: Orientation;
+  variant: TabProps['variant'];
+}>`
+  position: relative;
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style-type: none;
+  flex-shrink: 0;
+  gap: ${p => p.theme.space.xs};
+
+  ${p =>
+    p.orientation === 'horizontal'
+      ? css`
+          grid-auto-flow: column;
+          justify-content: start;
+        `
+      : css`
+          height: 100%;
+          grid-auto-flow: row;
+          align-content: start;
+          padding-right: ${p.theme.space.xs};
+        `}
+`;
+
+const StyledTabListOverflowWrap = styled('div')`
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: ${p => p.theme.zIndex.dropdown};
+`;
+
 /**
- * Uses IntersectionObserver API to detect overflowing tabs. Returns an array
- * containing of keys of overflowing tabs.
+ * Width (px) reserved on the right edge for the overflow menu trigger button.
+ * Kept slightly larger than the actual button so the trigger never overlaps
+ * the last visible tab.
+ */
+const RESERVED_OVERFLOW_TRIGGER_WIDTH = 48;
+
+/**
+ * Measures the tab list against the space available in its container and
+ * returns the keys of the tabs that don't fit, as a contiguous suffix. Those
+ * tabs are visually hidden (see `Tab`) and surfaced through an overflow menu.
+ *
+ * This uses direct measurement rather than an IntersectionObserver on purpose:
+ * the result is deterministic, so for a given container width the same set of
+ * tabs always overflows. That avoids the inconsistent states the observer-based
+ * approach could settle into while resizing — tabs from the middle of the list
+ * disappearing, the trigger overlapping a tab, or no overflow being detected at
+ * all when the list was momentarily allowed to grow to its content width.
  */
 function useOverflowTabs({
+  outerWrapRef,
   tabListRef,
   tabItemsRef,
   tabItems,
@@ -40,65 +99,154 @@ function useOverflowTabs({
    * Prevent tabs from being put in the overflow menu.
    */
   disabled: boolean | undefined;
+  /**
+   * The relatively-positioned wrapper around the list. Its width is the space
+   * available to the tabs and is unaffected by the list overflowing.
+   */
+  outerWrapRef: React.RefObject<HTMLDivElement | null>;
   tabItems: TabListItemProps[];
   tabItemsRef: React.RefObject<Record<string | number, HTMLLIElement | null>>;
   tabListRef: React.RefObject<HTMLUListElement | null>;
 }) {
   const [overflowTabs, setOverflowTabs] = useState<Array<string | number>>([]);
+  // Cached intrinsic widths per tab key. Overflowing tabs render with
+  // `display: none` and measure 0, so we remember their last measured width to
+  // know when they would fit again as space grows.
+  const tabWidthsRef = useRef(new Map<string | number, number>());
 
-  useEffect(() => {
+  // Measures the list against the available space and updates the overflow set.
+  const recompute = useEffectEvent(() => {
     if (disabled) {
-      return () => {};
+      setOverflowTabs(prev => (prev.length === 0 ? prev : []));
+      return;
     }
 
-    const options = {
-      root: tabListRef.current,
-      // Negative right margin to account for overflow menu's trigger button
-      rootMargin: `0px -42px 1px ${space(1)}`,
-      // Use 0.95 rather than 1 because of a bug in Edge (Windows) where the intersection
-      // ratio may unexpectedly drop to slightly below 1 (0.999…) on page scroll.
-      threshold: 0.95,
-    };
+    const outerWrap = outerWrapRef.current;
+    const tabList = tabListRef.current;
+    if (!outerWrap || !tabList) {
+      return;
+    }
 
-    const callback: IntersectionObserverCallback = entries => {
-      entries.forEach(entry => {
-        const {target} = entry;
-        const {key} = (target as HTMLElement).dataset;
-        if (!key) {
-          return;
-        }
+    const elements = tabItemsRef.current ?? {};
+    const gap = parseFloat(getComputedStyle(tabList).columnGap) || 0;
 
-        if (!entry.isIntersecting) {
-          setOverflowTabs(prev => prev.concat([key]));
-          return;
-        }
+    // Tabs that participate in the layout, in render (visual) order. Tabs with
+    // the `hidden` prop render with `display: none` and take up no space.
+    const keys = tabItems.filter(item => !item.hidden).map(item => item.key);
 
-        setOverflowTabs(prev => prev.filter(k => k !== key));
-      });
-    };
+    // Refresh the cached width of every measurable (currently visible) tab.
+    // Overflowing tabs measure 0; their last known width is kept.
+    for (const key of keys) {
+      const measured = elements[key]?.getBoundingClientRect().width ?? 0;
+      if (measured > 0) {
+        tabWidthsRef.current.set(key, measured);
+      }
+    }
 
-    const observer = new IntersectionObserver(callback, options);
-    Object.values(tabItemsRef.current ?? {}).forEach(
-      element => element && observer.observe(element)
+    const available = outerWrap.clientWidth;
+
+    // Width required to render every tab, without reserving the trigger.
+    const fullWidth = keys.reduce(
+      (sum: number, key, index) =>
+        sum + (tabWidthsRef.current.get(key) ?? 0) + (index === 0 ? 0 : gap),
+      0
     );
 
-    return () => observer.disconnect();
-  }, [tabListRef, tabItemsRef, disabled]);
+    let nextOverflow: Array<string | number>;
+    if (fullWidth <= available) {
+      nextOverflow = [];
+    } else {
+      // Overflow is needed, so leave room for the trigger button.
+      const budget = available - RESERVED_OVERFLOW_TRIGGER_WIDTH;
+      nextOverflow = [];
+      let used = 0;
+      let isOverflowing = false;
+      keys.forEach((key, index) => {
+        if (isOverflowing) {
+          nextOverflow.push(key);
+          return;
+        }
+        const nextUsed =
+          used + (tabWidthsRef.current.get(key) ?? 0) + (index === 0 ? 0 : gap);
+        // Always keep the first tab to avoid an empty tab bar.
+        if (index === 0 || nextUsed <= budget) {
+          used = nextUsed;
+        } else {
+          isOverflowing = true;
+          nextOverflow.push(key);
+        }
+      });
+    }
 
-  const tabItemKeyToHiddenMap = tabItems.reduce<Record<string | number, boolean>>(
-    (acc, next) => ({
-      ...acc,
-      [next.key]: !!next.hidden,
-    }),
-    {}
-  );
+    // Bail out when the result is unchanged to avoid re-render churn (and any
+    // observer feedback from hiding/showing tabs).
+    setOverflowTabs(prev =>
+      prev.length === nextOverflow.length &&
+      prev.every((key, index) => key === nextOverflow[index])
+        ? prev
+        : nextOverflow
+    );
+  });
 
-  // Tabs that are hidden will be rendered with display: none so won't intersect,
-  // but we don't want to show them in the overflow menu
-  return overflowTabs.filter(tabKey => !tabItemKeyToHiddenMap[tabKey]);
+  // Recompute whenever an input that affects the overflow result changes: the
+  // disabled state, or the set/order/hidden-state of the tabs. Width changes are
+  // handled by the ResizeObserver below; a reorder can leave the total width
+  // unchanged, so the observer alone wouldn't catch it.
+  const recomputeSignature = [
+    disabled ? 'disabled' : 'enabled',
+    ...tabItems.map(item => `${item.key}:${item.hidden ? 1 : 0}`),
+  ].join('|');
+
+  useLayoutEffect(() => {
+    recompute();
+  }, [recomputeSignature]);
+
+  // Recompute on container resize (available space changes) and on list resize
+  // (tabs added/removed/relabeled change its intrinsic width). Keyed only on the
+  const rafRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (disabled) {
+      return;
+    }
+
+    const outerWrap = outerWrapRef.current;
+    const tabList = tabListRef.current;
+    if (!outerWrap || !tabList) {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      // Defer recompute to outside the render/layout phase. In Firefox,
+      // ResizeObserver callbacks can fire synchronously during rendering,
+      // which throws when calling a useEffectEvent-wrapped function.
+      rafRef.current = requestAnimationFrame(() => recompute());
+    });
+    resizeObserver.observe(outerWrap);
+    resizeObserver.observe(tabList);
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
+      resizeObserver.disconnect();
+    };
+  }, [disabled, outerWrapRef, tabListRef]);
+
+  // Tabs with the `hidden` prop render with display: none; never surface them
+  // in the overflow menu.
+  const hiddenKeys = new Set(tabItems.filter(item => item.hidden).map(item => item.key));
+  return overflowTabs.filter(key => !hiddenKeys.has(key));
 }
 
-function OverflowMenu({state, overflowMenuItems, disabled}: any) {
+interface OverflowMenuProps {
+  disabled: boolean | undefined;
+  overflowMenuItems: Array<SelectOption<string | number>>;
+  state: TabListState<TabListItemProps>;
+}
+
+function OverflowMenu({state, overflowMenuItems, disabled}: OverflowMenuProps) {
+  const {t} = useTranslation();
+
   return (
     <TabListOverflowWrap>
       <CompactSelect
@@ -112,9 +260,7 @@ function OverflowMenu({state, overflowMenuItems, disabled}: any) {
         trigger={triggerProps => (
           <OverflowMenuTrigger
             {...triggerProps}
-            size="sm"
-            borderless
-            showChevron={false}
+            variant="transparent"
             icon={<IconEllipsis />}
             aria-label={t('More tabs')}
           />
@@ -124,31 +270,20 @@ function OverflowMenu({state, overflowMenuItems, disabled}: any) {
   );
 }
 
-export interface TabListProps {
+interface TabListProps {
   children: TabListStateOptions<TabListItemProps>['children'];
-  /**
-   * @deprecated
-   * With chonk, `flat` variants always have a border and `floating` variants never do.
-   * Whether to hide the bottom border of the tab list.
-   * Defaults to `false`.
-   */
-  hideBorder?: boolean;
   outerWrapStyles?: React.CSSProperties;
-  variant?: BaseTabProps['variant'];
+  variant?: TabProps['variant'];
 }
 
 interface BaseTabListProps extends AriaTabListOptions<TabListItemProps>, TabListProps {
   items: TabListItemProps[];
-  variant?: BaseTabProps['variant'];
+  variant?: TabProps['variant'];
 }
 
-function BaseTabList({
-  hideBorder = false,
-  outerWrapStyles,
-  variant = 'flat',
-  ...props
-}: BaseTabListProps) {
+function BaseTabList({outerWrapStyles, variant = 'flat', ...props}: BaseTabListProps) {
   const navigate = useNavigate();
+  const outerWrapRef = useRef<HTMLDivElement>(null);
   const tabListRef = useRef<HTMLUListElement>(null);
   const {rootProps, setTabListState} = useContext(TabsContext);
   const {
@@ -193,45 +328,50 @@ function BaseTabList({
   // Detect tabs that overflow from the wrapper and put them in an overflow menu
   const tabItemsRef = useRef<Record<string | number, HTMLLIElement | null>>({});
   const overflowTabs = useOverflowTabs({
+    outerWrapRef,
     tabListRef,
     tabItemsRef,
     tabItems: props.items,
-    disabled: disableOverflow,
+    // Overflow only applies to horizontal tab lists.
+    disabled: disableOverflow || orientation !== 'horizontal',
   });
 
   const overflowMenuItems = useMemo(() => {
     // Sort overflow items in the order that they appear in TabList
-    const sortedKeys = [...state.collection].map(item => item.key);
-    const sortedOverflowTabs = overflowTabs.sort(
+    const sortedKeys = Array.from(state.collection, item => item.key);
+    const sortedOverflowTabs = overflowTabs.toSorted(
       (a, b) => sortedKeys.indexOf(a) - sortedKeys.indexOf(b)
     );
 
-    return sortedOverflowTabs.flatMap<SelectOption<string | number>>(key => {
+    return sortedOverflowTabs.flatMap(key => {
       const item = state.collection.getItem(key);
 
       if (!item) {
         return [];
       }
 
+      const itemProps: TabListItemProps = item.props;
+
       return {
         value: key,
-        label: item.props.children,
-        disabled: item.props.disabled,
+        label: itemProps.children,
+        disabled: itemProps.disabled,
+        tooltip: itemProps.tooltip?.title,
+        tooltipOptions: itemProps.tooltip,
         textValue: item.textValue,
-      };
+      } satisfies SelectOption<string | number>;
     });
   }, [state.collection, overflowTabs]);
 
   return (
-    <TabListOuterWrap style={outerWrapStyles}>
+    <Container position="relative" style={outerWrapStyles} ref={outerWrapRef}>
       <TabListWrap
         {...tabListProps}
         orientation={orientation}
-        hideBorder={hideBorder}
         ref={tabListRef}
         variant={variant}
       >
-        {[...state.collection].map(item => (
+        {Array.from(state.collection, item => (
           <Tab
             key={item.key}
             item={item}
@@ -239,6 +379,7 @@ function BaseTabList({
             orientation={orientation}
             size={size}
             overflowing={orientation === 'horizontal' && overflowTabs.includes(item.key)}
+            tooltipProps={(item.props as TabListItemProps).tooltip}
             ref={element => {
               tabItemsRef.current[item.key] = element;
             }}
@@ -254,7 +395,7 @@ function BaseTabList({
           disabled={disabled}
         />
       )}
-    </TabListOuterWrap>
+    </Container>
   );
 }
 
@@ -272,7 +413,8 @@ export function TabList({variant, ...props}: TabListProps) {
   const collection = useCollection(props, collectionFactory);
 
   const parsedItems: TabListItemProps[] = useMemo(
-    () => [...collection].map(({key, props: itemProps}) => ({key, ...itemProps})),
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    () => Array.from(collection, ({key, props: itemProps}) => ({key, ...itemProps})),
     [collection]
   );
 
@@ -299,49 +441,12 @@ export function TabList({variant, ...props}: TabListProps) {
 
 TabList.Item = TabListItem;
 
-const TabListOuterWrap = styled('div')`
-  position: relative;
-`;
+const TabListWrap = StyledTabListWrap;
 
-const TabListWrap = withChonk(
-  styled('ul', {shouldForwardProp: tabsShouldForwardProp})<{
-    hideBorder: boolean;
-    orientation: Orientation;
-    variant: BaseTabProps['variant'];
-  }>`
-    position: relative;
-    display: grid;
-    padding: 0;
-    margin: 0;
-    list-style-type: none;
-    flex-shrink: 0;
+const TabListOverflowWrap = StyledTabListOverflowWrap;
 
-    ${p =>
-      p.orientation === 'horizontal'
-        ? css`
-            grid-auto-flow: column;
-            justify-content: start;
-            gap: ${p.variant === 'floating' ? 0 : space(2)};
-            ${!p.hideBorder && `border-bottom: solid 1px ${p.theme.border};`}
-          `
-        : css`
-            height: 100%;
-            grid-auto-flow: row;
-            align-content: start;
-            gap: 1px;
-            padding-right: ${space(2)};
-            ${!p.hideBorder && `border-right: solid 1px ${p.theme.border};`}
-          `};
-  `,
-  ChonkStyledTabListWrap
-);
-
-const TabListOverflowWrap = styled('div')`
-  position: absolute;
-  right: 0;
-  bottom: ${space(0.75)};
-`;
-const OverflowMenuTrigger = styled(DropdownButton)`
-  padding-left: ${space(1)};
-  padding-right: ${space(1)};
+const OverflowMenuTrigger = styled(OverlayTrigger.IconButton)`
+  padding-left: ${p => p.theme.space.md};
+  padding-right: ${p => p.theme.space.md};
+  color: ${p => p.theme.tokens.interactive.link.neutral.rest};
 `;

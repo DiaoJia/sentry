@@ -1,29 +1,29 @@
 import styled from '@emotion/styled';
 import startCase from 'lodash/startCase';
 
-import {Alert} from 'sentry/components/core/alert';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Link from 'sentry/components/links/link';
-import PanelItem from 'sentry/components/panels/panelItem';
-import {t} from 'sentry/locale';
-import {PluginIcon} from 'sentry/plugins/components/pluginIcon';
-import {space} from 'sentry/styles/space';
+import {Tag} from '@sentry/scraps/badge';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {IconWarning} from 'sentry/icons';
+import {PluginIcon} from 'sentry/icons/pluginIcon';
+import {t, tct, tn} from 'sentry/locale';
 import type {
   IntegrationInstallationStatus,
-  PluginWithProjectList,
   SentryApp,
   SentryAppStatus,
 } from 'sentry/types/integrations';
 import type {Organization} from 'sentry/types/organization';
+import {trackAnalytics} from 'sentry/utils/analytics';
 import {
+  canManageIntegrations,
   convertIntegrationTypeToSnakeCase,
-  trackIntegrationAnalytics,
+  getIntegrationNoun,
 } from 'sentry/utils/integrationUtil';
 
-import AlertContainer from './integrationAlertContainer';
-import IntegrationStatus from './integrationStatus';
-import PluginDeprecationAlert from './pluginDeprecationAlert';
+import {IntegrationStatus} from './integrationStatus';
 
 type Props = {
   categories: string[];
@@ -32,30 +32,21 @@ type Props = {
   organization: Organization;
   publishStatus: SentryAppStatus;
   slug: string;
-  type: 'plugin' | 'firstParty' | 'sentryApp' | 'docIntegration';
-  /**
-   * If provided, render an alert message with this text.
-   */
-  alertText?: string;
+  type: 'firstParty' | 'sentryApp' | 'docIntegration';
   customAlert?: React.ReactNode;
   customIcon?: React.ReactNode;
-  plugin?: PluginWithProjectList;
-  /**
-   * If `alertText` was provided, this text overrides the "Resolve now" message
-   * in the alert.
-   */
-  resolveText?: string;
+  disabledConfigurations?: number;
+  outdatedConfigurations?: number;
   status?: IntegrationInstallationStatus;
 };
 
 const urlMap = {
-  plugin: 'plugins',
   firstParty: 'integrations',
   sentryApp: 'sentry-apps',
   docIntegration: 'document-integrations',
 };
 
-function IntegrationRow(props: Props) {
+export function IntegrationRow(props: Props) {
   const {
     organization,
     type,
@@ -65,11 +56,10 @@ function IntegrationRow(props: Props) {
     publishStatus,
     configurations,
     categories,
-    alertText,
-    resolveText,
-    plugin,
+    outdatedConfigurations = 0,
     customAlert,
     customIcon,
+    disabledConfigurations,
   } = props;
 
   const baseUrl =
@@ -77,16 +67,50 @@ function IntegrationRow(props: Props) {
       ? `/settings/${organization.slug}/developer-settings/${slug}/`
       : `/settings/${organization.slug}/${urlMap[type]}/${slug}/`;
 
+  const hasIntegrationAccess = canManageIntegrations(organization);
+
+  // When exactly one workspace is outdated there's nothing to disambiguate, so
+  // auto-open the relevant modal instead of making the user pick on the config
+  // page. With multiple outdated workspaces we send them to the config tab to
+  // choose which one to update. Members who can't manage integrations never get
+  // the auto-open param, since they can't act on the reinstall flow.
+  //
+  // GitHub's outdated state means missing app permissions, not a reinstall, so
+  // it opens the update-permissions modal (showPermsModal) rather than the
+  // install modal (showInstallModal).
+  const getAutoOpenParam = () => {
+    if (!hasIntegrationAccess || outdatedConfigurations !== 1) {
+      return '';
+    }
+
+    switch (slug) {
+      case 'github':
+        return '&showPermsModal=1';
+      default:
+        return '&showInstallModal=1';
+    }
+  };
+  const resolveNowHref = `${baseUrl}?tab=configurations&referrer=directory_resolve_now${getAutoOpenParam()}`;
+
   const renderDetails = () => {
     if (type === 'sentryApp') {
       return publishStatus !== 'published' && <PublishStatus status={publishStatus} />;
     }
-    // TODO: Use proper translations
-    return configurations > 0 ? (
-      <StyledLink to={`${baseUrl}?tab=configurations`}>{`${configurations} Configuration${
-        configurations > 1 ? 's' : ''
-      }`}</StyledLink>
-    ) : null;
+    if (configurations <= 0) {
+      return null;
+    }
+    return (
+      <Flex align="center" gap="xs">
+        <StyledLink to={`${baseUrl}?tab=configurations`}>
+          {tn('%s Configuration', '%s Configurations', configurations)}
+        </StyledLink>
+        {disabledConfigurations ? (
+          <Tag variant="warning">
+            {tn('%s disabled', '%s disabled', disabledConfigurations)}
+          </Tag>
+        ) : null}
+      </Flex>
+    );
   };
 
   const renderStatus = () => {
@@ -97,77 +121,71 @@ function IntegrationRow(props: Props) {
     return <LearnMore to={baseUrl}>{t('Learn More')}</LearnMore>;
   };
 
+  const getUpgradeTooltipTitle = () => {
+    if (!hasIntegrationAccess) {
+      return tct(
+        "There's a new update for your [displayName] integration, please update your [noun]",
+        {displayName, noun: getIntegrationNoun(slug)}
+      );
+    }
+    return tct(
+      "There's a new update for your [displayName] integration, please [link:click here] to update your [noun]",
+      {
+        displayName,
+        noun: getIntegrationNoun(slug),
+        link: (
+          <Link
+            to={resolveNowHref}
+            onClick={() =>
+              trackAnalytics('integrations.resolve_now_clicked', {
+                integration_type: convertIntegrationTypeToSnakeCase(type),
+                integration: slug,
+                organization,
+              })
+            }
+          />
+        ),
+      }
+    );
+  };
+
   return (
     <PanelRow noPadding data-test-id={slug}>
-      <FlexContainer>
+      <Flex align="center" padding="xl">
         {customIcon ?? <PluginIcon size={36} pluginId={slug} />}
         <TitleContainer>
-          <IntegrationName to={baseUrl}>{displayName}</IntegrationName>
+          <Flex gap="xs" align="center">
+            <IntegrationName to={baseUrl}>{displayName}</IntegrationName>
+            {outdatedConfigurations > 0 && (
+              <Tooltip
+                isHoverable
+                containerDisplayMode="flex"
+                title={getUpgradeTooltipTitle()}
+              >
+                <IconWarning variant="warning" aria-label={t('Integration alert')} />
+              </Tooltip>
+            )}
+          </Flex>
           <IntegrationDetails>
             {renderStatus()}
             {renderDetails()}
           </IntegrationDetails>
         </TitleContainer>
-        <TagsContainer>
+        <Flex justify="end" wrap="wrap" flex={3} padding="0 xl" gap="md">
           {categories?.map(category => (
-            <Tag
-              key={category}
-              type={category === publishStatus ? 'highlight' : 'default'}
-            >
+            <Tag key={category} variant={category === publishStatus ? 'info' : 'muted'}>
               {category === 'api' ? 'API' : startCase(category)}
             </Tag>
           ))}
-        </TagsContainer>
-      </FlexContainer>
-      {alertText && (
-        <AlertContainer>
-          <Alert.Container>
-            <Alert
-              type="warning"
-              showIcon
-              trailingItems={
-                <ResolveNowButton
-                  href={`${baseUrl}?tab=configurations&referrer=directory_resolve_now`}
-                  size="xs"
-                  onClick={() =>
-                    trackIntegrationAnalytics('integrations.resolve_now_clicked', {
-                      integration_type: convertIntegrationTypeToSnakeCase(type),
-                      integration: slug,
-                      organization,
-                    })
-                  }
-                >
-                  {resolveText || t('Resolve Now')}
-                </ResolveNowButton>
-              }
-            >
-              {alertText}
-            </Alert>
-          </Alert.Container>
-        </AlertContainer>
-      )}
+        </Flex>
+      </Flex>
       {customAlert}
-      {plugin?.deprecationDate && (
-        <PluginDeprecationAlertWrapper>
-          <PluginDeprecationAlert organization={organization} plugin={plugin} />
-        </PluginDeprecationAlertWrapper>
-      )}
     </PanelRow>
   );
 }
 
-const PluginDeprecationAlertWrapper = styled('div')`
-  padding: 0px ${space(3)} 0px 68px;
-`;
-
 const PanelRow = styled(PanelItem)`
   flex-direction: column;
-`;
-
-const FlexContainer = styled('div')`
-  display: flex;
-  align-items: center;
-  padding: ${space(2)};
 `;
 
 const TitleContainer = styled('div')`
@@ -176,37 +194,27 @@ const TitleContainer = styled('div')`
   white-space: nowrap;
 `;
 
-const TagsContainer = styled('div')`
-  flex: 3;
-  padding: 0 ${space(2)};
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: ${space(1)};
-  justify-content: flex-end;
-`;
-
 const IntegrationName = styled(Link)`
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
 const IntegrationDetails = styled('div')`
   display: flex;
   align-items: center;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const StyledLink = styled(Link)`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   &:before {
     content: '|';
-    color: ${p => p.theme.subText};
-    margin-right: ${space(0.75)};
+    color: ${p => p.theme.tokens.content.secondary};
+    margin-right: ${p => p.theme.space.sm};
   }
 `;
 
 const LearnMore = styled(Link)`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 type PublishStatusProps = {status: SentryApp['status']};
@@ -214,21 +222,17 @@ type PublishStatusProps = {status: SentryApp['status']};
 const PublishStatus = styled(({status, ...props}: PublishStatusProps) => (
   <div {...props}>{status}</div>
 ))`
-  color: ${p => (p.status === 'published' ? p.theme.success : p.theme.subText)};
+  color: ${p =>
+    p.status === 'published'
+      ? p.theme.tokens.content.success
+      : p.theme.tokens.content.secondary};
   font-weight: light;
-  margin-right: ${space(0.75)};
+  margin-right: ${p => p.theme.space.sm};
   text-transform: capitalize;
   &:before {
     content: '|';
-    color: ${p => p.theme.subText};
-    margin-right: ${space(0.75)};
-    font-weight: ${p => p.theme.fontWeightNormal};
+    color: ${p => p.theme.tokens.content.secondary};
+    margin-right: ${p => p.theme.space.sm};
+    font-weight: ${p => p.theme.font.weight.sans.regular};
   }
 `;
-
-const ResolveNowButton = styled(LinkButton)`
-  color: ${p => p.theme.subText};
-  float: right;
-`;
-
-export default IntegrationRow;

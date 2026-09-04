@@ -7,13 +7,13 @@ from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 from sentry.users.models.user import User
 
 
-def assert_no_notification_settings():
+def assert_no_notification_settings() -> None:
     assert NotificationSettingProvider.objects.all().count() == 0
 
 
 @control_silo_test
 class NotificationSettingTest(TestCase):
-    def test_remove_for_user(self):
+    def test_remove_for_user(self) -> None:
         NotificationSettingProvider.objects.create(
             user_id=self.user.id,
             scope_type="user",
@@ -32,7 +32,7 @@ class NotificationSettingTest(TestCase):
 
         assert_no_notification_settings()
 
-    def test_remove_for_team(self):
+    def test_remove_for_team(self) -> None:
         NotificationSettingProvider.objects.create(
             team_id=self.team.id,
             scope_type="team",
@@ -43,7 +43,7 @@ class NotificationSettingTest(TestCase):
         )
 
         # Deletion is deferred and tasks aren't run in tests.
-        with assume_test_silo_mode(SiloMode.REGION), outbox_runner():
+        with assume_test_silo_mode(SiloMode.CELL), outbox_runner():
             self.team.delete()
 
         with self.tasks():
@@ -51,7 +51,7 @@ class NotificationSettingTest(TestCase):
 
         assert_no_notification_settings()
 
-    def test_remove_for_project(self):
+    def test_remove_for_project(self) -> None:
         NotificationSettingProvider.objects.create(
             user_id=self.user.id,
             scope_type="project",
@@ -61,11 +61,11 @@ class NotificationSettingTest(TestCase):
             provider="slack",
         )
 
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.project.delete()
         assert_no_notification_settings()
 
-    def test_remove_for_organization(self):
+    def test_remove_for_organization(self) -> None:
         NotificationSettingProvider.objects.create(
             user_id=self.user.id,
             scope_type="organization",
@@ -74,6 +74,6 @@ class NotificationSettingTest(TestCase):
             value="never",
             provider="slack",
         )
-        with assume_test_silo_mode(SiloMode.REGION), outbox_runner():
+        with assume_test_silo_mode(SiloMode.CELL), outbox_runner():
             self.organization.delete()
         assert_no_notification_settings()

@@ -1,13 +1,11 @@
 import {Fragment} from 'react';
 
-import {openHelpSearchModal} from 'sentry/actionCreators/modal';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import {t, tct} from 'sentry/locale';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {tct} from 'sentry/locale';
 import type {Project} from 'sentry/types/project';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import {useDenylistedProjects} from 'sentry/views/insights/database/queries/useDenylistedProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useOutdatedSDKProjects} from 'sentry/views/insights/database/queries/useOutdatedSDKProjects';
 import {MODULE_DOC_LINK} from 'sentry/views/insights/database/settings';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
@@ -17,12 +15,11 @@ interface Props {
   isDataAvailable?: boolean;
 }
 
-function DivWrapper(props: any) {
+function DivWrapper(props: React.ComponentProps<'div'>) {
   return <div {...props} />;
 }
 
 export function NoDataMessage({Wrapper = DivWrapper, isDataAvailable}: Props) {
-  const organization = useOrganization();
   const {selection, isReady: pageFilterIsReady} = usePageFilters();
 
   const selectedProjectIds = selection.projects.map(projectId => projectId.toString());
@@ -33,20 +30,14 @@ export function NoDataMessage({Wrapper = DivWrapper, isDataAvailable}: Props) {
       enabled: pageFilterIsReady && !isDataAvailable,
     });
 
-  const {projects: denylistedProjects, isFetching: areDenylistProjectsFetching} =
-    useDenylistedProjects({
-      projectId: selectedProjectIds,
-    });
-
-  const isDataFetching = areOutdatedProjectsFetching || areDenylistProjectsFetching;
+  const isDataFetching = areOutdatedProjectsFetching;
 
   if (isDataFetching) {
     return null;
   }
 
   const hasAnyProblematicProjects =
-    (!areOutdatedProjectsFetching && outdatedProjects.length > 0) ||
-    (!areDenylistProjectsFetching && denylistedProjects.length > 0);
+    !areOutdatedProjectsFetching && outdatedProjects.length > 0;
 
   if (isDataAvailable && !hasAnyProblematicProjects) {
     return null;
@@ -64,37 +55,24 @@ export function NoDataMessage({Wrapper = DivWrapper, isDataAvailable}: Props) {
       {outdatedProjects.length > 0 &&
         tct('You may be missing data due to outdated SDKs: [projectList].', {
           projectList: <ProjectList projects={outdatedProjects} />,
-        })}{' '}
-      {denylistedProjects.length > 0 &&
-        tct(
-          'Some of your projects have been omitted from query performance analysis. Please [supportLink]. Omitted projects: [projectList].',
-          {
-            supportLink: (
-              <Link to="" onClick={() => openHelpSearchModal({organization})}>
-                {t('Contact Support')}
-              </Link>
-            ),
-            projectList: <ProjectList projects={denylistedProjects} />,
-          }
-        )}
+        })}
     </Wrapper>
   );
 }
 
 interface ProjectListProps {
   projects: Project[];
-  limit?: number;
 }
 
-function ProjectList({projects, limit = MAX_LISTED_PROJECTS}: ProjectListProps) {
+function ProjectList({projects}: ProjectListProps) {
   const organization = useOrganization();
 
-  const visibleProjects = projects.slice(0, limit + 1);
+  const visibleProjects = projects.slice(0, MAX_LISTED_PROJECTS + 1);
   const hasMoreProjectsThanVisible = projects.length > MAX_LISTED_PROJECTS;
 
   return (
     <Fragment>
-      {visibleProjects.slice(0, limit).map((project, projectIndex) => {
+      {visibleProjects.slice(0, MAX_LISTED_PROJECTS).map((project, projectIndex) => {
         return (
           <span key={project.id}>
             <Link
@@ -111,7 +89,7 @@ function ProjectList({projects, limit = MAX_LISTED_PROJECTS}: ProjectListProps) 
       })}
       {hasMoreProjectsThanVisible &&
         tct(' and [count] more.', {
-          count: projects.length - limit,
+          count: projects.length - MAX_LISTED_PROJECTS,
         })}{' '}
     </Fragment>
   );

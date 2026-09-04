@@ -1,29 +1,29 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
+import {useQuery, useMutation, useQueryClient} from '@tanstack/react-query';
+
+import {LinkButton} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import type {TableColumnConfig} from '@sentry/scraps/table';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import Access from 'sentry/components/acl/access';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {Access} from 'sentry/components/acl/access';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {IconAdd} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import type {OrgAuthToken} from 'sentry/types/user';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {handleXhrErrorResponse} from 'sentry/utils/handleXhrErrorResponse';
-import {
-  setApiQueryData,
-  useApiQuery,
-  useMutation,
-  useQueryClient,
-} from 'sentry/utils/queryClient';
-import type RequestError from 'sentry/utils/requestError/requestError';
-import useApi from 'sentry/utils/useApi';
-import withOrganization from 'sentry/utils/withOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 import {OrganizationAuthTokensAuthTokenRow} from 'sentry/views/settings/organizationAuthTokens/authTokenRow';
 
 type FetchOrgAuthTokensResponse = OrgAuthToken[];
@@ -34,10 +34,21 @@ type RevokeTokenQueryVariables = {
   token: OrgAuthToken;
 };
 
+const TOKEN_COLUMNS: TableColumnConfig[] = [
+  {key: 'token', width: 'auto'},
+  {key: 'created', width: 'auto'},
+  {key: 'lastAccess', width: 'auto'},
+  {key: 'actions', width: 'auto'},
+];
+
 export const makeFetchOrgAuthTokensForOrgQueryKey = ({
   orgSlug,
 }: FetchOrgAuthTokensParameters) =>
-  [`/organizations/${orgSlug}/org-auth-tokens/`] as const;
+  [
+    getApiUrl('/organizations/$organizationIdOrSlug/org-auth-tokens/', {
+      path: {organizationIdOrSlug: orgSlug},
+    }),
+  ] as const;
 
 function TokenList({
   organization,
@@ -50,8 +61,6 @@ function TokenList({
   tokenList: OrgAuthToken[];
   revokeToken?: (data: {token: OrgAuthToken}) => void;
 }) {
-  const apiEndpoint = `/organizations/${organization.slug}/projects/`;
-
   const projectIds = tokenList
     .map(token => token.projectLastUsedId)
     .filter(id => !!id) as string[];
@@ -60,13 +69,17 @@ function TokenList({
 
   const hasProjects = projectIds.length > 0;
 
-  const {data: projects, isPending: isLoadingProjects} = useApiQuery<Project[]>(
-    [apiEndpoint, {query: {query: idQueryParams}}],
-    {
+  const {data: projects, isPending: isLoadingProjects} = useQuery({
+    ...apiOptions.as<Project[]>()('/organizations/$organizationIdOrSlug/projects/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        query: idQueryParams,
+        collapse: ['latestDeploys', 'unusedFeatures'],
+      },
       staleTime: 0,
-      enabled: hasProjects,
-    }
-  );
+    }),
+    enabled: hasProjects,
+  });
 
   return (
     <Fragment>
@@ -90,11 +103,8 @@ function TokenList({
   );
 }
 
-export function OrganizationAuthTokensIndex({
-  organization,
-}: {
-  organization: Organization;
-}) {
+function OrganizationAuthTokensIndex() {
+  const organization = useOrganization();
   const api = useApi();
   const queryClient = useQueryClient();
 
@@ -117,7 +127,9 @@ export function OrganizationAuthTokensIndex({
   >({
     mutationFn: ({token}) =>
       api.requestPromise(
-        `/organizations/${organization.slug}/org-auth-tokens/${token.id}/`,
+        getApiUrl('/organizations/$organizationIdOrSlug/org-auth-tokens/$tokenId/', {
+          path: {organizationIdOrSlug: organization.slug, tokenId: token.id},
+        }),
         {
           method: 'DELETE',
         }
@@ -147,8 +159,9 @@ export function OrganizationAuthTokensIndex({
 
   const createNewToken = (
     <LinkButton
-      priority="primary"
-      size="sm"
+      variant="primary"
+      size="md"
+      icon={<IconAdd />}
       to={`/settings/${organization.slug}/auth-tokens/new-token/`}
       data-test-id="create-token"
     >
@@ -164,36 +177,51 @@ export function OrganizationAuthTokensIndex({
             title={t('Organization Tokens')}
             orgSlug={organization.slug}
           />
-          <SettingsPageHeader title={t('Organization Tokens')} action={createNewToken} />
-
-          <TextBlock>
-            {t(
-              'Organization Tokens can be used in many places to interact with Sentry programatically. For example, they can be used for sentry-cli, bundler plugins or similar uses cases.'
-            )}
-          </TextBlock>
-          <TextBlock>
-            {tct(
-              'For more information on how to use the web API, see our [link:documentation].',
-              {
-                link: <ExternalLink href="https://docs.sentry.io/api/" />,
-              }
-            )}
-          </TextBlock>
-
-          <ResponsivePanelTable
-            isLoading={isPending || isError}
-            isEmpty={!isPending && !tokenList?.length}
-            loader={
-              isError ? (
-                <LoadingError
-                  message={t('Failed to load organization tokens.')}
-                  onRetry={refetchTokenList}
-                />
-              ) : undefined
+          <SettingsPageHeader
+            title={t('Organization Tokens')}
+            action={createNewToken}
+            subtitle={
+              <Stack gap="md">
+                <div>
+                  {t(
+                    'Organization tokens can be used in many places to interact with Sentry programmatically. For example, they can be used for sentry-cli, bundler plugins or similar uses cases.'
+                  )}
+                </div>
+                <div>
+                  {tct(
+                    'For more information on how to use the web API, see our [link:documentation].',
+                    {
+                      link: <ExternalLink href="https://docs.sentry.io/api/" />,
+                    }
+                  )}
+                </div>
+              </Stack>
             }
-            emptyMessage={t("You haven't created any authentication tokens yet.")}
-            headers={[t('Token'), t('Created'), t('Last access'), '']}
+          />
+
+          <ResponsiveSimpleTable
+            columns={TOKEN_COLUMNS}
+            header={
+              <SimpleTable.HeaderRow>
+                <SimpleTable.HeaderCell>{t('Token')}</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell>{t('Created')}</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell>{t('Last access')}</SimpleTable.HeaderCell>
+                <SimpleTable.HeaderCell />
+              </SimpleTable.HeaderRow>
+            }
           >
+            {isError && (
+              <SimpleTable.Error
+                message={t('Failed to load organization tokens.')}
+                onRetry={refetchTokenList}
+              />
+            )}
+            {!isError && isPending && <SimpleTable.Loading />}
+            {!isError && !isPending && !tokenList?.length && (
+              <SimpleTable.Empty>
+                {t("You haven't created any authentication tokens yet.")}
+              </SimpleTable.Empty>
+            )}
             {!isError && !isPending && !!tokenList?.length && (
               <TokenList
                 organization={organization}
@@ -202,7 +230,7 @@ export function OrganizationAuthTokensIndex({
                 revokeToken={hasAccess ? handleRevokeToken : undefined}
               />
             )}
-          </ResponsivePanelTable>
+          </ResponsiveSimpleTable>
         </Fragment>
       )}
     </Access>
@@ -213,15 +241,19 @@ export function tokenPreview(tokenLastCharacters: string, tokenPrefix = '') {
   return `${tokenPrefix}************${tokenLastCharacters}`;
 }
 
-export default withOrganization(OrganizationAuthTokensIndex);
-
-const ResponsivePanelTable = styled(PanelTable)`
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
+const ResponsiveSimpleTable = styled(SimpleTable)`
+  @container (max-width: ${p => p.theme.container.xl}) {
     grid-template-columns: 1fr 1fr;
 
-    > *:nth-child(4n + 2),
-    > *:nth-child(4n + 3) {
+    /* Hide the "Created" and "Last access" columns; the flat nth-child(4n + x)
+       form this replaced counted cells across the whole grid. */
+    [role='columnheader']:nth-child(2),
+    [role='columnheader']:nth-child(3),
+    [role='cell']:nth-child(2),
+    [role='cell']:nth-child(3) {
       display: none;
     }
   }
 `;
+
+export default OrganizationAuthTokensIndex;

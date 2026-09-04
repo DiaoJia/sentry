@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections import namedtuple
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from parsimonious.exceptions import ParseError
 from parsimonious.grammar import Grammar
@@ -11,9 +11,11 @@ from parsimonious.nodes import Node
 from parsimonious.nodes import NodeVisitor as BaseNodeVisitor
 from rest_framework.serializers import ValidationError
 
-from sentry.eventstore.models import EventSubjectTemplateData
 from sentry.integrations.models.repository_project_path_config import RepositoryProjectPathConfig
 from sentry.models.organizationmember import OrganizationMember
+from sentry.models.project import Project
+from sentry.models.team import Team
+from sentry.services.eventstore.models import EventSubjectTemplateData
 from sentry.types.actor import Actor, ActorType
 from sentry.users.services.user.service import user_service
 from sentry.utils.codeowners import codeowners_match
@@ -29,6 +31,24 @@ else:
     NodeVisitor = BaseNodeVisitor
 
 VERSION = 1
+
+_CODEOWNERS_EMAIL_RE = re.compile(r"[^@]+@[^@]+\.[^@]+")
+_CODEOWNERS_SPLIT_RE = re.compile(r"(?<!\\)\s")
+
+
+class OwnershipRuleMatcher(TypedDict):
+    type: str
+    pattern: str
+
+
+class OwnershipRule(TypedDict):
+    matcher: OwnershipRuleMatcher
+    owners: list[dict[str, Any]]
+
+
+# $version is not a valid Python identifier, so we use the functional form.
+OwnershipSchema = TypedDict("OwnershipSchema", {"$version": int, "rules": list[OwnershipRule]})
+
 
 URL = "url"
 PATH = "path"
@@ -51,7 +71,7 @@ matcher_type = "{URL}" / "{PATH}" / "{MODULE}" / "{CODEOWNERS}" / event_tag
 
 event_tag   = ~r"tags.[^:]+"
 
-owners       = _ owner+
+owners       = _ owner*
 owner        = _ team_prefix identifier
 team_prefix  = "#"?
 
@@ -79,6 +99,8 @@ class Rule(namedtuple("Rule", "matcher owners")):
     """
 
     def __str__(self) -> str:
+        if not self.owners:
+            return str(self.matcher)
         owners = [o.dump() for o in self.owners]
         owners_str = " ".join(
             f"#{owner['identifier']}" if owner["type"] == "team" else owner["identifier"]
@@ -86,11 +108,11 @@ class Rule(namedtuple("Rule", "matcher owners")):
         )
         return f"{self.matcher} {owners_str}"
 
-    def dump(self) -> dict[str, Sequence[Owner]]:
+    def dump(self) -> OwnershipRule:
         return {"matcher": self.matcher.dump(), "owners": [o.dump() for o in self.owners]}
 
     @classmethod
-    def load(cls, data: Mapping[str, Any]) -> Rule:
+    def load(cls, data: OwnershipRule) -> Rule:
         return cls(Matcher.load(data["matcher"]), [Owner.load(o) for o in data["owners"]])
 
     def test(
@@ -119,16 +141,16 @@ class Matcher(namedtuple("Matcher", "type pattern")):
     def __str__(self) -> str:
         return f"{self.type}:{self.pattern}"
 
-    def dump(self) -> dict[str, str]:
+    def dump(self) -> OwnershipRuleMatcher:
         return {"type": self.type, "pattern": self.pattern}
 
     @classmethod
-    def load(cls, data: Mapping[str, str]) -> Matcher:
+    def load(cls, data: OwnershipRuleMatcher) -> Matcher:
         return cls(data["type"], data["pattern"])
 
     @staticmethod
     def munge_if_needed(
-        data: Mapping[str, Any]
+        data: Mapping[str, Any],
     ) -> tuple[Sequence[Mapping[str, Any]], Sequence[str]]:
         keys = ["filename", "abs_path"]
         platform = data.get("platform")
@@ -308,19 +330,19 @@ def parse_rules(data: str) -> Any:
     return OwnershipVisitor().visit(tree)
 
 
-def dump_schema(rules: Sequence[Rule]) -> dict[str, Any]:
+def dump_schema(rules: Sequence[Rule]) -> OwnershipSchema:
     """Convert a Rule tree into a JSON schema"""
     return {"$version": VERSION, "rules": [r.dump() for r in rules]}
 
 
-def load_schema(schema: Mapping[str, Any]) -> list[Rule]:
+def load_schema(schema: OwnershipSchema) -> list[Rule]:
     """Convert a JSON schema into a Rule tree"""
     if schema["$version"] != VERSION:
         raise RuntimeError("Invalid schema $version: %r" % schema["$version"])
     return [Rule.load(r) for r in schema["rules"]]
 
 
-def convert_schema_to_rules_text(schema: Mapping[str, Any]) -> str:
+def convert_schema_to_rules_text(schema: OwnershipSchema) -> str:
     rules = load_schema(schema)
     text = ""
 
@@ -330,7 +352,13 @@ def convert_schema_to_rules_text(schema: Mapping[str, Any]) -> str:
         return ""
 
     for rule in rules:
-        text += f"{rule.matcher.type}:{rule.matcher.pattern} {' '.join([f'{owner_prefix(owner.type)}{owner.identifier}' for owner in rule.owners])}\n"
+        owners_str = " ".join(
+            f"{owner_prefix(owner.type)}{owner.identifier}" for owner in rule.owners
+        )
+        if owners_str:
+            text += f"{rule.matcher.type}:{rule.matcher.pattern} {owners_str}\n"
+        else:
+            text += f"{rule.matcher.type}:{rule.matcher.pattern}\n"
 
     return text
 
@@ -345,13 +373,13 @@ def parse_code_owners(data: str) -> tuple[list[str], list[str], list[str]]:
             continue
 
         # Skip lines that are only empty space characters
-        if re.match(r"^\s*$", rule):
+        if rule.isspace():
             continue
 
         _, assignees = get_codeowners_path_and_owners(rule)
         for assignee in assignees:
             if "/" not in assignee:
-                if re.match(r"[^@]+@[^@]+\.[^@]+", assignee):
+                if _CODEOWNERS_EMAIL_RE.match(assignee):
                     emails.append(assignee)
                 else:
                     usernames.append(assignee)
@@ -363,16 +391,18 @@ def parse_code_owners(data: str) -> tuple[list[str], list[str], list[str]]:
 
 
 def get_codeowners_path_and_owners(rule: str) -> tuple[str, Sequence[str]]:
-    # Regex does a negative lookbehind for a backslash. Matches on whitespace without a preceding backslash.
-    pattern = re.compile(r"(?<!\\)\s")
-    path, *code_owners = (i for i in pattern.split(rule.strip()) if i)
+    # CODEOWNERS patterns follow gitignore syntax, so backslashes can escape spaces:
+    # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners#codeowners-syntax
+    # Use a negative lookbehind for those uncommon rules and native split otherwise.
+    if "\\" in rule:
+        path, *code_owners = (i for i in _CODEOWNERS_SPLIT_RE.split(rule.strip()) if i)
+    else:
+        path, *code_owners = rule.split()
 
     # Find index of # in code_owners, assume everything after is a comment
-    try:
+    if "#" in code_owners:
         comment_index = code_owners.index("#")
         code_owners = code_owners[:comment_index]
-    except ValueError:
-        pass
 
     return path, code_owners
 
@@ -395,7 +425,7 @@ def convert_codeowners_syntax(
             continue
 
         # Skip lines that are only empty space characters
-        if re.match(r"^\s*$", rule):
+        if rule.isspace():
             continue
 
         path, code_owners = get_codeowners_path_and_owners(rule)
@@ -422,21 +452,25 @@ def convert_codeowners_syntax(
                 # we skip associations
                 continue
 
-        if sentry_assignees:
-            # Replace source_root with stack_root for anchored paths
-            # /foo/dir -> anchored
-            # foo/dir -> anchored
-            # foo/dir/ -> anchored
-            # foo/ -> not anchored
-            if re.search(r"[\/].{1}", path):
-                path_with_stack_root = path.replace(
-                    code_mapping.source_root, code_mapping.stack_root, 1
-                )
-                # flatten multiple '/' if not protocol
-                formatted_path = re.sub(r"(?<!:)\/{2,}", "/", path_with_stack_root)
-                result += f'codeowners:{formatted_path} {" ".join(sentry_assignees)}\n'
-            else:
-                result += f'codeowners:{path} {" ".join(sentry_assignees)}\n'
+        # Replace source_root with stack_root for anchored paths
+        # /foo/dir -> anchored
+        # foo/dir -> anchored
+        # foo/dir/ -> anchored
+        # foo/ -> not anchored
+        if re.search(r"[\/].{1}", path):
+            path_with_stack_root = path.replace(
+                code_mapping.source_root, code_mapping.stack_root, 1
+            )
+            # flatten multiple '/' if not protocol
+            formatted_path = re.sub(r"(?<!:)\/{2,}", "/", path_with_stack_root)
+        else:
+            formatted_path = path
+
+        if not code_owners:
+            # Exclusion rule: path with no owners means "no ownership" for this path
+            result += f"codeowners:{formatted_path}\n"
+        elif sentry_assignees:
+            result += f"codeowners:{formatted_path} {' '.join(sentry_assignees)}\n"
 
     return result
 
@@ -445,7 +479,6 @@ def resolve_actors(owners: Iterable[Owner], project_id: int) -> dict[Owner, Acto
     """Convert a list of Owner objects into a dictionary
     of {Owner: Actor} pairs. Actors not identified are returned
     as None."""
-    from sentry.models.team import Team
 
     if not owners:
         return {}
@@ -504,12 +537,66 @@ def resolve_actors(owners: Iterable[Owner], project_id: int) -> dict[Owner, Acto
     return {o: actors.get((o.type, o.identifier.lower())) for o in owners}
 
 
+def get_invalid_owner_details(bad_owners: Sequence[Owner], project_id: int) -> list[str]:
+    if not bad_owners:
+        return []
+
+    project_slug, organization_id = Project.objects.values_list("slug", "organization_id").get(
+        id=project_id
+    )
+
+    messages: list[str] = []
+
+    team_owners = [o for o in bad_owners if o.type == "team"]
+    for owner in team_owners:
+        messages.append(
+            f"Team #{owner.identifier} does not have access to project '{project_slug}'."
+        )
+
+    user_owners = [o for o in bad_owners if o.type == "user"]
+    if user_owners:
+        emails = [o.identifier for o in user_owners]
+        existing_users = user_service.get_many(filter=dict(emails=emails, is_active=True))
+        existing_email_to_user_id: dict[str, int] = {}
+        for user in existing_users:
+            existing_email_to_user_id[user.email.lower()] = user.id
+            for useremail in user.useremails:
+                existing_email_to_user_id[useremail.email.lower()] = user.id
+
+        existing_user_ids = set(existing_email_to_user_id.values())
+
+        org_member_user_ids = (
+            set(
+                OrganizationMember.objects.filter(
+                    user_id__in=existing_user_ids,
+                    organization_id=organization_id,
+                ).values_list("user_id", flat=True)
+            )
+            if existing_user_ids
+            else set()
+        )
+
+        for owner in user_owners:
+            user_id = existing_email_to_user_id.get(owner.identifier.lower())
+            if user_id is not None and user_id in org_member_user_ids:
+                messages.append(
+                    f"User {owner.identifier} does not have access to project '{project_slug}'."
+                )
+            else:
+                messages.append(f"User {owner.identifier} is not a member of this organization.")
+
+    messages.sort()
+    return messages
+
+
 def remove_deleted_owners_from_schema(
-    rules: list[dict[str, Any]], owners_id: dict[str, int]
+    rules: list[OwnershipRule], owners_id: dict[str, int]
 ) -> None:
     valid_rules = rules
 
     for rule in rules:
+        if not rule["owners"]:
+            continue
         valid_owners = rule["owners"]
         for rule_owner in rule["owners"]:
             if rule_owner["identifier"] not in owners_id.keys():
@@ -523,7 +610,7 @@ def remove_deleted_owners_from_schema(
     rules = valid_rules
 
 
-def add_owner_ids_to_schema(rules: list[dict[str, Any]], owners_id: dict[str, int]) -> None:
+def add_owner_ids_to_schema(rules: list[OwnershipRule], owners_id: dict[str, int]) -> None:
     for rule in rules:
         for rule_owner in rule["owners"]:
             if rule_owner["identifier"] in owners_id.keys():
@@ -533,9 +620,8 @@ def add_owner_ids_to_schema(rules: list[dict[str, Any]], owners_id: dict[str, in
 def create_schema_from_issue_owners(
     project_id: int,
     issue_owners: str | None,
-    add_owner_ids: bool = False,
     remove_deleted_owners: bool = False,
-) -> dict[str, Any] | None:
+) -> OwnershipSchema | None:
     if issue_owners is None:
         return None
 
@@ -547,29 +633,31 @@ def create_schema_from_issue_owners(
             {"raw": f"Parse error: {rule_name} (line {e.line()}, column {e.column()})"}
         )
 
+    for rule in rules:
+        if not rule.owners and rule.matcher.type != CODEOWNERS:
+            raise ValidationError(
+                {"raw": f"Missing owner in rule: {rule.matcher.type}:{rule.matcher.pattern}"}
+            )
+
     schema = dump_schema(rules)
 
     owners = {o for rule in rules for o in rule.owners}
     owners_id = {}
     actors = resolve_actors(owners, project_id)
 
-    bad_actors = []
+    bad_owners: list[Owner] = []
     for owner, actor in actors.items():
         if actor is None:
-            if owner.type == "user":
-                bad_actors.append(owner.identifier)
-            elif owner.type == "team":
-                bad_actors.append(f"#{owner.identifier}")
-        elif add_owner_ids:
+            bad_owners.append(owner)
+        else:
             owners_id[owner.identifier] = actor.id
 
-    if bad_actors and remove_deleted_owners:
+    if bad_owners and remove_deleted_owners:
         remove_deleted_owners_from_schema(schema["rules"], owners_id)
-    elif bad_actors:
-        bad_actors.sort()
-        raise ValidationError({"raw": "Invalid rule owners: {}".format(", ".join(bad_actors))})
+    elif bad_owners:
+        error_messages = get_invalid_owner_details(bad_owners, project_id)
+        raise ValidationError({"raw": "Invalid rule owners: {}".format(" ".join(error_messages))})
 
-    if add_owner_ids:
-        add_owner_ids_to_schema(schema["rules"], owners_id)
+    add_owner_ids_to_schema(schema["rules"], owners_id)
 
     return schema

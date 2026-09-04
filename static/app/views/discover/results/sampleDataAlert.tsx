@@ -1,13 +1,14 @@
 import styled from '@emotion/styled';
 
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+
 import {IconClose} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import useDismissAlert from 'sentry/utils/useDismissAlert';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useDismissAlert} from 'sentry/utils/useDismissAlert';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useUser} from 'sentry/utils/useUser';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
 
 const EXCLUDED_CONDITIONS = [
   'event.type:error',
@@ -26,7 +27,8 @@ const EXCLUDED_CONDITIONS = [
 
 export function SampleDataAlert({query}: {query?: string}) {
   const user = useUser();
-  const {slug, isDynamicallySampled} = useOrganization();
+  const organization = useOrganization();
+  const {slug, isDynamicallySampled} = organization;
 
   const {dismiss, isDismissed} = useDismissAlert({
     key: `${slug}-${user.id}:sample-data-alert-dismissed`,
@@ -42,17 +44,21 @@ export function SampleDataAlert({query}: {query?: string}) {
 
   return (
     <Alert.Container>
-      <Alert type="warning" showIcon>
+      <Alert variant="warning">
         <AlertContent>
-          {t(
-            'Based on your search criteria and sample rate, the events available may be limited because Discover uses sampled data only.'
-          )}
+          {getDiscoverDeprecation(organization)
+            ? t(
+                'Based on your search criteria and sample rate, the events available may be limited because Errors uses sampled data only.'
+              )
+            : t(
+                'Based on your search criteria and sample rate, the events available may be limited because Discover uses sampled data only.'
+              )}
           <DismissButton
-            priority="link"
+            variant="link"
             icon={<IconClose />}
             onClick={dismiss}
             aria-label={t('Dismiss Alert')}
-            title={t('Dismiss Alert')}
+            tooltipProps={{title: t('Dismiss Alert')}}
           />
         </AlertContent>
       </Alert>
@@ -61,7 +67,7 @@ export function SampleDataAlert({query}: {query?: string}) {
 }
 
 const DismissButton = styled(Button)`
-  color: ${p => p.theme.alert.warning.color};
+  color: ${p => p.theme.colors.yellow500};
   pointer-events: all;
   &:hover {
     opacity: 0.5;
@@ -71,6 +77,6 @@ const DismissButton = styled(Button)`
 const AlertContent = styled('div')`
   display: grid;
   grid-template-columns: 1fr max-content;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
 `;

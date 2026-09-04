@@ -1,5 +1,9 @@
 from typing import Any
 
+from sentry import options
+from sentry.constants import ObjectStatus
+from sentry.integrations.services.integration import integration_service
+from sentry.integrations.services.integration.model import RpcIntegration
 from sentry.notifications.notification_action.registry import issue_alert_handler_registry
 from sentry.notifications.notification_action.types import BaseIssueAlertHandler
 from sentry.workflow_engine.models import Action
@@ -16,3 +20,28 @@ class DiscordIssueAlertHandler(BaseIssueAlertHandler):
     @classmethod
     def get_target_display(cls, action: Action, mapping: ActionFieldMapping) -> dict[str, Any]:
         return {}
+
+    @classmethod
+    def render_label(
+        cls,
+        organization_id: int,
+        blob: dict[str, Any],
+        integration_cache: dict[int, RpcIntegration] | None = None,
+    ) -> str:
+        integration_id = blob["server"]
+        integration = cls._get_cached_integration(integration_id, integration_cache)
+        if integration is None:
+            integration = integration_service.get_integration(
+                integration_id=integration_id,
+                organization_id=organization_id,
+                status=ObjectStatus.ACTIVE,
+                using_replica=options.get("integration_service.get_integration.using_replica"),
+            )
+        if not integration:
+            return ""
+
+        server = integration.name
+        channel_id = blob["channel_id"]
+        tags = [s.strip() for s in blob["tags"].split(",")]
+        formatted_tags = "[{}]".format(", ".join(tags))
+        return f"Send a notification to the {server} Discord server in the channel with ID or URL: {channel_id} and show tags {formatted_tags} in the notification."

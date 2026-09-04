@@ -6,27 +6,26 @@ from sentry.hybridcloud.services.organization_mapping.model import CustomerId
 from sentry.models.organization import Organization
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.organizations.services.organization import RpcOrganizationMappingFlags
-from sentry.types.region import Region
+from sentry.types.cell import Cell
 
 
 def update_organization_mapping_from_instance(
     organization: Organization,
-    region: Region,
+    cell: Cell,
     customer_id: CustomerId | tuple[str | None] | None = None,
 ) -> RpcOrganizationMappingUpdate:
     return RpcOrganizationMappingUpdate(
         name=organization.name,
         status=organization.status,
         slug=organization.slug,
-        region_name=region.name,
+        cell_name=cell.name,
+        date_created=organization.date_added,
         requires_2fa=bool(organization.flags.require_2fa),
         early_adopter=bool(organization.flags.early_adopter),
-        codecov_access=bool(organization.flags.codecov_access),
         disable_shared_issues=bool(organization.flags.disable_shared_issues),
         allow_joinleave=bool(organization.flags.allow_joinleave),
         disable_new_visibility_features=bool(organization.flags.disable_new_visibility_features),
         enhanced_privacy=bool(organization.flags.enhanced_privacy),
-        require_email_verification=bool(organization.flags.require_email_verification),
         disable_member_project_creation=bool(organization.flags.disable_member_project_creation),
         prevent_superuser_access=bool(organization.flags.prevent_superuser_access),
         disable_member_invite=bool(organization.flags.disable_member_invite),
@@ -39,7 +38,7 @@ def serialize_organization_mapping(org_mapping: OrganizationMapping) -> RpcOrgan
         id=org_mapping.organization_id,
         slug=org_mapping.slug,
         name=org_mapping.name,
-        region_name=org_mapping.region_name,
+        cell_name=org_mapping.cell_name,
         date_created=org_mapping.date_created,
         customer_id=org_mapping.customer_id,
         status=org_mapping.status,
@@ -57,8 +56,6 @@ def serialize_organization_mapping_flags(
         enhanced_privacy=org_mapping.enhanced_privacy,
         disable_shared_issues=org_mapping.disable_shared_issues,
         disable_new_visibility_features=org_mapping.disable_new_visibility_features,
-        require_email_verification=org_mapping.require_email_verification,
-        codecov_access=org_mapping.codecov_access,
         disable_member_project_creation=org_mapping.disable_member_project_creation,
         prevent_superuser_access=org_mapping.prevent_superuser_access,
         disable_member_invite=org_mapping.disable_member_invite,

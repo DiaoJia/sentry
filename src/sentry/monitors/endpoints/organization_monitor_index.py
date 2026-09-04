@@ -16,9 +16,9 @@ from rest_framework.response import Response
 from sentry import audit_log, quotas
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects
-from sentry.api.bases.organization import OrganizationAlertRulePermission, OrganizationEndpoint
+from sentry.api.bases.organization import OrganizationAlertRulePermission
 from sentry.api.helpers.teams import get_teams
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import serialize
@@ -28,10 +28,16 @@ from sentry.apidocs.constants import (
     RESPONSE_NOT_FOUND,
     RESPONSE_UNAUTHORIZED,
 )
-from sentry.apidocs.parameters import GlobalParams, MonitorParams, OrganizationParams
+from sentry.apidocs.parameters import (
+    CursorQueryParam,
+    GlobalParams,
+    MonitorParams,
+    OrganizationParams,
+)
 from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.constants import ObjectStatus
 from sentry.db.models.query import in_iexact
+from sentry.incidents.endpoints.bases import OrganizationAlertRuleBaseEndpoint
 from sentry.models.environment import Environment
 from sentry.models.organization import Organization
 from sentry.monitors.models import (
@@ -39,7 +45,6 @@ from sentry.monitors.models import (
     MONITOR_ENVIRONMENT_ORDERING,
     Monitor,
     MonitorEnvironment,
-    MonitorLimitsExceeded,
     MonitorStatus,
 )
 from sentry.monitors.serializers import (
@@ -47,7 +52,6 @@ from sentry.monitors.serializers import (
     MonitorSerializer,
     MonitorSerializerResponse,
 )
-from sentry.monitors.utils import create_issue_alert_rule, signal_monitor_created
 from sentry.monitors.validators import MonitorBulkEditValidator, MonitorValidator
 from sentry.search.utils import tokenize_query
 from sentry.types.actor import Actor
@@ -72,9 +76,9 @@ def flip_sort_direction(sort_field: str) -> str:
     return sort_field
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Crons"])
-class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
+class OrganizationMonitorIndexEndpoint(OrganizationAlertRuleBaseEndpoint):
     publish_status = {
         "GET": ApiPublishStatus.PUBLIC,
         "POST": ApiPublishStatus.PUBLIC,
@@ -85,12 +89,14 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
     permission_classes = (OrganizationAlertRulePermission,)
 
     @extend_schema(
-        operation_id="Retrieve Monitors for an Organization",
+        operation_id="listOrganizationMonitors",
+        summary="Retrieve Monitors for an Organization",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             OrganizationParams.PROJECT,
             GlobalParams.ENVIRONMENT,
             MonitorParams.OWNER,
+            CursorQueryParam,
         ],
         responses={
             200: inline_sentry_response_serializer("MonitorList", list[MonitorSerializerResponse]),
@@ -99,7 +105,9 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def get(self, request: AuthenticatedHttpRequest, organization: Organization) -> Response:
+    def get(
+        self, request: AuthenticatedHttpRequest, organization: Organization
+    ) -> Response[list[MonitorSerializerResponse]]:
         """
         Lists monitors, including nested monitor environments. May be filtered to a project or environment.
         """
@@ -144,11 +152,17 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
         sort_fields = []
 
         if sort == "status":
+            # Check if all environments are muted by seeing if any unmuted environments exist
+            has_unmuted_env = monitor_environments_query.filter(is_muted=False)
+
             queryset = queryset.annotate(
                 environment_status_ordering=Case(
-                    # Sort DISABLED and is_muted monitors to the bottom of the list
+                    # Sort DISABLED and fully muted monitors to the bottom of the list
                     When(status=ObjectStatus.DISABLED, then=Value(len(DEFAULT_STATUS_ORDER) + 1)),
-                    When(is_muted=True, then=Value(len(DEFAULT_STATUS_ORDER))),
+                    When(
+                        Exists(monitor_environments_query) & ~Exists(has_unmuted_env),
+                        then=Value(len(DEFAULT_STATUS_ORDER)),
+                    ),
                     default=Subquery(
                         monitor_environments_query.annotate(
                             status_ordering=MONITOR_ENVIRONMENT_ORDERING
@@ -170,10 +184,21 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
         elif sort == "name":
             sort_fields = ["name"]
         elif sort == "muted":
+            # Check if any environments are muted
+            has_muted_env = monitor_environments_query.filter(is_muted=True)
+            # Check if all environments are muted
+            has_unmuted_env = monitor_environments_query.filter(is_muted=False)
+
             queryset = queryset.annotate(
                 muted_ordering=Case(
-                    When(is_muted=True, then=Value(2)),
-                    When(Exists(monitor_environments_query.filter(is_muted=True)), then=Value(1)),
+                    # No environments muted (or no environments at all)
+                    When(~Exists(has_muted_env), then=Value(0)),
+                    # Some environments muted (not all)
+                    When(Exists(has_muted_env) & Exists(has_unmuted_env), then=Value(1)),
+                    # All environments muted (and at least one environment exists)
+                    When(
+                        Exists(monitor_environments_query) & ~Exists(has_unmuted_env), then=Value(2)
+                    ),
                     default=0,
                 ),
             )
@@ -246,7 +271,8 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
         )
 
     @extend_schema(
-        operation_id="Create a Monitor",
+        operation_id="createOrganizationMonitor",
+        summary="Create a Monitor",
         parameters=[GlobalParams.ORG_ID_OR_SLUG],
         request=MonitorValidator,
         responses={
@@ -257,59 +283,22 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def post(self, request: AuthenticatedHttpRequest, organization) -> Response:
+    def post(
+        self, request: AuthenticatedHttpRequest, organization
+    ) -> Response[MonitorSerializerResponse]:
         """
         Create a new monitor.
         """
+        self.check_can_create_alert(request, organization)
+
         validator = MonitorValidator(
-            data=request.data, context={"organization": organization, "access": request.access}
+            data=request.data,
+            context={"organization": organization, "access": request.access, "request": request},
         )
         if not validator.is_valid():
             return self.respond(validator.errors, status=400)
 
-        result = validator.validated_data
-
-        owner = result.get("owner")
-        owner_user_id = None
-        owner_team_id = None
-        if owner and owner.is_user:
-            owner_user_id = owner.id
-        elif owner and owner.is_team:
-            owner_team_id = owner.id
-
-        try:
-            monitor = Monitor.objects.create(
-                project_id=result["project"].id,
-                organization_id=organization.id,
-                owner_user_id=owner_user_id,
-                owner_team_id=owner_team_id,
-                name=result["name"],
-                slug=result.get("slug"),
-                status=result["status"],
-                config=result["config"],
-            )
-        except MonitorLimitsExceeded as e:
-            return self.respond({type(e).__name__: str(e)}, status=403)
-
-        # Attempt to assign a seat for this monitor
-        seat_outcome = quotas.backend.assign_monitor_seat(monitor)
-        if seat_outcome != Outcome.ACCEPTED:
-            monitor.update(status=ObjectStatus.DISABLED)
-
-        project = result["project"]
-        signal_monitor_created(project, request.user, False, monitor, request)
-
-        validated_issue_alert_rule = result.get("alert_rule")
-        if validated_issue_alert_rule:
-            issue_alert_rule_id = create_issue_alert_rule(
-                request, project, monitor, validated_issue_alert_rule
-            )
-
-            if issue_alert_rule_id:
-                config = monitor.config
-                config["alert_rule_id"] = issue_alert_rule_id
-                monitor.update(config=config)
-
+        monitor = validator.save()
         return self.respond(serialize(monitor, request.user), status=201)
 
     @extend_schema(
@@ -326,7 +315,9 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
             404: RESPONSE_NOT_FOUND,
         },
     )
-    def put(self, request: AuthenticatedHttpRequest, organization) -> Response:
+    def put(
+        self, request: AuthenticatedHttpRequest, organization
+    ) -> Response[MonitorBulkEditResponse]:
         """
         Bulk edit the muted and disabled status of a list of monitors determined by slug
         """
@@ -352,9 +343,12 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
         status = result.get("status")
         # If enabling monitors, ensure we can assign all before moving forward
         if status == ObjectStatus.ACTIVE:
-            assign_result = quotas.backend.check_assign_monitor_seats(monitors)
+            assign_result = quotas.backend.check_assign_seats(seat_objects=monitors)
             if not assign_result.assignable:
                 return self.respond(assign_result.reason, status=400)
+
+        # Extract is_muted to propagate to environments, don't update Monitor directly
+        is_muted = result.pop("is_muted", None)
 
         updated = []
         errored = []
@@ -362,16 +356,23 @@ class OrganizationMonitorIndexEndpoint(OrganizationEndpoint):
             with transaction.atomic(router.db_for_write(Monitor)):
                 # Attempt to assign a monitor seat
                 if status == ObjectStatus.ACTIVE:
-                    outcome = quotas.backend.assign_monitor_seat(monitor)
+                    outcome = quotas.backend.assign_seat(seat_object=monitor)
                     if outcome != Outcome.ACCEPTED:
                         errored.append(monitor)
                         continue
 
                 # Attempt to unassign the monitor seat
                 if status == ObjectStatus.DISABLED:
-                    quotas.backend.disable_monitor_seat(monitor)
+                    quotas.backend.disable_seat(seat_object=monitor)
 
-                monitor.update(**result)
+                # Propagate is_muted to all monitor environments
+                if is_muted is not None:
+                    MonitorEnvironment.objects.filter(monitor_id=monitor.id).update(
+                        is_muted=is_muted
+                    )
+
+                if result:
+                    monitor.update(**result)
                 updated.append(monitor)
             self.create_audit_entry(
                 request=request,

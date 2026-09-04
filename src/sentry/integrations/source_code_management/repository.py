@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Generic, Literal, NotRequired, TypedDict, TypeVar
 from urllib.parse import quote as urlquote
 from urllib.parse import unquote, urlparse, urlunparse
 
@@ -19,17 +19,74 @@ from sentry.integrations.source_code_management.metrics import (
 from sentry.integrations.types import IntegrationProviderSlug
 from sentry.models.repository import Repository
 from sentry.shared_integrations.exceptions import (
+    ApiConnectionResetError,
     ApiError,
+    ApiForbiddenError,
+    ApiHostError,
+    ApiRateLimitedError,
     ApiRetryError,
+    ApiTimeoutError,
     ApiUnauthorized,
+    IntegrationConfigurationError,
     IntegrationError,
+    UnsupportedResponseType,
 )
 from sentry.users.models.identity import Identity
 
+HaltReason = Literal[
+    "configuration_error",
+    "connection_reset",
+    "host_timeout",
+    "host_unreachable",
+    "identity_not_found",
+    "identity_not_valid",
+    "installation_suspended",
+    "rate_limited",
+    "too_many_redirects",
+    "unauthorized",
+    "unsupported_response",
+]
+
+
+class RepositoryInfo(TypedDict):
+    """Common shape returned by get_repositories() across all SCM providers."""
+
+    name: str
+    identifier: str
+    external_id: str
+    default_branch: NotRequired[str | None]  # GitHub, GitHub Enterprise
+    url: NotRequired[str]  # GitLab, VSTS
+    instance: NotRequired[str]  # GitLab, VSTS
+    project: NotRequired[str]  # Bitbucket Server, VSTS
+    path: NotRequired[str]  # GitLab (path_with_namespace)
+    project_id: NotRequired[int]  # GitLab
+    repo: NotRequired[str]  # Bitbucket Server
+    repo_name: NotRequired[str]  # VSTS (bare repo name for API calls)
+
 
 class BaseRepositoryIntegration(ABC):
+    def get_repo_external_id(self, repo: Mapping[str, Any]) -> str:
+        """
+        Extract the external_id from a raw repository API response.
+
+        This is the canonical definition of how each provider maps its
+        API response to the external_id stored in Sentry's Repository model.
+        Override in provider-specific installation classes as needed.
+
+        Default assumes the API returns an ``id`` field.
+        """
+        return str(repo["id"])
+
     @abstractmethod
-    def get_repositories(self, query: str | None = None) -> list[dict[str, Any]]:
+    def get_repositories(
+        self,
+        query: str | None = None,
+        page_number_limit: int | None = None,
+        accessible_only: bool = False,
+        use_cache: bool = False,
+        raise_on_page_limit: bool = False,
+        parallel: bool = False,
+    ) -> list[RepositoryInfo]:
         """
         Get a list of available repositories for an installation
 
@@ -39,18 +96,39 @@ class BaseRepositoryIntegration(ABC):
         return [{
             'name': display_name,
             'identifier': external_repo_id,
+            'external_id': provider_internal_id,
         }]
 
         The shape of the `identifier` should match the data
         returned by the integration's
         IntegrationRepositoryProvider.repository_external_slug()
 
+        The `external_id` is derived from `self.get_repo_external_id(repo)`.
+
         You can use the `query` argument to filter repositories.
+        When `accessible_only` is True and a query is provided,
+        only repositories the installation has access to are
+        returned, filtering locally instead of using the provider's
+        search API.
+
+        When ``raise_on_page_limit`` is True and the provider's fetch hits a
+        pagination cap with more data still available, ``ApiPaginationTruncated``
+        is raised with the partial result attached. Providers without a
+        pagination cap may accept and ignore this argument.
+
+        ``parallel`` is a hint that pages after the first may be fetched
+        concurrently. Providers that do not implement parallel pagination may
+        accept and ignore this argument.
         """
         raise NotImplementedError
 
 
-class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, ABC):
+ClientT = TypeVar("ClientT", bound="RepositoryClient", default="RepositoryClient")
+
+
+class RepositoryIntegration(
+    IntegrationInstallation, BaseRepositoryIntegration, Generic[ClientT], ABC
+):
     @property
     def codeowners_locations(self) -> list[str] | None:
         """
@@ -68,7 +146,7 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
         raise NotImplementedError
 
     @abstractmethod
-    def get_client(self) -> RepositoryClient:
+    def get_client(self) -> ClientT:
         """Returns the client for the integration. The client must be a subclass of RepositoryClient."""
         raise NotImplementedError
 
@@ -97,19 +175,80 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
         """Used for migrating repositories. Checks if the installation has access to the repository."""
         raise NotImplementedError
 
-    def get_unmigratable_repositories(self) -> list[RpcRepository]:
+    @staticmethod
+    def find_repo_info(repositories: list[RepositoryInfo], repo_name: str) -> RepositoryInfo | None:
         """
-        Get all repositories which are in our database but no longer exist as far as
-        the external service is concerned.
+        Find a repository dict by matching identifier first, then name.
         """
-        return []
+        for repo_info in repositories:
+            if repo_info.get("identifier") == repo_name:
+                return repo_info
+        for repo_info in repositories:
+            if repo_info.get("name") == repo_name:
+                return repo_info
+        return None
+
+    def get_repository_default_branch(self, repo: Repository) -> str | None:
+        """
+        Resolve a repository's default branch using integration repository metadata.
+        """
+        repositories = self.get_repositories(query=repo.name)
+        repo_info = self.find_repo_info(repositories, repo.name)
+        return repo_info.get("default_branch") if repo_info else None
+
+    def is_broken_integration_error(self, exc: Exception) -> HaltReason | None:
+        """Return a halt reason if this is a terminal integration error, else None.
+
+        Terminal errors indicate a broken or misconfigured integration that
+        will not self-heal through retries (e.g. revoked credentials, suspended
+        installs, unreachable hosts). Provider subclasses can override to add
+        provider-specific terminal states or refine the default behaviour.
+        """
+        from requests.exceptions import TooManyRedirects
+
+        from sentry.auth.exceptions import IdentityNotValid
+
+        if isinstance(exc, IdentityNotValid):
+            return "identity_not_valid"
+        if isinstance(exc, Identity.DoesNotExist):
+            return "identity_not_found"
+
+        if isinstance(exc, ApiError):
+            if self.is_rate_limited_error(exc):
+                return "rate_limited"
+            if isinstance(exc, ApiUnauthorized):
+                return "unauthorized"
+            if isinstance(exc, ApiHostError):
+                return "host_unreachable"
+            if isinstance(exc, ApiTimeoutError):
+                return "host_timeout"
+            if isinstance(exc, ApiConnectionResetError):
+                return "connection_reset"
+            if isinstance(exc, UnsupportedResponseType):
+                return "unsupported_response"
+            if isinstance(exc, ApiRateLimitedError):
+                return "rate_limited"
+            return None
+
+        if isinstance(exc, IntegrationConfigurationError):
+            return "configuration_error"
+        if isinstance(exc, IntegrationError):
+            cause = exc.__context__
+            if isinstance(cause, Exception):
+                return self.is_broken_integration_error(cause)
+            return None
+
+        if isinstance(exc, TooManyRedirects):
+            return "too_many_redirects"
+
+        return None
 
     def record_event(self, event: SCMIntegrationInteractionType) -> SCMIntegrationInteractionEvent:
         return SCMIntegrationInteractionEvent(
             interaction_type=event,
             provider_key=self.integration_name,
-            organization=self.organization,
-            org_integration=self.org_integration,
+            organization_id=self.organization.id,
+            integration_id=self.org_integration.integration_id,
         )
 
     def check_file(self, repo: Repository, filepath: str, branch: str | None = None) -> str | None:
@@ -129,6 +268,10 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
             filepath = filepath.lstrip("/")
             try:
                 client = self.get_client()
+            except IntegrationConfigurationError:
+                # This is likely due to access being revoked by the user, or
+                # some other misconfiguration on the integration's side.
+                return None
             except (Identity.DoesNotExist, IntegrationError):
                 sentry_sdk.capture_exception()
                 return None
@@ -152,7 +295,10 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
             except ApiUnauthorized as e:
                 lifecycle.record_halt(e)
                 return None
-
+            except (ApiForbiddenError, IntegrationConfigurationError) as e:
+                lifecycle.record_halt(e)
+                # Need to re-raise since 403 errors will be returned to user via get_link
+                raise
             except ApiError as e:
                 if e.code in (404, 400):
                     lifecycle.record_halt(e)
@@ -168,7 +314,6 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
                     lifecycle.record_halt(e)
                     return None
                 else:
-                    sentry_sdk.capture_exception()
                     raise
 
             return self.format_source_url(repo, filepath, branch)
@@ -199,6 +344,7 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
             )
             scope = sentry_sdk.get_isolation_scope()
             scope.set_tag("stacktrace_link.tried_version", False)
+            scope.set_attribute("stacktrace_link.tried_version", False)
 
             def encode_url(url: str) -> str:
                 parsed = urlparse(url)
@@ -210,15 +356,25 @@ class RepositoryIntegration(IntegrationInstallation, BaseRepositoryIntegration, 
                 # Preserve path separators and query params etc.
                 return urlunparse(parsed._replace(path=encoded_path))
 
-            if version:
-                scope.set_tag("stacktrace_link.tried_version", True)
-                source_url = self.check_file(repo, filepath, version)
-                if source_url:
-                    scope.set_tag("stacktrace_link.used_version", True)
-                    return encode_url(source_url)
+            try:
+                if version:
+                    scope.set_tag("stacktrace_link.tried_version", True)
+                    scope.set_attribute("stacktrace_link.tried_version", True)
+                    source_url = self.check_file(repo, filepath, version)
+                    if source_url:
+                        scope.set_tag("stacktrace_link.used_version", True)
+                        scope.set_attribute("stacktrace_link.used_version", True)
+                        return encode_url(source_url)
 
-            scope.set_tag("stacktrace_link.used_version", False)
-            source_url = self.check_file(repo, filepath, default)
+                scope.set_tag("stacktrace_link.used_version", False)
+                scope.set_attribute("stacktrace_link.used_version", False)
+                source_url = self.check_file(repo, filepath, default)
+            except (ApiForbiddenError, IntegrationConfigurationError) as e:
+                # Similar to the `check_file` implementation, we need to re-raise
+                # for 403 errors as these need to be propagated to the user.
+                lifecycle.record_halt(e)
+                raise
+
             return encode_url(source_url) if source_url else None
 
     def get_codeowner_file(

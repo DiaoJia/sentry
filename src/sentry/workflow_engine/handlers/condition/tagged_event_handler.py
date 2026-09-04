@@ -1,21 +1,29 @@
 from typing import Any
 
 from sentry import tagstore
-from sentry.rules import MatchType, match_values
+from sentry.rules import MATCH_CHOICES, MatchType, match_values
+from sentry.services.eventstore.models import GroupEvent
+from sentry.tagstore.base import TAG_KEY_RE
 from sentry.workflow_engine.models.data_condition import Condition
 from sentry.workflow_engine.registry import condition_handler_registry
 from sentry.workflow_engine.types import DataConditionHandler, WorkflowEventData
+from sentry.workflow_engine.utils import log_context
+
+logger = log_context.get_logger(__name__)
 
 
 @condition_handler_registry.register(Condition.TAGGED_EVENT)
 class TaggedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
     group = DataConditionHandler.Group.ACTION_FILTER
     subgroup = DataConditionHandler.Subgroup.EVENT_ATTRIBUTES
+    label_template = "The event's tags match {key} {match} {value}"
+
+    _TAG_KEY_SCHEMA = {"type": "string", "pattern": TAG_KEY_RE.pattern}
 
     comparison_json_schema = {
         "type": "object",
         "properties": {
-            "key": {"type": "string"},
+            "key": _TAG_KEY_SCHEMA,
             "match": {
                 "type": "string",
                 "enum": [*MatchType],
@@ -28,7 +36,7 @@ class TaggedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
         "oneOf": [
             {
                 "properties": {
-                    "key": {"type": "string"},
+                    "key": _TAG_KEY_SCHEMA,
                     "match": {"enum": [MatchType.IS_SET, MatchType.NOT_SET]},
                 },
                 "required": ["key", "match"],
@@ -36,7 +44,7 @@ class TaggedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
             },
             {
                 "properties": {
-                    "key": {"type": "string"},
+                    "key": _TAG_KEY_SCHEMA,
                     "match": {
                         "not": {"enum": [MatchType.IS_SET, MatchType.NOT_SET]},
                     },
@@ -51,6 +59,11 @@ class TaggedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
     @staticmethod
     def evaluate_value(event_data: WorkflowEventData, comparison: Any) -> bool:
         event = event_data.event
+
+        if not isinstance(event, GroupEvent):
+            # We can only evaluate tagged events for GroupEvent types
+            return False
+
         raw_tags = event.tags
         key = comparison["key"]
         match = comparison["match"]
@@ -78,10 +91,32 @@ class TaggedEventConditionHandler(DataConditionHandler[WorkflowEventData]):
 
         # This represents the fetched tag values given the provided key
         # so eg. if the key is 'environment' and the tag_value is 'production'
-        tag_values = (
+        tag_values = tuple(
             v.lower()
             for k, v in raw_tags
             if k.lower() == key or tagstore.backend.get_standardized_key(k) == key
         )
 
-        return match_values(group_values=tag_values, match_value=value, match_type=match)
+        result = match_values(group_values=tag_values, match_value=value, match_type=match)
+
+        logger.debug(
+            "workflow_engine.handlers.tagged_event_handler",
+            extra={
+                "evaluation_result": result,
+                "event": event,
+                "event_tags": event.tags,
+                "processed_values": tag_values,
+                "comparison_type": match,
+            },
+        )
+
+        return result
+
+    @classmethod
+    def render_label(cls, condition_data: dict[str, Any], organization_id: int) -> str:
+        data = {
+            "key": condition_data["key"],
+            "value": condition_data["value"],
+            "match": MATCH_CHOICES[condition_data["match"]],
+        }
+        return cls.label_template.format(**data)

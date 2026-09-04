@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import pydantic
 
-from sentry.hybridcloud.rpc.resolvers import ByRegionName
-from sentry.hybridcloud.rpc.service import RpcService, regional_rpc_method, rpc_method
+from sentry.hybridcloud.rpc.resolvers import ByCellName
+from sentry.hybridcloud.rpc.service import RpcService, cell_rpc_method, rpc_method
 from sentry.silo.base import SiloMode
 from sentry.utils import json, metrics
 from sentry.utils.json import JSONDecodeError
@@ -18,19 +18,24 @@ if TYPE_CHECKING:
     pass
 
 
-class RegionCachingService(RpcService):
+class CellCachingService(RpcService):
     key = "region_caching"
-    local_mode = SiloMode.REGION
+    local_mode = SiloMode.CELL
 
     @classmethod
     def get_local_implementation(cls) -> RpcService:
-        from .impl import LocalRegionCachingService
+        from .impl import LocalCellCachingService
 
-        return LocalRegionCachingService()
+        return LocalCellCachingService()
 
-    @regional_rpc_method(resolve=ByRegionName())
+    @cell_rpc_method(resolve=ByCellName())
     @abc.abstractmethod
-    def clear_key(self, *, region_name: str, key: str) -> int:
+    def clear_key(
+        self,
+        *,
+        cell_name: str,
+        key: str,
+    ) -> int:
         pass
 
 
@@ -162,7 +167,14 @@ class SiloCacheBackedListCallable(Generic[_R]):
             try:
                 metrics.incr("hybridcloud.caching.list.cached", tags={"base_key": self.base_key})
                 return [self.type_(**item) for item in json.loads(value)]
-            except (pydantic.ValidationError, JSONDecodeError, TypeError):
+            except (pydantic.ValidationError, JSONDecodeError, TypeError) as err:
+                metrics.incr(
+                    "hybridcloud.caching.list.failed_read",
+                    tags={
+                        "base_key": self.base_key,
+                        "err": type(err).__name__,
+                    },
+                )
                 version = yield from _delete_cache(key, self.silo_mode)
         else:
             version = value
@@ -170,7 +182,7 @@ class SiloCacheBackedListCallable(Generic[_R]):
         metrics.incr("hybridcloud.caching.list.rpc", tags={"base_key": self.base_key})
         result = self.cb(object_id)
         if result is not None:
-            cache_value = json.dumps([item.json() for item in result])
+            cache_value = json.dumps([item.dict() for item in result])
             _consume_generator(_set_cache(key, cache_value, version, self.timeout))
         return result
 
@@ -283,7 +295,7 @@ def back_with_silo_cache(
     If the cache read fails, the decorated function will be called and its result
     will be stored in cache. The decorator adds helper methods on the wrapped
     function for generating keys to clear cache entries
-    with region_caching_service and control_caching_service.
+    with cell_caching_service and control_caching_service.
 
     See user_service.get_user() for an example usage.
     """
@@ -328,7 +340,7 @@ def back_with_silo_cache_list(
     If the cache read for the id value fails, the decorated function will be called and
     its result will be stored in cache. The decorator also adds method on the wrapped
     function for generating keys to clear cache entires with
-    with region_caching_service and control_caching_service.
+    with cell_caching_service and control_caching_service.
 
     See app_service.installations_for_organization() for an example usage.
     """
@@ -339,7 +351,7 @@ def back_with_silo_cache_list(
     return wrapper
 
 
-region_caching_service = RegionCachingService.create_delegation()
+cell_caching_service = CellCachingService.create_delegation()
 
 
 class ControlCachingService(RpcService):

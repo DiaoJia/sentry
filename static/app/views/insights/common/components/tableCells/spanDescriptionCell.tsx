@@ -3,27 +3,22 @@ import styled from '@emotion/styled';
 
 import {Hovercard} from 'sentry/components/hovercard';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {SQLishFormatter} from 'sentry/utils/sqlish/SQLishFormatter';
+import {emptyStringValue, emptyValue} from 'sentry/utils/discover/emptyFieldValues';
+import {SQLishFormatter} from 'sentry/utils/sqlish';
 import {FullSpanDescription} from 'sentry/views/insights/common/components/fullSpanDescription';
 import {SpanGroupDetailsLink} from 'sentry/views/insights/common/components/spanGroupDetailsLink';
-import {SupportedDatabaseSystem} from 'sentry/views/insights/database/utils/constants';
-import {formatMongoDBQuery} from 'sentry/views/insights/database/utils/formatMongoDBQuery';
-import {ModuleName, SpanMetricsField} from 'sentry/views/insights/types';
+import {ModuleName, SpanFields} from 'sentry/views/insights/types';
 
 const formatter = new SQLishFormatter();
 
-const {SPAN_OP} = SpanMetricsField;
+const {SPAN_OP} = SpanFields;
 
 interface Props {
-  description: string;
   moduleName: ModuleName.DB | ModuleName.RESOURCE;
   projectId: number;
-  extraLinkQueryParams?: Record<string, string>;
-  group?: string;
-  spanAction?: string;
+  description?: string;
+  group?: string | null;
   spanOp?: string;
-  system?: string;
 }
 
 export function SpanDescriptionCell({
@@ -32,24 +27,17 @@ export function SpanDescriptionCell({
   moduleName,
   spanOp,
   projectId,
-  system,
-  spanAction,
-  extraLinkQueryParams,
 }: Props) {
   const formatterDescription = useMemo(() => {
-    if (moduleName !== ModuleName.DB) {
+    if (!rawDescription || moduleName !== ModuleName.DB) {
       return rawDescription;
     }
 
-    if (system === SupportedDatabaseSystem.MONGODB) {
-      return spanAction ? formatMongoDBQuery(rawDescription, spanAction) : rawDescription;
-    }
-
     return formatter.toSimpleMarkup(rawDescription);
-  }, [moduleName, rawDescription, spanAction, system]);
+  }, [moduleName, rawDescription]);
 
   if (!rawDescription) {
-    return NULL_DESCRIPTION;
+    return rawDescription === '' ? emptyStringValue : emptyValue;
   }
 
   const descriptionLink = (
@@ -59,7 +47,6 @@ export function SpanDescriptionCell({
       projectId={projectId}
       spanOp={spanOp}
       description={formatterDescription}
-      extraLinkQueryParams={extraLinkQueryParams}
     />
   );
 
@@ -104,8 +91,6 @@ export function SpanDescriptionCell({
   return descriptionLink;
 }
 
-const NULL_DESCRIPTION = <span>&lt;null&gt;</span>;
-
 export const WiderHovercard = styled(
   ({children, className, ...props}: React.ComponentProps<typeof Hovercard>) => (
     <Hovercard
@@ -124,5 +109,5 @@ export const WiderHovercard = styled(
 `;
 
 const TitleWrapper = styled('div')`
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;

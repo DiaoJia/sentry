@@ -1,20 +1,21 @@
 import {useState} from 'react';
 
-import {SegmentedControl} from 'sentry/components/core/segmentedControl';
-import ContextBlock from 'sentry/components/events/contexts/contextBlock';
+import {SegmentedControl} from '@sentry/scraps/segmentedControl';
+
+import {ContextBlock} from 'sentry/components/events/contexts/contextBlock';
 import {
   getKnownData,
   getKnownStructuredData,
 } from 'sentry/components/events/contexts/utils';
 import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 import {getEventExtraDataKnownDataDetails} from './getEventExtraDataKnownDataDetails';
-import type {EventExtraData as TEventExtraData, EventExtraDataType} from './types';
+import type {EventExtraDataType, EventExtraData as TEventExtraData} from './types';
 
 type Props = {
   event: Event;
@@ -41,8 +42,8 @@ export function EventExtraData({event}: Props) {
   }
 
   return (
-    <InterimSection
-      type={SectionKey.EXTRA}
+    <FoldSection
+      sectionKey={SectionKey.EXTRA}
       title={t('Additional Data')}
       actions={
         <SegmentedControl
@@ -57,6 +58,6 @@ export function EventExtraData({event}: Props) {
       }
     >
       {contextBlock}
-    </InterimSection>
+    </FoldSection>
   );
 }

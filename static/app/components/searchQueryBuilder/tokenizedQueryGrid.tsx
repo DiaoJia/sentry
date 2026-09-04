@@ -6,7 +6,10 @@ import type {ListState} from '@react-stately/list';
 import {useListState} from '@react-stately/list';
 import type {CollectionChildren} from '@react-types/shared';
 
-import {useSearchQueryBuilder} from 'sentry/components/searchQueryBuilder/context';
+import {
+  useSearchQueryBuilderLayout,
+  useSearchQueryBuilderState,
+} from 'sentry/components/searchQueryBuilder/context';
 import {KeyboardSelection} from 'sentry/components/searchQueryBuilder/hooks/useKeyboardSelection';
 import {useQueryBuilderGrid} from 'sentry/components/searchQueryBuilder/hooks/useQueryBuilderGrid';
 import {useSelectOnDrag} from 'sentry/components/searchQueryBuilder/hooks/useSelectOnDrag';
@@ -17,9 +20,8 @@ import {SearchQueryBuilderFilter} from 'sentry/components/searchQueryBuilder/tok
 import {SearchQueryBuilderFreeText} from 'sentry/components/searchQueryBuilder/tokens/freeText';
 import {SearchQueryBuilderParen} from 'sentry/components/searchQueryBuilder/tokens/paren';
 import {makeTokenKey} from 'sentry/components/searchQueryBuilder/utils';
-import {type ParseResultToken, Token} from 'sentry/components/searchSyntax/parser';
+import {Token, type ParseResultToken} from 'sentry/components/searchSyntax/parser';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 interface TokenizedQueryGridProps {
   actionBarWidth: number;
@@ -35,7 +37,7 @@ interface GridProps extends AriaGridListOptions<ParseResultToken> {
 }
 
 function useAutoFocus(autoFocus: boolean, state: ListState<ParseResultToken>) {
-  const {dispatch} = useSearchQueryBuilder();
+  const {dispatch} = useSearchQueryBuilderState();
   const autoFocused = useRef(!autoFocus);
 
   useEffect(() => {
@@ -50,7 +52,7 @@ function useAutoFocus(autoFocus: boolean, state: ListState<ParseResultToken>) {
 }
 
 function useApplyFocusOverride(state: ListState<ParseResultToken>) {
-  const {focusOverride, dispatch} = useSearchQueryBuilder();
+  const {focusOverride, dispatch} = useSearchQueryBuilderState();
 
   useLayoutEffect(() => {
     if (focusOverride && !focusOverride.part) {
@@ -69,7 +71,8 @@ function useApplyFocusOverride(state: ListState<ParseResultToken>) {
 function Grid(props: GridProps) {
   const ref = useRef<HTMLDivElement>(null);
   const selectionKeyHandlerRef = useRef<HTMLInputElement>(null);
-  const {size, dispatch} = useSearchQueryBuilder();
+  const {dispatch} = useSearchQueryBuilderState();
+  const {size} = useSearchQueryBuilderLayout();
   const state = useListState<ParseResultToken>({
     ...props,
     selectionBehavior: 'replace',
@@ -101,7 +104,7 @@ function Grid(props: GridProps) {
       ref={ref}
       style={size === 'small' ? undefined : {paddingRight: props.actionBarWidth + 12}}
       onBlur={e => {
-        if (ref.current?.contains(e.relatedTarget as Node)) {
+        if (ref.current?.contains(e.relatedTarget)) {
           return;
         }
 
@@ -114,7 +117,7 @@ function Grid(props: GridProps) {
         undo={undo}
         gridRef={ref}
       />
-      {[...state.collection].map(item => {
+      {Array.from(state.collection, item => {
         const token = item.value;
 
         switch (token?.type) {
@@ -169,7 +172,7 @@ export function TokenizedQueryGrid({
   label,
   actionBarWidth,
 }: TokenizedQueryGridProps) {
-  const {parsedQuery} = useSearchQueryBuilder();
+  const {parsedQuery} = useSearchQueryBuilderState();
 
   // Shouldn't ever get here since we will render the plain text input instead
   if (!parsedQuery) {
@@ -197,13 +200,14 @@ export function TokenizedQueryGrid({
 
 const SearchQueryGridWrapper = styled('div')`
   /* calc + 1px to account for the border */
-  padding-top: ${p => (p.theme.isChonk ? `calc(${space(0.5)} + 1px);` : space(0.75))};
-  padding-bottom: ${p => (p.theme.isChonk ? `calc(${space(0.5)} + 1px);` : space(0.75))};
+  padding-top: calc(${p => p.theme.space.xs} + 1px);
+  padding-bottom: calc(${p => p.theme.space.xs} + 1px);
+  /* Reserves room for the leading search icon; see [data-hide-search-icon] in index.tsx. */
   padding-left: 32px;
-  padding-right: ${space(0.75)};
+  padding-right: ${p => p.theme.space.sm};
   display: flex;
   align-items: stretch;
-  row-gap: ${space(0.5)};
+  row-gap: ${p => p.theme.space.xs};
   flex-wrap: wrap;
 
   &:focus {

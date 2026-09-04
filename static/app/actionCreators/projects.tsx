@@ -1,7 +1,4 @@
-import {useCallback} from 'react';
-import type {Query} from 'history';
-import chunk from 'lodash/chunk';
-import debounce from 'lodash/debounce';
+import {queryOptions, skipToken, useQueryClient} from '@tanstack/react-query';
 
 import {
   addErrorMessage,
@@ -9,26 +6,28 @@ import {
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import {t, tct} from 'sentry/locale';
-import ProjectsStatsStore from 'sentry/stores/projectsStatsStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
+import {tct} from 'sentry/locale';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import type {Team} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import type {ApiQueryKey} from 'sentry/utils/queryClient';
-import {setApiQueryData, useApiQuery, useQueryClient} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {useApi} from 'sentry/utils/useApi';
 
 type UpdateParams = {
   orgId: string;
   projectId: string;
   data?: Record<string, any>;
-  query?: Query;
 };
 
 export function update(api: Client, params: UpdateParams) {
-  ProjectsStatsStore.onUpdate(params.projectId, params.data as Partial<Project>);
-
-  const endpoint = `/projects/${params.orgId}/${params.projectId}/`;
+  const endpoint = getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/', {
+    path: {
+      organizationIdOrSlug: params.orgId,
+      projectIdOrSlug: params.projectId,
+    },
+  });
   return api
     .requestPromise(endpoint, {
       method: 'PUT',
@@ -39,91 +38,10 @@ export function update(api: Client, params: UpdateParams) {
         ProjectsStore.onUpdateSuccess(data);
         return data;
       },
-      err => {
-        ProjectsStatsStore.onUpdateError(err, params.projectId);
+      (err: Error) => {
         throw err;
       }
     );
-}
-
-type StatsParams = Pick<UpdateParams, 'orgId' | 'data' | 'query'>;
-
-export function loadStats(api: Client, params: StatsParams) {
-  const endpoint = `/organizations/${params.orgId}/stats/`;
-  api.request(endpoint, {
-    query: params.query,
-    success: data => ProjectsStore.onStatsLoadSuccess(data),
-  });
-}
-
-// This is going to queue up a list of project ids we need to fetch stats for
-// Will be cleared when debounced function fires
-export const _projectStatsToFetch: Set<string> = new Set();
-
-// Max projects to query at a time, otherwise if we fetch too many in the same request
-// it can timeout
-const MAX_PROJECTS_TO_FETCH = 10;
-
-const _queryForStats = (
-  api: Client,
-  projects: string[],
-  orgId: string,
-  additionalQuery: Query | undefined
-) => {
-  const idQueryParams = projects.map(project => `id:${project}`).join(' ');
-  const endpoint = `/organizations/${orgId}/projects/`;
-
-  const query: Query = {
-    statsPeriod: '24h',
-    query: idQueryParams,
-    ...additionalQuery,
-  };
-
-  return api.requestPromise(endpoint, {
-    query,
-  });
-};
-
-export const _debouncedLoadStats = debounce(
-  (api: Client, projectSet: Set<string>, params: UpdateParams) => {
-    const storedProjects: Record<string, Project> = ProjectsStatsStore.getAll();
-    const existingProjectStats = Object.values(storedProjects).map(({id}) => id);
-    const projects = Array.from(projectSet).filter(
-      project => !existingProjectStats.includes(project)
-    );
-
-    if (!projects.length) {
-      _projectStatsToFetch.clear();
-      return;
-    }
-
-    // Split projects into more manageable chunks to query, otherwise we can
-    // potentially face server timeouts
-    const queries = chunk(projects, MAX_PROJECTS_TO_FETCH).map(chunkedProjects =>
-      _queryForStats(api, chunkedProjects, params.orgId, params.query)
-    );
-
-    Promise.all(queries)
-      .then(results => {
-        ProjectsStatsStore.onStatsLoadSuccess(
-          results.reduce((acc, result) => acc.concat(result), [])
-        );
-      })
-      .catch(() => {
-        addErrorMessage(t('Unable to fetch all project stats'));
-      });
-
-    // Reset projects list
-    _projectStatsToFetch.clear();
-  },
-  50
-);
-
-export function loadStatsForProject(api: Client, project: string, params: UpdateParams) {
-  // Queue up a list of projects that we need stats for
-  // and call a debounced function to fetch stats for list of projects
-  _projectStatsToFetch.add(project);
-  _debouncedLoadStats(api, _projectStatsToFetch, params);
 }
 
 export function transferProject(
@@ -132,7 +50,12 @@ export function transferProject(
   project: Project,
   email: string
 ) {
-  const endpoint = `/projects/${orgId}/${project.slug}/transfer/`;
+  const endpoint = getApiUrl(
+    '/projects/$organizationIdOrSlug/$projectIdOrSlug/transfer/',
+    {
+      path: {organizationIdOrSlug: orgId, projectIdOrSlug: project.slug},
+    }
+  );
 
   return api
     .requestPromise(endpoint, {
@@ -149,11 +72,11 @@ export function transferProject(
           })
         );
       },
-      err => {
+      (err: RequestError) => {
         let message = '';
         // Handle errors with known failures
-        if (err.status >= 400 && err.status < 500 && err.responseJSON) {
-          message = err.responseJSON?.detail;
+        if (err.status && err.status >= 400 && err.status < 500 && err.responseJSON) {
+          message = err.responseJSON.detail as string;
         }
 
         if (message) {
@@ -185,7 +108,16 @@ export function addTeamToProject(
   projectSlug: string,
   team: Team
 ) {
-  const endpoint = `/projects/${orgSlug}/${projectSlug}/teams/${team.slug}/`;
+  const endpoint = getApiUrl(
+    '/projects/$organizationIdOrSlug/$projectIdOrSlug/teams/$teamIdOrSlug/',
+    {
+      path: {
+        organizationIdOrSlug: orgSlug,
+        projectIdOrSlug: projectSlug,
+        teamIdOrSlug: team.slug,
+      },
+    }
+  );
 
   addLoadingMessage();
 
@@ -225,7 +157,16 @@ function removeTeamFromProject(
   projectSlug: string,
   teamSlug: string
 ) {
-  const endpoint = `/projects/${orgSlug}/${projectSlug}/teams/${teamSlug}/`;
+  const endpoint = getApiUrl(
+    '/projects/$organizationIdOrSlug/$projectIdOrSlug/teams/$teamIdOrSlug/',
+    {
+      path: {
+        organizationIdOrSlug: orgSlug,
+        projectIdOrSlug: projectSlug,
+        teamIdOrSlug: teamSlug,
+      },
+    }
+  );
 
   addLoadingMessage();
 
@@ -277,10 +218,15 @@ export async function removeProject({
   origin: 'onboarding' | 'settings' | 'getting_started';
   projectSlug: Project['slug'];
 }) {
-  const response = await api.requestPromise(`/projects/${orgSlug}/${projectSlug}/`, {
-    method: 'DELETE',
-    data: {origin},
-  });
+  const response = await api.requestPromise(
+    getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/', {
+      path: {organizationIdOrSlug: orgSlug, projectIdOrSlug: projectSlug},
+    }),
+    {
+      method: 'DELETE',
+      data: {origin},
+    }
+  );
   ProjectsStore.onDeleteProject(projectSlug);
 
   return response;
@@ -290,22 +236,14 @@ export async function removeProject({
  * Load the counts of my projects and all projects for the current user
  */
 export function fetchProjectsCount(api: Client, orgSlug: string) {
-  return api.requestPromise(`/organizations/${orgSlug}/projects-count/`);
+  return api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/projects-count/', {
+      path: {organizationIdOrSlug: orgSlug},
+    })
+  );
 }
 
-function makeProjectTeamsQueryKey({
-  orgSlug,
-  projectSlug,
-  cursor,
-}: {
-  orgSlug: string;
-  projectSlug: string;
-  cursor?: string;
-}): ApiQueryKey {
-  return [`/projects/${orgSlug}/${projectSlug}/teams/`, {query: {cursor}}];
-}
-
-export function useFetchProjectTeams({
+export function projectTeamsApiOptions({
   orgSlug,
   projectSlug,
   cursor,
@@ -314,10 +252,19 @@ export function useFetchProjectTeams({
   projectSlug: string;
   cursor?: string;
 }) {
-  return useApiQuery<Team[]>(makeProjectTeamsQueryKey({orgSlug, projectSlug, cursor}), {
-    staleTime: 0,
+  return queryOptions({
+    ...apiOptions.as<Team[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/teams/',
+      {
+        path:
+          orgSlug && projectSlug
+            ? {organizationIdOrSlug: orgSlug, projectIdOrSlug: projectSlug}
+            : skipToken,
+        query: {cursor},
+        staleTime: 0,
+      }
+    ),
     retry: false,
-    enabled: Boolean(orgSlug && projectSlug),
   });
 }
 
@@ -332,19 +279,15 @@ export function useAddTeamToProject({
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
+  const {queryKey} = projectTeamsApiOptions({orgSlug, projectSlug, cursor});
 
-  return useCallback(
-    async (team: Team) => {
-      await addTeamToProject(api, orgSlug, projectSlug, team);
+  return async (team: Team) => {
+    await addTeamToProject(api, orgSlug, projectSlug, team);
 
-      setApiQueryData<Team[]>(
-        queryClient,
-        makeProjectTeamsQueryKey({orgSlug, projectSlug, cursor}),
-        prevData => (Array.isArray(prevData) ? [team, ...prevData] : [team])
-      );
-    },
-    [api, orgSlug, projectSlug, cursor, queryClient]
-  );
+    queryClient.setQueryData(queryKey, prevData =>
+      prevData ? {...prevData, json: [team, ...prevData.json]} : prevData
+    );
+  };
 }
 
 export function useRemoveTeamFromProject({
@@ -358,18 +301,15 @@ export function useRemoveTeamFromProject({
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
+  const {queryKey} = projectTeamsApiOptions({orgSlug, projectSlug, cursor});
 
-  return useCallback(
-    async (teamSlug: string) => {
-      await removeTeamFromProject(api, orgSlug, projectSlug, teamSlug);
+  return async (teamSlug: string) => {
+    await removeTeamFromProject(api, orgSlug, projectSlug, teamSlug);
 
-      setApiQueryData<Team[]>(
-        queryClient,
-        makeProjectTeamsQueryKey({orgSlug, projectSlug, cursor}),
-        prevData =>
-          Array.isArray(prevData) ? prevData.filter(team => team?.slug !== teamSlug) : []
-      );
-    },
-    [api, orgSlug, projectSlug, cursor, queryClient]
-  );
+    queryClient.setQueryData(queryKey, prevData =>
+      prevData
+        ? {...prevData, json: prevData.json.filter(team => team?.slug !== teamSlug)}
+        : prevData
+    );
+  };
 }

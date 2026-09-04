@@ -2,6 +2,7 @@ declare const __LOADER__PUBLIC_KEY__: any;
 declare const __LOADER__SDK_URL__: any;
 declare const __LOADER__CONFIG__: any;
 declare const __LOADER__IS_LAZY__: any;
+declare const __LOADER__QUEUEABLE_APIS__: any;
 
 (function sentryLoader(
   _window,
@@ -12,7 +13,8 @@ declare const __LOADER__IS_LAZY__: any;
   _publicKey,
   _sdkBundleUrl,
   _loaderInitConfig,
-  _lazy
+  _lazy,
+  _queueableApis
 ) {
   let lazy = _lazy;
 
@@ -36,6 +38,22 @@ declare const __LOADER__IS_LAZY__: any;
   // A captured function call to Sentry
   type FunctionQueueItem = {a: IArguments; f: string};
   type QueueItem = ErrorQueueItem | PromiseRejectionQueueItem | FunctionQueueItem;
+
+  // Loader config injected from the backend
+  interface LoaderConfig {
+    dsn: string;
+    tracesSampleRate?: number;
+    replaysSessionSampleRate?: number;
+    replaysOnErrorSampleRate?: number;
+    debug?: boolean;
+    // Although this is not a top-level SDK option we pass this flag so we can
+    // auto-add the integration in the loader template
+    autoInjectFeedback?: boolean;
+    integrations?:
+      | {name: string}[]
+      | ((integrations: {name: string}[]) => {name: string}[]);
+    [key: string]: unknown;
+  }
 
   function queueIsError(item: QueueItem): item is ErrorQueueItem {
     return 'e' in item;
@@ -62,7 +80,7 @@ declare const __LOADER__IS_LAZY__: any;
         (queueIsFunction(item) && item.f.indexOf('showReportDialog') > -1))
     ) {
       // We only want to lazy inject/load the sdk bundle if
-      // an error or promise rejection occured
+      // an error or promise rejection occurred
       // OR someone called `capture...` on the SDK
       injectCDNScriptTag();
     }
@@ -147,8 +165,8 @@ declare const __LOADER__IS_LAZY__: any;
   }
 
   // We want to ensure to only add default integrations if they haven't been added by the user.
-  function setupDefaultIntegrations(config: any, SDK: any) {
-    const integrations: {name: string}[] = config.integrations || [];
+  function setupDefaultIntegrations(config: LoaderConfig, SDK: any) {
+    const integrations = config.integrations || [];
 
     // integrations can be a function, in which case we will not add any defaults
     if (!Array.isArray(integrations)) {
@@ -178,6 +196,12 @@ declare const __LOADER__IS_LAZY__: any;
       } else if (SDK.Replay) {
         // Pre v8 version of the Replay integration
         integrations.push(new SDK.Replay());
+      }
+    }
+
+    if (config.autoInjectFeedback && integrationNames.indexOf('Feedback') === -1) {
+      if (SDK.feedbackIntegration) {
+        integrations.push(SDK.feedbackIntegration());
       }
     }
 
@@ -287,16 +311,9 @@ declare const __LOADER__IS_LAZY__: any;
     });
   };
 
-  [
-    'init',
-    'addBreadcrumb',
-    'captureMessage',
-    'captureException',
-    'captureEvent',
-    'configureScope',
-    'withScope',
-    'showReportDialog',
-  ].forEach(function (f) {
+  // The list of queueable APIs is injected by the backend, based on the SDK version
+  // the loader serves (see `QUEUEABLE_SDK_APIS` in `js_sdk_loader.py`).
+  _queueableApis.forEach(function (f) {
     _window[_namespace][f] = function () {
       enqueue({f, a: arguments});
     };
@@ -325,5 +342,6 @@ declare const __LOADER__IS_LAZY__: any;
   __LOADER__PUBLIC_KEY__,
   __LOADER__SDK_URL__,
   __LOADER__CONFIG__,
-  __LOADER__IS_LAZY__
+  __LOADER__IS_LAZY__,
+  __LOADER__QUEUEABLE_APIS__
 );

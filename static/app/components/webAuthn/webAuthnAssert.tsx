@@ -6,12 +6,13 @@ import noop from 'lodash/noop';
 
 import deviceAnimation from 'sentry-images/spot/u2f-small.gif';
 
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {t, tct} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {ChallengeData} from 'sentry/types/auth';
 
 import {handleSign} from './handlers';
@@ -108,10 +109,19 @@ export function WebAuthnAssert({
   // submitted once the response is set.
   const shouldSubmitForm = !onWebAuthn && response !== null;
 
-  useEffect(
-    () => void (shouldSubmitForm && inputRef.current?.form?.submit()),
-    [shouldSubmitForm]
-  );
+  useEffect(() => {
+    if (shouldSubmitForm && inputRef.current?.form) {
+      const form = inputRef.current.form;
+      // Use requestSubmit() to fire the 'submit' event, allowing the global
+      // CSRF sync listener in auth.html to update the token for multi-tab scenarios.
+      // Falls back to submit() for Safari 15 (requestSubmit added in Safari 16).
+      if (form.requestSubmit) {
+        form.requestSubmit();
+      } else {
+        form.submit();
+      }
+    }
+  }, [shouldSubmitForm]);
 
   // Trigger the webAuthn flow immediately
   useEffect(() => {
@@ -144,13 +154,13 @@ export function WebAuthnAssert({
   }
 
   return (
-    <Container>
+    <WebAuthnContainer>
       <DeviceAnimation activated={activated} role="presentation" />
       {MESSAGES[mode]}
 
       <input type="hidden" name="challenge" value={challenge} />
       <input type="hidden" name="response" value={response ?? ''} ref={inputRef} />
-    </Container>
+    </WebAuthnContainer>
   );
 }
 
@@ -181,33 +191,41 @@ function AuthenticatorError({error, triggerWebAuthn}: AuthenticatorErrorProps) {
   );
 
   return (
-    <Container>
-      <Alert type="error" showIcon trailingItems={retry}>
+    <AlertContainer>
+      <Alert variant="danger" trailingItems={retry}>
         {errorMessages[error]}
       </Alert>
-    </Container>
+    </AlertContainer>
   );
 }
 
 function UnsupportedError() {
   return (
-    <Container>
-      <Alert type="warning" showIcon>
+    <AlertContainer>
+      <Alert variant="warning">
         {t(
           'Your browser does not support WebAuthn (passkey). You need to use a different two-factor method or switch to a browser that supports it (Google Chrome or Microsoft Edge).'
         )}
       </Alert>
+    </AlertContainer>
+  );
+}
+
+function AlertContainer({children}: {children: React.ReactNode}) {
+  return (
+    <Container padding="2xl 0" margin="0 0 xl 0">
+      {children}
     </Container>
   );
 }
 
-const Container = styled('div')`
+const WebAuthnContainer = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
   align-items: center;
-  padding: ${space(3)} 0;
-  margin-bottom: ${space(2)};
+  padding: ${p => p.theme.space['2xl']} 0;
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 const DeviceAnimation = styled('div')<{activated: boolean}>`
@@ -216,13 +234,13 @@ const DeviceAnimation = styled('div')<{activated: boolean}>`
   border-radius: 50%;
   background-image: url(${deviceAnimation});
   background-size: 100px;
-  border: 1px solid ${p => p.theme.border};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
   ${p =>
     p.activated &&
     css`
       filter: blur(8px);
       transition: filter 300ms ease;
-    `};
+    `}
 `;
 
 // XXX(epurkhiser): We are ONLY exporting this as default for the

@@ -1,9 +1,12 @@
 from sentry.constants import SentryAppInstallationStatus
 from sentry.sentry_apps.models.sentry_app_installation import SentryAppInstallation
 from sentry.sentry_apps.services.app import app_service
+from sentry.silo.base import SiloMode
+from sentry.testutils.cases import TestCase
 from sentry.testutils.factories import Factories
 from sentry.testutils.pytest.fixtures import django_db_all
-from sentry.testutils.silo import all_silo_test, assume_test_silo_mode_of
+from sentry.testutils.silo import all_silo_test, assume_test_silo_mode, assume_test_silo_mode_of
+from sentry.users.models.useremail import UserEmail
 
 
 @django_db_all(transaction=True)
@@ -240,6 +243,59 @@ def test_get_installation_org_id_by_token_id() -> None:
 
 @django_db_all(transaction=True)
 @all_silo_test
+def test_get_sentry_apps_for_organization() -> None:
+    org = Factories.create_organization()
+    other_org = Factories.create_organization()
+
+    # Create internal integrations
+    Factories.create_internal_integration(
+        name="Test Integration",
+        organization_id=org.id,
+    )
+    Factories.create_internal_integration(
+        name="Test Integration",
+        organization_id=other_org.id,
+    )
+    result = app_service.get_sentry_apps_for_organization(organization_id=org.id)
+    assert len(result) == 1
+    assert result[0].owner_id == org.id
+
+
+@django_db_all(transaction=True)
+@all_silo_test
+def test_update_sentry_app() -> None:
+    org = Factories.create_organization()
+
+    sentry_app = Factories.create_internal_integration(
+        name="Test Integration",
+        organization_id=org.id,
+        events=[
+            "issue.resolved",
+            "issue.unresolved",
+            "issue.ignored",
+            "issue.assigned",
+            "error.created",
+        ],
+    )
+    result = app_service.update_sentry_app(id=sentry_app.id, attrs=dict(events=["error.created"]))
+    assert result
+    assert result.events == ["error.created"]
+
+
+@django_db_all(transaction=True)
+@all_silo_test
+def test_prepare_sentry_app_components_returns_none_for_nonexistent_installation() -> None:
+    """Test that prepare_sentry_app_components returns None when installation doesn't exist"""
+    # Use a non-existent installation ID
+    result = app_service.prepare_sentry_app_components(
+        installation_id=999999999,
+        component_type="alert-rule-action",
+    )
+    assert result is None
+
+
+@django_db_all(transaction=True)
+@all_silo_test
 def test_get_internal_integrations() -> None:
     org = Factories.create_organization()
     other_org = Factories.create_organization()
@@ -289,3 +345,80 @@ def test_get_internal_integrations() -> None:
         integration_name="Test Integration",
     )
     assert len(results) == 0
+
+
+@all_silo_test
+class GetNotificationEmailsForSentryAppTest(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.owner = self.create_user(email="owner@example.com")
+        self.organization = self.create_organization(owner=self.owner)
+
+    def test_creator_is_valid_org_member(self) -> None:
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="owner@example.com",
+        )
+        assert result == ["owner@example.com"]
+
+    def test_creator_not_org_member_falls_back_to_owner(self) -> None:
+        self.create_user(email="non-member@example.com")
+
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="non-member@example.com",
+        )
+        assert result == ["owner@example.com"]
+
+    def test_creator_email_not_verified_falls_back(self) -> None:
+        unverified_user = self.create_user(email="unverified@example.com")
+        self.create_member(organization=self.organization, user=unverified_user, role="member")
+
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            UserEmail.objects.filter(user=unverified_user, email="unverified@example.com").update(
+                is_verified=False
+            )
+
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="unverified@example.com",
+        )
+        assert result == ["owner@example.com"]
+
+    def test_creator_label_without_at_falls_back(self) -> None:
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="just-a-username",
+        )
+        assert result == ["owner@example.com"]
+
+    def test_no_valid_recipients(self) -> None:
+        org = self.create_organization()
+
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=org.id,
+            creator_label="ghost@example.com",
+        )
+        assert result == []
+
+    def test_inactive_creator_falls_back(self) -> None:
+        inactive_user = self.create_user(email="inactive@example.com", is_active=False)
+        self.create_member(organization=self.organization, user=inactive_user, role="member")
+
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="inactive@example.com",
+        )
+        assert result == ["owner@example.com"]
+
+    def test_owner_unverified_email_excluded(self) -> None:
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            UserEmail.objects.filter(user=self.owner, email="owner@example.com").update(
+                is_verified=False
+            )
+
+        result = app_service.get_notification_emails_for_sentry_app(
+            organization_id=self.organization.id,
+            creator_label="nobody@example.com",
+        )
+        assert result == []

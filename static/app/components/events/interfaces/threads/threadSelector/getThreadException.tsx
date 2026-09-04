@@ -1,5 +1,5 @@
 import type {Event, ExceptionType, ExceptionValue, Thread} from 'sentry/types/event';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 
 function getException(
   exceptionData: ExceptionType,
@@ -27,10 +27,10 @@ function getException(
     return exceptionData as Required<ExceptionType>;
   }
 
-  return undefined;
+  return;
 }
 
-function getThreadException(
+export function getThreadException(
   event: Event,
   thread?: Thread
 ): Required<ExceptionType> | undefined {
@@ -66,5 +66,3 @@ function getThreadException(
 
   return undefined;
 }
-
-export default getThreadException;

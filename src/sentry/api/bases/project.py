@@ -20,8 +20,14 @@ from sentry.exceptions import InvalidParams
 from sentry.models.project import Project
 from sentry.models.projectredirect import ProjectRedirect
 from sentry.utils.sdk import Scope, bind_organization_context
+from sentry.viewer_context import set_viewer_context_project
 
 from .organization import OrganizationPermission
+
+
+class ProjectDoesNotExist(ResourceDoesNotExist):
+    def __init__(self) -> None:
+        super().__init__(detail="Project does not exist")
 
 
 class ProjectEventsError(Exception):
@@ -79,6 +85,21 @@ class ProjectReleasePermission(ProjectPermission):
     }
 
 
+class ProjectDistributionPermission(ProjectPermission):
+    scope_map = {
+        "GET": ["project:distribution"],
+    }
+
+
+class ProjectDistributionOrProjectPermission(ProjectPermission):
+    scope_map = {
+        "GET": ["project:distribution", "project:read", "project:write", "project:admin"],
+        "POST": ["project:write", "project:admin"],
+        "PUT": ["project:write", "project:admin"],
+        "DELETE": ["project:admin"],
+    }
+
+
 class ProjectEventPermission(ProjectPermission):
     scope_map = {
         "GET": ["event:read", "event:write", "event:admin"],
@@ -121,9 +142,9 @@ class ProjectEndpoint(Endpoint):
     def convert_args(
         self,
         request: Request,
-        *args,
-        **kwargs,
-    ):
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         if args and args[0] is not None:
             organization_id_or_slug: int | str = args[0]
             # Required so it behaves like the original convert_args, where organization_id_or_slug was another parameter
@@ -175,25 +196,31 @@ class ProjectEndpoint(Endpoint):
                     raise ProjectMoved(new_url, redirect.project.slug)
 
                 # otherwise project doesn't exist
-                raise ResourceDoesNotExist
+                raise ProjectDoesNotExist
             except ProjectRedirect.DoesNotExist:
-                raise ResourceDoesNotExist
+                raise ProjectDoesNotExist
 
         if project.status != ObjectStatus.ACTIVE:
-            raise ResourceDoesNotExist
+            raise ProjectDoesNotExist
 
         self.check_object_permissions(request, project)
 
-        sentry_sdk.get_isolation_scope().set_tag("project", project.id)
+        sentry_sdk.set_tag("project", project.id)
+        sentry_sdk.set_attribute("project", project.id)
 
         bind_organization_context(project.organization)
+        set_viewer_context_project(project.id)
 
-        request._request.organization = project.organization  # type: ignore[attr-defined]  # XXX: we should not be stuffing random attributes into HttpRequest
+        request._request.organization = (
+            project.organization
+        )  # XXX: we should not be stuffing random attributes into HttpRequest
 
         kwargs["project"] = project
         return (args, kwargs)
 
-    def get_filter_params(self, request: Request, project, date_filter_optional=False):
+    def get_filter_params(
+        self, request: Request, project: Project, date_filter_optional: bool = False
+    ) -> dict[str, Any]:
         """Similar to the version on the organization just for a single project."""
         # get the top level params -- projects, time range, and environment
         # from the request
@@ -203,7 +230,7 @@ class ProjectEndpoint(Endpoint):
             raise ProjectEventsError(str(e))
 
         environments = [env.name for env in get_environments(request, project.organization)]
-        params = {"start": start, "end": end, "project_id": [project.id]}
+        params: dict[str, Any] = {"start": start, "end": end, "project_id": [project.id]}
         if environments:
             params["environment"] = environments
 

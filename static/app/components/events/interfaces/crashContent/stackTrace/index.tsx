@@ -1,16 +1,13 @@
-import styled from '@emotion/styled';
-
-import ErrorBoundary from 'sentry/components/errorBoundary';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import type {Event} from 'sentry/types/event';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import type {StacktraceType} from 'sentry/types/stacktrace';
 import {StackView} from 'sentry/types/stacktrace';
 import {isNativePlatform} from 'sentry/utils/platform';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
 
-import Content from './content';
+import {Content} from './content';
 import {NativeContent} from './nativeContent';
-import rawStacktraceContent from './rawContent';
+import {displayRawContent as rawStacktraceContent} from './rawContent';
 
 type Props = {
   event: Event;
@@ -19,9 +16,7 @@ type Props = {
   stackView: StackView;
   stacktrace: StacktraceType;
   groupingCurrentLevel?: number;
-  inlined?: boolean;
   lockAddress?: string;
-  maxDepth?: number;
   meta?: Record<any, any>;
   threadId?: number;
 };
@@ -33,18 +28,15 @@ export function StackTraceContent({
   newestFirst,
   platform,
   groupingCurrentLevel,
-  maxDepth,
   meta,
-  inlined,
   threadId,
   lockAddress,
 }: Props) {
-  const hasStreamlinedUI = useHasStreamlinedUI();
   if (stackView === StackView.RAW) {
     return (
       <ErrorBoundary mini>
         <pre className="traceback plain">
-          {rawStacktraceContent(stacktrace, event.platform)}
+          {rawStacktraceContent({data: stacktrace, platform: event.platform})}
         </pre>
       </ErrorBoundary>
     );
@@ -53,7 +45,7 @@ export function StackTraceContent({
   if (isNativePlatform(platform)) {
     return (
       <ErrorBoundary mini>
-        <StyledNativeContent
+        <NativeContent
           data={stacktrace}
           includeSystemFrames={stackView === StackView.FULL}
           platform={platform}
@@ -61,9 +53,6 @@ export function StackTraceContent({
           newestFirst={newestFirst}
           groupingCurrentLevel={groupingCurrentLevel}
           meta={meta}
-          inlined={inlined}
-          hideIcon={inlined || hasStreamlinedUI}
-          maxDepth={maxDepth}
         />
       </ErrorBoundary>
     );
@@ -71,7 +60,7 @@ export function StackTraceContent({
 
   return (
     <ErrorBoundary mini>
-      <StyledContent
+      <Content
         data={stacktrace}
         className="no-exception"
         includeSystemFrames={stackView === StackView.FULL}
@@ -79,26 +68,9 @@ export function StackTraceContent({
         event={event}
         newestFirst={newestFirst}
         meta={meta}
-        hideIcon={inlined || hasStreamlinedUI}
-        inlined={inlined}
-        maxDepth={maxDepth}
         threadId={threadId}
         lockAddress={lockAddress}
       />
     </ErrorBoundary>
   );
 }
-
-const inlinedStyles = `
-  border-radius: 0;
-  border-left: 0;
-  border-right: 0;
-`;
-
-const StyledNativeContent = styled(NativeContent)<{inlined?: boolean}>`
-  ${p => p.inlined && inlinedStyles}
-`;
-
-const StyledContent = styled(Content)<{inlined?: boolean}>`
-  ${p => p.inlined && inlinedStyles}
-`;

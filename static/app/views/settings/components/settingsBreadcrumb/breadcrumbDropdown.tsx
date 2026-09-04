@@ -1,66 +1,145 @@
-import {useState} from 'react';
+import {useCallback, useContext, useEffect, useRef} from 'react';
+import {useHover} from '@react-aria/interactions';
+import {mergeProps} from '@react-aria/utils';
+import {type OverlayTriggerState} from '@react-stately/overlays';
 
-import DropdownAutoCompleteMenu from 'sentry/components/dropdownAutoComplete/menu';
-import type {Item} from 'sentry/components/dropdownAutoComplete/types';
+import {
+  CompactSelect,
+  ControlContext,
+  type SingleSelectProps,
+} from '@sentry/scraps/compactSelect';
+import {Flex} from '@sentry/scraps/layout';
+import {OverlayTrigger, type TriggerProps} from '@sentry/scraps/overlayTrigger';
+import {Text} from '@sentry/scraps/text';
 
-import Crumb from './crumb';
-import Divider from './divider';
+import {Divider} from './divider';
 import type {RouteWithName} from './types';
 
-interface AdditionalDropdownProps
-  extends Pick<
-    React.ComponentProps<typeof DropdownAutoCompleteMenu>,
-    'onChange' | 'busyItemsStillVisible'
-  > {}
-
-export interface BreadcrumbDropdownProps extends AdditionalDropdownProps {
-  items: Item[];
+interface BreadcrumbDropdownProps extends Omit<
+  SingleSelectProps<string>,
+  'onChange' | 'clearable'
+> {
   name: React.ReactNode;
-  onSelect: (item: Item) => void;
+  onCrumbSelect: (value: string) => void;
   route: RouteWithName;
   hasMenu?: boolean;
-  isLast?: boolean;
+  showDivider?: boolean;
 }
 
-function BreadcrumbDropdown({
+export function BreadcrumbDropdown({
   hasMenu,
   route,
-  isLast,
+  showDivider,
   name,
-  onSelect,
-  ...dropdownProps
+  onCrumbSelect,
+  options,
+  value,
+  ...props
 }: BreadcrumbDropdownProps) {
-  const [isActive, setIsActive] = useState(false);
+  const {
+    hoverProps: {onPointerEnter, onPointerLeave},
+    isHovered,
+  } = useHover({});
+
+  if (!hasMenu) {
+    return (
+      <Flex gap="sm" align="center">
+        <Text bold={false}>{name || route.name}</Text>
+        {showDivider && <Divider />}
+      </Flex>
+    );
+  }
 
   return (
-    <DropdownAutoCompleteMenu
-      blendCorner={false}
-      isOpen={isActive}
-      virtualizedHeight={41}
-      onSelect={item => {
-        setIsActive(false);
-        onSelect(item);
+    <CompactSelect
+      search
+      options={options.map(item => ({...item, hideCheck: true}))}
+      onChange={selected => {
+        onCrumbSelect(selected.value);
       }}
-      menuProps={{
-        onMouseEnter: () => setIsActive(true),
-        onMouseLeave: () => setIsActive(false),
-      }}
-      {...dropdownProps}
-    >
-      {({getActorProps, isOpen}) => (
-        <Crumb
-          {...getActorProps({
-            onClick: () => setIsActive(false),
-            onMouseEnter: () => setIsActive(true),
-            onMouseLeave: () => setIsActive(false),
-          })}
-        >
-          <span>{name || route.name} </span>
-          {isLast ? null : <Divider isHover={hasMenu && isOpen} />}
-        </Crumb>
+      closeOnSelect
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      value={value}
+      trigger={triggerProps => (
+        <MenuCrumb
+          crumbLabel={name || route.name}
+          menuHasHover={isHovered}
+          showDivider={showDivider}
+          {...triggerProps}
+        />
       )}
-    </DropdownAutoCompleteMenu>
+      {...props}
+    />
   );
 }
 
-export default BreadcrumbDropdown;
+type MenuCrumbProps = TriggerProps & {
+  crumbLabel: React.ReactNode;
+  menuHasHover: boolean;
+  showDivider?: boolean;
+};
+// XXX(epurkhiser): We have a couple hacks in place to get hover-activation of
+// our CompactSelect working well for these breadcrumbs.
+//
+// 1. We're using the SelectContext to retrieve the OverlayTriggerState object
+//    for the CompactSelect that will be rendered upon hover. We need this so
+//    we can activate the menu. Using the `isOpen` controlled prop on
+//    CompactSelect does not work since it will not actually focus the menu.
+//
+// 2. We track the active crumb OverlayTriggerState objects so that when
+//    activating a second crumb the first one can be immediately closed,
+//    instead of being closed after the PointerLeave timemout.
+const activeCrumbStates = new Set<OverlayTriggerState | undefined>();
+
+const CLOSE_MENU_TIMEOUT = 250;
+
+function MenuCrumb({crumbLabel, menuHasHover, showDivider, ...props}: MenuCrumbProps) {
+  const {overlayState, overlayIsOpen} = useContext(ControlContext);
+  const {open, close} = overlayState ?? {};
+
+  const closeTimeoutRef = useRef<number>(undefined);
+
+  useEffect(() => {
+    activeCrumbStates.add(overlayState);
+    return () => void activeCrumbStates.delete(overlayState);
+  }, [overlayState]);
+
+  const queueMenuClose = useCallback(() => {
+    window.clearTimeout(closeTimeoutRef.current);
+    closeTimeoutRef.current = window.setTimeout(() => close?.(), CLOSE_MENU_TIMEOUT);
+  }, [close]);
+
+  const handleOpen = () => {
+    activeCrumbStates.forEach(state => state?.close());
+    window.clearTimeout(closeTimeoutRef.current);
+    open?.();
+  };
+
+  useEffect(() => {
+    if (menuHasHover) {
+      window.clearTimeout(closeTimeoutRef.current);
+    } else {
+      queueMenuClose();
+    }
+  }, [menuHasHover, queueMenuClose]);
+
+  return (
+    <Flex alignSelf="center">
+      {flexProps => (
+        <OverlayTrigger.Button
+          {...mergeProps(props, flexProps)}
+          variant="link"
+          showChevron={false}
+          onPointerEnter={handleOpen}
+          onPointerLeave={queueMenuClose}
+        >
+          <Flex gap="sm" align="center">
+            <Text bold={false}>{crumbLabel} </Text>
+            {showDivider && <Divider isHover={overlayIsOpen} />}
+          </Flex>
+        </OverlayTrigger.Button>
+      )}
+    </Flex>
+  );
+}

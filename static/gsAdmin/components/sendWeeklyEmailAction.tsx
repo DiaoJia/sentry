@@ -6,9 +6,10 @@ import {
   addSuccessMessage,
 } from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import BooleanField from 'sentry/components/forms/fields/booleanField';
-import TextField from 'sentry/components/forms/fields/textField';
-import withApi from 'sentry/utils/withApi';
+import {BooleanField} from 'sentry/components/forms/fields/booleanField';
+import {TextField} from 'sentry/components/forms/fields/textField';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {withApi} from 'sentry/utils/withApi';
 
 import type {
   AdminConfirmParams,
@@ -28,7 +29,7 @@ type State = {
  */
 class SendWeeklyEmailAction extends Component<Props, State> {
   state: State = {
-    dryRun: true,
+    dryRun: false,
     targetEmail: '',
     deliveryEmail: '',
   };
@@ -40,6 +41,11 @@ class SendWeeklyEmailAction extends Component<Props, State> {
   handleConfirm = (_params: AdminConfirmParams) => {
     const {targetEmail, deliveryEmail, dryRun} = this.state;
 
+    if (!dryRun && !deliveryEmail) {
+      addErrorMessage('Delivery email address is required when dry run is disabled');
+      return;
+    }
+
     addLoadingMessage('Sending Email');
     this.props.api
       .requestPromise(`/customers/${this.props.orgId}/send-weekly-email/`, {
@@ -50,10 +56,12 @@ class SendWeeklyEmailAction extends Component<Props, State> {
         addSuccessMessage('Email queued');
       })
       .catch(res => {
-        if (res.status === 404) {
-          addErrorMessage('User is not a member of the organization!');
-        } else {
-          addErrorMessage(res.responseText || res.name);
+        if (res instanceof RequestError) {
+          if (res.status === 404) {
+            addErrorMessage('User is not a member of the organization!');
+          } else {
+            addErrorMessage(res.responseText || res.name);
+          }
         }
       });
   };
@@ -80,7 +88,7 @@ class SendWeeklyEmailAction extends Component<Props, State> {
           flexibleControlStateSize
           label="Delivery email address"
           help="The weekly email will be sent to this address."
-          required
+          required={!this.state.dryRun}
           name="username"
           inputMode="text"
           value={this.state.deliveryEmail}
@@ -88,6 +96,7 @@ class SendWeeklyEmailAction extends Component<Props, State> {
         />
         <BooleanField
           label="Dry Run"
+          help="When enabled, generates the report without sending an email for performance testing. Delivery email address is not required in dry run mode. When disabled, a delivery email address must be provided."
           inline={false}
           name="dryrun"
           stacked

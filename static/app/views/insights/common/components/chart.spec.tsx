@@ -1,16 +1,16 @@
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import BaseChart from 'sentry/components/charts/baseChart';
-import MarkLine from 'sentry/components/charts/components/markLine';
+import {BaseChart} from 'sentry/components/charts/baseChart';
+import {markLine} from 'sentry/components/charts/components/markLine';
 import type {Series} from 'sentry/types/echarts';
-import Chart, {ChartType} from 'sentry/views/insights/common/components/chart';
+import {Chart, ChartType} from 'sentry/views/insights/common/components/chart';
 
-jest.mock('sentry/components/charts/baseChart', () => {
-  return jest.fn().mockImplementation(() => <div />);
-});
+jest.mock('sentry/components/charts/baseChart', () => ({
+  BaseChart: jest.fn().mockImplementation(() => <div />),
+}));
 
-describe('Chart', function () {
-  test('it shows an error panel if an error prop is supplied', function () {
+describe('Chart', () => {
+  test('it shows an error panel if an error prop is supplied', () => {
     const parsingError = new Error('Could not parse chart data');
 
     render(
@@ -20,7 +20,7 @@ describe('Chart', function () {
     expect(screen.getByTestId('chart-error-panel')).toBeInTheDocument();
   });
 
-  it('does not propagate mark line to the incomplete series', function () {
+  it('does not propagate mark line to the incomplete series', () => {
     const start = Date.now();
     const mockedSeries: Series[] = [
       {
@@ -32,7 +32,7 @@ describe('Chart', function () {
           {name: start - 30_000, value: 2},
           {name: start, value: 1},
         ],
-        markLine: MarkLine({
+        markLine: markLine({
           data: [
             {
               type: 'average',

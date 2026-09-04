@@ -1,5 +1,7 @@
 import type {Location} from 'history';
 
+import {Link} from '@sentry/scraps/link';
+
 import {
   deleteHomepageQuery,
   updateHomepageQuery,
@@ -11,21 +13,22 @@ import {
 } from 'sentry/actionCreators/discoverSavedQueries';
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {Client} from 'sentry/api';
-import {t} from 'sentry/locale';
+import {t, tct} from 'sentry/locale';
 import type {NewQuery, Organization, SavedQuery} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {SaveQueryEventParameters} from 'sentry/utils/analytics/discoverAnalyticsEvents';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {
   DiscoverDatasets,
   DisplayModes,
   SavedQueryDatasets,
 } from 'sentry/utils/discover/types';
 import {decodeScalar} from 'sentry/utils/queryString';
-import type RequestError from 'sentry/utils/requestError/requestError';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
 import {DisplayType} from 'sentry/views/dashboards/types';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
 import {DATASET_PARAM} from 'sentry/views/discover/savedQuery/datasetSelectorTabs';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
 
 export function handleCreateQuery(
   api: Client,
@@ -79,7 +82,7 @@ export function handleUpdateQuery(
 
   if (!eventView.name) {
     addErrorMessage(t('Please name your query'));
-    return Promise.reject();
+    return Promise.reject(new Error('Query name is required'));
   }
 
   trackAnalytics('discover_v2.update_query_request', {
@@ -196,11 +199,17 @@ export function handleUpdateHomepageQuery(
 
   return promise
     .then(savedQuery => {
-      addSuccessMessage(t('Saved as Discover default'));
+      addSuccessMessage(
+        getDiscoverDeprecation(organization)
+          ? t('Saved as Errors default')
+          : t('Saved as Discover default')
+      );
       return savedQuery;
     })
     .catch((e: RequestError) => {
-      let errorMessage = t('Unable to set query as Discover default');
+      let errorMessage = getDiscoverDeprecation(organization)
+        ? t('Unable to set query as Errors default')
+        : t('Unable to set query as Discover default');
 
       if ('responseJSON' in e) {
         const response = e.responseJSON;
@@ -217,14 +226,22 @@ export function handleResetHomepageQuery(api: Client, organization: Organization
 
   return promise
     .then(() => {
-      addSuccessMessage(t('Successfully removed Discover default'));
+      addSuccessMessage(
+        getDiscoverDeprecation(organization)
+          ? t('Successfully removed Errors default')
+          : t('Successfully removed Discover default')
+      );
     })
     .catch(() => {
-      addErrorMessage(t('Unable to remove Discover default'));
+      addErrorMessage(
+        getDiscoverDeprecation(organization)
+          ? t('Unable to remove Errors default')
+          : t('Unable to remove Discover default')
+      );
     });
 }
 
-export function getAnalyticsCreateEventKeyName(
+function getAnalyticsCreateEventKeyName(
   // True if this is a brand new query being saved
   // False if this is a modification from a saved query
   isNewQuery: boolean,
@@ -241,7 +258,7 @@ export function getAnalyticsCreateEventKeyName(
  * Takes in a DiscoverV2 NewQuery object and returns a Partial containing
  * the desired fields to populate into reload analytics
  */
-export function extractAnalyticsQueryFields(payload: NewQuery): Partial<NewQuery> {
+function extractAnalyticsQueryFields(payload: NewQuery): Partial<NewQuery> {
   const {projects, fields, query} = payload;
   return {
     projects,
@@ -250,7 +267,7 @@ export function extractAnalyticsQueryFields(payload: NewQuery): Partial<NewQuery
   };
 }
 
-export function displayModeToDisplayType(displayMode: DisplayModes): DisplayType {
+export function displayModeToDisplayType(displayMode: DisplayModes | undefined) {
   switch (displayMode) {
     case DisplayModes.DAILYTOP5:
     case DisplayModes.DAILY:
@@ -346,4 +363,13 @@ export function getSavedQueryDatasetFromLocationOrDataset(
     default:
       return undefined;
   }
+}
+
+export function getTransactionDeprecationMessage(tracesUrl: string) {
+  return tct(
+    'Discover\u2192Transactions is going to be merged into Explore\u2192Traces soon. Please save any transaction related queries from [traces:Explore\u2192Traces]',
+    {
+      traces: <Link to={tracesUrl} />,
+    }
+  );
 }

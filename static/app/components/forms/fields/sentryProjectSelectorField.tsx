@@ -1,10 +1,17 @@
-import IdBadge from 'sentry/components/idBadge';
+import {Flex} from '@sentry/scraps/layout';
+import {components} from '@sentry/scraps/select';
+
+import {IdBadge} from 'sentry/components/idBadge';
 import {t} from 'sentry/locale';
 import type {Project} from 'sentry/types/project';
 
 // XXX(epurkhiser): This is wrong, it should not be inheriting these props
 import type {InputFieldProps} from './inputField';
-import SelectField from './selectField';
+import {SelectField} from './selectField';
+
+const OVERRIDE_COMPONENTS = {
+  MultiValueLabel: SelectedProjectMultiValueLabel,
+};
 
 /**
  * Function used to group projects by returning the key of the group
@@ -32,7 +39,31 @@ export interface RenderFieldProps extends InputFieldProps {
   valueIsSlug?: boolean;
 }
 
-function SentryProjectSelectorField({
+// When in multi-select mode, this adds the project badget to the selected badges
+function SelectedProjectMultiValueLabel({
+  data,
+  children,
+  ...props
+}: React.ComponentProps<typeof components.MultiValueLabel>) {
+  return (
+    <components.MultiValueLabel data={data} {...props}>
+      <Flex align="center" gap="xs">
+        {data.project ? (
+          <IdBadge
+            project={data.project}
+            avatarSize={14}
+            avatarProps={{consistentWidth: true}}
+            disableLink
+            hideName
+          />
+        ) : null}
+        {children}
+      </Flex>
+    </components.MultiValueLabel>
+  );
+}
+
+export function SentryProjectSelectorField({
   projects,
   groupProjects,
   groups,
@@ -45,11 +76,13 @@ function SentryProjectSelectorField({
     return {
       value: project[valueIsSlug ? 'slug' : 'id'],
       label: project.slug,
+      project,
       leadingItems: (
         <IdBadge
           project={project}
           avatarSize={avatarSize}
           avatarProps={{consistentWidth: true}}
+          disableLink
           hideName
         />
       ),
@@ -68,7 +101,12 @@ function SentryProjectSelectorField({
       : // Otherwise just map projects to the options
         projects?.map(projectToOption);
 
-  return <SelectField placeholder={placeholder} options={projectOptions} {...props} />;
+  return (
+    <SelectField
+      placeholder={placeholder}
+      options={projectOptions}
+      components={OVERRIDE_COMPONENTS}
+      {...props}
+    />
+  );
 }
-
-export default SentryProjectSelectorField;

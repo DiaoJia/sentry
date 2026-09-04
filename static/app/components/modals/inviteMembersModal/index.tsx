@@ -2,25 +2,24 @@ import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import {
   ErrorAlert,
   InviteMessage,
 } from 'sentry/components/modals/inviteMembersModal/inviteHeaderMessages';
 import {InviteMembersContext} from 'sentry/components/modals/inviteMembersModal/inviteMembersContext';
-import InviteMembersFooter from 'sentry/components/modals/inviteMembersModal/inviteMembersFooter';
-import InviteRowControl from 'sentry/components/modals/inviteMembersModal/inviteRowControl';
+import {InviteMembersFooter} from 'sentry/components/modals/inviteMembersModal/inviteMembersFooter';
+import {InviteRowControl} from 'sentry/components/modals/inviteMembersModal/inviteRowControl';
 import type {InviteRow} from 'sentry/components/modals/inviteMembersModal/types';
-import useInviteModal from 'sentry/components/modals/inviteMembersModal/useInviteModal';
+import {useInviteModal} from 'sentry/components/modals/inviteMembersModal/useInviteModal';
 import {InviteModalHook} from 'sentry/components/modals/memberInviteModalCustomization';
 import {ORG_ROLES} from 'sentry/constants';
 import {t} from 'sentry/locale';
-import HookStore from 'sentry/stores/hookStore';
-import {space} from 'sentry/styles/space';
+import {getOverride} from 'sentry/overrideRegistry';
 import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 interface InviteMembersModalProps extends ModalRenderProps {
   initialData?: Array<Partial<InviteRow>>;
@@ -71,8 +70,7 @@ function InviteMembersModal({
   }
 
   const defaultOrgRoles =
-    HookStore.get('member-invite-modal:organization-roles')[0]?.(organization) ??
-    ORG_ROLES;
+    getOverride('member-invite-modal:organization-roles')?.(organization) ?? ORG_ROLES;
 
   return (
     <ErrorBoundary>
@@ -136,14 +134,14 @@ export const modalCss = css`
 `;
 
 const Heading = styled('h1')`
-  font-weight: ${p => p.theme.fontWeightNormal};
-  font-size: ${p => p.theme.headerFontSize};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  font-size: ${p => p.theme.font.size.xl};
   margin-top: 0;
-  margin-bottom: ${space(0.75)};
+  margin-bottom: ${p => p.theme.space.sm};
 `;
 
 const StyledInviteRow = styled(InviteRowControl)`
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 `;
 
 export default InviteMembersModal;

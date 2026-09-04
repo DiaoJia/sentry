@@ -44,11 +44,34 @@ describe('initializeSdk', () => {
       })
     );
   });
+
+  it('ignores the ECharts tooltip error thrown when a chart replaces its series', () => {
+    initializeSdk({
+      ...window.__initialData,
+      apmSampling: 1,
+      sentryConfig: {
+        allowUrls: [],
+        dsn: '',
+        release: '',
+        tracePropagationTargets: [],
+      },
+    });
+
+    const ignoreErrors = jest.mocked(Sentry.init).mock.lastCall?.[0]?.ignoreErrors ?? [];
+    const message =
+      "TypeError: Cannot read properties of undefined (reading 'getDataParams')";
+
+    expect(
+      ignoreErrors.some(pattern =>
+        typeof pattern === 'string' ? message.includes(pattern) : pattern.test(message)
+      )
+    ).toBe(true);
+  });
 });
 
 describe('isFilteredRequestErrorEvent', () => {
   const methods = ['GET', 'POST', 'PUT', 'DELETE'];
-  const stati = [200, 400, 401, 403, 404, 429];
+  const stati = [200, 400, 401, 402, 403, 404, 429];
 
   describe('matching error type, matching message', () => {
     for (const method of methods) {
@@ -129,7 +152,7 @@ describe('isFilteredRequestErrorEvent', () => {
   });
 
   describe('non-matching error type, non-matching message', () => {
-    it(`rejects other errors`, () => {
+    it('rejects other errors', () => {
       const event = {
         exception: {
           values: [{type: 'UncaughtSquirrelError', value: 'Squirrel was not caught'}],
@@ -139,7 +162,7 @@ describe('isFilteredRequestErrorEvent', () => {
       expect(isFilteredRequestErrorEvent(event)).toBeFalsy();
     });
 
-    it(`rejects other errors as causes`, () => {
+    it('rejects other errors as causes', () => {
       const event = {
         exception: {
           values: [

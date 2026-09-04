@@ -1,7 +1,5 @@
 import {DashboardFixture} from 'sentry-fixture/dashboard';
-import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {RouterFixture} from 'sentry-fixture/routerFixture';
 
 import {
   render,
@@ -12,16 +10,19 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 
 import {addErrorMessage} from 'sentry/actionCreators/indicator';
-import ModalStore from 'sentry/stores/modalStore';
-import useCustomMeasurements from 'sentry/utils/useCustomMeasurements';
+import {useCustomMeasurements} from 'sentry/utils/useCustomMeasurements';
 import {useParams} from 'sentry/utils/useParams';
 import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
-import WidgetBuilderSlideout from 'sentry/views/dashboards/widgetBuilder/components/widgetBuilderSlideout';
+import {WidgetBuilderSlideout} from 'sentry/views/dashboards/widgetBuilder/components/widgetBuilderSlideout';
 import {WidgetBuilderProvider} from 'sentry/views/dashboards/widgetBuilder/contexts/widgetBuilderContext';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
+import {
+  useSpanItemAttributes,
+  useTraceItemDatasetAttributes,
+  useTraceMetricItemAttributes,
+} from 'sentry/views/explore/hooks/useTraceItemAttributes';
 
 jest.mock('sentry/utils/useCustomMeasurements');
-jest.mock('sentry/views/explore/contexts/spanTagsContext');
+jest.mock('sentry/views/explore/hooks/useTraceItemAttributes');
 jest.mock('sentry/actionCreators/indicator');
 jest.mock('sentry/utils/useParams');
 
@@ -32,11 +33,22 @@ describe('WidgetBuilderSlideout', () => {
 
     jest.mocked(useCustomMeasurements).mockReturnValue({customMeasurements: {}});
 
-    jest.mocked(useTraceItemTags).mockReturnValue({tags: {}, isLoading: false});
+    jest
+      .mocked(useTraceItemDatasetAttributes)
+      .mockReturnValue({attributes: {}, secondaryAliases: {}, isLoading: false});
+    jest
+      .mocked(useSpanItemAttributes)
+      .mockReturnValue({attributes: {}, secondaryAliases: {}, isLoading: false});
+    jest
+      .mocked(useTraceMetricItemAttributes)
+      .mockReturnValue({attributes: {}, secondaryAliases: {}, isLoading: false});
 
     jest.mocked(useParams).mockReturnValue({widgetIndex: undefined});
 
-    MockApiClient.addMockResponse({url: '/organizations/org-slug/recent-searches/'});
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/recent-searches/',
+      body: [],
+    });
 
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/widgets/',
@@ -48,10 +60,19 @@ describe('WidgetBuilderSlideout', () => {
       url: '/organizations/org-slug/tags/',
       body: [],
     });
+
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/events/',
+      body: {data: [], meta: {fields: {}, units: {}}},
+    });
+
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-items/attributes/',
+      body: [],
+    });
   });
 
   afterEach(() => {
-    ModalStore.reset();
     jest.clearAllMocks();
   });
 
@@ -61,31 +82,27 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid={false}
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: ['project'],
               yAxis: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -101,31 +118,27 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid={false}
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: [],
               yAxis: [],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -138,31 +151,27 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid={false}
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: [],
               yAxis: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -176,19 +185,16 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid={false}
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-        deprecatedRouterMocks: true,
       }
     );
     renderGlobalModal();
@@ -208,19 +214,16 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid={false}
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-        deprecatedRouterMocks: true,
       }
     );
 
@@ -249,32 +252,27 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: [],
               yAxis: ['count()'],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.LINE,
-              title: undefined,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -293,36 +291,33 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: ['count()'],
               yAxis: [],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
     await userEvent.type(await screen.findByPlaceholderText('Add Alias'), 'test alias');
-    await userEvent.click(screen.getByText('Errors'));
+    await userEvent.click(await screen.findByRole('button', {name: 'Transactions'}));
+    await userEvent.click(await screen.findByRole('option', {name: 'Errors'}));
 
     expect(await screen.findByPlaceholderText('Add Alias')).toHaveValue('');
   }, 10_000);
@@ -333,31 +328,27 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               field: ['count()'],
               yAxis: [],
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.TABLE,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -380,29 +371,25 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={jest.fn()}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-
-        router: RouterFixture({
-          location: LocationFixture({
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
             query: {
               dataset: WidgetType.TRANSACTIONS,
               displayType: DisplayType.BIG_NUMBER,
             },
-          }),
-        }),
-
-        deprecatedRouterMocks: true,
+          },
+        },
       }
     );
 
@@ -418,19 +405,16 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={onSave}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-        deprecatedRouterMocks: true,
       }
     );
 
@@ -450,19 +434,16 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={onSave}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
       </WidgetBuilderProvider>,
       {
         organization,
-        deprecatedRouterMocks: true,
       }
     );
 
@@ -481,12 +462,10 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={onSave}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates
           setOpenWidgetTemplates={jest.fn()}
         />
@@ -506,12 +485,10 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={onSave}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates
           setOpenWidgetTemplates={jest.fn()}
         />
@@ -531,12 +508,10 @@ describe('WidgetBuilderSlideout', () => {
         <WidgetBuilderSlideout
           dashboard={DashboardFixture([])}
           dashboardFilters={{release: undefined}}
-          isWidgetInvalid
           onClose={jest.fn()}
           onQueryConditionChange={jest.fn()}
           onSave={onSave}
           setIsPreviewDraggable={jest.fn()}
-          isOpen
           openWidgetTemplates={false}
           setOpenWidgetTemplates={jest.fn()}
         />
@@ -545,5 +520,354 @@ describe('WidgetBuilderSlideout', () => {
 
     expect(await screen.findByText('Widget Library')).toBeInTheDocument();
     expect(await screen.findByText('Custom Widget Builder')).toBeInTheDocument();
+  });
+
+  it('should show deprecation alert when flag enabled', async () => {
+    const organizationWithFeature = OrganizationFixture({
+      features: [
+        'discover-saved-queries-deprecation',
+        'performance-transaction-deprecation-banner',
+      ],
+    });
+    jest.mocked(useParams).mockReturnValue({widgetIndex: '1'});
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization: organizationWithFeature,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.TRANSACTIONS,
+              displayType: DisplayType.LINE,
+            },
+          },
+        },
+      }
+    );
+    renderGlobalModal();
+
+    expect(
+      await screen.findByText(
+        /Editing of transaction-based widgets is disabled, as we migrate to the span dataset/i
+      )
+    ).toBeInTheDocument();
+
+    expect(screen.getAllByTestId('transaction-widget-disabled-wrapper')).toHaveLength(2);
+  });
+
+  it('should not show deprecation alert when flag enabled', async () => {
+    jest.mocked(useParams).mockReturnValue({widgetIndex: '1'});
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.TRANSACTIONS,
+              displayType: DisplayType.LINE,
+            },
+          },
+        },
+      }
+    );
+    renderGlobalModal();
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText(
+          /You may have limited functionality due to the ongoing migration of transactions to spans/i
+        )
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId('transaction-widget-disabled-wrapper')
+    ).not.toBeInTheDocument();
+  });
+
+  it('should not show the query filter builder if the widget is an issue and a chart display type', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.ISSUE,
+              displayType: DisplayType.LINE,
+            },
+          },
+        },
+      }
+    );
+
+    expect(screen.queryByLabelText('Add a search term')).not.toBeInTheDocument();
+
+    // Wait for any pending popper updates to complete
+    await waitFor(() => {
+      expect(screen.getByRole('button', {name: 'Issues'})).toBeInTheDocument();
+    });
+  });
+
+  it('should show the markdown content field for text widgets', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              displayType: DisplayType.TEXT,
+            },
+          },
+        },
+      }
+    );
+
+    expect(
+      await screen.findByPlaceholderText('Write your markdown here...')
+    ).toBeInTheDocument();
+  });
+
+  it('should not show the dataset selector for text widgets', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              displayType: DisplayType.TEXT,
+            },
+          },
+        },
+      }
+    );
+
+    expect(
+      await screen.findByPlaceholderText('Write your markdown here...')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: 'Errors'})).not.toBeInTheDocument();
+  });
+
+  it('should not show the sort by step for text widgets', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              displayType: DisplayType.TEXT,
+            },
+          },
+        },
+      }
+    );
+
+    expect(
+      await screen.findByPlaceholderText('Write your markdown here...')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Sort by')).not.toBeInTheDocument();
+  });
+
+  it('stays in series mode after a dataset round-trip', async () => {
+    render(
+      <WidgetBuilderSlideout
+        dashboard={DashboardFixture([])}
+        dashboardFilters={{release: undefined}}
+        onClose={jest.fn()}
+        onQueryConditionChange={jest.fn()}
+        onSave={jest.fn()}
+        setIsPreviewDraggable={jest.fn()}
+        openWidgetTemplates={false}
+        setOpenWidgetTemplates={jest.fn()}
+      />,
+      {
+        organization: OrganizationFixture({
+          features: ['tracemetrics-enabled'],
+        }),
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.TRACEMETRICS,
+              displayType: DisplayType.LINE,
+              yAxis: ['sum(value,alpha_metric,counter,none)'],
+            },
+          },
+        },
+        additionalWrapper: WidgetBuilderProvider,
+      }
+    );
+
+    expect(await screen.findByRole('radio', {name: 'Series'})).toBeChecked();
+
+    await userEvent.click(screen.getByRole('button', {name: 'Application Metrics'}));
+    await userEvent.click(screen.getByRole('option', {name: 'Errors'}));
+
+    expect(screen.queryByRole('radio', {name: 'Series'})).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', {name: 'Errors'}));
+    await userEvent.click(screen.getByRole('option', {name: 'Application Metrics'}));
+
+    await waitFor(() => {
+      expect(screen.getByRole('radio', {name: 'Series'})).toBeChecked();
+    });
+  });
+
+  it('restores equation mode after a dataset round-trip', async () => {
+    render(
+      <WidgetBuilderSlideout
+        dashboard={DashboardFixture([])}
+        dashboardFilters={{release: undefined}}
+        onClose={jest.fn()}
+        onQueryConditionChange={jest.fn()}
+        onSave={jest.fn()}
+        setIsPreviewDraggable={jest.fn()}
+        openWidgetTemplates={false}
+        setOpenWidgetTemplates={jest.fn()}
+      />,
+      {
+        organization: OrganizationFixture({
+          features: ['tracemetrics-enabled'],
+        }),
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.TRACEMETRICS,
+              displayType: DisplayType.LINE,
+              yAxis: [
+                'equation|sum(value,alpha_metric,counter,none) + avg(value,beta_metric,counter,none)',
+              ],
+            },
+          },
+        },
+        additionalWrapper: WidgetBuilderProvider,
+      }
+    );
+
+    expect(await screen.findByRole('radio', {name: 'Equation'})).toBeChecked();
+
+    await userEvent.click(screen.getByRole('button', {name: 'Application Metrics'}));
+    await userEvent.click(screen.getByRole('option', {name: 'Errors'}));
+
+    expect(screen.queryByRole('radio', {name: 'Equation'})).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', {name: 'Errors'}));
+    await userEvent.click(screen.getByRole('option', {name: 'Application Metrics'}));
+
+    await waitFor(() => {
+      expect(screen.getByRole('radio', {name: 'Equation'})).toBeChecked();
+    });
+  });
+
+  it('should not show the group by selector if the widget is an issue and a chart display type', async () => {
+    render(
+      <WidgetBuilderProvider>
+        <WidgetBuilderSlideout
+          dashboard={DashboardFixture([])}
+          dashboardFilters={{release: undefined}}
+          onClose={jest.fn()}
+          onQueryConditionChange={jest.fn()}
+          onSave={jest.fn()}
+          setIsPreviewDraggable={jest.fn()}
+          openWidgetTemplates={false}
+          setOpenWidgetTemplates={jest.fn()}
+        />
+      </WidgetBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {
+          location: {
+            pathname: '/dashboards/',
+            query: {
+              dataset: WidgetType.ISSUE,
+              displayType: DisplayType.LINE,
+            },
+          },
+        },
+      }
+    );
+
+    expect(screen.queryByText('Group by')).not.toBeInTheDocument();
+
+    // Wait for any pending popper updates to complete
+    await waitFor(() => {
+      expect(screen.getByRole('button', {name: 'Issues'})).toBeInTheDocument();
+    });
   });
 });

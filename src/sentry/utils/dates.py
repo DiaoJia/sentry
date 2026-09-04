@@ -1,11 +1,12 @@
 import logging
 import re
 import zoneinfo
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, overload
 
-from dateutil.parser import ParserError, parse
+from dateutil.parser import parse
 from django.http.request import HttpRequest
+from django.template.defaultfilters import pluralize
 from django.utils.timezone import is_aware, make_aware
 
 from sentry import quotas
@@ -26,6 +27,35 @@ def ensure_aware(value: datetime) -> datetime:
     if is_aware(value):
         return value
     return make_aware(value)
+
+
+def format_duration(minutes: int | float, floor_to_largest_unit: bool = True) -> str:
+    """
+    Format a number of minutes into a human-friendly, pluralized duration string.
+
+    floor_to_largest_unit=True: the value is floored to the largest whole unit that fits
+    and any remainder is dropped. (90 -> "1 hour", 1500 -> "1 day")
+
+    floor_to_largest_unit=False: duration is rendered exactly, only promoted to hours
+    when it divides evenly, otherwise it stays in MINUTES (does not have seconds resolution).
+    (90 -> "90 minutes", 120 -> "2 hours", 0.5 -> "0 minutes")
+    """
+
+    def unit(value: int, name: str) -> str:
+        return f"{value:d} {name}{pluralize(value)}"
+
+    if not floor_to_largest_unit:
+        if minutes >= 60 and minutes % 60 == 0:
+            return unit(int(minutes // 60), "hour")
+        return unit(int(minutes), "minute")
+
+    if minutes >= 1440:
+        return unit(int(minutes // 1440), "day")
+    if minutes >= 60:
+        return unit(int(minutes // 60), "hour")
+    if minutes >= 1:
+        return unit(int(minutes), "minute")
+    return unit(int(minutes * 60), "second")
 
 
 @overload
@@ -76,6 +106,14 @@ def parse_date(datestr: str, timestr: str) -> datetime | None:
             return None
 
 
+@overload  # TODO: deprecate
+def parse_timestamp(value: None) -> None: ...
+
+
+@overload
+def parse_timestamp(value: datetime | int | float | str | bytes) -> datetime: ...
+
+
 def parse_timestamp(value: datetime | int | float | str | bytes | None) -> datetime | None:
     # TODO(mitsuhiko): merge this code with coreapis date parser
     if not value:
@@ -85,13 +123,9 @@ def parse_timestamp(value: datetime | int | float | str | bytes | None) -> datet
     elif isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, UTC)
 
-    try:
-        if isinstance(value, bytes):
-            value = value.decode()
-        return parse(value, ignoretz=True).replace(tzinfo=UTC)
-    except (ParserError, ValueError):
-        logger.exception("parse_timestamp")
-        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    return parse(value, ignoretz=True).replace(tzinfo=UTC)
 
 
 def parse_stats_period(period: str) -> timedelta | None:
@@ -140,6 +174,7 @@ def get_rollup_from_request(
     error: Exception,
     top_events: int = 0,
     allow_interval_over_range: bool = True,
+    max_rollup_override: None | float = None,
 ) -> int:
     if default_interval is None:
         default_interval = get_interval_from_range(date_range, False)
@@ -147,7 +182,9 @@ def get_rollup_from_request(
     interval = parse_stats_period(request.GET.get("interval", default_interval))
     if interval is None:
         interval = timedelta(hours=1)
-    validate_interval(interval, error, date_range, top_events, allow_interval_over_range)
+    validate_interval(
+        interval, error, date_range, top_events, allow_interval_over_range, max_rollup_override
+    )
 
     return int(interval.total_seconds())
 
@@ -158,12 +195,16 @@ def validate_interval(
     date_range: timedelta,
     top_events: int,
     allow_interval_over_range: bool = True,
+    max_rollup_override: None | float = None,
 ) -> None:
     if interval.total_seconds() <= 0:
         raise error.__class__("Interval cannot result in a zero duration.")
 
-    # When top events are present, there can be up to 5x as many points
-    max_rollup_points = MAX_ROLLUP_POINTS if top_events == 0 else MAX_ROLLUP_POINTS / top_events
+    if max_rollup_override is not None:
+        max_rollup_points = max_rollup_override
+    else:
+        # When top events are present, there can be up to 5x as many points
+        max_rollup_points = MAX_ROLLUP_POINTS if top_events == 0 else MAX_ROLLUP_POINTS / top_events
 
     if not allow_interval_over_range and interval.total_seconds() > date_range.total_seconds():
         raise error.__class__("Interval cannot be larger than the date range.")
@@ -186,7 +227,7 @@ def outside_retention_with_modified_start(
 
     # Need to support timezone-aware and naive datetimes since
     # Snuba API only deals in naive UTC
-    now = datetime.now(UTC) if start.tzinfo else datetime.utcnow()
+    now = datetime.now(UTC) if start.tzinfo else datetime.now(UTC).replace(tzinfo=None)
     start = max(start, now - timedelta(days=retention))
 
     return start > end, start
@@ -204,3 +245,19 @@ def get_timezone_choices() -> list[tuple[str, str]]:
     for item in build_results:
         results.append(item[1:])
     return results
+
+
+def deprecated_utcnow() -> datetime:
+    """
+    Returns a naive UTC timestamp.
+
+    Using this function is wrong and it should be replaced with a timezone aware
+    timestamp. This function exists to replace `utcnow` which is deprecated.
+    `utcnow` logs deprecation notices which are polluting the log stream. This
+    function signals that its obviously deprecated without being annoying for people
+    trying to debug things other than timezone issue.
+
+    If you see this function being called in your code please replace it with a timezone
+    aware datetime.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)

@@ -2,36 +2,65 @@ import {useMemo} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
+import {Input} from '@sentry/scraps/input';
+
 import {useArithmeticBuilderAction} from 'sentry/components/arithmeticBuilder/action';
 import {ArithmeticBuilderContext} from 'sentry/components/arithmeticBuilder/context';
 import type {Expression} from 'sentry/components/arithmeticBuilder/expression';
 import {TokenGrid} from 'sentry/components/arithmeticBuilder/token/grid';
-import type {
-  AggregateFunction,
-  FunctionArgument,
-} from 'sentry/components/arithmeticBuilder/types';
-import {Input} from 'sentry/components/core/input';
-import PanelProvider from 'sentry/utils/panelProvider';
+import type {FunctionArgument} from 'sentry/components/arithmeticBuilder/types';
+import type {FieldDefinition} from 'sentry/utils/fields';
+import {FieldKind} from 'sentry/utils/fields';
+import {PanelProvider} from 'sentry/utils/panelProvider';
 
 interface ArithmeticBuilderProps {
-  aggregateFunctions: AggregateFunction[];
+  aggregations: string[];
   expression: string;
   functionArguments: FunctionArgument[];
+  getFieldDefinition: (key: string) => FieldDefinition | null;
   className?: string;
+  'data-test-id'?: string;
   disabled?: boolean;
+  /**
+   * This is used when a user types in a search key and submits the token.
+   * The submission happens when the user types a colon or presses enter.
+   * When this happens, this function is used to try to map the user input
+   * to a known column.
+   */
+  getSuggestedKey?: (key: string) => string | null;
+  /**
+   * When provided, the arithmetic builder will use the references to suggest
+   * keys for the user instead of aggregations and function arguments.
+   */
+  references?: Set<string>;
   setExpression?: (expression: Expression) => void;
 }
 
+const VALID_REFERENCE_PATTERN = /^[A-Z]$/;
+
 export function ArithmeticBuilder({
+  'data-test-id': dataTestId,
   expression,
   setExpression,
-  aggregateFunctions,
+  aggregations,
   functionArguments,
+  getFieldDefinition,
+  getSuggestedKey,
   className,
   disabled,
+  references,
 }: ArithmeticBuilderProps) {
+  if (references) {
+    for (const reference of references) {
+      if (!VALID_REFERENCE_PATTERN.test(reference)) {
+        throw new Error(`Invalid reference: ${reference}`);
+      }
+    }
+  }
+
   const {state, dispatch} = useArithmeticBuilderAction({
     initialExpression: expression || '',
+    references,
     updateExpression: setExpression,
   });
 
@@ -39,10 +68,23 @@ export function ArithmeticBuilder({
     return {
       dispatch,
       focusOverride: state.focusOverride,
-      aggregateFunctions,
+      aggregations: aggregations.filter(aggregation => {
+        return getFieldDefinition(aggregation)?.kind === FieldKind.FUNCTION;
+      }),
       functionArguments,
+      getFieldDefinition,
+      getSuggestedKey,
+      references,
     };
-  }, [state, dispatch, aggregateFunctions, functionArguments]);
+  }, [
+    state,
+    dispatch,
+    aggregations,
+    functionArguments,
+    getFieldDefinition,
+    getSuggestedKey,
+    references,
+  ]);
 
   return (
     <PanelProvider>
@@ -50,8 +92,9 @@ export function ArithmeticBuilder({
         <Wrapper
           className={className}
           aria-disabled={disabled}
-          data-test-id="arithmetic-builder"
+          data-test-id={dataTestId ?? 'arithmetic-builder'}
           state={state.expression.isValid ? 'valid' : 'invalid'}
+          disabled={disabled}
         >
           <TokenGrid tokens={state.expression.tokens} />
         </Wrapper>
@@ -66,22 +109,28 @@ const Wrapper = styled(Input.withComponent('div'))<{state: 'valid' | 'invalid'}>
   height: auto;
   width: 100%;
   position: relative;
-  font-size: ${p => p.theme.fontSize.md};
+  font-size: ${p => p.theme.font.size.md};
   cursor: text;
+
+  ${p =>
+    p.disabled &&
+    css`
+      pointer-events: none;
+    `}
 
   ${p =>
     p.state === 'valid'
       ? css`
           :focus-within {
-            border: 1px solid ${p.theme.focusBorder};
-            box-shadow: 0 0 0 1px ${p.theme.focusBorder};
+            border: 1px solid ${p.theme.tokens.focus.default};
+            box-shadow: 0 0 0 1px ${p.theme.tokens.focus.default};
           }
         `
       : p.state === 'invalid'
         ? css`
             :focus-within {
-              border: 1px solid ${p.theme.errorFocus};
-              box-shadow: 0 0 0 1px ${p.theme.errorFocus};
+              border: 1px solid ${p.theme.tokens.focus.invalid};
+              box-shadow: 0 0 0 1px ${p.theme.tokens.focus.invalid};
             }
           `
         : ''}

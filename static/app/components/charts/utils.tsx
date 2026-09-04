@@ -5,18 +5,18 @@ import orderBy from 'lodash/orderBy';
 import moment from 'moment-timezone';
 
 import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
-import type {PageFilters} from 'sentry/types/core';
-import type {ReactEchartsRef, Series} from 'sentry/types/echarts';
+import type {PageFilterDatetime} from 'sentry/types/core';
+import type {ECharts, ReactEchartsRef} from 'sentry/types/echarts';
 import type {
   EventsStats,
   GroupedMultiSeriesEventsStats,
   MultiSeriesEventsStats,
 } from 'sentry/types/organization';
-import {defined, escape} from 'sentry/utils';
+import {escape} from 'sentry/utils';
 import {getFormat, getFormattedDate} from 'sentry/utils/dates';
-import type {TableDataWithTitle} from 'sentry/utils/discover/discoverQuery';
+import {defined} from 'sentry/utils/defined';
 import {parsePeriodToHours} from 'sentry/utils/duration/parsePeriodToHours';
-import oxfordizeArray from 'sentry/utils/oxfordizeArray';
+import {oxfordizeArray} from 'sentry/utils/oxfordizeArray';
 import {decodeList} from 'sentry/utils/queryString';
 
 const DEFAULT_TRUNCATE_LENGTH = 80;
@@ -28,11 +28,14 @@ export const SIXTY_DAYS = 86400;
 export const THIRTY_DAYS = 43200;
 export const TWO_WEEKS = 20160;
 export const ONE_WEEK = 10080;
+export const FOUR_DAYS = 5760;
 export const FORTY_EIGHT_HOURS = 2880;
 export const TWENTY_FOUR_HOURS = 1440;
+export const TWELVE_HOURS = 720;
 export const SIX_HOURS = 360;
 const THREE_HOURS = 180;
 export const ONE_HOUR = 60;
+const THIRTY_MINUTES = 30;
 export const FIVE_MINUTES = 5;
 
 /**
@@ -40,7 +43,7 @@ export const FIVE_MINUTES = 5;
  */
 export const RELEASE_LINES_THRESHOLD = 50;
 
-export type DateTimeObject = Partial<PageFilters['datetime']>;
+export type DateTimeObject = Partial<PageFilterDatetime>;
 
 export function truncationFormatter(
   value: string,
@@ -106,12 +109,12 @@ export class GranularityLadder {
         fmt`Invalid duration supplied to interval function. (minutes: ${String(minutes)})`
       );
 
-      return (this.steps.at(-1) as GranularityStep)[1];
+      return this.steps.at(-1)![1];
     }
 
     const step = this.steps.find(([threshold]) => {
       return minutes >= threshold;
-    }) as GranularityStep;
+    })!;
 
     return step[1];
   }
@@ -199,8 +202,8 @@ const issuesFidelityLadder = new GranularityLadder([
 const spansFidelityLadder = new GranularityLadder([
   [SIXTY_DAYS, '1d'],
   [THIRTY_DAYS, '12h'],
-  [TWO_WEEKS, '4h'],
-  [ONE_WEEK, '2h'],
+  [TWO_WEEKS, '3h'],
+  [ONE_WEEK, '1h'],
   [FORTY_EIGHT_HOURS, '30m'],
   [TWENTY_FOUR_HOURS, '15m'],
   [SIX_HOURS, '15m'],
@@ -211,12 +214,12 @@ const spansFidelityLadder = new GranularityLadder([
 const spansLowFidelityLadder = new GranularityLadder([
   [THIRTY_DAYS, '1d'],
   [TWO_WEEKS, '12h'],
-  [ONE_WEEK, '4h'],
-  [FORTY_EIGHT_HOURS, '2h'],
+  [ONE_WEEK, '3h'],
   [TWENTY_FOUR_HOURS, '1h'],
   [SIX_HOURS, '30m'],
-  [ONE_HOUR, '10m'],
-  [0, '5m'],
+  [ONE_HOUR, '15m'],
+  [THIRTY_MINUTES, '5m'],
+  [0, '1m'],
 ]);
 
 /**
@@ -282,13 +285,10 @@ export function getSeriesSelection(
   location: Location
 ): LegendComponentOption['selected'] {
   const unselectedSeries = decodeList(location?.query.unselectedSeries);
-  return unselectedSeries.reduce(
-    (selection, series) => {
-      selection[series] = false;
-      return selection;
-    },
-    {} as Record<string, boolean>
-  );
+  return unselectedSeries.reduce<Record<string, boolean>>((selection, series) => {
+    selection[series] = false;
+    return selection;
+  }, {});
 }
 
 /**
@@ -331,7 +331,7 @@ export const getDimensionValue = (dimension?: number | string | null) => {
   }
 
   if (dimension === null) {
-    return undefined;
+    return;
   }
 
   return dimension;
@@ -347,42 +347,6 @@ export const lightenHexToRgb = (colors: readonly string[]) =>
     ];
     return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
   });
-
-const DEFAULT_GEO_DATA = {
-  title: '',
-  data: [],
-};
-export const processTableResults = (tableResults?: TableDataWithTitle[]) => {
-  if (!tableResults?.length) {
-    return DEFAULT_GEO_DATA;
-  }
-
-  const tableResult = tableResults[0]!;
-
-  const {data} = tableResult;
-
-  if (!data?.length) {
-    return DEFAULT_GEO_DATA;
-  }
-
-  const preAggregate = Object.keys(data[0]!).find(column => {
-    return column !== 'geo.country_code';
-  });
-
-  if (!preAggregate) {
-    return DEFAULT_GEO_DATA;
-  }
-
-  return {
-    title: tableResult.title ?? '',
-    data: data.map(row => {
-      return {
-        name: row['geo.country_code'] as string,
-        value: row[preAggregate] as number,
-      };
-    }),
-  };
-};
 
 export const getPreviousSeriesName = (seriesName: string) => {
   return `previous ${seriesName}`;
@@ -485,14 +449,37 @@ export function computeEchartsAriaLabels(
   };
 }
 
-export function isEmptySeries(series: Series) {
-  return series.data.every(dataPoint => dataPoint.value === 0);
-}
-
 /**
  * Used to determine which chart in a group is currently hovered.
  */
 export function isChartHovered(chartRef: ReactEchartsRef | null) {
   const hoveredEchartElement = document.querySelector('.echarts-for-react:hover');
   return hoveredEchartElement === chartRef?.ele;
+}
+
+/**
+ * Chart event when *any* rendering+animation finishes.
+ *
+ * Auto-activates the toolbox area-zoom cursor so users can drag-to-select a range
+ * without first clicking the (hidden) toolbox icon.
+ */
+export function activateZoomAreaSelect(chart: ECharts) {
+  // ECharts can expose more than one toolbox dataZoom feature after option
+  // updates. Only re-arm the hidden selector when none are active, otherwise
+  // duplicate brush controllers can stack during drag selection.
+  const dataZoomFeatures = ((chart as any)._componentsViews ?? [])
+    .map((view: any) => view._features?.get?.('dataZoom'))
+    .filter(Boolean);
+
+  if (
+    dataZoomFeatures.length > 0 &&
+    dataZoomFeatures.every((feature: any) => !feature._isZoomActive)
+  ) {
+    // Calling dispatchAction will re-trigger handleChartFinished
+    chart.dispatchAction({
+      type: 'takeGlobalCursor',
+      key: 'dataZoomSelect',
+      dataZoomSelectActive: true,
+    });
+  }
 }

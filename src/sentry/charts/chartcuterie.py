@@ -5,13 +5,13 @@ from uuid import uuid4
 
 import orjson
 import requests
-import sentry_sdk
 from django.conf import settings
 
 from sentry import options
 from sentry.exceptions import InvalidConfiguration
 from sentry.models.file import get_storage
 from sentry.utils.http import absolute_uri
+from sentry.utils.tracing import start_span
 
 from .base import ChartRenderer, logger
 from .types import ChartSize, ChartType
@@ -30,7 +30,7 @@ class Chartcuterie(ChartRenderer):
         return options.get("chart-rendering.chartcuterie", {}).get("url")
 
     @property
-    def storage_options(self):
+    def storage_options(self) -> dict[str, Any] | None:
         backend = options.get("chart-rendering.storage.backend")
         opts = options.get("chart-rendering.storage.options")
 
@@ -65,11 +65,10 @@ class Chartcuterie(ChartRenderer):
         if size:
             payload.update(size)
 
-        with sentry_sdk.start_span(
+        with start_span(
             op="charts.chartcuterie.generate_chart",
             name=type(self).__name__,
         ):
-
             # Using sentry json formatter to handle datetime objects
             assert self.service_url is not None
             resp = requests.post(
@@ -88,7 +87,7 @@ class Chartcuterie(ChartRenderer):
 
         file_name = f"{request_id}.png"
 
-        with sentry_sdk.start_span(
+        with start_span(
             op="charts.chartcuterie.upload",
             name=type(self).__name__,
         ):

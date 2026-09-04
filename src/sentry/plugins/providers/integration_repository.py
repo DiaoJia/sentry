@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import timezone
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, TypedDict, TypeVar, cast
 
 from dateutil.parser import parse as parse_date
 from rest_framework import status
@@ -13,12 +13,13 @@ from rest_framework.response import Response
 from sentry import analytics
 from sentry.api.exceptions import SentryAPIException
 from sentry.constants import ObjectStatus
-from sentry.integrations.base import IntegrationInstallation
+from sentry.integrations.analytics import IntegrationRepoAddedEvent
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.services.integration import integration_service
 from sentry.integrations.services.repository import repository_service
-from sentry.integrations.services.repository.model import RpcCreateRepository
-from sentry.models.repository import Repository
+from sentry.integrations.services.repository.model import RpcCreateRepository, RpcRepository
+from sentry.integrations.source_code_management.repository import RepositoryIntegration
+from sentry.models.repository import REPOSITORY_NAME_LENGTH, REPOSITORY_URL_LENGTH
 from sentry.organizations.services.organization.model import RpcOrganization
 from sentry.shared_integrations.exceptions import IntegrationError
 from sentry.signals import repo_linked
@@ -26,14 +27,45 @@ from sentry.users.models.user import User
 from sentry.users.services.user.serial import serialize_rpc_user
 from sentry.utils import metrics
 
+InstT = TypeVar("InstT", bound="RepositoryIntegration[Any]", default=RepositoryIntegration)
+
+
+class RepositoryConfig(TypedDict):
+    name: str
+    external_id: str
+    url: str
+    config: dict[str, Any]
+    integration_id: int
+
 
 class RepoExistsError(SentryAPIException):
     status_code = status.HTTP_400_BAD_REQUEST
     code = "repo_exists"
     message = "A repository with that configuration already exists"
 
+    def __init__(
+        self,
+        code: str | None = None,
+        message: str | None = None,
+        detail: Any = None,
+        repos: list[RepositoryConfig] | None = None,
+        existing_repo: RpcRepository | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(code=code, message=message, detail=detail, **kwargs)
+        self.repos = repos
+        # Populated when create_repository found an existing ACTIVE row matching
+        # the config. Callers that can treat the race as a success (e.g. the
+        # REST dispatch) should check this before surfacing the 400.
+        self.existing_repo = existing_repo
 
-def get_integration_repository_provider(integration):
+    def __str__(self) -> str:
+        if self.repos:
+            return f"Repositories already exist: {', '.join(repo['name'] for repo in self.repos)}"
+        return "Repositories already exist."
+
+
+def get_integration_repository_provider(integration: Any) -> Any:
     from sentry.plugins.base import bindings  # circular import
 
     binding_key = "integration-repository.provider"
@@ -46,7 +78,7 @@ def get_integration_repository_provider(integration):
     return provider_cls(id=provider_key)
 
 
-class IntegrationRepositoryProvider:
+class IntegrationRepositoryProvider(Generic[InstT]):
     """
     Repository Provider for Integrations in the Sentry Repository.
     Does not include plugins.
@@ -55,7 +87,7 @@ class IntegrationRepositoryProvider:
     name: ClassVar[str]
     repo_provider: ClassVar[str]
 
-    def __init__(self, id):
+    def __init__(self, id: str) -> None:
         self.id = id
         self.logger = logging.getLogger(f"sentry.integrations.{self.repo_provider}")
 
@@ -63,7 +95,7 @@ class IntegrationRepositoryProvider:
         self,
         integration_id: int | None,
         organization_id: int,
-    ) -> IntegrationInstallation:
+    ) -> InstT:
         if integration_id is None:
             raise IntegrationError(f"{self.name} requires an integration id.")
 
@@ -79,19 +111,19 @@ class IntegrationRepositoryProvider:
         if rpc_org_integration is None:
             raise Integration.DoesNotExist("Integration matching query does not exist.")
 
-        return rpc_integration.get_installation(organization_id=organization_id)
+        return cast(InstT, rpc_integration.get_installation(organization_id=organization_id))
 
     def create_repository(
         self,
-        repo_config: MutableMapping[str, Any],
+        repo_config: Mapping[str, Any],
         organization: RpcOrganization,
-    ):
+    ) -> tuple[RepositoryConfig, RpcRepository]:
         result = self.build_repository_config(organization=organization, data=repo_config)
 
-        integration_id = result.get("integration_id")
-        external_id = result.get("external_id")
-        name = result.get("name")
-        url = result.get("url")
+        integration_id = result["integration_id"]
+        external_id = result["external_id"]
+        name = result["name"]
+        url = result["url"]
 
         # first check if there is an existing hidden repository for the organization and external id
         repositories = repository_service.get_repositories(
@@ -105,9 +137,11 @@ class IntegrationRepositoryProvider:
             existing_repo.name = name
             existing_repo.integration_id = integration_id
             existing_repo.url = url
+            existing_repo.config = {**existing_repo.config, **(result.get("config") or {})}
             repository_service.update_repository(
                 organization_id=organization.id, update=existing_repo
             )
+            self.on_create_repository(existing_repo, organization)
             metrics.incr("sentry.integration_repo_provider.repo_relink")
             return result, existing_repo
 
@@ -119,13 +153,14 @@ class IntegrationRepositoryProvider:
         )
         repo = repositories[0] if repositories else None
 
-        repo_update_params = {
+        config_updates: dict[str, Any] = result.get("config") or {}
+        repo_update_params: dict[str, Any] = {
             "external_id": external_id,
-            "url": result.get("url"),
-            "config": result.get("config") or {},
+            "url": result.get("url")[:REPOSITORY_URL_LENGTH],
+            "config": config_updates,
             "provider": self.id,
             "integration_id": integration_id,
-            "name": name,
+            "name": name[:REPOSITORY_NAME_LENGTH],
         }
 
         if repo:
@@ -137,12 +172,15 @@ class IntegrationRepositoryProvider:
                     "old_provider": repo.provider,
                 },
             )
-            # update from params
+            # update from params, merging config to preserve keys like webhook_id
+            repo.config = {**repo.config, **config_updates}
             for field_name, field_value in repo_update_params.items():
-                setattr(repo, field_name, field_value)
+                if field_name != "config":
+                    setattr(repo, field_name, field_value)
             # also update the status if it was in a bad state
             repo.status = ObjectStatus.ACTIVE
             repository_service.update_repository(organization_id=organization.id, update=repo)
+            self.on_create_repository(repo, organization)
         else:
             create_repository = RpcCreateRepository.parse_obj(
                 {**repo_update_params, "status": ObjectStatus.ACTIVE}
@@ -151,15 +189,8 @@ class IntegrationRepositoryProvider:
                 organization_id=organization.id, create=create_repository
             )
             if new_repository is not None:
+                self.on_create_repository(new_repository, organization)
                 return result, new_repository
-
-            # Try to delete webhook we just created
-            try:
-                self.on_delete_repository(
-                    Repository(organization_id=organization.id, **repo_update_params)
-                )
-            except IntegrationError:
-                pass
 
             # if possible update the repo with matching integration
             repositories = repository_service.get_repositories(
@@ -167,6 +198,7 @@ class IntegrationRepositoryProvider:
                 integration_id=integration_id,
                 external_id=external_id,
             )
+            active_repo: RpcRepository | None = None
             if repositories:
                 # We anticipate to only update one repository, but we update any duplicates as well.
                 for repo in repositories:
@@ -176,12 +208,118 @@ class IntegrationRepositoryProvider:
                         organization_id=organization.id,
                         update=repo,
                     )
+                    if active_repo is None and repo.status == ObjectStatus.ACTIVE:
+                        active_repo = repo
 
-            raise RepoExistsError
+            # Concurrent writer (e.g. link_all_repos) already created the row.
+            # Surface the active match on the exception so callers that want to
+            # treat the race as success (dispatch) can, while callers that
+            # prefer the historical "skip and try again" behavior (the GitHub
+            # push webhook) stay unaffected by catching RepoExistsError as
+            # before.
+            raise RepoExistsError(repos=[result], existing_repo=active_repo)
 
         return result, repo
 
-    def dispatch(self, request: Request, organization, **kwargs):
+    def _update_repository(self, repo: RpcRepository, config: RepositoryConfig) -> RpcRepository:
+        repo.status = ObjectStatus.ACTIVE
+
+        new_config = config.get("config") or {}
+        repo.config = {**repo.config, **new_config}
+        for field_name, field_value in config.items():
+            if field_name != "config":
+                setattr(repo, field_name, field_value)
+        return repo
+
+    def _update_repositories(
+        self,
+        repositories: list[RpcRepository],
+        external_id_to_repo_config: dict[str, RepositoryConfig],
+    ) -> list[RpcRepository]:
+        repos_to_update: list[RpcRepository] = []
+        for repo in repositories:
+            external_id = repo.external_id
+            if external_id and (repo_config := external_id_to_repo_config.get(external_id)):
+                repos_to_update.append(self._update_repository(repo, repo_config))
+                external_id_to_repo_config.pop(external_id, None)
+        return repos_to_update
+
+    def create_repositories(
+        self,
+        configs: list[dict[str, Any]],
+        organization: RpcOrganization,
+    ) -> tuple[list[RpcRepository], list[RpcRepository], list[RepositoryConfig]]:
+        """
+        Create or update repositories from configs.
+        Returns (created, reactivated, missing) — newly created repos, repos that
+        were reactivated or updated from a hidden/unlinked state, and repo configs
+        that could not be created because a repository with that configuration
+        already exists.
+        """
+        external_id_to_repo_config: dict[str, RepositoryConfig] = {}
+        for config in configs:
+            result = self.build_repository_config(organization=organization, data=config)
+            external_id_to_repo_config[result["external_id"]] = result
+
+        repos_to_update: list[RpcRepository] = []
+        created_repos: list[RpcRepository] = []
+
+        hidden_repos = repository_service.get_repositories(
+            organization_id=organization.id,
+            status=ObjectStatus.HIDDEN,
+        )
+        repos_to_update.extend(self._update_repositories(hidden_repos, external_id_to_repo_config))
+
+        # then check if there are repositories without an integration that matches
+        repositories = repository_service.get_repositories(
+            organization_id=organization.id,
+            has_integration=False,
+        )
+        repos_to_update.extend(self._update_repositories(repositories, external_id_to_repo_config))
+
+        # create remaining repositories
+        missing_repos: list[RepositoryConfig] = []
+        for external_id, repo_config in external_id_to_repo_config.items():
+            integration_id = repo_config["integration_id"]
+            if "name" in repo_config:
+                repo_config["name"] = repo_config["name"][:REPOSITORY_NAME_LENGTH]
+            if "url" in repo_config:
+                repo_config["url"] = repo_config["url"][:REPOSITORY_URL_LENGTH]
+
+            create_repository = RpcCreateRepository.parse_obj(
+                {**repo_config, "provider": self.id, "status": ObjectStatus.ACTIVE}
+            )
+            new_repository = repository_service.create_repository(
+                organization_id=organization.id, create=create_repository
+            )
+            if new_repository is not None:
+                self.on_create_repository(new_repository, organization)
+                created_repos.append(new_repository)
+                continue
+
+            missing_repos.append(repo_config)
+
+            # if possible update the repo with matching integration
+            repositories = repository_service.get_repositories(
+                organization_id=organization.id,
+                integration_id=integration_id,
+                external_id=external_id,
+            )
+            # We anticipate to only update one repository, but we update any duplicates as well.
+            for repo in repositories:
+                repos_to_update.append(self._update_repository(repo, repo_config))
+
+        if repos_to_update:
+            repository_service.update_repositories(
+                organization_id=organization.id,
+                updates=repos_to_update,
+            )
+            for repo in repos_to_update:
+                self.on_create_repository(repo, organization)
+
+        return created_repos, repos_to_update, missing_repos
+
+    def dispatch(self, request: Request, organization: Any, **kwargs: Any) -> Response:
         try:
             config = self.get_repository_data(organization, request.data)
         except Exception as e:
@@ -189,19 +327,26 @@ class IntegrationRepositoryProvider:
 
         try:
             result, repo = self.create_repository(repo_config=config, organization=organization)
-        except RepoExistsError:
+        except RepoExistsError as exc:
             metrics.incr("sentry.integration_repo_provider.repo_exists")
-            raise
+            if exc.existing_repo is None or not exc.repos:
+                raise
+            # A concurrent writer created the row before we could; return it
+            # as if our create had succeeded so repo_linked/analytics still
+            # fire from the normal success path.
+            repo = exc.existing_repo
+            result = exc.repos[0]
         except Exception as e:
             return self.handle_api_error(e)
 
         repo_linked.send_robust(repo=repo, user=request.user, sender=self.__class__)
 
         analytics.record(
-            "integration.repo.added",
-            provider=self.id,
-            id=result.get("integration_id"),
-            organization_id=organization.id,
+            IntegrationRepoAddedEvent(
+                provider=self.id,
+                id=result.get("integration_id"),
+                organization_id=organization.id,
+            )
         )
         return Response(
             repository_service.serialize_repository(
@@ -233,16 +378,20 @@ class IntegrationRepositoryProvider:
             self.logger.exception(str(e))
             return Response({"error_type": "unknown"}, status=500)
 
-    def get_config(self, organization):
+    def get_config(self, organization: Any) -> Any:
         raise NotImplementedError
 
-    def get_repository_data(self, organization, config):
+    def get_repository_data(
+        self, organization: Any, config: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
         """
         Gets the necessary repository data through the integration's API
         """
         return config
 
-    def build_repository_config(self, organization: RpcOrganization, data):
+    def build_repository_config(
+        self, organization: RpcOrganization, data: Mapping[str, Any]
+    ) -> RepositoryConfig:
         """
         Builds final dict containing all necessary data to create the repository
 
@@ -258,15 +407,25 @@ class IntegrationRepositoryProvider:
         """
         raise NotImplementedError
 
-    def on_delete_repository(self, repo):
+    def on_create_repository(self, repo: RpcRepository, organization: RpcOrganization) -> None:
+        """Called after a repository is created or reactivated.
+
+        Override to perform post-creation setup like webhook creation.
+        The repo has already been persisted — update repo.config and call
+        repository_service.update_repository to store any new config values.
+        """
+
+    def on_delete_repository(self, repo: Any) -> None:
         pass
 
-    def format_date(self, date):
+    def format_date(self, date: str | None) -> Any | None:
         if not date:
             return None
         return parse_date(date).astimezone(timezone.utc)
 
-    def compare_commits(self, repo, start_sha, end_sha):
+    def compare_commits(
+        self, repo: Any, start_sha: str | None, end_sha: str
+    ) -> Sequence[Mapping[str, Any]]:
         """
         Generate a list of commits between the start & end sha
         Commits should be of the following format:
@@ -282,13 +441,26 @@ class IntegrationRepositoryProvider:
         """
         raise NotImplementedError
 
-    def pull_request_url(self, repo, pull_request):
+    def fetch_recent_commits(
+        self, repo: Any, end_sha: str, *, actor: Any | None = None
+    ) -> Sequence[Mapping[str, Any]]:
+        return self.compare_commits(repo, None, end_sha)
+
+    def fetch_commits_for_compare_range(
+        self, repo: Any, start_sha: str, end_sha: str, *, actor: Any | None = None
+    ) -> Sequence[Mapping[str, Any]]:
+        return self.compare_commits(repo, start_sha, end_sha)
+
+    def get_scm_provider_key(self) -> str:
+        return self.repo_provider
+
+    def pull_request_url(self, repo: Any, pull_request: Any) -> str | None:
         """
         Generate a URL to a pull request on the repository provider.
         """
         return None
 
-    def repository_external_slug(self, repo):
+    def repository_external_slug(self, repo: Any) -> str | None:
         """
         Generate the public facing 'external_slug' for a repository
         The shape of this id must match the `identifier` returned by
@@ -297,5 +469,5 @@ class IntegrationRepositoryProvider:
         return repo.name
 
     @staticmethod
-    def should_ignore_commit(message):
+    def should_ignore_commit(message: str) -> bool:
         return "#skipsentry" in message

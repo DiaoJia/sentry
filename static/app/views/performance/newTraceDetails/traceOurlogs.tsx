@@ -1,92 +1,155 @@
 import type React from 'react';
-import {Fragment} from 'react';
+import {Fragment, useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import Panel from 'sentry/components/panels/panel';
-import {SearchQueryBuilder} from 'sentry/components/searchQueryBuilder';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {LogsAnalyticsPageSource} from 'sentry/utils/analytics/logsAnalyticsEvent';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
-import useOrganization from 'sentry/utils/useOrganization';
-import {LogsPageDataProvider} from 'sentry/views/explore/contexts/logs/logsPageData';
-import {
-  LogsPageParamsProvider,
-  useLogsSearch,
-  useSetLogsSearch,
-} from 'sentry/views/explore/contexts/logs/logsPageParams';
-import {LogsInfiniteTable} from 'sentry/views/explore/logs/tables/logsInfiniteTable';
-import {LogsTable} from 'sentry/views/explore/logs/tables/logsTable';
+import {LinkButton} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
 
-type UseTraceViewLogsDataProps = {
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {Panel} from 'sentry/components/panels/panel';
+import {t} from 'sentry/locale';
+import {LogsAnalyticsPageSource} from 'sentry/utils/analytics/logsAnalyticsEvent';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {TraceItemSearchQueryBuilder} from 'sentry/views/explore/components/traceItemSearchQueryBuilder';
+import {LogsPageDataProvider} from 'sentry/views/explore/contexts/logs/logsPageData';
+import {useLogItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
+import {HiddenLogSearchFields} from 'sentry/views/explore/logs/constants';
+import {useLogsFrozenTraceIds} from 'sentry/views/explore/logs/logsFrozenContext';
+import {LogsQueryParamsProvider} from 'sentry/views/explore/logs/logsQueryParamsProvider';
+import {LogsInfiniteTable} from 'sentry/views/explore/logs/tables/logsInfiniteTable';
+import {useLogsSearchQueryBuilderProps} from 'sentry/views/explore/logs/useLogsSearchQueryBuilderProps';
+import {
+  adjustLogTraceID,
+  createErrorLogRow,
+  getLogsUrl,
+} from 'sentry/views/explore/logs/utils';
+import type {TraceTree} from 'sentry/views/performance/newTraceDetails/traceModels/traceTree';
+import {useTraceQueryParams} from 'sentry/views/performance/newTraceDetails/useTraceQueryParams';
+
+type PageDataProviderProps = {
   children: React.ReactNode;
-  traceSlug: string;
 };
 
-export function TraceViewLogsDataProvider({
+export function TraceViewLogsQueryParamsProvider({
   traceSlug,
   children,
-}: UseTraceViewLogsDataProps) {
+}: {
+  children: React.ReactNode;
+  traceSlug: string;
+}) {
+  const {timestamp} = useTraceQueryParams();
+
   return (
-    <LogsPageParamsProvider
-      isTableFrozen
-      limitToTraceId={traceSlug}
+    <LogsQueryParamsProvider
       analyticsPageSource={LogsAnalyticsPageSource.TRACE_DETAILS}
+      source="location"
+      freeze={{traceId: traceSlug, traceTimestamp: timestamp}}
     >
-      <LogsPageDataProvider>{children}</LogsPageDataProvider>
-    </LogsPageParamsProvider>
+      {children}
+    </LogsQueryParamsProvider>
   );
 }
 
+export function TraceViewLogsPageDataProvider({children}: PageDataProviderProps) {
+  return <LogsPageDataProvider>{children}</LogsPageDataProvider>;
+}
+
+interface TraceViewLogsSectionProps {
+  errors?: TraceTree.TraceErrorIssue[];
+  fallbackTimestampSeconds?: number;
+}
+
 export function TraceViewLogsSection({
-  scrollContainer,
-}: {
-  scrollContainer: React.RefObject<HTMLDivElement | null>;
-}) {
+  errors = [],
+  fallbackTimestampSeconds = 0,
+}: TraceViewLogsSectionProps) {
   return (
     <StyledPanel>
-      <LogsSectionContent scrollContainer={scrollContainer} />
+      <LogsSectionContent
+        errors={errors}
+        fallbackTimestampSeconds={fallbackTimestampSeconds}
+      />
     </StyledPanel>
   );
 }
 
 function LogsSectionContent({
-  scrollContainer,
-}: {
-  scrollContainer: React.RefObject<HTMLDivElement | null>;
-}) {
+  errors,
+  fallbackTimestampSeconds,
+}: Required<TraceViewLogsSectionProps>) {
   const organization = useOrganization();
-  const setLogsSearch = useSetLogsSearch();
-  const logsSearch = useLogsSearch();
-  const hasInfiniteFeature = organization.features.includes('ourlogs-infinite-scroll');
+  const supportsArrays = organization.features.includes('trace-item-array-query-support');
+  const {selection} = usePageFilters();
+  const traceIds = useLogsFrozenTraceIds();
+
+  const injectedErrorRows = useMemo(
+    () => errors.map(error => createErrorLogRow(error, fallbackTimestampSeconds)),
+    [errors, fallbackTimestampSeconds]
+  );
+
+  const {attributes: stringAttributes, secondaryAliases: stringSecondaryAliases} =
+    useLogItemAttributes({}, 'string', HiddenLogSearchFields);
+  const {attributes: numberAttributes, secondaryAliases: numberSecondaryAliases} =
+    useLogItemAttributes({}, 'number', HiddenLogSearchFields);
+  const {attributes: booleanAttributes, secondaryAliases: booleanSecondaryAliases} =
+    useLogItemAttributes({}, 'boolean', HiddenLogSearchFields);
+  const {attributes: arrayAttributes, secondaryAliases: arraySecondaryAliases} =
+    useLogItemAttributes({enabled: supportsArrays}, 'array', HiddenLogSearchFields);
+
+  const {tracesItemSearchQueryBuilderProps} = useLogsSearchQueryBuilderProps({
+    arrayAttributes,
+    booleanAttributes,
+    numberAttributes,
+    stringAttributes,
+    arraySecondaryAliases,
+    booleanSecondaryAliases,
+    numberSecondaryAliases,
+    stringSecondaryAliases,
+  });
+
+  const traceId = traceIds?.[0] && adjustLogTraceID(traceIds[0]);
+  const logsUrl = getLogsUrl({
+    organization,
+    selection,
+    query: traceId ? `trace:${traceId}` : undefined,
+  });
 
   return (
     <Fragment>
-      <SearchQueryBuilder
-        searchOnChange={organization.features.includes('ui-search-on-change')}
-        placeholder={t('Search logs for this event')}
-        filterKeys={{}}
-        getTagValues={() => new Promise<string[]>(() => [])}
-        initialQuery={logsSearch.formatString()}
-        searchSource="ourlogs"
-        onSearch={query => setLogsSearch(new MutableSearch(query))}
-      />
+      <Flex gap="lg">
+        <TraceItemSearchQueryBuilder
+          {...tracesItemSearchQueryBuilderProps}
+          placeholder={t('Search logs for this event')}
+        />
+        <LinkButton to={logsUrl}>{t('Open in Logs')}</LinkButton>
+      </Flex>
       <TableContainer>
-        {hasInfiniteFeature ? (
-          <LogsInfiniteTable showHeader={false} scrollContainer={scrollContainer} />
-        ) : (
-          <LogsTable showHeader={false} />
-        )}
+        <LogsInfiniteTable
+          analyticsPageSource={LogsAnalyticsPageSource.TRACE_DETAILS}
+          embedded
+          injectedErrorRows={injectedErrorRows}
+          showCellActions
+          showExploreSimilarSpansLink
+        />
       </TableContainer>
     </Fragment>
   );
 }
 
 const TableContainer = styled('div')`
-  margin-top: ${space(2)};
+  margin-top: ${p => p.theme.space.xl};
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 `;
 
 const StyledPanel = styled(Panel)`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
+  padding-bottom: 0;
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 `;

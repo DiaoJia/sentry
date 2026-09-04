@@ -1,32 +1,32 @@
 import styled from '@emotion/styled';
 
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+
 import {IconClose} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import AlertStore from 'sentry/stores/alertStore';
+
+import type {StoredGlobalAlert} from './globalAlerts';
 
 type Props = {
-  alert: ReturnType<(typeof AlertStore)['getState']>[number];
+  alert: StoredGlobalAlert;
+  onClose: () => void;
   system: boolean;
 };
 
-function AlertMessage({alert, system}: Props) {
-  const handleClose = () => AlertStore.closeAlert(alert);
-
+export function AlertMessage({alert, onClose, system}: Props) {
   return (
     <Alert
-      type={alert.type}
-      showIcon
+      variant={alert.variant}
       system={system}
       trailingItems={
         <StyledCloseButton
           icon={<IconClose size="sm" />}
           aria-label={t('Close')}
-          onClick={alert.onClose ?? handleClose}
+          onClick={onClose}
           size="zero"
-          borderless
+          variant="transparent"
         />
       }
     >
@@ -38,8 +38,6 @@ function AlertMessage({alert, system}: Props) {
     </Alert>
   );
 }
-
-export default AlertMessage;
 
 const StyledCloseButton = styled(Button)`
   background-color: transparent;

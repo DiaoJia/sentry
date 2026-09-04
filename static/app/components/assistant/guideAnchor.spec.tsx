@@ -3,20 +3,20 @@ import {UserFixture} from 'sentry-fixture/user';
 
 import {act, render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import GuideAnchor from 'sentry/components/assistant/guideAnchor';
-import ConfigStore from 'sentry/stores/configStore';
-import GuideStore from 'sentry/stores/guideStore';
+import {GuideAnchor} from 'sentry/components/assistant/guideAnchor';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {GuideStore} from 'sentry/stores/guideStore';
 
-describe('GuideAnchor', function () {
+describe('GuideAnchor', () => {
   const serverGuide = [
     {
-      guide: 'issue',
+      guide: 'trace_view',
       seen: false,
     },
   ];
-  const firstGuideHeader = 'How bad is it?';
+  const firstGuideHeader = 'Event Breakdown';
 
-  beforeEach(function () {
+  beforeEach(() => {
     ConfigStore.loadInitialData(
       ConfigFixture({
         user: UserFixture({
@@ -27,31 +27,27 @@ describe('GuideAnchor', function () {
     );
   });
 
-  it('renders, async advances, async and finishes', async function () {
+  it('renders, async advances, async and finishes', async () => {
     render(
       <div>
-        <GuideAnchor target="issue_header_stats" />
-        <GuideAnchor target="breadcrumbs" />
-        <GuideAnchor target="issue_sidebar_owners" />
+        <GuideAnchor target="trace_view_guide_breakdown" />
+        <GuideAnchor target="trace_view_guide_row" />
+        <GuideAnchor target="trace_view_guide_row_details" />
       </div>
     );
 
     act(() => GuideStore.fetchSucceeded(serverGuide));
     expect(await screen.findByText(firstGuideHeader)).toBeInTheDocument();
 
-    // XXX(epurkhiser): Skip pointer event checks due to a bug with how Popper
-    // renders the hovercard with pointer-events: none. See [0]
-    //
-    // [0]: https://github.com/testing-library/user-event/issues/639
-    //
-    // NOTE(epurkhiser): We may be able to remove the skipPointerEventsCheck
-    // when we're on popper >= 1.
     await userEvent.click(screen.getByLabelText('Next'));
 
-    expect(await screen.findByText('Retrace Your Steps')).toBeInTheDocument();
+    expect(await screen.findByText('Events')).toBeInTheDocument();
     expect(screen.queryByText(firstGuideHeader)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByLabelText('Next'));
+
+    expect(await screen.findByText('Event Details')).toBeInTheDocument();
+    expect(screen.queryByText('Events')).not.toBeInTheDocument();
 
     // Clicking on the button in the last step should finish the guide.
     const finishMock = MockApiClient.addMockResponse({
@@ -66,19 +62,19 @@ describe('GuideAnchor', function () {
       expect.objectContaining({
         method: 'PUT',
         data: {
-          guide: 'issue',
+          guide: 'trace_view',
           status: 'viewed',
         },
       })
     );
   });
 
-  it('dismisses', async function () {
+  it('dismisses', async () => {
     render(
       <div>
-        <GuideAnchor target="issue_header_stats" />
-        <GuideAnchor target="breadcrumbs" />
-        <GuideAnchor target="issue_sidebar_owners" />
+        <GuideAnchor target="trace_view_guide_breakdown" />
+        <GuideAnchor target="trace_view_guide_row" />
+        <GuideAnchor target="trace_view_guide_row_details" />
       </div>
     );
 
@@ -97,7 +93,7 @@ describe('GuideAnchor', function () {
       expect.objectContaining({
         method: 'PUT',
         data: {
-          guide: 'issue',
+          guide: 'trace_view',
           status: 'dismissed',
         },
       })
@@ -106,7 +102,7 @@ describe('GuideAnchor', function () {
     expect(screen.queryByText(firstGuideHeader)).not.toBeInTheDocument();
   });
 
-  it('renders no container when inactive', function () {
+  it('renders no container when inactive', () => {
     render(
       <GuideAnchor target="target 1">
         <span data-test-id="child-div" />
@@ -117,7 +113,7 @@ describe('GuideAnchor', function () {
     expect(screen.getByTestId('child-div')).toBeInTheDocument();
   });
 
-  it('renders children when disabled', function () {
+  it('renders children when disabled', () => {
     render(
       <GuideAnchor disabled target="exception">
         <div data-test-id="child-div" />
@@ -128,12 +124,12 @@ describe('GuideAnchor', function () {
     expect(screen.getByTestId('child-div')).toBeInTheDocument();
   });
 
-  it('if forceHide is true, async do not render guide', async function () {
+  it('if forceHide is true, async do not render guide', async () => {
     render(
       <div>
-        <GuideAnchor target="issue_header_stats" />
-        <GuideAnchor target="breadcrumbs" />
-        <GuideAnchor target="issue_sidebar_owners" />
+        <GuideAnchor target="trace_view_guide_breakdown" />
+        <GuideAnchor target="trace_view_guide_row" />
+        <GuideAnchor target="trace_view_guide_row_details" />
       </div>
     );
 

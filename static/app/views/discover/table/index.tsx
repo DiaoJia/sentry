@@ -2,28 +2,27 @@ import {PureComponent} from 'react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
-import type {EventQuery} from 'sentry/actionCreators/events';
+import type {CursorHandler} from '@sentry/scraps/pagination';
+import {Pagination} from '@sentry/scraps/pagination';
+
 import type {Client} from 'sentry/api';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import type {CursorHandler} from 'sentry/components/pagination';
-import Pagination from 'sentry/components/pagination';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import {metric, trackAnalytics} from 'sentry/utils/analytics';
 import {CustomMeasurementsContext} from 'sentry/utils/customMeasurements/customMeasurementsContext';
 import type {TableData} from 'sentry/utils/discover/discoverQuery';
-import type {LocationQuery} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {isAPIPayloadSimilar, isFieldsSimilar} from 'sentry/utils/discover/eventView';
 import {SPAN_OP_BREAKDOWN_FIELDS} from 'sentry/utils/discover/fields';
 import type {DiscoverDatasets, SavedQueryDatasets} from 'sentry/utils/discover/types';
-import Measurements from 'sentry/utils/measurements/measurements';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
+import {Measurements} from 'sentry/utils/measurements/measurements';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
 import {VisuallyCompleteWithData} from 'sentry/utils/performanceForSentry';
-import withApi from 'sentry/utils/withApi';
+import {withApi} from 'sentry/utils/withApi';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
 
-import TableView from './tableView';
+import {TableView} from './tableView';
 
 type TableProps = {
   api: Client;
@@ -107,7 +106,7 @@ class Table extends PureComponent<TableProps, TableState> {
     // from an invalid view state to a valid one.
     if (
       (!this.state.isLoading && this.shouldRefetchData(prevProps)) ||
-      (prevProps.eventView.isValid() === false && this.props.eventView.isValid()) ||
+      (!prevProps.eventView.isValid() && this.props.eventView.isValid()) ||
       (prevProps.confirmedQuery !== this.props.confirmedQuery && this.didViewChange())
     ) {
       this.fetchData();
@@ -154,13 +153,13 @@ class Table extends PureComponent<TableProps, TableState> {
     const url = `/organizations/${organization.slug}/events/`;
     const tableFetchID = Symbol('tableFetchID');
 
-    const apiPayload = eventView.getEventsAPIPayload(location) as LocationQuery &
-      EventQuery;
+    const apiPayload = eventView.getEventsAPIPayload(location);
 
     // We are now routing to the trace view on clicking event ids. Therefore, we need the trace slug associated to the event id.
     // Note: Event ID or 'id' is added to the fields in the API payload response by default for all non-aggregate queries.
     if (!eventView.hasAggregateField() || apiPayload.field.includes('id')) {
       apiPayload.field.push('trace');
+      apiPayload.field.push('issue.id');
 
       // We need to include the event.type field because we want to
       // route to issue details for error and default event types.
@@ -254,7 +253,7 @@ class Table extends PureComponent<TableProps, TableState> {
           setSplitDecision?.(splitDecision);
         }
       })
-      .catch(err => {
+      .catch((err: any) => {
         metric.measure({
           name: 'app.api.discover-query',
           start: `discover-events-start-${apiPayload.query}`,

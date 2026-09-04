@@ -1,23 +1,34 @@
-from unittest.mock import patch
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import orjson
 
 from fixtures.gitlab import (
     EXTERNAL_ID,
+    ISSUE_ASSIGNED_EVENT,
+    ISSUE_CLOSED_EVENT,
+    ISSUE_OPENED_EVENT,
+    ISSUE_REOPENED_EVENT,
+    ISSUE_UNASSIGNED_EVENT,
     MERGE_REQUEST_OPENED_EVENT,
     PUSH_EVENT,
     PUSH_EVENT_IGNORED_COMMIT,
     WEBHOOK_TOKEN,
     GitLabTestCase,
 )
+from sentry.integrations.gitlab.webhooks import MergeEventWebhook
 from sentry.integrations.models.integration import Integration
+from sentry.integrations.models.organization_integration import OrganizationIntegration
 from sentry.models.commit import Commit
 from sentry.models.commitauthor import CommitAuthor
+from sentry.models.group import Group, GroupStatus
 from sentry.models.grouplink import GroupLink
-from sentry.models.pullrequest import PullRequest
+from sentry.models.pullrequest import PullRequest, PullRequestLifecycleState
+from sentry.seer.code_review.webhooks.merge_request import handle_merge_request_event
 from sentry.silo.base import SiloMode
 from sentry.testutils.asserts import assert_failure_metric, assert_success_metric
 from sentry.testutils.silo import assume_test_silo_mode, assume_test_silo_mode_of
+from sentry.types.activity import ActivityType
 
 
 class WebhookTest(GitLabTestCase):
@@ -30,11 +41,18 @@ class WebhookTest(GitLabTestCase):
 
     def assert_pull_request(self, pull: PullRequest, author: CommitAuthor) -> None:
         assert pull.title
+        assert pull.external_id == 90
         assert pull.message
         assert pull.date_added
         assert pull.author == author
         assert pull.merge_commit_sha is None
         assert pull.organization_id == self.organization.id
+        assert pull.state == PullRequestLifecycleState.OPEN
+        assert pull.opened_at is not None
+        assert pull.closed_at is None
+        assert pull.merged_at is None
+        assert pull.head_commit_sha == "ba3e0d8ff79c80d5b0bbb4f3e2e343e0aaa662b7"
+        assert pull.draft is False
 
     def assert_group_link(self, group, pull):
         link = GroupLink.objects.get()
@@ -42,12 +60,12 @@ class WebhookTest(GitLabTestCase):
         assert link.linked_type == GroupLink.LinkedType.pull_request
         assert link.linked_id == pull.id
 
-    def test_get(self):
+    def test_get(self) -> None:
         response = self.client.get(self.url)
         assert response.status_code == 405
         assert response.reason_phrase == "HTTP method not supported."
 
-    def test_missing_x_gitlab_token(self):
+    def test_missing_x_gitlab_token(self) -> None:
         response = self.client.post(
             self.url,
             data=PUSH_EVENT,
@@ -59,7 +77,7 @@ class WebhookTest(GitLabTestCase):
             response.reason_phrase == "The customer needs to set a Secret Token in their webhook."
         )
 
-    def test_unknown_event(self):
+    def test_unknown_event(self) -> None:
         response = self.client.post(
             self.url,
             data=PUSH_EVENT,
@@ -70,10 +88,11 @@ class WebhookTest(GitLabTestCase):
         assert response.status_code == 400
         assert (
             response.reason_phrase
-            == "The customer has edited the webhook in Gitlab to include other types of events."
+            == "The customer has edited the webhook in Gitlab to include other types of events. We only support these kinds of events: Issue Hook, Merge Request Hook, Note Hook, Push Hook"
         )
 
-    def test_invalid_token(self):
+    @patch("sentry.integrations.gitlab.webhooks.logger")
+    def test_invalid_token(self, mock_logger: MagicMock) -> None:
         response = self.client.post(
             self.url,
             data=PUSH_EVENT,
@@ -84,7 +103,15 @@ class WebhookTest(GitLabTestCase):
         assert response.status_code == 400
         assert response.reason_phrase == "The customer's Secret Token is malformed."
 
-    def test_valid_id_invalid_secret(self):
+        # The token is malformed so we can't resolve the org, but the payload
+        # body still identifies the source repo/owner — attach it to the log.
+        mock_logger.warning.assert_called_once()
+        extra = mock_logger.warning.call_args.kwargs["extra"]
+        assert extra["webhook.repo.path"] == "cool-group/sentry"
+        assert extra["webhook.repo.web_url"] == "http://example.com/cool-group/sentry"
+        assert extra["webhook.object_kind"] == "push"
+
+    def test_valid_id_invalid_secret(self) -> None:
         response = self.client.post(
             self.url,
             data=PUSH_EVENT,
@@ -98,7 +125,7 @@ class WebhookTest(GitLabTestCase):
             == "Gitlab's webhook secret does not match. Refresh token (or re-install the integration) by following this https://docs.sentry.io/organization/integrations/integration-platform/public-integration/#refreshing-tokens."
         )
 
-    def test_invalid_payload(self):
+    def test_invalid_payload(self) -> None:
         response = self.client.post(
             self.url,
             data="lol not json",
@@ -109,7 +136,7 @@ class WebhookTest(GitLabTestCase):
         assert response.status_code == 400
         assert response.reason_phrase == "Data received is not JSON."
 
-    def test_push_event_missing_repo(self):
+    def test_push_event_missing_repo(self) -> None:
         response = self.client.post(
             self.url,
             data=PUSH_EVENT,
@@ -125,7 +152,7 @@ class WebhookTest(GitLabTestCase):
 
     @patch("sentry.integrations.gitlab.webhooks.PushEventWebhook.__call__")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_push_event_failure_metric(self, mock_record, mock_event):
+    def test_push_event_failure_metric(self, mock_record: MagicMock, mock_event: MagicMock) -> None:
         error = Exception("oops")
         mock_event.side_effect = error
 
@@ -140,7 +167,7 @@ class WebhookTest(GitLabTestCase):
 
         assert_failure_metric(mock_record, error)
 
-    def test_push_event_multiple_organizations_one_missing_repo(self):
+    def test_push_event_multiple_organizations_one_missing_repo(self) -> None:
         # Create a repo on the primary organization
         repo = self.create_gitlab_repo("getsentry/sentry")
 
@@ -163,7 +190,7 @@ class WebhookTest(GitLabTestCase):
             assert commit.organization_id == self.organization.id
             assert commit.repository_id == repo.id
 
-    def test_push_event_multiple_organizations(self):
+    def test_push_event_multiple_organizations(self) -> None:
         # Create a repo on the primary organization
         repo = self.create_gitlab_repo("getsentry/sentry")
 
@@ -194,7 +221,7 @@ class WebhookTest(GitLabTestCase):
         for commit in commits:
             assert commit.organization_id == other_org.id
 
-    def test_push_event_create_commits_and_authors(self):
+    def test_push_event_create_commits_and_authors(self) -> None:
         repo = self.create_gitlab_repo("getsentry/sentry")
         response = self.client.post(
             self.url,
@@ -223,7 +250,7 @@ class WebhookTest(GitLabTestCase):
             assert author.name
             assert author.organization_id == self.organization.id
 
-    def test_push_event_create_commits_with_no_author_email(self):
+    def test_push_event_create_commits_with_no_author_email(self) -> None:
         repo = self.create_gitlab_repo("getsentry/sentry")
         push_event = orjson.loads(PUSH_EVENT)
         push_event["commits"][0]["author"]["email"] = None
@@ -258,7 +285,7 @@ class WebhookTest(GitLabTestCase):
             assert author.name
             assert author.organization_id == self.organization.id
 
-    def test_push_event_ignore_commit(self):
+    def test_push_event_ignore_commit(self) -> None:
         self.create_gitlab_repo("getsentry/sentry")
         response = self.client.post(
             self.url,
@@ -270,7 +297,7 @@ class WebhookTest(GitLabTestCase):
         assert response.status_code == 204
         assert 0 == Commit.objects.count()
 
-    def test_push_event_known_author(self):
+    def test_push_event_known_author(self) -> None:
         CommitAuthor.objects.create(
             organization_id=self.organization.id, email="jordi@example.org", name="Jordi"
         )
@@ -285,7 +312,7 @@ class WebhookTest(GitLabTestCase):
         assert response.status_code == 204
         assert 2 == CommitAuthor.objects.count(), "No dupes made"
 
-    def test_merge_event_missing_repo(self):
+    def test_merge_event_missing_repo(self) -> None:
         response = self.client.post(
             self.url,
             data=MERGE_REQUEST_OPENED_EVENT,
@@ -298,7 +325,9 @@ class WebhookTest(GitLabTestCase):
 
     @patch("sentry.integrations.gitlab.webhooks.MergeEventWebhook.__call__")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_merge_event_failure_metric(self, mock_record, mock_event):
+    def test_merge_event_failure_metric(
+        self, mock_record: MagicMock, mock_event: MagicMock
+    ) -> None:
         payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
 
         error = Exception("oops")
@@ -316,7 +345,7 @@ class WebhookTest(GitLabTestCase):
         assert_failure_metric(mock_record, error)
 
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_merge_event_no_last_commit(self, mock_record):
+    def test_merge_event_no_last_commit(self, mock_record: MagicMock) -> None:
         payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
 
         # Remove required keys. There have been events in prod that are missing
@@ -335,8 +364,60 @@ class WebhookTest(GitLabTestCase):
 
         assert_success_metric(mock_record)
 
-    @patch("sentry.integrations.source_code_management.tasks.open_pr_comment_workflow.delay")
-    def test_merge_event_create_pull_request(self, mock_delay):
+    @patch("sentry.integrations.gitlab.webhooks.metrics.incr")
+    def test_merge_event_no_author_email_does_not_error(self, mock_incr: MagicMock) -> None:
+        # A repo exists (so the processor runs), but the MR has no commit author
+        # email. The PR processor must stop cleanly rather than raising, which
+        # _handle would otherwise catch and mislabel as a processor error.
+        self.create_gitlab_repo("getsentry/sentry")
+        payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        del payload["object_attributes"]["last_commit"]
+
+        response = self.client.post(
+            self.url,
+            data=orjson.dumps(payload),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Merge Request Hook",
+        )
+        assert response.status_code == 204
+        assert 0 == PullRequest.objects.count()
+
+        error_metrics = [
+            c
+            for c in mock_incr.call_args_list
+            if c.args and c.args[0] == "gitlab.webhook.processor.error"
+        ]
+        assert error_metrics == []
+
+    def test_merge_event_invokes_code_review_handler(self) -> None:
+        # The code-review handler is wired into the endpoint via the processor
+        # tuple. Confirm both that it is registered and that an inbound
+        # merge_request event is dispatched into it with the expected context.
+        assert handle_merge_request_event in MergeEventWebhook.WEBHOOK_EVENT_PROCESSORS
+
+        self.create_gitlab_repo("getsentry/sentry")
+
+        # wraps the real handler so it still runs while we record the invocation
+        spy = MagicMock(wraps=handle_merge_request_event)
+        with patch.object(MergeEventWebhook, "WEBHOOK_EVENT_PROCESSORS", (spy,)):
+            response = self.client.post(
+                self.url,
+                data=MERGE_REQUEST_OPENED_EVENT,
+                content_type="application/json",
+                HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+                HTTP_X_GITLAB_EVENT="Merge Request Hook",
+            )
+
+        assert response.status_code == 204
+        spy.assert_called_once()
+        call_kwargs = spy.call_args.kwargs
+        assert call_kwargs["event"]["object_attributes"]["action"] == "open"
+        assert call_kwargs["integration"].id == self.integration.id
+        assert call_kwargs["organization"].id == self.organization.id
+        assert call_kwargs["repo"].name == "getsentry/sentry"
+
+    def test_merge_event_create_pull_request(self) -> None:
         self.create_gitlab_repo("getsentry/sentry")
         group = self.create_group(project=self.project, short_id=9)
         response = self.client.post(
@@ -354,10 +435,7 @@ class WebhookTest(GitLabTestCase):
         self.assert_pull_request(pull, author)
         self.assert_group_link(group, pull)
 
-        mock_delay.assert_called_once_with(pr_id=pull.id)
-
-    @patch("sentry.integrations.source_code_management.tasks.open_pr_comment_workflow.delay")
-    def test_merge_event_update_pull_request(self, mock_delay):
+    def test_merge_event_update_pull_request(self) -> None:
         repo = self.create_gitlab_repo("getsentry/sentry")
         group = self.create_group(project=self.project, short_id=9)
         PullRequest.objects.create(
@@ -386,15 +464,172 @@ class WebhookTest(GitLabTestCase):
         self.assert_pull_request(pull, author)
         self.assert_group_link(group, pull)
 
-        assert mock_delay.call_count == 0
+    def test_merge_event_merged_pull_request_state(self) -> None:
+        self.create_gitlab_repo("getsentry/sentry")
+        self.create_group(project=self.project, short_id=9)
 
-    def test_update_repo_path(self):
+        payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        payload["object_attributes"]["state"] = "merged"
+        payload["object_attributes"]["action"] = "merge"
+        payload["object_attributes"]["merge_commit_sha"] = "abc123"
+        payload["object_attributes"]["merged_at"] = "2017-09-28T12:23:42.365Z"
+
+        response = self.client.post(
+            self.url,
+            data=orjson.dumps(payload),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Merge Request Hook",
+        )
+        assert response.status_code == 204
+
+        pull = PullRequest.objects.get()
+        assert pull.state == PullRequestLifecycleState.MERGED
+        assert pull.merge_commit_sha == "abc123"
+        # merged_at is taken directly from the webhook's object_attributes.
+        assert pull.merged_at == datetime(2017, 9, 28, 12, 23, 42, 365000, tzinfo=timezone.utc)
+        # A merged merge request is also closed.
+        assert pull.closed_at == pull.merged_at
+
+    def test_merge_event_edit_after_merge_preserves_terminal_timestamps(self) -> None:
+        self.create_gitlab_repo("getsentry/sentry")
+
+        # Merge the merge request, stamping merged_at from the reported
+        # merged_at and closed_at from the same value.
+        merge_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        merge_payload["object_attributes"]["state"] = "merged"
+        merge_payload["object_attributes"]["action"] = "merge"
+        merge_payload["object_attributes"]["merged_at"] = "2017-09-28T12:23:42.365Z"
+        self.client.post(
+            self.url,
+            data=orjson.dumps(merge_payload),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Merge Request Hook",
+        )
+
+        pull = PullRequest.objects.get()
+        merged_at = pull.merged_at
+        closed_at = pull.closed_at
+        assert merged_at is not None
+        assert closed_at is not None
+
+        # GitLab fires the hook again for an edit (e.g. label change) with a
+        # later updated_at while the state is still "merged". The edit carries
+        # the same absolute merged_at, and an "update" action never touches
+        # closed_at, so the terminal timestamps must not drift to the edit time.
+        edit_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        edit_payload["object_attributes"]["state"] = "merged"
+        edit_payload["object_attributes"]["action"] = "update"
+        edit_payload["object_attributes"]["updated_at"] = "2018-01-01T00:00:00.000Z"
+        edit_payload["object_attributes"]["merged_at"] = "2017-09-28T12:23:42.365Z"
+        edit_payload["object_attributes"]["title"] = "Edited after merge"
+        response = self.client.post(
+            self.url,
+            data=orjson.dumps(edit_payload),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Merge Request Hook",
+        )
+        assert response.status_code == 204
+
+        pull.refresh_from_db()
+        assert pull.title == "Edited after merge"
+        assert pull.state == PullRequestLifecycleState.MERGED
+        assert pull.merged_at == merged_at
+        assert pull.closed_at == closed_at
+
+    def _post_merge_event(self, payload: dict) -> None:
+        response = self.client.post(
+            self.url,
+            data=orjson.dumps(payload),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Merge Request Hook",
+        )
+        assert response.status_code == 204
+
+    def test_merge_event_stale_update_after_merge_does_not_regress_state(self) -> None:
+        # An `update` hook that failed its first delivery is retried minutes later,
+        # landing after the `merge` it preceded. Its object_attributes still
+        # describe an open merge request, so replaying it would rewrite the merged
+        # row back to open. The older snapshot must be dropped wholesale.
+        self.create_gitlab_repo("getsentry/sentry")
+
+        merge_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        merge_payload["object_attributes"]["state"] = "merged"
+        merge_payload["object_attributes"]["action"] = "merge"
+        merge_payload["object_attributes"]["updated_at"] = "2017-09-28T12:23:42.365Z"
+        merge_payload["object_attributes"]["merged_at"] = "2017-09-28T12:23:42.365Z"
+        merge_payload["object_attributes"]["merge_commit_sha"] = "abc123"
+        self._post_merge_event(merge_payload)
+
+        stale_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        stale_payload["object_attributes"]["action"] = "update"
+        stale_payload["object_attributes"]["state"] = "opened"
+        stale_payload["object_attributes"]["updated_at"] = "2017-09-28T12:20:00.000Z"
+        stale_payload["object_attributes"]["title"] = "Stale title"
+        self._post_merge_event(stale_payload)
+
+        pull = PullRequest.objects.get()
+        assert pull.state == PullRequestLifecycleState.MERGED
+        assert pull.merged_at == datetime(2017, 9, 28, 12, 23, 42, 365000, tzinfo=timezone.utc)
+        assert pull.closed_at == pull.merged_at
+        assert pull.merge_commit_sha == "abc123"
+        assert pull.title != "Stale title"
+
+    def test_merge_event_stale_update_after_close_does_not_reopen(self) -> None:
+        # Same reordering, but the merge request was closed unmerged. `close` ->
+        # `reopen` is a legitimate transition, so only the payload timestamp can
+        # tell the stale replay from a real reopen.
+        self.create_gitlab_repo("getsentry/sentry")
+
+        close_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        close_payload["object_attributes"]["state"] = "closed"
+        close_payload["object_attributes"]["action"] = "close"
+        close_payload["object_attributes"]["updated_at"] = "2017-09-28T12:23:42.365Z"
+        self._post_merge_event(close_payload)
+
+        stale_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        stale_payload["object_attributes"]["action"] = "update"
+        stale_payload["object_attributes"]["state"] = "opened"
+        stale_payload["object_attributes"]["updated_at"] = "2017-09-28T12:20:00.000Z"
+        self._post_merge_event(stale_payload)
+
+        pull = PullRequest.objects.get()
+        assert pull.state == PullRequestLifecycleState.CLOSED
+        assert pull.closed_at == datetime(2017, 9, 28, 12, 23, 42, 365000, tzinfo=timezone.utc)
+
+    def test_merge_event_reopen_after_close_is_applied(self) -> None:
+        # The guard rejects only *older* snapshots: a genuine reopen carries a
+        # later updated_at and must still land.
+        self.create_gitlab_repo("getsentry/sentry")
+
+        close_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        close_payload["object_attributes"]["state"] = "closed"
+        close_payload["object_attributes"]["action"] = "close"
+        close_payload["object_attributes"]["updated_at"] = "2017-09-28T12:23:42.365Z"
+        self._post_merge_event(close_payload)
+
+        reopen_payload = orjson.loads(MERGE_REQUEST_OPENED_EVENT)
+        reopen_payload["object_attributes"]["state"] = "opened"
+        reopen_payload["object_attributes"]["action"] = "reopen"
+        reopen_payload["object_attributes"]["updated_at"] = "2017-09-28T12:30:00.000Z"
+        self._post_merge_event(reopen_payload)
+
+        pull = PullRequest.objects.get()
+        assert pull.state == PullRequestLifecycleState.OPEN
+        assert pull.closed_at is None
+        assert pull.provider_updated_at == datetime(2017, 9, 28, 12, 30, tzinfo=timezone.utc)
+
+    def test_update_repo_path(self) -> None:
         repo_out_of_date_path = self.create_gitlab_repo(
             name="Cool Group / Sentry", url="http://example.com/cool-group/sentry"
         )
         repo_out_of_date_path.update(
             config=dict(
-                repo_out_of_date_path.config, path="uncool-group/sentry"  # path out of date
+                repo_out_of_date_path.config,
+                path="uncool-group/sentry",  # path out of date
             )
         )
 
@@ -412,7 +647,7 @@ class WebhookTest(GitLabTestCase):
         repo_out_of_date_path.refresh_from_db()
         assert repo_out_of_date_path.config["path"] == "cool-group/sentry"
 
-    def test_update_repo_url(self):
+    def test_update_repo_url(self) -> None:
         repo_out_of_date_url = self.create_gitlab_repo(
             name="Cool Group / Sentry",
             url="http://example.com/uncool-group/sentry",  # url out of date
@@ -435,7 +670,7 @@ class WebhookTest(GitLabTestCase):
         repo_out_of_date_url.refresh_from_db()
         assert repo_out_of_date_url.url == "http://example.com/cool-group/sentry"
 
-    def test_no_valid_integration_for_organization(self):
+    def test_no_valid_integration_for_organization(self) -> None:
         self.create_gitlab_repo("getsentry/sentry")
         self.create_group(project=self.project, short_id=9)
 
@@ -451,3 +686,179 @@ class WebhookTest(GitLabTestCase):
         )
         assert response.status_code == 409
         assert response.reason_phrase == "There is no integration that matches your organization."
+
+    @patch("sentry.integrations.gitlab.webhooks.sync_group_assignee_inbound_by_external_actor")
+    def test_issue_assigned(self, mock_sync: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_ASSIGNED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        # Verify sync_group_assignee_inbound_by_external_actor was called
+        assert mock_sync.called
+        call_args = mock_sync.call_args
+        assert call_args[1]["external_user_name"] == "@root"
+        assert (
+            call_args[1]["external_issue_key"] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        )
+        assert call_args[1]["assign"] is True
+        assert call_args[1]["external_user_id"] == 1
+
+    @patch("sentry.integrations.gitlab.webhooks.sync_group_assignee_inbound_by_external_actor")
+    def test_issue_assigned_with_dotted_username(self, mock_sync: MagicMock) -> None:
+        event = orjson.loads(ISSUE_ASSIGNED_EVENT)
+        event["assignees"][0]["id"] = 123
+        event["assignees"][0]["username"] = "first.last"
+
+        response = self.client.post(
+            self.url,
+            data=orjson.dumps(event),
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        assert mock_sync.called
+        call_args = mock_sync.call_args
+        assert call_args[1]["external_user_name"] == "@first.last"
+        assert call_args[1]["external_user_id"] == 123
+        assert (
+            call_args[1]["external_issue_key"] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        )
+        assert call_args[1]["assign"] is True
+
+    @patch("sentry.integrations.gitlab.webhooks.sync_group_assignee_inbound_by_external_actor")
+    def test_issue_unassigned(self, mock_sync: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_UNASSIGNED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        # Verify sync_group_assignee_inbound_by_external_actor was called for deassignment
+        assert mock_sync.called
+        call_args = mock_sync.call_args
+        assert call_args[1]["external_user_name"] == ""
+        assert (
+            call_args[1]["external_issue_key"] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        )
+        assert call_args[1]["assign"] is False
+
+
+class TestIssuesEventWebhookStatusSync(GitLabTestCase):
+    url = "/extensions/gitlab/webhook/"
+
+    @patch("sentry.integrations.gitlab.integration.GitlabIntegration.sync_status_inbound")
+    def test_close_event_triggers_sync(self, mock_sync_status: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_CLOSED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        assert mock_sync_status.called
+        call_args = mock_sync_status.call_args
+        assert call_args[0][0] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        assert call_args[0][1] == {
+            "action": "close",
+            "provider_event_time": "2023-01-01 00:00:00 UTC",
+        }
+
+    @patch("sentry.integrations.gitlab.integration.GitlabIntegration.sync_status_inbound")
+    def test_reopen_event_triggers_sync(self, mock_sync_status: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_REOPENED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        assert mock_sync_status.called
+        call_args = mock_sync_status.call_args
+        assert call_args[0][0] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        assert call_args[0][1] == {
+            "action": "reopen",
+            "provider_event_time": "2023-01-01 00:00:00 UTC",
+        }
+
+    @patch("sentry.integrations.gitlab.integration.GitlabIntegration.sync_status_inbound")
+    def test_open_event_does_not_trigger_sync(self, mock_sync_status: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_OPENED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        assert not mock_sync_status.called
+
+    @patch("sentry.integrations.gitlab.integration.GitlabIntegration.sync_status_inbound")
+    def test_sync_called_with_correct_params(self, mock_sync_status: MagicMock) -> None:
+        response = self.client.post(
+            self.url,
+            data=ISSUE_CLOSED_EVENT,
+            content_type="application/json",
+            HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+            HTTP_X_GITLAB_EVENT="Issue Hook",
+        )
+        assert response.status_code == 204
+
+        assert mock_sync_status.called
+        call_args = mock_sync_status.call_args
+        assert call_args[0][0] == "example.gitlab.com/group-x:cool-group/sentry#23"
+        assert call_args[0][1]["action"] == "close"
+
+    def test_close_delivered_after_reopen_does_not_resolve(self) -> None:
+        # A close/reopen pair delivered in reverse order must not resolve the group.
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            org_integration = OrganizationIntegration.objects.get(
+                organization_id=self.organization.id, integration_id=self.integration.id
+            )
+            org_integration.update(config={"sync_status_reverse": True})
+
+        group = self.create_group(project=self.project)
+        self.create_integration_external_issue(
+            group=group,
+            integration=self.integration,
+            key="example.gitlab.com/group-x:cool-group/sentry#23",
+        )
+
+        reopened = orjson.loads(ISSUE_REOPENED_EVENT)
+        reopened["object_attributes"]["updated_at"] = "2023-01-01 00:00:03 UTC"
+        closed = orjson.loads(ISSUE_CLOSED_EVENT)
+        closed["object_attributes"]["updated_at"] = "2023-01-01 00:00:00 UTC"
+
+        features = [
+            "organizations:integrations-issue-sync",
+            "organizations:integrations-gitlab-project-management",
+        ]
+        with self.feature(features), self.tasks():
+            for payload in (reopened, closed):
+                response = self.client.post(
+                    self.url,
+                    data=orjson.dumps(payload),
+                    content_type="application/json",
+                    HTTP_X_GITLAB_TOKEN=WEBHOOK_TOKEN,
+                    HTTP_X_GITLAB_EVENT="Issue Hook",
+                )
+                assert response.status_code == 204
+
+        assert Group.objects.get(id=group.id).status == GroupStatus.UNRESOLVED
+        # The reopen was applied, so the close really did reach the guard.
+        assert group.activity_set.filter(type=ActivityType.SET_UNRESOLVED.value).exists()
+        assert not group.activity_set.filter(type=ActivityType.SET_RESOLVED.value).exists()

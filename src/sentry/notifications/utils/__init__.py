@@ -5,17 +5,20 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Optional, TypedDict, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, TypedDict, cast
 from urllib.parse import parse_qs, urlparse
 
+import sentry_sdk
 from django.db.models import Count
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 
-from sentry.eventstore.models import Event, GroupEvent
 from sentry.integrations.base import IntegrationFeatures, IntegrationProvider
 from sentry.integrations.manager import default_manager as integrations
 from sentry.integrations.services.integration import integration_service
+from sentry.issue_detection.detectors.utils import get_url_from_span
+from sentry.issue_detection.performance_problem import PerformanceProblem
+from sentry.issue_detection.types import Span
 from sentry.issues.grouptype import (
     PerformanceConsecutiveDBQueriesGroupType,
     PerformanceNPlusOneAPICallsExperimentalGroupType,
@@ -33,13 +36,14 @@ from sentry.models.project import Project
 from sentry.models.release import Release
 from sentry.models.releasecommit import ReleaseCommit
 from sentry.models.repository import Repository
-from sentry.models.rule import Rule
-from sentry.performance_issues.base import get_url_from_span
-from sentry.performance_issues.performance_problem import PerformanceProblem
-from sentry.silo.base import region_silo_function
-from sentry.types.rules import NotificationRuleDetails
+from sentry.services.eventstore.models import BaseEvent, Event, GroupEvent
+from sentry.silo.base import cell_silo_function
 from sentry.users.services.user import RpcUser
-from sentry.utils.committers import get_serialized_event_file_committers
+from sentry.utils.committers import (
+    AuthorCommitsSerialized,
+    get_serialized_committers,
+    get_serialized_event_file_committers,
+)
 from sentry.web.helpers import render_to_string
 
 if TYPE_CHECKING:
@@ -111,29 +115,68 @@ def get_repos(
 
 def get_environment_for_deploy(deploy: Deploy | None) -> str:
     if deploy:
-        environment = Environment.objects.get(id=deploy.environment_id)
+        try:
+            environment = Environment.objects.get(id=deploy.environment_id)
+        except Environment.DoesNotExist:
+            return "Default Environment"
         if environment and environment.name:
             return str(environment.name)
     return "Default Environment"
 
 
-def get_rules(
-    rules: Sequence[Rule], organization: Organization, project: Project
-) -> Sequence[NotificationRuleDetails]:
-    return [
-        NotificationRuleDetails(
-            rule.id,
-            rule.label,
-            f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule.id}/",
-            f"/organizations/{organization.slug}/alerts/rules/{project.slug}/{rule.id}/details/",
-        )
-        for rule in rules
-    ]
+def process_serialized_committers(
+    committers: Sequence[AuthorCommitsSerialized], commits: MutableMapping[str, Mapping[str, Any]]
+) -> MutableMapping[str, Mapping[str, Any]]:
+    """
+    Transform committer data from nested structure to flat commit dictionary.
+
+    Args:
+        committers: List of {author, commits}
+        commits: Dict to store processed commits (modified in-place)
+
+    Returns:
+        Dict mapping commit IDs to enriched commit data with shortId, author, subject
+    """
+    for committer in committers:
+        for commit in committer["commits"]:
+            if commit["id"] not in commits:
+                commit_data = dict(commit)
+                commit_data["shortId"] = commit_data["id"][:7]
+                commit_data["author"] = committer["author"]
+                commit_data["subject"] = (
+                    commit_data["message"].split("\n", 1)[0] if commit_data["message"] else ""
+                )
+                if commit.get("pullRequest"):
+                    commit_data["pull_request"] = commit["pullRequest"]
+                commits[commit["id"]] = commit_data
+    return commits
+
+
+def get_suspect_commits_by_group_id(
+    project: Project,
+    group_id: int,
+) -> Sequence[Mapping[str, Any]]:
+    """
+    Get suspect commits for workflow notifications that only have a group ID (no Event).
+
+    Uses Commit Context (SCM integrations) only - no release-based fallback.
+    Returns commits sorted by recency, not suspicion score.
+    """
+    commits: MutableMapping[str, Mapping[str, Any]] = {}
+    try:
+        committers = get_serialized_committers(project, group_id)
+    except (Commit.DoesNotExist, Release.DoesNotExist):
+        pass
+    except Exception as exc:
+        sentry_sdk.capture_exception(exc)
+    else:
+        commits = process_serialized_committers(committers=committers, commits=commits)
+    return list(commits.values())
 
 
 def get_commits(project: Project, event: Event) -> Sequence[Mapping[str, Any]]:
-    # lets identify possibly suspect commits and owners
-    commits: MutableMapping[int, Mapping[str, Any]] = {}
+    # let's identify possible suspect commits and owners
+    commits: MutableMapping[str, Mapping[str, Any]] = {}
     try:
         committers = get_serialized_event_file_committers(project, event)
     except (Commit.DoesNotExist, Release.DoesNotExist):
@@ -141,33 +184,20 @@ def get_commits(project: Project, event: Event) -> Sequence[Mapping[str, Any]]:
     except Exception as exc:
         logging.exception(str(exc))
     else:
-        for committer in committers:
-            for commit in committer["commits"]:
-                if commit["id"] not in commits:
-                    commit_data = dict(commit)
-                    commit_data["shortId"] = commit_data["id"][:7]
-                    commit_data["author"] = committer["author"]
-                    commit_data["subject"] = (
-                        commit_data["message"].split("\n", 1)[0] if commit_data["message"] else ""
-                    )
-                    if commit.get("pullRequest"):
-                        commit_data["pull_request"] = commit["pullRequest"]
-                    commits[commit["id"]] = commit_data
+        commits = process_serialized_committers(committers=committers, commits=commits)
     # TODO(nisanthan): Once Commit Context is GA, no need to sort by "score"
     # commits from Commit Context dont have a "score" key
+    # keep this sort while release_based SuspectCommitStrategy is active.
+    # scm_based SuspectCommitStrategy does not use this scoring system.
     return sorted(commits.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
 
 
-@region_silo_function
+@cell_silo_function
 def has_integrations(organization: Organization, project: Project) -> bool:
-    from sentry.plugins.base import plugins
-
-    project_plugins = plugins.for_project(project, version=1)
     organization_integrations = integration_service.get_integrations(
         organization_id=organization.id, limit=1
     )
-    # TODO: fix because project_plugins is an iterator and thus always truthy
-    return bool(project_plugins or organization_integrations)
+    return bool(organization_integrations)
 
 
 def is_alert_rule_integration(provider: IntegrationProvider) -> bool:
@@ -184,14 +214,10 @@ def has_alert_integration(project: Project) -> bool:
     if integration_service.get_integrations(organization_id=org.id, providers=provider_keys):
         return True
 
-    # check plugins
-    from sentry.plugins.base import plugins
-
-    project_plugins = plugins.for_project(project, version=None)
-    return any(plugin.get_plugin_type() == "notification" for plugin in project_plugins)
+    return False
 
 
-def get_interface_list(event: Event) -> Sequence[tuple[str, str, str]]:
+def get_interface_list(event: BaseEvent) -> Sequence[tuple[str, str, str]]:
     interface_list = []
     for interface in event.interfaces.values():
         body = interface.to_email_html(event)
@@ -202,20 +228,18 @@ def get_interface_list(event: Event) -> Sequence[tuple[str, str, str]]:
     return interface_list
 
 
-def get_span_evidence_value(
-    span: dict[str, str | float] | None = None, include_op: bool = True
-) -> str:
+def get_span_evidence_value(span: Span | None = None, include_op: bool = True) -> str:
     """Get the 'span evidence' data for a given span. This is displayed in issue alert emails."""
     value = "no value"
     if not span:
         return value
     if not span.get("op") and span.get("description"):
-        value = cast(str, span["description"])
+        value = span["description"]
     if span.get("op") and not span.get("description"):
-        value = cast(str, span["op"])
+        value = span["op"]
     if span.get("op") and span.get("description"):
-        op = cast(str, span["op"])
-        desc = cast(str, span["description"])
+        op = span["op"]
+        desc = span["description"]
         value = f"{op} - {desc}"
         if not include_op:
             value = desc
@@ -223,8 +247,8 @@ def get_span_evidence_value(
 
 
 def get_parent_and_repeating_spans(
-    spans: list[dict[str, str | float]] | None, problem: PerformanceProblem
-) -> tuple[dict[str, str | float] | None, dict[str, str | float] | None]:
+    spans: list[Span] | None, problem: PerformanceProblem
+) -> tuple[Span | None, Span | None]:
     """Parse out the parent and repeating spans given an event's spans"""
     if not spans:
         return (None, None)
@@ -233,12 +257,10 @@ def get_parent_and_repeating_spans(
     repeating_spans = None
 
     for span in spans:
-        if problem.parent_span_ids:
-            if problem.parent_span_ids[0] == span.get("span_id"):
-                parent_span = span
-        if problem.offender_span_ids:
-            if problem.offender_span_ids[0] == span.get("span_id"):
-                repeating_spans = span
+        if problem.parent_span_ids and problem.parent_span_ids[0] == span.get("span_id"):
+            parent_span = span
+        if problem.offender_span_ids and problem.offender_span_ids[0] == span.get("span_id"):
+            repeating_spans = span
         if parent_span is not None and repeating_spans is not None:
             break
 
@@ -252,15 +274,15 @@ def occurrence_perf_to_email_html(context: Any) -> str:
 
 def get_spans(
     entries: list[dict[str, list[dict[str, str | float]] | str]],
-) -> list[dict[str, str | float]] | None:
+) -> list[Span] | None:
     """Get the given event's spans"""
     if not len(entries):
         return None
 
-    spans: list[dict[str, str | float]] | None = None
+    spans: list[Span] | None = None
     for entry in entries:
         if entry.get("type") == "spans":
-            spans = cast(Optional[list[dict[str, Union[str, float]]]], entry.get("data"))
+            spans = cast(Optional[list[Span]], entry.get("data"))
             break
 
     return spans
@@ -291,7 +313,10 @@ def get_performance_issue_alert_subtitle(event: GroupEvent) -> str:
     """Generate the issue alert subtitle for performance issues"""
     if event.occurrence is None:
         return ""
-    return event.occurrence.evidence_data.get("repeating_spans_compact", "").replace("`", '"')
+    repeating_spans_compact = event.occurrence.evidence_data.get("repeating_spans_compact", "")
+    if isinstance(repeating_spans_compact, list):
+        repeating_spans_compact = repeating_spans_compact[0]
+    return repeating_spans_compact.replace("`", '"')
 
 
 def get_notification_group_title(
@@ -321,15 +346,15 @@ def send_activity_notification(notification: ActivityNotification | UserReportNo
 
 
 def get_replay_id(event: Event | GroupEvent) -> str | None:
-    replay_id = event.data.get("contexts", {}).get("replay", {}).get("replay_id", {})
+    contexts = event.data.get("contexts") or {}
+    replay_id = (contexts.get("replay") or {}).get("replay_id")
     if (
         isinstance(event, GroupEvent)
         and event.occurrence is not None
         and event.occurrence.evidence_data
     ):
-        evidence_replay_id = (
-            event.occurrence.evidence_data.get("contexts", {}).get("replay", {}).get("replay_id")
-        )
+        evidence_contexts = event.occurrence.evidence_data.get("contexts") or {}
+        evidence_replay_id = (evidence_contexts.get("replay") or {}).get("replay_id")
 
         if evidence_replay_id:
             return evidence_replay_id
@@ -340,7 +365,7 @@ def get_replay_id(event: Event | GroupEvent) -> str | None:
 @dataclass
 class PerformanceProblemContext:
     problem: PerformanceProblem
-    spans: list[dict[str, str | float]] | None
+    spans: list[Span] | None
     event: Event | None
 
     def __post_init__(self) -> None:
@@ -354,9 +379,7 @@ class PerformanceProblemContext:
             "transaction_name": self.transaction,
             "parent_span": get_span_evidence_value(self.parent_span),
             "repeating_spans": get_span_evidence_value(self.repeating_spans),
-            "num_repeating_spans": (
-                str(len(self.problem.offender_span_ids)) if self.problem.offender_span_ids else ""
-            ),
+            "num_repeating_spans": str(len(self.problem.offender_span_ids)),
         }
 
     @property
@@ -381,7 +404,7 @@ class PerformanceProblemContext:
 
         return (end - start) * 1000
 
-    def _find_span_by_id(self, id: str) -> dict[str, Any] | None:
+    def _find_span_by_id(self, id: str) -> Span | None:
         if not self.spans:
             return None
 
@@ -391,12 +414,12 @@ class PerformanceProblemContext:
                 return span
         return None
 
-    def get_span_duration(self, span: dict[str, Any] | None) -> timedelta:
+    def get_span_duration(self, span: Span | None) -> timedelta:
         if span:
             return timedelta(seconds=span.get("timestamp", 0) - span.get("start_timestamp", 0))
         return timedelta(0)
 
-    def _sum_span_duration(self, spans: list[dict[str, Any] | None]) -> float:
+    def _sum_span_duration(self, spans: list[Span | None]) -> float:
         "Given non-overlapping spans, find the sum of the span durations in milliseconds"
         sum = 0.0
         for span in spans:
@@ -408,7 +431,7 @@ class PerformanceProblemContext:
     def from_problem_and_spans(
         cls,
         problem: PerformanceProblem,
-        spans: list[dict[str, str | float]] | None,
+        spans: list[Span] | None,
         event: Event | None = None,
     ) -> PerformanceProblemContext:
         if problem.type in (
@@ -430,9 +453,7 @@ class NPlusOneAPICallProblemContext(PerformanceProblemContext):
             "transaction_name": self.transaction,
             "repeating_spans": self.path_prefix,
             "parameters": self.parameters,
-            "num_repeating_spans": (
-                str(len(self.problem.offender_span_ids)) if self.problem.offender_span_ids else ""
-            ),
+            "num_repeating_spans": str(len(self.problem.offender_span_ids)),
         }
 
     @property
@@ -487,7 +508,7 @@ class ConsecutiveDBQueriesProblemContext(PerformanceProblemContext):
 
     @property
     def starting_span(self) -> str:
-        if not self.problem.cause_span_ids or len(self.problem.cause_span_ids) < 1:
+        if not self.problem.cause_span_ids:
             return ""
 
         starting_span_id = self.problem.cause_span_ids[0]
@@ -496,7 +517,7 @@ class ConsecutiveDBQueriesProblemContext(PerformanceProblemContext):
 
     @property
     def parallelizable_spans(self) -> list[str]:
-        if not self.problem.offender_span_ids or len(self.problem.offender_span_ids) < 1:
+        if not self.problem.offender_span_ids:
             return [""]
 
         offender_span_ids = self.problem.offender_span_ids
@@ -515,7 +536,7 @@ class ConsecutiveDBQueriesProblemContext(PerformanceProblemContext):
         this is where thresholds come in
         """
         independent_spans = [self._find_span_by_id(id) for id in self.problem.offender_span_ids]
-        consecutive_spans = [self._find_span_by_id(id) for id in self.problem.cause_span_ids or ()]
+        consecutive_spans = [self._find_span_by_id(id) for id in self.problem.cause_span_ids]
         total_duration = self._sum_span_duration(consecutive_spans)
 
         max_independent_span_duration = max(
@@ -543,7 +564,7 @@ class RenderBlockingAssetProblemContext(PerformanceProblemContext):
         }
 
     @property
-    def slow_span(self) -> dict[str, str | float] | None:
+    def slow_span(self) -> Span | None:
         if not self.spans:
             return None
 

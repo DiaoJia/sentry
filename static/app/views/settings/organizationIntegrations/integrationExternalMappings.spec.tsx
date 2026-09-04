@@ -9,9 +9,9 @@ import {
   waitForElementToBeRemoved,
 } from 'sentry-test/reactTestingLibrary';
 
-import IntegrationExternalMappings from './integrationExternalMappings';
+import {IntegrationExternalMappings} from './integrationExternalMappings';
 
-describe('IntegrationExternalMappings', function () {
+describe('IntegrationExternalMappings', () => {
   const {organization} = initializeOrg();
 
   const onCreateMock = jest.fn();
@@ -52,6 +52,30 @@ describe('IntegrationExternalMappings', function () {
     },
   ];
 
+  const MOCK_MEMBERS = [
+    {name: 'user1', email: 'user1@test.com', user: {id: '1'}},
+    {name: 'user2', email: 'user2@test.com', user: {id: '2'}},
+  ];
+  const MOCK_TEAMS = [
+    {id: '1', slug: 'zoo'},
+    {id: '2', slug: 'boo'},
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/members/`,
+      method: 'GET',
+      body: MOCK_MEMBERS,
+    });
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/teams/`,
+      method: 'GET',
+      body: MOCK_TEAMS,
+    });
+  });
+
   const createMockSuggestions = () => {
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/codeowners-associations/`,
@@ -67,7 +91,7 @@ describe('IntegrationExternalMappings', function () {
     });
   };
 
-  it('renders empty if not mappings are provided or found', async function () {
+  it('renders empty if not mappings are provided or found', async () => {
     MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/codeowners-associations/`,
       method: 'GET',
@@ -81,9 +105,7 @@ describe('IntegrationExternalMappings', function () {
         onCreate={onCreateMock}
         onDelete={onDeleteMock}
         defaultOptions={[]}
-        dataEndpoint="/organizations/org-slug/codeowners-associations/"
         getBaseFormEndpoint={() => '/organizations/org-slug/codeowners-associations/'}
-        sentryNamesMapper={data => data}
       />
     );
 
@@ -91,7 +113,7 @@ describe('IntegrationExternalMappings', function () {
     expect(container).toHaveTextContent('Set up External User Mappings.');
   });
 
-  it('still renders suggestions if no mappings are provided', async function () {
+  it('still renders suggestions if no mappings are provided', async () => {
     createMockSuggestions();
     render(
       <IntegrationExternalMappings
@@ -101,9 +123,7 @@ describe('IntegrationExternalMappings', function () {
         onCreate={onCreateMock}
         onDelete={onDeleteMock}
         defaultOptions={[]}
-        dataEndpoint="/organizations/org-slug/codeowners-associations/"
         getBaseFormEndpoint={() => '/organizations/org-slug/codeowners-associations/'}
-        sentryNamesMapper={data => data}
       />
     );
 
@@ -111,10 +131,10 @@ describe('IntegrationExternalMappings', function () {
     for (const user of MOCK_USER_SUGGESTIONS) {
       expect(screen.getByText(user)).toBeInTheDocument();
     }
-    expect(screen.getAllByTestId('more-information')).toHaveLength(3);
+    expect(screen.getAllByRole('img', {name: 'More information'})).toHaveLength(3);
   });
 
-  it('renders suggestions along with the provided mappings', async function () {
+  it('renders suggestions along with the provided mappings', async () => {
     createMockSuggestions();
     render(
       <IntegrationExternalMappings
@@ -124,9 +144,7 @@ describe('IntegrationExternalMappings', function () {
         onCreate={onCreateMock}
         onDelete={onDeleteMock}
         defaultOptions={[]}
-        dataEndpoint="/organizations/org-slug/codeowners-associations/"
         getBaseFormEndpoint={() => '/organizations/org-slug/codeowners-associations/'}
-        sentryNamesMapper={data => data}
       />
     );
 
@@ -138,12 +156,15 @@ describe('IntegrationExternalMappings', function () {
 
     for (const team of MOCK_TEAM_MAPPINGS) {
       expect(screen.getByText(team.externalName)).toBeInTheDocument();
-      expect(screen.getByText(team.sentryName)).toBeInTheDocument();
     }
-    expect(screen.getAllByTestId('more-information')).toHaveLength(3);
+    // The inline form selects show the team slugs from the API response
+    for (const team of MOCK_TEAMS) {
+      expect(await screen.findByText(team.slug)).toBeInTheDocument();
+    }
+    expect(screen.getAllByRole('img', {name: 'More information'})).toHaveLength(3);
   });
 
-  it('uses the methods passed down from props appropriately', async function () {
+  it('uses the methods passed down from props appropriately', async () => {
     createMockSuggestions();
     render(
       <IntegrationExternalMappings
@@ -153,9 +174,7 @@ describe('IntegrationExternalMappings', function () {
         onCreate={onCreateMock}
         onDelete={onDeleteMock}
         defaultOptions={[]}
-        dataEndpoint="/organizations/org-slug/codeowners-associations/"
         getBaseFormEndpoint={() => '/organizations/org-slug/codeowners-associations/'}
-        sentryNamesMapper={data => data}
       />
     );
     renderGlobalModal();

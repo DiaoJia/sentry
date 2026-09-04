@@ -8,12 +8,11 @@ the `GroupHash` model file, so that existing records will get updated with the n
 from __future__ import annotations
 
 import logging
-import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, TypeIs, cast
 
-from sentry import options
-from sentry.eventstore.models import Event
+from django.utils import timezone
+
 from sentry.grouping.api import get_contributing_variant_and_component
 from sentry.grouping.component import (
     ChainedExceptionGroupingComponent,
@@ -43,6 +42,7 @@ from sentry.models.grouphashmetadata import (
     HashBasis,
 )
 from sentry.models.project import Project
+from sentry.services.eventstore.models import Event
 from sentry.types.grouphash_metadata import (
     ChecksumHashingMetadata,
     FallbackHashingMetadata,
@@ -62,13 +62,13 @@ GROUPING_METHODS_BY_DESCRIPTION = {
     # All frames from a stacktrace at the top level of the event, in `exception`, or in
     # `threads` (top-level stacktraces come, for example, from using `attach_stacktrace`
     # together with `capture_message`)
-    "stack-trace": HashBasis.STACKTRACE,
-    "exception stack-trace": HashBasis.STACKTRACE,
-    "thread stack-trace": HashBasis.STACKTRACE,
+    "stacktrace": HashBasis.STACKTRACE,
+    "exception stacktrace": HashBasis.STACKTRACE,
+    "thread stacktrace": HashBasis.STACKTRACE,
     # Same as above, but restricted to in-app frames
-    "in-app stack-trace": HashBasis.STACKTRACE,
-    "in-app exception stack-trace": HashBasis.STACKTRACE,
-    "in-app thread stack-trace": HashBasis.STACKTRACE,
+    "in-app stacktrace": HashBasis.STACKTRACE,
+    "in-app exception stacktrace": HashBasis.STACKTRACE,
+    "in-app thread stacktrace": HashBasis.STACKTRACE,
     # The value in `message` or `log_entry`, such as from using `capture_message` or calling
     # `capture_exception` on a string
     "message": HashBasis.MESSAGE,
@@ -108,26 +108,12 @@ METRICS_TAGS_BY_HASH_BASIS = {
 }
 
 
-def should_handle_grouphash_metadata(project: Project, grouphash_is_new: bool) -> bool:
-    # Killswitches
-    if not options.get("grouping.grouphash_metadata.ingestion_writes_enabled"):
-        return False
-
-    # While we're backfilling metadata for existing grouphash records, if the load is too high, we
-    # want to prioritize metadata for new grouphashes because there's certain information
-    # (timestamp, Seer data) which is only available at group creation time.
-    if grouphash_is_new:
-        return True
-    else:
-        return random.random() <= options.get("grouping.grouphash_metadata.backfill_sample_rate")
-
-
 def create_or_update_grouphash_metadata_if_needed(
     event: Event,
     project: Project,
     grouphash: GroupHash,
     grouphash_is_new: bool,
-    grouping_config: str,
+    grouping_config_id: str,
     variants: dict[str, BaseVariant],
 ) -> None:
     db_hit_metadata: dict[str, Any] = {}
@@ -138,9 +124,12 @@ def create_or_update_grouphash_metadata_if_needed(
         # for a lock
         grouphash_metadata, created = GroupHashMetadata.objects.get_or_create(grouphash=grouphash)
 
-        new_data = get_grouphash_metadata_data(event, project, variants, grouping_config)
+        new_data = get_grouphash_metadata_data(event, project, variants, grouping_config_id)
 
+        # Handle race condition cases where this event lost the race to create the metadata record
         if not created:
+            grouphash.refresh_from_db()
+
             logger.info(
                 "grouphash_metadata.creation_race_condition.record_exists",
                 extra={
@@ -188,19 +177,19 @@ def create_or_update_grouphash_metadata_if_needed(
         # Keep track of the most recent config which computed this hash, so that once a config is
         # deprecated, we can clear out the GroupHash records which are no longer being produced
         current_latest_config = grouphash.metadata.latest_grouping_config
-        if _is_incoming_config_newer_than_current_latest(grouping_config, current_latest_config):
-            updated_data = {"latest_grouping_config": grouping_config}
+        if _is_incoming_config_newer_than_current_latest(grouping_config_id, current_latest_config):
+            updated_data = {"latest_grouping_config": grouping_config_id}
             db_hit_metadata = {
                 "reason": "old_grouping_config",
                 "current_config": current_latest_config,
-                "new_config": grouping_config,
+                "new_config": grouping_config_id,
             }
 
         # If the metadata was gathered under an old schema, get new data and bump the schema version
         if grouphash.metadata.schema_version != GROUPHASH_METADATA_SCHEMA_VERSION:
             updated_data.update(
                 # This includes `schema_version`
-                get_grouphash_metadata_data(event, project, variants, grouping_config)
+                get_grouphash_metadata_data(event, project, variants, grouping_config_id)
             )
 
             db_hit_metadata.update(
@@ -218,9 +207,22 @@ def create_or_update_grouphash_metadata_if_needed(
                     "new_version": GROUPHASH_METADATA_SCHEMA_VERSION,
                 }
             )
+        # If the metadata is more than 90 days old, the event upon which it's based will have aged
+        # out, so refresh the data with this new event
+        elif (
+            grouphash.metadata.date_updated
+            and grouphash.metadata.date_updated < timezone.now() - timedelta(days=90)
+        ):
+            updated_data.update(
+                get_grouphash_metadata_data(event, project, variants, grouping_config_id)
+            )
+            db_hit_metadata.update(
+                {"reason": ("stale" if not db_hit_metadata.get("reason") else "stale_and_config")}
+            )
 
         # Only hit the DB if there's something to change
         if updated_data:
+            updated_data["date_updated"] = timezone.now()
             grouphash.metadata.update(**updated_data)
 
     # If we did something, collect a metric
@@ -246,15 +248,16 @@ def get_grouphash_metadata_data(
     event: Event,
     project: Project,
     variants: dict[str, BaseVariant],
-    grouping_config: str,
+    grouping_config_id: str,
 ) -> dict[str, Any]:
     with metrics.timer(
         "grouping.grouphashmetadata.get_grouphash_metadata_data"
     ) as metrics_timer_tags:
         base_data = {
             "schema_version": GROUPHASH_METADATA_SCHEMA_VERSION,
-            "latest_grouping_config": grouping_config,
+            "latest_grouping_config": grouping_config_id,
             "platform": event.platform or "unknown",
+            "event_id": event.event_id,
         }
         hashing_metadata: HashingMetadata = {}
 
@@ -401,11 +404,13 @@ def _get_stacktrace_hashing_metadata(
         "stacktrace_location": (
             "exception"
             if "exception" in contributing_variant.description
-            else "thread" if "thread" in contributing_variant.description else "top-level"
+            else "thread"
+            if "thread" in contributing_variant.description
+            else "top-level"
         ),
         "num_stacktraces": (
             len(contributing_component.values)
-            if contributing_component.id == "chained-exception"
+            if contributing_component.id == "chained_exception"
             else 1
         ),
     }
@@ -449,8 +454,8 @@ def _get_message_hashing_metadata(
 def _get_fingerprint_hashing_metadata(
     contributing_variant: CustomFingerprintVariant | SaltedComponentVariant, is_hybrid: bool = False
 ) -> FingerprintHashingMetadata:
-    client_fingerprint = contributing_variant.info.get("client_fingerprint")
-    matched_rule = contributing_variant.info.get("matched_rule")
+    client_fingerprint = contributing_variant.fingerprint_info.get("client_fingerprint")
+    matched_rule = contributing_variant.fingerprint_info.get("matched_rule")
 
     metadata: FingerprintHashingMetadata = {
         # For simplicity, we stringify fingerprint values (which are always lists) to keep
@@ -461,7 +466,7 @@ def _get_fingerprint_hashing_metadata(
             if not matched_rule
             else (
                 "server_builtin_rule"
-                if contributing_variant.type == "built_in_fingerprint"
+                if contributing_variant.key == "built_in_fingerprint"
                 else "server_custom_rule"
             )
         ),
@@ -518,8 +523,8 @@ def _get_template_hashing_metadata(
 
     if subcomponents_by_id["filename"].values:
         metadata["template_name"] = subcomponents_by_id["filename"].values[0]
-    if subcomponents_by_id["context-line"].values:
-        metadata["template_context_line"] = subcomponents_by_id["context-line"].values[0]
+    if subcomponents_by_id["context_line"].values:
+        metadata["template_context_line"] = subcomponents_by_id["context_line"].values[0]
 
     return metadata
 
@@ -544,19 +549,19 @@ def _get_fallback_hashing_metadata(
 
     if (
         "app" in variants
-        and variants["app"].component.values[0].hint == "ignored because it contains no frames"
+        and variants["app"].root_component.values[0].hint == "ignored because it contains no frames"
     ):
         reason = "no_frames"
 
     elif (
         "system" in variants
-        and variants["system"].component.values[0].hint
+        and variants["system"].root_component.values[0].hint
         == "ignored because it contains no contributing frames"
     ):
         reason = "no_contributing_frames"
 
     elif "system" in variants and "min-frames" in (
-        variants["system"].component.values[0].hint or ""
+        variants["system"].root_component.values[0].hint or ""
     ):
         reason = "insufficient_contributing_frames"
 

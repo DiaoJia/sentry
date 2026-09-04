@@ -1,21 +1,20 @@
-import {Component, useContext} from 'react';
-import {useQuery} from '@tanstack/react-query';
+import {Component} from 'react';
+import {useQuery, type UseQueryOptions} from '@tanstack/react-query';
 import type {Location} from 'history';
 
 import type {EventQuery} from 'sentry/actionCreators/events';
-import type {ResponseMeta} from 'sentry/api';
 import {Client} from 'sentry/api';
 import {t} from 'sentry/locale';
-import type {ImmutableEventView, LocationQuery} from 'sentry/utils/discover/eventView';
-import type EventView from 'sentry/utils/discover/eventView';
+import type {ResponseMeta} from 'sentry/types/api';
+import type {
+  EventView,
+  ImmutableEventView,
+  LocationQuery,
+} from 'sentry/utils/discover/eventView';
 import {isAPIPayloadSimilar} from 'sentry/utils/discover/eventView';
-import type {QueryBatching} from 'sentry/utils/performance/contexts/genericQueryBatcher';
-import {PerformanceEventViewContext} from 'sentry/utils/performance/contexts/performanceEventViewContext';
-import type {UseQueryOptions} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
 
-export interface DiscoverQueryExtras {
+interface DiscoverQueryExtras {
   useOnDemandMetrics?: boolean;
 }
 
@@ -54,11 +53,6 @@ export type GenericChildrenProps<T> = {
   tableData: T | null;
 };
 
-type OptionalContextProps = {
-  eventView?: EventView | ImmutableEventView;
-  orgSlug?: string;
-};
-
 type BaseDiscoverQueryProps = {
   /**
    * Used as the default source for cursor values.
@@ -70,11 +64,6 @@ type BaseDiscoverQueryProps = {
    */
   cursor?: string;
   /**
-   * Appends a raw string to query to be able to sidestep the tokenizer.
-   * @deprecated
-   */
-  forceAppendRawQueryString?: string;
-  /**
    * Record limit to get.
    */
   limit?: number;
@@ -84,13 +73,9 @@ type BaseDiscoverQueryProps = {
    */
   noPagination?: boolean;
   options?: Omit<
-    UseQueryOptions<[any, string | undefined, ResponseMeta<any> | undefined], QueryError>,
+    UseQueryOptions<[any, string | undefined, ResponseMeta | undefined], QueryError>,
     'queryKey' | 'queryFn'
   > & {additionalQueryKey?: UseQueryOptions['queryKey']};
-  /**
-   * A container for query batching data and functions.
-   */
-  queryBatching?: QueryBatching;
   /**
    * Extra query parameters to be added.
    */
@@ -111,14 +96,10 @@ type BaseDiscoverQueryProps = {
   skipAbort?: boolean;
 };
 
-export type DiscoverQueryPropsWithContext = BaseDiscoverQueryProps & OptionalContextProps;
 export type DiscoverQueryProps = BaseDiscoverQueryProps & {
   eventView: EventView | ImmutableEventView;
   orgSlug: string;
 };
-
-type InnerRequestProps<P> = DiscoverQueryProps & P;
-type OuterRequestProps<P> = DiscoverQueryPropsWithContext & P;
 
 type ReactProps<T> = {
   children?: (props: GenericChildrenProps<T>) => React.ReactNode;
@@ -156,8 +137,7 @@ type ComponentProps<T, P> = {
   shouldRefetchData?: (prevProps: Props<T, P>, props: Props<T, P>) => boolean;
 };
 
-type Props<T, P> = InnerRequestProps<P> & ReactProps<T> & ComponentProps<T, P>;
-type OuterProps<T, P> = OuterRequestProps<P> & ReactProps<T> & ComponentProps<T, P>;
+type Props<T, P> = DiscoverQueryProps & P & ReactProps<T> & ComponentProps<T, P>;
 
 type State<T> = {
   api: Client;
@@ -188,7 +168,7 @@ class _GenericDiscoverQuery<T, P> extends Component<Props<T, P>, State<T>> {
 
     // or if we've moved from an invalid view state to a valid one,
     const eventViewValidation =
-      prevProps.eventView.isValid() === false && this.props.eventView.isValid();
+      !prevProps.eventView.isValid() && this.props.eventView.isValid();
 
     const shouldRefetchExternal = this.props.shouldRefetchData
       ? this.props.shouldRefetchData(prevProps, this.props)
@@ -223,16 +203,8 @@ class _GenericDiscoverQuery<T, P> extends Component<Props<T, P>, State<T>> {
   };
 
   fetchData = async () => {
-    const {
-      queryBatching,
-      beforeFetch,
-      afterFetch,
-      didFetch,
-      eventView,
-      orgSlug,
-      route,
-      setError,
-    } = this.props;
+    const {beforeFetch, afterFetch, didFetch, eventView, orgSlug, route, setError} =
+      this.props;
     const {api} = this.state;
 
     if (!eventView.isValid()) {
@@ -240,7 +212,7 @@ class _GenericDiscoverQuery<T, P> extends Component<Props<T, P>, State<T>> {
     }
 
     const url = `/organizations/${orgSlug}/${route}/`;
-    const tableFetchID = Symbol(`tableFetchID`);
+    const tableFetchID = Symbol('tableFetchID');
     const apiPayload: Partial<EventQuery & LocationQuery> = getPayload(this.props);
 
     this.setState({isLoading: true, tableFetchID});
@@ -253,9 +225,7 @@ class _GenericDiscoverQuery<T, P> extends Component<Props<T, P>, State<T>> {
     api.clear();
 
     try {
-      const [data, , resp] = await doDiscoverQuery<T>(api, url, apiPayload, {
-        queryBatching,
-      });
+      const [data, , resp] = await doDiscoverQuery<T>(api, url, apiPayload);
 
       if (this.state.tableFetchID !== tableFetchID) {
         // invariant: a different request was initiated after this request
@@ -294,31 +264,14 @@ class _GenericDiscoverQuery<T, P> extends Component<Props<T, P>, State<T>> {
       tableData,
       pageLinks,
     };
-    const children: ReactProps<T>['children'] = this.props.children; // Explicitly setting type due to issues with generics and React's children
+    const children = this.props.children; // Explicitly setting type due to issues with generics and React's children
     return children?.(childrenProps);
   }
 }
 
-// Shim to allow us to use generic discover query or any specialization with or without passing org slug or eventview, which are now contexts.
-// This will help keep tests working and we can remove extra uses of context-provided props and update tests as we go.
-export function GenericDiscoverQuery<T, P>(props: OuterProps<T, P>) {
-  const organizationSlug = useOrganization({allowNull: true})?.slug;
-  const performanceEventView = useContext(PerformanceEventViewContext)?.eventView;
-
-  const orgSlug = props.orgSlug ?? organizationSlug;
-  const eventView = props.eventView ?? performanceEventView;
-
-  if (orgSlug === undefined || eventView === undefined) {
-    throw new Error('GenericDiscoverQuery requires both an orgSlug and eventView');
-  }
-
-  const _props: Props<T, P> = {
-    ...props,
-    orgSlug,
-    eventView,
-  };
+export function GenericDiscoverQuery<T, P>(props: Props<T, P>) {
   // TODO(any): HoC prop types not working w/ emotion https://github.com/emotion-js/emotion/issues/3261
-  return <_GenericDiscoverQuery<T, P> {...(_props as any)} />;
+  return <_GenericDiscoverQuery<T, P> {...(props as any)} />;
 }
 
 export type DiscoverQueryRequestParams = Partial<
@@ -332,8 +285,8 @@ type RetryOptions = {
   timeoutMultiplier?: number;
 };
 
-const BASE_TIMEOUT = 200;
-const TIMEOUT_MULTIPLIER = 2;
+const BASE_TIMEOUT = 500;
+const TIMEOUT_MULTIPLIER = 1.75;
 const wait = (duration: any) => new Promise(resolve => setTimeout(resolve, duration));
 
 export async function doDiscoverQuery<T>(
@@ -341,18 +294,11 @@ export async function doDiscoverQuery<T>(
   url: string,
   params: DiscoverQueryRequestParams,
   options: {
-    queryBatching?: QueryBatching;
     retry?: RetryOptions;
     skipAbort?: boolean;
   } = {}
 ): Promise<[T, string | undefined, ResponseMeta<T> | undefined]> {
-  const {queryBatching, retry, skipAbort} = options;
-  if (queryBatching?.batchRequest) {
-    return queryBatching.batchRequest(api, url, {
-      query: params,
-      includeAllArgs: true,
-    });
-  }
+  const {retry, skipAbort} = options;
 
   const baseTimeout = retry?.baseTimeout ?? BASE_TIMEOUT;
   const timeoutMultiplier = retry?.timeoutMultiplier ?? TIMEOUT_MULTIPLIER;
@@ -386,19 +332,11 @@ export async function doDiscoverQuery<T>(
 }
 
 function getPayload<T, P>(props: Props<T, P>) {
-  const {
-    cursor,
-    limit,
-    noPagination,
-    referrer,
-    getRequestPayload,
-    eventView,
-    location,
-    forceAppendRawQueryString,
-  } = props;
+  const {cursor, limit, noPagination, referrer, getRequestPayload, eventView, location} =
+    props;
   const payload = getRequestPayload
     ? getRequestPayload(props)
-    : eventView.getEventsAPIPayload(location, forceAppendRawQueryString);
+    : eventView.getEventsAPIPayload(location);
 
   if (cursor !== undefined) {
     payload.cursor = cursor;
@@ -425,18 +363,18 @@ export function useGenericDiscoverQuery<T, P>(props: Props<T, P>) {
   const apiPayload = getPayload<T, P>(props);
   const additionalQueryKey = props.options?.additionalQueryKey ?? [];
 
+  // eslint-disable-next-line @tanstack/query/exhaustive-deps
   const res = useQuery<[T, string | undefined, ResponseMeta<T> | undefined], QueryError>({
-    // eslint-disable-next-line @tanstack/query/exhaustive-deps
     queryKey: [...additionalQueryKey, route, apiPayload],
     queryFn: ({signal: _signal}) =>
       doDiscoverQuery<T>(api, url, apiPayload, {
-        queryBatching: props.queryBatching,
         skipAbort: props.skipAbort,
       }),
     ...options,
   });
 
   return {
+    // eslint-disable-next-line @tanstack/query/no-rest-destructuring
     ...res,
     data: res.data?.[0] ?? undefined,
     error: parseError(res.error),

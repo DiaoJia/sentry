@@ -1,12 +1,21 @@
 from django.urls import reverse
 
-from sentry.discover.models import DiscoverSavedQuery
+from sentry.discover.models import (
+    DiscoverSavedQuery,
+    DiscoverSavedQueryLastVisited,
+    DiscoverSavedQueryTypes,
+)
+from sentry.explore.models import ExploreSavedQuery, ExploreSavedQueryDataset
+from sentry.explore.translation.discover_translation import (
+    translate_discover_query_to_explore_query,
+)
 from sentry.testutils.cases import APITestCase, SnubaTestCase
 from sentry.testutils.helpers.datetime import before_now
+from sentry.testutils.thread_leaks.pytest import thread_leak_allowlist
 
 
 class DiscoverSavedQueryBase(APITestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(user=self.user)
         self.org = self.create_organization(owner=self.user)
@@ -29,21 +38,23 @@ class DiscoverSavedQueryBase(APITestCase, SnubaTestCase):
         model.set_projects(self.project_ids)
 
 
+@thread_leak_allowlist(reason="sentry sdk background worker", issue=97042)
 class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
-    feature_name = "organizations:discover"
+    feature_name = "organizations:discover-query"
+    migrate_feature_name = "organizations:discover-queries-in-all-queries"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.url = reverse("sentry-api-0-discover-saved-queries", args=[self.org.slug])
 
-    def test_get(self):
+    def test_get(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.get(self.url)
 
         assert response.status_code == 200, response.content
         assert len(response.data) == 1
         assert response.data[0]["name"] == "Test query"
-        assert response.data[0]["projects"] == self.project_ids
+        assert sorted(response.data[0]["projects"]) == sorted(self.project_ids)
         assert response.data[0]["fields"] == ["test"]
         assert response.data[0]["conditions"] == []
         assert response.data[0]["limit"] == 10
@@ -52,7 +63,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.data[0]["createdBy"]["username"] == self.user.username
         assert not response.data[0]["expired"]
 
-    def test_get_version_filter(self):
+    def test_get_version_filter(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.get(self.url, format="json", data={"query": "version:1"})
 
@@ -66,7 +77,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.status_code == 200, response.content
         assert len(response.data) == 0
 
-    def test_get_name_filter(self):
+    def test_get_name_filter(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.get(self.url, format="json", data={"query": "Test"})
 
@@ -88,7 +99,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.status_code == 200, response.content
         assert len(response.data) == 0
 
-    def test_get_all_paginated(self):
+    def test_get_all_paginated(self) -> None:
         for i in range(0, 10):
             query = {"fields": ["test"], "conditions": [], "limit": 10}
             model = DiscoverSavedQuery.objects.create(
@@ -111,7 +122,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.status_code == 200, response.content
         assert len(response.data) == 11
 
-    def test_get_sortby(self):
+    def test_get_sortby(self) -> None:
         query = {"fields": ["message"], "query": "", "limit": 10}
         model = DiscoverSavedQuery.objects.create(
             organization=self.org,
@@ -142,7 +153,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
                 values = list(reversed(values))
             assert list(sorted(values)) == values
 
-    def test_get_sortby_most_popular(self):
+    def test_get_sortby_most_popular(self) -> None:
         query = {"fields": ["message"], "query": "", "limit": 10}
         model = DiscoverSavedQuery.objects.create(
             organization=self.org,
@@ -171,7 +182,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
 
             assert values == expected
 
-    def test_get_sortby_recently_viewed(self):
+    def test_get_sortby_recently_viewed(self) -> None:
         query = {"fields": ["message"], "query": "", "limit": 10}
         model = DiscoverSavedQuery.objects.create(
             organization=self.org,
@@ -184,23 +195,145 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
             date_updated=before_now(minutes=10),
             last_visited=before_now(minutes=5),
         )
-
         model.set_projects(self.project_ids)
-        for forward_sort in [True, False]:
-            sorting = "recentlyViewed" if forward_sort else "-recentlyViewed"
-            with self.feature(self.feature_name):
+
+        test_query = DiscoverSavedQuery.objects.get(organization=self.org, name="Test query")
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=self.user.id,
+            discover_saved_query=test_query,
+            last_visited=before_now(minutes=10),
+        )
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=self.user.id,
+            discover_saved_query=model,
+            last_visited=before_now(minutes=5),
+        )
+
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url, data={"sortBy": "recentlyViewed"})
+        assert response.status_code == 200
+        assert [row["name"] for row in response.data] == ["My query", "Test query"]
+
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url, data={"sortBy": "-recentlyViewed"})
+        assert response.status_code == 200
+        assert [row["name"] for row in response.data] == ["Test query", "My query"]
+
+    def test_get_sortby_recently_viewed_is_per_user(self) -> None:
+        """Another user's visit must not affect the caller's ordering."""
+        other_user = self.create_user()
+        self.create_member(organization=self.org, user=other_user)
+
+        query = {"fields": ["message"], "query": "", "limit": 10}
+        model = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="My query",
+            query=query,
+            version=2,
+            date_created=before_now(minutes=10),
+            date_updated=before_now(minutes=10),
+        )
+        model.set_projects(self.project_ids)
+
+        test_query = DiscoverSavedQuery.objects.get(organization=self.org, name="Test query")
+        # The caller has only viewed "Test query"...
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=self.user.id,
+            discover_saved_query=test_query,
+            last_visited=before_now(minutes=10),
+        )
+        # ...while another user viewed "My query" more recently.
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=other_user.id,
+            discover_saved_query=model,
+            last_visited=before_now(minutes=1),
+        )
+
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url, data={"sortBy": "recentlyViewed"})
+
+        assert response.status_code == 200
+        # "My query" has no last visited row for the caller, so it sorts last.
+        assert [row["name"] for row in response.data] == ["Test query", "My query"]
+        assert response.data[0]["lastVisited"] is not None
+        assert response.data[1]["lastVisited"] is None
+
+    def test_get_sortby_recently_viewed_never_visited_sorts_last(self) -> None:
+        query = {"fields": ["message"], "query": "", "limit": 10}
+        model = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="My query",
+            query=query,
+            version=2,
+            date_created=before_now(minutes=10),
+            date_updated=before_now(minutes=10),
+        )
+        model.set_projects(self.project_ids)
+
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=self.user.id,
+            discover_saved_query=model,
+            last_visited=before_now(minutes=5),
+        )
+
+        for sorting in ["recentlyViewed", "-recentlyViewed"]:
+            with self.feature([self.feature_name, self.migrate_feature_name]):
                 response = self.client.get(self.url, data={"sortBy": sorting})
 
             assert response.status_code == 200
-            values = [row["name"] for row in response.data]
-            expected = ["Test query", "My query"]
+            assert [row["name"] for row in response.data] == ["My query", "Test query"]
 
-            if not forward_sort:
-                expected = list(reversed(expected))
+    def test_get_last_visited_serialized_per_user(self) -> None:
+        other_user = self.create_user()
+        self.create_member(organization=self.org, user=other_user)
+        test_query = DiscoverSavedQuery.objects.get(organization=self.org, name="Test query")
 
-            assert values == expected
+        last_visited = before_now(minutes=5)
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=self.org,
+            user_id=self.user.id,
+            discover_saved_query=test_query,
+            last_visited=last_visited,
+        )
 
-    def test_get_sortby_myqueries(self):
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200
+        assert response.data[0]["lastVisited"] == last_visited
+
+        self.login_as(user=other_user)
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200
+        assert response.data[0]["lastVisited"] is None
+
+    def test_get_last_visited_ignores_other_organization_rows(self) -> None:
+        other_org = self.create_organization(owner=self.user)
+        test_query = DiscoverSavedQuery.objects.get(organization=self.org, name="Test query")
+
+        DiscoverSavedQueryLastVisited.objects.create(
+            organization=other_org,
+            user_id=self.user.id,
+            discover_saved_query=test_query,
+            last_visited=before_now(minutes=5),
+        )
+
+        with self.feature([self.feature_name, self.migrate_feature_name]):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200
+        assert response.data[0]["lastVisited"] is None
+
+    def test_get_sortby_myqueries(self) -> None:
         uhoh_user = self.create_user(username="uhoh")
         self.create_member(organization=self.org, user=uhoh_user)
 
@@ -236,10 +369,10 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         values = [int(item["createdBy"]["id"]) for item in response.data]
         assert values == [self.user.id, uhoh_user.id, whoops_user.id]
 
-    def test_get_expired_query(self):
+    def test_get_expired_query(self) -> None:
         query = {
-            "start": before_now(days=90),
-            "end": before_now(days=61),
+            "start": before_now(days=90).isoformat(),
+            "end": before_now(days=61).isoformat(),
         }
         DiscoverSavedQuery.objects.create(
             organization=self.org,
@@ -256,7 +389,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.status_code == 200, response.content
         assert response.data[0]["expired"]
 
-    def test_get_ignores_homepage_queries(self):
+    def test_get_ignores_homepage_queries(self) -> None:
         query = {"fields": ["test"], "conditions": [], "limit": 10}
         model = DiscoverSavedQuery.objects.create(
             organization=self.org,
@@ -276,7 +409,129 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert len(response.data) == 1
         assert not any([query["name"] == "Homepage Test Query" for query in response.data])
 
-    def test_post(self):
+    def test_get_hides_transaction_queries_with_deprecation_flag(self) -> None:
+        transaction_query = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="Transaction query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+            dataset=DiscoverSavedQueryTypes.TRANSACTION_LIKE,
+        )
+        transaction_query.set_projects(self.project_ids)
+
+        with (
+            self.feature(self.feature_name),
+            self.feature("organizations:deprecate-discover"),
+        ):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200, response.content
+        ids = [row["id"] for row in response.data]
+        assert str(transaction_query.id) not in ids
+        assert all(row["queryDataset"] != "transaction-like" for row in response.data)
+
+    def test_get_shows_transaction_queries_without_deprecation_flag(self) -> None:
+        transaction_query = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="Transaction query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+            dataset=DiscoverSavedQueryTypes.TRANSACTION_LIKE,
+        )
+        transaction_query.set_projects(self.project_ids)
+
+        with self.feature(self.feature_name):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200, response.content
+        ids = [row["id"] for row in response.data]
+        assert str(transaction_query.id) in ids
+
+    def test_get_hides_queries_when_no_project_access(self) -> None:
+        # Disable Open Membership so project-level access actually applies.
+        self.org.flags.allow_joinleave = False
+        self.org.save()
+
+        # Original Test query (created in setUp) is scoped to self.projects.
+        # Create a second project that the no-team user will have access to via a team.
+        accessible_team = self.create_team(organization=self.org)
+        accessible_project = self.create_project(organization=self.org, teams=[accessible_team])
+        accessible_query = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="Accessible query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+        )
+        accessible_query.set_projects([accessible_project.id])
+
+        # And one with no projects at all (covers "All Projects" / "My Projects").
+        DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="All-projects query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+        )
+
+        # A regular member with access only to `accessible_team` should NOT see queries
+        # scoped to projects they cannot access, nor the "no projects" query authored by
+        # someone else (since they aren't org:write or the creator).
+        outsider = self.create_user()
+        self.create_member(
+            user=outsider, organization=self.org, role="member", teams=[accessible_team]
+        )
+        self.login_as(outsider)
+
+        with self.feature(self.feature_name):
+            response = self.client.get(self.url)
+        assert response.status_code == 200, response.content
+        names = sorted(item["name"] for item in response.data)
+        assert names == ["Accessible query"]
+
+        # The `all=1` branch must apply the same filter.
+        with self.feature(self.feature_name):
+            response = self.client.get(self.url, data={"all": "1"})
+        assert response.status_code == 200, response.content
+        names = sorted(item["name"] for item in response.data)
+        assert names == ["Accessible query"]
+
+    def test_get_shows_unprojected_query_to_creator_only(self) -> None:
+        self.org.flags.allow_joinleave = False
+        self.org.save()
+
+        # Owner-authored "no projects" query that members shouldn't see.
+        DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=self.user.id,
+            name="Owner-authored all-projects query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+        )
+
+        outsider = self.create_user()
+        team = self.create_team(organization=self.org)
+        self.create_member(user=outsider, organization=self.org, role="member", teams=[team])
+        # Member-authored "no projects" query — same user should still see it.
+        own_query = DiscoverSavedQuery.objects.create(
+            organization=self.org,
+            created_by_id=outsider.id,
+            name="Outsider's all-projects query",
+            query={"fields": ["test"], "conditions": [], "limit": 10},
+            version=1,
+        )
+
+        self.login_as(outsider)
+        with self.feature(self.feature_name):
+            response = self.client.get(self.url)
+        assert response.status_code == 200, response.content
+        names = sorted(item["name"] for item in response.data)
+        assert names == ["Outsider's all-projects query"]
+        assert response.data[0]["id"] == str(own_query.id)
+
+    def test_post(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -298,7 +553,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert "start" not in response.data
         assert "end" not in response.data
 
-    def test_post_invalid_projects(self):
+    def test_post_invalid_projects(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -315,7 +570,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
             )
         assert response.status_code == 403, response.content
 
-    def test_post_all_projects(self):
+    def test_post_all_projects(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -332,7 +587,7 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
         assert response.data["projects"] == [-1]
         assert response.data["name"] == "All projects"
 
-    def test_post_cannot_use_version_two_fields(self):
+    def test_post_cannot_use_version_two_fields(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -358,11 +613,11 @@ class DiscoverSavedQueriesTest(DiscoverSavedQueryBase):
 class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
     feature_name = "organizations:discover-query"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.url = reverse("sentry-api-0-discover-saved-queries", args=[self.org.slug])
 
-    def test_post_invalid_conditions(self):
+    def test_post_invalid_conditions(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -381,7 +636,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
             == response.data["non_field_errors"][0]
         )
 
-    def test_post_require_selected_fields(self):
+    def test_post_require_selected_fields(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -396,7 +651,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400, response.content
         assert "You must include at least one field." == response.data["non_field_errors"][0]
 
-    def test_post_success(self):
+    def test_post_success(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -422,7 +677,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert data["display"] == "releases"
         assert data["version"] == 2
 
-    def test_post_all_projects(self):
+    def test_post_all_projects(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -437,7 +692,80 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert response.data["projects"] == [-1]
 
-    def test_save_with_project(self):
+    def test_post_e2e_test_with_translation(self) -> None:
+        with self.feature(self.feature_name):
+            response = self.client.post(
+                self.url,
+                {
+                    "name": "Query to translate",
+                    "projects": self.project_ids,
+                    "fields": [
+                        "title",
+                        "count()",
+                        "count_web_vitals(measurements.lcp,good)",
+                        "any(span.duration)",
+                    ],
+                    "range": "7d",
+                    "query": "event.type:transaction browser.name:Firefox",
+                    "yAxis": ["count()"],
+                    "version": 2,
+                    "queryDataset": "transaction-like",
+                },
+            )
+        assert response.status_code == 201, response.content
+
+        assert DiscoverSavedQuery.objects.filter(name="Query to translate").exists()
+        saved_query = DiscoverSavedQuery.objects.filter(name="Query to translate").first()
+        assert saved_query is not None
+        assert saved_query.dataset == DiscoverSavedQueryTypes.TRANSACTION_LIKE
+        assert saved_query.query == {
+            "fields": [
+                "title",
+                "count()",
+                "count_web_vitals(measurements.lcp,good)",
+                "any(span.duration)",
+            ],
+            "range": "7d",
+            "query": "event.type:transaction browser.name:Firefox",
+            "yAxis": ["count()"],
+        }
+
+        translated_query = translate_discover_query_to_explore_query(saved_query)
+        saved_query.refresh_from_db()
+        assert saved_query.explore_query is not None
+        assert saved_query.explore_query.id == translated_query.id
+
+        assert ExploreSavedQuery.objects.filter(id=translated_query.id).exists()
+
+        assert translated_query.dataset == ExploreSavedQueryDataset.SEGMENT_SPANS
+        explore_query = translated_query.query
+        assert explore_query["query"][0]["fields"] == ["id", "transaction"]
+        assert explore_query["range"] == "7d"
+        assert (
+            explore_query["query"][0]["query"]
+            == "(is_transaction:1 browser.name:Firefox) AND is_transaction:1"
+        )
+        assert explore_query["query"][0]["mode"] == "samples"
+        assert explore_query["query"][0]["aggregateField"] == [
+            {
+                "yAxes": ["count(span.duration)"],
+                "chartType": 2,
+            }
+        ]
+        assert explore_query["query"][0]["orderby"] == ""
+        assert explore_query["query"][0]["aggregateOrderby"] is None
+        assert explore_query["end"] is None
+        assert explore_query["environment"] == []
+        assert explore_query["interval"] is None
+        assert explore_query["start"] is None
+
+        assert translated_query.changed_reason == {
+            "columns": ["count_web_vitals(measurements.lcp,good)", "any(span.duration)"],
+            "equations": [],
+            "orderby": [],
+        }
+
+    def test_save_with_project(self) -> None:
         with self.feature(self.feature_name):
             url = reverse("sentry-api-0-discover-saved-queries", args=[self.org.slug])
             response = self.client.post(
@@ -454,7 +782,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="project query").exists()
 
-    def test_save_with_project_and_my_projects(self):
+    def test_save_with_project_and_my_projects(self) -> None:
         team = self.create_team(organization=self.org, members=[self.user])
         project = self.create_project(organization=self.org, teams=[team])
         with self.feature(self.feature_name):
@@ -473,7 +801,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="project query").exists()
 
-    def test_save_with_org_projects(self):
+    def test_save_with_org_projects(self) -> None:
         project = self.create_project(organization=self.org)
         with self.feature(self.feature_name):
             url = reverse("sentry-api-0-discover-saved-queries", args=[self.org.slug])
@@ -490,7 +818,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="project query").exists()
 
-    def test_save_with_team_project(self):
+    def test_save_with_team_project(self) -> None:
         team = self.create_team(organization=self.org, members=[self.user])
         project = self.create_project(organization=self.org, teams=[team])
         self.create_project(organization=self.org, teams=[team])
@@ -509,7 +837,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="project query").exists()
 
-    def test_save_without_team(self):
+    def test_save_without_team(self) -> None:
         team = self.create_team(organization=self.org, members=[])
         self.create_project(organization=self.org, teams=[team])
         with self.feature(self.feature_name):
@@ -528,7 +856,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400
         assert "No Projects found, join a Team" == response.data["detail"]
 
-    def test_save_with_team_and_without_project(self):
+    def test_save_with_team_and_without_project(self) -> None:
         team = self.create_team(organization=self.org, members=[self.user])
         self.create_project(organization=self.org, teams=[team])
         with self.feature(self.feature_name):
@@ -547,7 +875,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="with team query").exists()
 
-    def test_save_with_wrong_projects(self):
+    def test_save_with_wrong_projects(self) -> None:
         other_org = self.create_organization(owner=self.user)
         project = self.create_project(organization=other_org)
         project2 = self.create_project(organization=self.org)
@@ -600,7 +928,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400, response.content
         assert not DiscoverSavedQuery.objects.filter(name="project query").exists()
 
-    def test_save_with_equation(self):
+    def test_save_with_equation(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -622,7 +950,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 201, response.content
         assert DiscoverSavedQuery.objects.filter(name="Equation query").exists()
 
-    def test_save_with_invalid_equation(self):
+    def test_save_with_invalid_equation(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -644,7 +972,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400, response.content
         assert not DiscoverSavedQuery.objects.filter(name="Equation query").exists()
 
-    def test_save_invalid_query(self):
+    def test_save_invalid_query(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -660,7 +988,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400, response.content
         assert not DiscoverSavedQuery.objects.filter(name="Bad query").exists()
 
-    def test_save_invalid_query_orderby(self):
+    def test_save_invalid_query_orderby(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -677,7 +1005,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.status_code == 400, response.content
         assert not DiscoverSavedQuery.objects.filter(name="Bad query").exists()
 
-    def test_save_interval(self):
+    def test_save_interval(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -695,7 +1023,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert response.data["name"] == "Interval query"
         assert response.data["interval"] == "1m"
 
-    def test_save_invalid_interval(self):
+    def test_save_invalid_interval(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -711,7 +1039,7 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
             )
         assert response.status_code == 400, response.content
 
-    def test_post_success_is_filter(self):
+    def test_post_success_is_filter(self) -> None:
         with self.feature(self.feature_name):
             response = self.client.post(
                 self.url,
@@ -734,3 +1062,28 @@ class DiscoverSavedQueriesVersion2Test(DiscoverSavedQueryBase):
         assert data["yAxis"] == ["count(id)"]
         assert data["display"] == "releases"
         assert data["version"] == 2
+
+    def test_post_transactions_query_with_deprecation_flag(self) -> None:
+        with (
+            self.feature(self.feature_name),
+            self.feature("organizations:discover-saved-queries-deprecation"),
+        ):
+            response = self.client.post(
+                self.url,
+                {
+                    "name": "new query",
+                    "projects": self.project_ids,
+                    "fields": ["title"],
+                    "yAxis": ["count(id)"],
+                    "range": "24h",
+                    "queryDataset": "transaction-like",
+                    "display": "default",
+                    "version": 2,
+                },
+            )
+        assert response.status_code == 400, response.content
+        response_data = response.json()
+        assert (
+            f"The Transactions dataset is being deprecated. Please append the `is_transaction:true` filter in the Trace Explorer product in Sentry or use the `/organizations/{self.org.slug}/explore/saved/` endpoint with the filter to save new transaction queries."
+            in response_data["queryDataset"][0]
+        )

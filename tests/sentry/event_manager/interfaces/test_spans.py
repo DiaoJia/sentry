@@ -1,31 +1,38 @@
+from typing import Any
+
 import pytest
 
-from sentry import eventstore
 from sentry.event_manager import EventManager
+from sentry.services import eventstore
+from sentry.testutils.pytest.fixtures import InstaSnapshotter
+from tests.sentry.event_manager.interfaces import CustomSnapshotter as CustomSnapshotterBase
 
 START_TIME = 1562873192.624
 END_TIME = 1562873194.624
 
+SnapshotInput = list[dict[str, Any] | None]
+CustomSnapshotter = CustomSnapshotterBase[SnapshotInput]
+
 
 @pytest.fixture
-def make_spans_snapshot(insta_snapshot):
-    def inner(data):
+def make_spans_snapshot(insta_snapshot: InstaSnapshotter) -> CustomSnapshotter:
+    def inner(data: SnapshotInput) -> None:
         mgr = EventManager(data={"spans": data})
         mgr.normalize()
         evt = eventstore.backend.create_event(project_id=1, data=mgr.get_data())
 
         interface = evt.interfaces.get("spans")
-
+        assert interface is not None
         insta_snapshot({"errors": evt.data.get("errors"), "to_json": interface.to_json()})
 
     return inner
 
 
-def test_empty(make_spans_snapshot):
+def test_empty(make_spans_snapshot: CustomSnapshotter) -> None:
     make_spans_snapshot([])
 
 
-def test_single_invalid(make_spans_snapshot):
+def test_single_invalid(make_spans_snapshot: CustomSnapshotter) -> None:
     make_spans_snapshot(
         [
             {
@@ -38,7 +45,7 @@ def test_single_invalid(make_spans_snapshot):
     )
 
 
-def test_single_incomplete(make_spans_snapshot):
+def test_single_incomplete(make_spans_snapshot: CustomSnapshotter) -> None:
     make_spans_snapshot(
         [
             {
@@ -51,7 +58,7 @@ def test_single_incomplete(make_spans_snapshot):
     )
 
 
-def test_single_full(make_spans_snapshot):
+def test_single_full(make_spans_snapshot: CustomSnapshotter) -> None:
     make_spans_snapshot(
         [
             {
@@ -68,7 +75,7 @@ def test_single_full(make_spans_snapshot):
     )
 
 
-def test_multiple_full(make_spans_snapshot):
+def test_multiple_full(make_spans_snapshot: CustomSnapshotter) -> None:
     make_spans_snapshot(
         [
             {
@@ -90,5 +97,20 @@ def test_multiple_full(make_spans_snapshot):
                 "description": "SELECT * FROM users",
                 "tags": {"service": "example"},
             },
+        ]
+    )
+
+
+def test_none_span_entries_are_skipped(make_spans_snapshot: CustomSnapshotter) -> None:
+    make_spans_snapshot(
+        [
+            None,
+            {
+                "trace_id": "a0fa8803753e40fd8124b21eeb2986b5",
+                "span_id": "8c931f4740435fb8",
+                "start_timestamp": START_TIME,
+                "timestamp": END_TIME,
+            },
+            None,
         ]
     )

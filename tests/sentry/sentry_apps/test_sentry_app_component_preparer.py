@@ -11,7 +11,7 @@ from sentry.testutils.silo import assume_test_silo_mode, control_silo_test
 
 @control_silo_test
 class TestPreparerIssueLink(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.sentry_app = self.create_sentry_app(
@@ -21,7 +21,7 @@ class TestPreparerIssueLink(TestCase):
         self.install = self.create_sentry_app_installation(slug=self.sentry_app.slug)
 
         self.component = self.sentry_app.components.first()
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.project = Organization.objects.get(
                 id=self.install.organization_id
             ).project_set.get()
@@ -31,8 +31,7 @@ class TestPreparerIssueLink(TestCase):
         )
 
     @responses.activate
-    def test_prepares_components_requiring_requests(self):
-
+    def test_prepares_components_requiring_requests(self) -> None:
         # the webhook uris that we'll contact to get field options
         uris = ["sentry/foo", "sentry/beep", "sentry/bar"]
 
@@ -92,7 +91,7 @@ class TestPreparerIssueLink(TestCase):
 
 @control_silo_test
 class TestPreparerStacktraceLink(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.sentry_app = self.create_sentry_app(
@@ -102,7 +101,7 @@ class TestPreparerStacktraceLink(TestCase):
         self.install = self.create_sentry_app_installation(slug=self.sentry_app.slug)
 
         self.component = self.sentry_app.components.first()
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.project = Organization.objects.get(
                 id=self.install.organization_id
             ).project_set.get()
@@ -111,7 +110,7 @@ class TestPreparerStacktraceLink(TestCase):
             component=self.component, install=self.install, project_slug=self.project.slug
         )
 
-    def test_prepares_components_url(self):
+    def test_prepares_components_url(self) -> None:
         self.component.schema = {"uri": "/redirection"}
 
         self.preparer.run()
@@ -124,7 +123,7 @@ class TestPreparerStacktraceLink(TestCase):
 
 @control_silo_test
 class TestPreparerAlertRuleAction(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.sentry_app = self.create_sentry_app(
@@ -173,14 +172,13 @@ class TestPreparerAlertRuleAction(TestCase):
         )
 
         self.component = self.sentry_app.components.first()
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.project = Organization.objects.get(
                 id=self.install.organization_id
             ).project_set.first()
 
     @responses.activate
-    def test_prepares_components_requiring_requests(self):
-
+    def test_prepares_components_requiring_requests(self) -> None:
         # these get passed as query params in the url as dependentData
         dependent_data: list[Mapping[str, str]] = [
             {"name": "teamId", "value": "ecosystem"},

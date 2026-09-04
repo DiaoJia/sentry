@@ -1,6 +1,6 @@
-import grammar from './grammar.pegjs';
+import {parse} from 'sentry/components/searchQueryBuilder/tokens/filter/parsers/grammar.pegjs';
 
-type DurationTokenValue = {
+type PercentageTokenValue = {
   value: string;
   unit?: string;
 };
@@ -11,9 +11,9 @@ type DurationTokenValue = {
  * more lenient. This parser still returns a valid result even if the percentage
  * does not contain "%".
  */
-export function parseFilterValuePercentage(query: string): DurationTokenValue | null {
+export function parseFilterValuePercentage(query: string): PercentageTokenValue | null {
   try {
-    return grammar.parse(query);
+    return parse(query, {startRule: 'percentage'});
   } catch (e) {
     return null;
   }

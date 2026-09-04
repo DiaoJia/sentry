@@ -5,11 +5,11 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
+import sentry_sdk
+from django.db import router, transaction
 from google.api_core.exceptions import DeadlineExceeded
 from sentry_sdk import set_tag, set_user
 
-from sentry import eventstore
-from sentry.eventstore.models import Event, GroupEvent
 from sentry.integrations.base import IntegrationInstallation
 from sentry.integrations.models.repository_project_path_config import RepositoryProjectPathConfig
 from sentry.integrations.services.integration.model import RpcOrganizationIntegration
@@ -21,7 +21,10 @@ from sentry.issues.auto_source_code_config.code_mapping import CodeMapping, Code
 from sentry.locks import locks
 from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.models.projectrepository import ProjectRepository, ProjectRepositorySource
 from sentry.models.repository import Repository
+from sentry.services import eventstore
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.shared_integrations.exceptions import ApiError
 from sentry.utils import metrics
 from sentry.utils.locking import UnableToAcquireLock
@@ -58,9 +61,11 @@ def process_event(
     project = Project.objects.get(id=project_id)
     org = Organization.objects.get(id=project.organization_id)
     set_tag("organization.slug", org.slug)
+    sentry_sdk.set_attribute("organization.slug", org.slug)
     # When you look at the performance page the user is a default column
     set_user({"username": org.slug})
     set_tag("project.slug", project.slug)
+    sentry_sdk.set_attribute("project.slug", project.slug)
     extra = {
         "organization.slug": org.slug,
         "project_id": project_id,
@@ -75,6 +80,7 @@ def process_event(
     platform = event.platform
     assert platform is not None
     set_tag("platform", platform)
+    sentry_sdk.set_attribute("platform", platform)
 
     platform_config = PlatformConfig(platform)
     if not platform_config.is_supported():
@@ -173,6 +179,8 @@ def get_trees_for_org(
     with SCMIntegrationInteractionEvent(
         SCMIntegrationInteractionType.DERIVE_CODEMAPPINGS,
         provider_key=installation.model.provider,
+        organization_id=org.id,
+        integration_id=installation.org_integration.integration_id,
     ).capture() as lifecycle:
         try:
             with lock.acquire():
@@ -197,9 +205,9 @@ def create_configurations(
     platform_config: PlatformConfig,
 ) -> tuple[list[CodeMapping], list[str]]:
     """
-    Given a set of trees and frames to process, create code mappings & in-app stack trace rules.
+    Given a set of trees and frames to process, create code mappings & in-app stacktrace rules.
 
-    Returns a tuple of code mappings and in-app stack trace rules even when running in dry-run mode.
+    Returns a tuple of code mappings and in-app stacktrace rules even when running in dry-run mode.
     """
     org_integration = installation.org_integration
     if not org_integration:
@@ -210,7 +218,9 @@ def create_configurations(
     tags: Mapping[str, str | bool] = {"platform": platform, "dry_run": dry_run}
     with metrics.timer(f"{METRIC_PREFIX}.create_configurations.duration", tags=tags):
         for code_mapping in code_mappings:
-            repository = create_repository(code_mapping.repo.name, org_integration, tags)
+            repository = create_repository(
+                code_mapping.repo.name, org_integration, tags, code_mapping.repo.external_id
+            )
             create_code_mapping(code_mapping, repository, project, org_integration, tags)
 
     in_app_stack_trace_rules: list[str] = []
@@ -233,18 +243,23 @@ def create_code_mapping(
 ) -> None:
     created = False
     if not tags["dry_run"] and repository is not None:
-        _, created = RepositoryProjectPathConfig.objects.get_or_create(
-            project=project,
-            stack_root=code_mapping.stacktrace_root,
-            defaults={
-                "repository": repository,
-                "organization_integration_id": org_integration.id,
-                "integration_id": org_integration.integration_id,
-                "organization_id": org_integration.organization_id,
-                "source_root": code_mapping.source_path,
-                "default_branch": code_mapping.repo.branch,
-                "automatically_generated": True,
-            },
-        )
+        with transaction.atomic(using=router.db_for_write(RepositoryProjectPathConfig)):
+            project_repo, _ = ProjectRepository.objects.get_or_create_with_source(
+                project_id=project.id,
+                repository_id=repository.id,
+                source=ProjectRepositorySource.AUTO_EVENT,
+            )
+            _, created = RepositoryProjectPathConfig.objects.get_or_create(
+                project_repository=project_repo,
+                stack_root=code_mapping.stacktrace_root,
+                source_root=code_mapping.source_path,
+                defaults={
+                    "organization_integration_id": org_integration.id,
+                    "integration_id": org_integration.integration_id,
+                    "organization_id": org_integration.organization_id,
+                    "default_branch": code_mapping.repo.branch,
+                    "automatically_generated": True,
+                },
+            )
     if created or tags["dry_run"]:
         metrics.incr(key=f"{METRIC_PREFIX}.code_mapping.created", tags=tags, sample_rate=1.0)

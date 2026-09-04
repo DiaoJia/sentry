@@ -10,16 +10,24 @@ import {InviteBanner} from 'sentry/views/settings/organizationMembers/inviteBann
 
 const missingMembers = {
   integration: 'github',
+  enabled: true,
   users: MissingMembersFixture(),
 };
 
 const noMissingMembers = {
   integration: 'github',
+  enabled: true,
   users: [],
 };
 
-describe('inviteBanner', function () {
-  beforeEach(function () {
+const nudgeDisabled = {
+  integration: 'github',
+  enabled: false,
+  users: [],
+};
+
+describe('inviteBanner', () => {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/missing-members/',
@@ -36,18 +44,12 @@ describe('inviteBanner', function () {
     });
   });
 
-  it('render banners', async function () {
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+  it('render banners', async () => {
+    const org = OrganizationFixture();
 
     render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     expect(
@@ -59,25 +61,26 @@ describe('inviteBanner', function () {
     expect(screen.getByText('See all 5 missing members')).toBeInTheDocument();
   });
 
-  it('does not render banner if no option', function () {
+  it('does not render banner if nudge_invite is disabled', async () => {
     const org = OrganizationFixture();
 
+    const mock = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/missing-members/',
+      method: 'GET',
+      body: [nudgeDisabled],
+    });
+
     const {container} = render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('does not render banner if no missing members', async function () {
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+  it('does not render banner if no missing members', async () => {
+    const org = OrganizationFixture();
 
     const mock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/missing-members/',
@@ -86,22 +89,16 @@ describe('inviteBanner', function () {
     });
 
     const {container} = render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     await waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('does not render banner if no integration', async function () {
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+  it('does not render banner if no integration', async () => {
+    const org = OrganizationFixture();
 
     const mock = MockApiClient.addMockResponse({
       url: '/organizations/org-slug/missing-members/',
@@ -110,40 +107,27 @@ describe('inviteBanner', function () {
     });
 
     const {container} = render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     await waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('does not render banner if lacking org:write', function () {
-    const org = OrganizationFixture({
-      access: [],
-      githubNudgeInvite: true,
-    });
+  it('does not render banner if lacking org:write', () => {
+    const org = OrganizationFixture({access: []});
 
     const {container} = render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('renders banner if snoozed_ts days is longer than threshold', async function () {
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+  it('renders banner if snoozed_ts days is longer than threshold', async () => {
+    const org = OrganizationFixture();
     const promptResponse = {
       dismissed_ts: undefined,
       snoozed_ts: moment
@@ -158,12 +142,8 @@ describe('inviteBanner', function () {
     });
 
     render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     expect(
@@ -173,10 +153,8 @@ describe('inviteBanner', function () {
     ).toBeInTheDocument();
   });
 
-  it('does not render banner if snoozed_ts days is shorter than threshold', async function () {
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+  it('does not render banner if snoozed_ts days is shorter than threshold', async () => {
+    const org = OrganizationFixture();
     const promptResponse = {
       dismissed_ts: undefined,
       snoozed_ts: moment
@@ -191,19 +169,15 @@ describe('inviteBanner', function () {
     });
 
     const {container} = render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     await waitFor(() => expect(mockPrompt).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('invites member from banner', async function () {
+  it('invites member from banner', async () => {
     const newMember = MemberFixture({
       id: '6',
       email: 'hello@sentry.io',
@@ -225,6 +199,7 @@ describe('inviteBanner', function () {
       body: [
         {
           integration: 'github',
+          enabled: true,
           users: MissingMembersFixture().slice(0, 5),
         },
       ],
@@ -236,17 +211,11 @@ describe('inviteBanner', function () {
       body: newMember,
     });
 
-    const org = OrganizationFixture({
-      githubNudgeInvite: true,
-    });
+    const org = OrganizationFixture();
 
     render(
-      <InviteBanner
-        onSendInvite={() => {}}
-        organization={org}
-        allowedRoles={[]}
-        onModalClose={() => {}}
-      />
+      <InviteBanner onSendInvite={() => {}} allowedRoles={[]} onModalClose={() => {}} />,
+      {organization: org}
     );
 
     expect(

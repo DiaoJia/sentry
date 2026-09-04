@@ -1,25 +1,29 @@
 import {useEffect} from 'react';
 
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import FeedbackEmptyDetails from 'sentry/components/feedback/details/feedbackEmptyDetails';
-import FeedbackErrorDetails from 'sentry/components/feedback/details/feedbackErrorDetails';
-import FeedbackItem from 'sentry/components/feedback/feedbackItem/feedbackItem';
-import useCurrentFeedbackId from 'sentry/components/feedback/useCurrentFeedbackId';
-import useCurrentFeedbackProject from 'sentry/components/feedback/useCurrentFeedbackProject';
-import useFetchFeedbackData from 'sentry/components/feedback/useFetchFeedbackData';
-import Placeholder from 'sentry/components/placeholder';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {FeedbackEmptyDetails} from 'sentry/components/feedback/details/feedbackEmptyDetails';
+import {FeedbackErrorDetails} from 'sentry/components/feedback/details/feedbackErrorDetails';
+import {FeedbackItem} from 'sentry/components/feedback/feedbackItem/feedbackItem';
+import {useFeedbackSlug} from 'sentry/components/feedback/useFeedbackSlug';
+import {useFetchFeedbackData} from 'sentry/components/feedback/useFetchFeedbackData';
+import {Placeholder} from 'sentry/components/placeholder';
 import {t} from 'sentry/locale';
-import useSentryAppComponentsData from 'sentry/stores/useSentryAppComponentsData';
+import {useSentryAppComponentsData} from 'sentry/stores/useSentryAppComponentsData';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-export default function FeedbackItemLoader() {
+interface Props {
+  onBackToList?: () => void;
+}
+
+export function FeedbackItemLoader({onBackToList}: Props = {}) {
   const organization = useOrganization();
-  const feedbackId = useCurrentFeedbackId();
-  const {issueResult, issueData, eventData} = useFetchFeedbackData({feedbackId});
+  const [feedbackSlug] = useFeedbackSlug();
+  const feedbackId = feedbackSlug?.feedbackId ?? '';
 
-  const projectSlug = useCurrentFeedbackProject();
-  useSentryAppComponentsData({projectId: projectSlug});
+  const {issueResult, issueData, eventData} = useFetchFeedbackData({feedbackId});
+  const projectId = issueData?.project?.id ?? feedbackSlug?.projectSlug;
+  useSentryAppComponentsData({projectId});
 
   useEffect(() => {
     if (issueResult.isError) {
@@ -50,7 +54,11 @@ export default function FeedbackItemLoader() {
         <FeedbackErrorDetails error={t('Unable to load feedback')} />
       )}
     >
-      <FeedbackItem eventData={eventData} feedbackItem={issueData} />
+      <FeedbackItem
+        eventData={eventData}
+        feedbackItem={issueData}
+        onBackToList={onBackToList}
+      />
     </ErrorBoundary>
   ) : (
     <FeedbackEmptyDetails />

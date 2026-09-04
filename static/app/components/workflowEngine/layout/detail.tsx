@@ -1,84 +1,65 @@
-import styled from '@emotion/styled';
+import {Fragment} from 'react';
 
-import {Flex} from 'sentry/components/core/layout';
+import {Flex, Stack} from '@sentry/scraps/layout';
+
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
 import * as Layout from 'sentry/components/layouts/thirds';
-import {useDocumentTitle} from 'sentry/components/sentryDocumentTitle';
-import {ActionsFromContext} from 'sentry/components/workflowEngine/layout/actions';
-import {BreadcrumbsFromContext} from 'sentry/components/workflowEngine/layout/breadcrumbs';
-import {space} from 'sentry/styles/space';
 import type {AvatarProject} from 'sentry/types/project';
 
 interface WorkflowEngineDetailLayoutProps {
   /**
    * The main content for this page
-   * Expected to include `<DetailLayout.Main>` and `<DetailLayout.Sidebar>` components.
+   * Expected to include `<DetailLayout.Body>` and `<DetailLayout.Header>` components.
    */
   children: React.ReactNode;
-  project?: AvatarProject;
 }
 
 /**
- * Precomposed 67/33 layout for Automations / Monitors detail pages.
+ * Precomposed 67/33 layout for Monitors / Alerts detail pages.
  */
-function DetailLayout({children, project}: WorkflowEngineDetailLayoutProps) {
-  const title = useDocumentTitle();
-  return (
-    <StyledPage>
-      <Layout.Header unified>
-        <Layout.HeaderContent>
-          <BreadcrumbsFromContext />
-          <Layout.Title>{title}</Layout.Title>
-          {project && (
-            <ProjectContainer>
-              <ProjectBadge project={project} disableLink avatarSize={16} />
-            </ProjectContainer>
-          )}
-        </Layout.HeaderContent>
-        <ActionsFromContext />
-      </Layout.Header>
-      <StyledBody>{children}</StyledBody>
-    </StyledPage>
-  );
+function DetailLayoutComponent({children}: WorkflowEngineDetailLayoutProps) {
+  return <Stack flex={1}>{children}</Stack>;
 }
-
-const ProjectContainer = styled('div')`
-  margin-top: ${space(1)};
-  font-size: ${p => p.theme.fontSize.md};
-`;
-
-const StyledPage = styled(Layout.Page)`
-  background: ${p => p.theme.background};
-`;
-
-const StyledBody = styled(Layout.Body)`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(3)};
-`;
 
 interface RequiredChildren {
   children: React.ReactNode;
 }
+
+function Body({children}: RequiredChildren) {
+  return <Layout.Body gap="2xl">{children}</Layout.Body>;
+}
+
 function Main({children}: RequiredChildren) {
   return (
     <Layout.Main>
-      <Flex direction="column" gap={space(2)}>
-        {children}
-      </Flex>
+      <Stack gap="xl">{children}</Stack>
     </Layout.Main>
   );
 }
 function Sidebar({children}: RequiredChildren) {
   return (
     <Layout.Side>
-      <Flex direction="column" gap={space(2)}>
-        {children}
-      </Flex>
+      <Stack gap="xl">{children}</Stack>
     </Layout.Side>
   );
 }
 
-const WorkflowEngineDetailLayout = Object.assign(DetailLayout, {Main, Sidebar});
+function Title({title, project}: {title: string; project?: AvatarProject}) {
+  return (
+    <Fragment>
+      <Layout.Title>{title}</Layout.Title>
+      {project && (
+        <Flex align="center" padding="md 0">
+          <ProjectBadge project={project} disableLink avatarSize={16} />
+        </Flex>
+      )}
+    </Fragment>
+  );
+}
 
-export default WorkflowEngineDetailLayout;
+export const DetailLayout = Object.assign(DetailLayoutComponent, {
+  Body,
+  Main,
+  Sidebar,
+  Title,
+});

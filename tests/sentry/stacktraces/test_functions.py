@@ -12,6 +12,12 @@ from sentry.stacktraces.functions import (
 @pytest.mark.parametrize(
     "input,output",
     [
+        ["function", "function"],
+        ["namespace::Class::function", "namespace::Class::function"],
+        [" const ", " const "],
+        [" namespace::const ", "namespace::"],
+        ["namespace::function::h9de5fbebc1652d47", "namespace::function"],
+        ["?A0xc3a0617d::crash", "`anonymous namespace'::crash"],
         [
             "Scaleform::GFx::AS3::IMEManager::DispatchEvent(char const *,char const *,char const *)",
             "Scaleform::GFx::AS3::IMEManager::DispatchEvent",
@@ -129,7 +135,7 @@ from sentry.stacktraces.functions import (
         ],
     ],
 )
-def test_trim_native_function_name(input, output):
+def test_trim_native_function_name(input, output) -> None:
     assert trim_function_name(input, "native") == output
 
 
@@ -143,7 +149,7 @@ def test_trim_native_function_name(input, output):
         ],
     ],
 )
-def test_trim_csharp_function_name(input, output):
+def test_trim_csharp_function_name(input, output) -> None:
     assert trim_function_name(input, "csharp") == output
 
 
@@ -176,7 +182,7 @@ def test_trim_csharp_function_name(input, output):
         ],
     ],
 )
-def test_trim_cocoa_function_name(input, output):
+def test_trim_cocoa_function_name(input, output) -> None:
     assert trim_function_name(input, "cocoa") == output
 
 
@@ -201,13 +207,14 @@ def replace_group(value, start):
         ],
     ],
 )
-def test_enclosed_string_simple(input, start, end, replacement, output):
+def test_enclosed_string_simple(input, start, end, replacement, output) -> None:
     assert replace_enclosed_string(input, start, end, replacement) == output
 
 
 @pytest.mark.parametrize(
     "input,output",
     [
+        ["namespace::Class::function", ["namespace::Class::function"]],
         ["foo bar baz", ["foo", "bar", "baz"]],
         ["foo bar (enclosed baz)", ["foo", "bar", "(enclosed baz)"]],
         ["foo (enclosed bar) baz", ["foo", "(enclosed bar)", "baz"]],
@@ -215,11 +222,11 @@ def test_enclosed_string_simple(input, start, end, replacement, output):
         ["foo bar [baz (blah)]", ["foo", "bar", "[baz (blah)]"]],
     ],
 )
-def test_split_func_tokens(input, output):
+def test_split_func_tokens(input, output) -> None:
     assert split_func_tokens(input) == output
 
 
-def test_trim_function_name_cocoa():
+def test_trim_function_name_cocoa() -> None:
     assert trim_function_name("+[foo:(bar)]", "objc") == "+[foo:(bar)]"
     assert trim_function_name("[foo:(bar)]", "objc") == "[foo:(bar)]"
     assert trim_function_name("-[foo:(bar)]", "objc") == "-[foo:(bar)]"
@@ -261,5 +268,5 @@ def test_trim_function_name_cocoa():
         [{"source_link": "woejfdsiwjidsoi", "lineNo": "7"}, None],
     ],
 )
-def test_get_source_link_for_frame(input, output):
+def test_get_source_link_for_frame(input, output) -> None:
     assert get_source_link_for_frame(Frame.to_python(input)) == output

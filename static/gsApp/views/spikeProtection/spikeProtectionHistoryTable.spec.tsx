@@ -1,5 +1,5 @@
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {ProjectFixture} from 'sentry-fixture/project';
+import {DetailedProjectFixture} from 'sentry-fixture/project';
 
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
@@ -7,7 +7,7 @@ import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 import {DATA_CATEGORY_INFO} from 'sentry/constants';
 import {DataCategoryExact} from 'sentry/types/core';
 
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 import SpikeProtectionHistoryTable from 'getsentry/views/spikeProtection/spikeProtectionHistoryTable';
 import type {SpikeDetails} from 'getsentry/views/spikeProtection/types';
 
@@ -19,7 +19,7 @@ describe('SpikeProtectionHistoryTable', () => {
   });
   const subscription = SubscriptionFixture({organization});
 
-  const project = ProjectFixture();
+  const project = DetailedProjectFixture();
 
   const dataCategoryInfo = DATA_CATEGORY_INFO[DataCategoryExact.ERROR];
   let mockPost: jest.Mock;
@@ -106,7 +106,7 @@ describe('SpikeProtectionHistoryTable', () => {
     screen.getByText('1.3M');
     screen.getByText('500K');
 
-    const headers = screen.getAllByTestId('table-header');
+    const headers = screen.getAllByRole('columnheader');
     expect(headers).toHaveLength(5);
 
     const discoverLink = screen.getByTestId('spike-protection-discover-button');

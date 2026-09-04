@@ -1,8 +1,9 @@
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {DeprecatedPlatformInfo} from 'sentry/components/onboarding/gettingStartedDoc/deprecatedPlatformInfo';
 import {OnboardingLayout} from 'sentry/components/onboarding/gettingStartedDoc/onboardingLayout';
 import type {
-  ConfigType,
+  DocsFlow,
   ProductSolution,
 } from 'sentry/components/onboarding/gettingStartedDoc/types';
 import {useLoadGettingStarted} from 'sentry/components/onboarding/gettingStartedDoc/utils/useLoadGettingStarted';
@@ -14,25 +15,23 @@ type SdkDocumentationProps = {
   activeProductSelection: ProductSolution[];
   organization: Organization;
   platform: PlatformIntegration;
-  projectId: Project['id'];
-  projectSlug: Project['slug'];
-  configType?: ConfigType;
-  newOrg?: boolean;
+  project: Project;
+  docsFlow?: DocsFlow;
+  onProductSelectionSync?: (products: ProductSolution[]) => void;
 };
 
 // Loads the component containing the documentation for the specified platform
 export function SdkDocumentation({
   platform,
-  projectSlug,
+  project,
   activeProductSelection,
-  newOrg,
-  projectId,
-  configType,
+  docsFlow,
   organization,
+  onProductSelectionSync,
 }: SdkDocumentationProps) {
   const {isLoading, isError, dsn, docs, refetch, projectKeyId} = useLoadGettingStarted({
     orgSlug: organization.slug,
-    projSlug: projectSlug,
+    projSlug: project.slug,
     platform,
   });
 
@@ -50,16 +49,6 @@ export function SdkDocumentation({
     );
   }
 
-  if (!docs) {
-    return (
-      <LoadingError
-        message={t(
-          'The getting started documentation for this platform is currently unavailable.'
-        )}
-      />
-    );
-  }
-
   if (!dsn) {
     return (
       <LoadingError
@@ -67,6 +56,20 @@ export function SdkDocumentation({
           'We encountered an issue while loading the DSN for this getting started documentation.'
         )}
         onRetry={refetch}
+      />
+    );
+  }
+
+  if (platform.deprecated) {
+    return <DeprecatedPlatformInfo dsn={dsn} platform={platform} />;
+  }
+
+  if (!docs) {
+    return (
+      <LoadingError
+        message={t(
+          'The getting started documentation for this platform is currently unavailable.'
+        )}
       />
     );
   }
@@ -87,12 +90,11 @@ export function SdkDocumentation({
       docsConfig={docs}
       dsn={dsn}
       activeProductSelection={activeProductSelection}
-      newOrg={newOrg}
+      docsFlow={docsFlow}
       platformKey={platform.id}
-      projectId={projectId}
-      projectSlug={projectSlug}
-      configType={configType}
+      project={project}
       projectKeyId={projectKeyId}
+      onProductSelectionSync={onProductSelectionSync}
     />
   );
 }

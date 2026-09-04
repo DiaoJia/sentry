@@ -9,9 +9,18 @@ from flagpole.evaluation_context import EvaluationContext
 
 class ConditionOperatorKind(str, Enum):
     IN = "in"
-    """Provided a list of values, check if the property value is in the list ov values"""
+    """
+    Provided a list of values, check if the property value is in the list of values.
+
+    When the property is itself a list, the condition matches if any of its
+    entries appears in the list of values.
+    """
 
     NOT_IN = "not_in"
+    """
+    The negation of IN: true when the property value is absent from the list of
+    values. A list-valued property must have no entry in common with it.
+    """
 
     CONTAINS = "contains"
     """Provided a single value, check if the property (a list) is included"""
@@ -24,6 +33,16 @@ class ConditionOperatorKind(str, Enum):
 
     NOT_EQUALS = "not_equals"
     """Compare a value to not be equal to another. Values are compared with types"""
+
+    MATCHES = "matches"
+    """
+    Provided a list of patterns, check if the property value matches any pattern.
+    """
+
+    NOT_MATCHES = "not_matches"
+    """
+    Provided a list of patterns, check if the property value matches none of the patterns.
+    """
 
 
 class ConditionTypeMismatchException(Exception):
@@ -77,15 +96,28 @@ class ConditionBase:
                 f"'In' condition value must be a list, but was provided a '{get_type_name(self.value)}'"
                 + f" of segment {segment_name}"
             )
-        if isinstance(condition_property, (list, dict)):
+        if isinstance(condition_property, dict):
             raise ConditionTypeMismatchException(
-                "'In' condition property value must be str | int | float | bool | None, but was provided a"
-                + f"'{get_type_name(self.value)}' of segment {segment_name}"
+                "'In' condition property value must be str | int | float | bool | None, or a list"
+                + f" thereof, but was provided a '{get_type_name(condition_property)}'"
+                + f" of segment {segment_name}"
             )
+
+        candidate_values = create_case_insensitive_set_from_list(self.value)
+
+        # A list-valued property holds several names for one entity, so the
+        # condition matches when the two sets overlap. Plan families use this:
+        # an enterprise subscription reports both "enterprise business" and
+        # "business", letting a config name either one.
+        if isinstance(condition_property, list):
+            return bool(
+                create_case_insensitive_set_from_list(condition_property) & candidate_values
+            )
+
         if isinstance(condition_property, str):
             condition_property = condition_property.lower()
 
-        return condition_property in create_case_insensitive_set_from_list(self.value)
+        return condition_property in candidate_values
 
     def _evaluate_contains(self, condition_property: Any, segment_name: str) -> bool:
         if not isinstance(condition_property, list):
@@ -115,6 +147,23 @@ class ConditionBase:
             return condition_property.lower() == self.value.lower()
 
         return condition_property == self.value
+
+    def _evaluate_matches(self, condition_property: Any, segment_name: str) -> bool:
+        if not isinstance(self.value, list):
+            raise ConditionTypeMismatchException(
+                f"'Matches' condition value must be a list of strings, but was provided a"
+                f" '{get_type_name(self.value)}' of segment {segment_name}"
+            )
+        if isinstance(condition_property, (list, dict)):
+            raise ConditionTypeMismatchException(
+                "'Matches' condition property value must be a string, but was provided a"
+                f" '{get_type_name(condition_property)}' of segment {segment_name}"
+            )
+        if condition_property is None:
+            return False
+        if not isinstance(condition_property, str):
+            return False
+        return any(glob_star_match(pattern, condition_property) for pattern in self.value)
 
 
 InOperatorValueTypes = list[int] | list[float] | list[str]
@@ -186,6 +235,76 @@ class NotEqualsCondition(ConditionBase):
         )
 
 
+def glob_star_match(pattern: str, value: str) -> bool:
+    """
+    Match value against a star-only glob pattern (case-insensitive).
+
+    '*' matches zero or more of any character. Every other character,
+    including '?' and '[', is treated as a literal for now.
+    """
+    pattern = pattern.lower()
+    value = value.lower()
+    # Split on '*' to get the literal segments that must appear in order.
+    # e.g. "a*b*c" -> ["a", "b", "c"]
+    parts = pattern.split("*")
+    # No wildcard — require exact equality.
+    if len(parts) == 1:
+        return value == pattern
+    # parts[0] is the prefix anchor; value must start with it.
+    if not value.startswith(parts[0]):
+        return False
+    # parts[-1] is the suffix anchor; value must end with it (unless the
+    # pattern ends with '*', in which case parts[-1] is "" and any suffix matches).
+    if not value.endswith(parts[-1]) and parts[-1] != "":
+        return False
+    # Narrow the search window to exclude the already-matched prefix and suffix.
+    end = len(value) - len(parts[-1]) if parts[-1] else len(value)
+    start = len(parts[0])
+    # The prefix and suffix anchors overlap, meaning the
+    # value is shorter than prefix + suffix combined — no valid match possible.
+    if start > end:
+        return False
+    # Walk the middle segments left-to-right, advancing the cursor after each hit
+    # so that relative ordering is preserved.
+    for part in parts[1:-1]:
+        if not part:
+            # Consecutive '*'s produce empty segments — nothing to match, skip.
+            continue
+        idx = value.find(part, start, end)
+        if idx == -1:
+            return False
+        start = idx + len(part)
+    return True
+
+
+def _glob_star_match(pattern: str, value: str) -> bool:
+    # keep this until getsentry use is refactored
+    return glob_star_match(pattern=pattern, value=value)
+
+
+MatchesOperatorValueTypes = list[str]
+
+
+class MatchesCondition(ConditionBase):
+    value: MatchesOperatorValueTypes
+    operator: str = dataclasses.field(default="matches")
+
+    def _operator_match(self, condition_property: Any, segment_name: str) -> bool:
+        return self._evaluate_matches(
+            condition_property=condition_property, segment_name=segment_name
+        )
+
+
+class NotMatchesCondition(ConditionBase):
+    value: MatchesOperatorValueTypes
+    operator: str = dataclasses.field(default="not_matches")
+
+    def _operator_match(self, condition_property: Any, segment_name: str) -> bool:
+        return not self._evaluate_matches(
+            condition_property=condition_property, segment_name=segment_name
+        )
+
+
 OPERATOR_LOOKUP: Mapping[ConditionOperatorKind, type[ConditionBase]] = {
     ConditionOperatorKind.IN: InCondition,
     ConditionOperatorKind.NOT_IN: NotInCondition,
@@ -193,6 +312,8 @@ OPERATOR_LOOKUP: Mapping[ConditionOperatorKind, type[ConditionBase]] = {
     ConditionOperatorKind.NOT_CONTAINS: NotContainsCondition,
     ConditionOperatorKind.EQUALS: EqualsCondition,
     ConditionOperatorKind.NOT_EQUALS: NotEqualsCondition,
+    ConditionOperatorKind.MATCHES: MatchesCondition,
+    ConditionOperatorKind.NOT_MATCHES: NotMatchesCondition,
 }
 
 

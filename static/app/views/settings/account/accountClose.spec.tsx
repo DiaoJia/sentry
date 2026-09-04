@@ -9,12 +9,12 @@ import {
 
 import AccountClose from 'sentry/views/settings/account/accountClose';
 
-describe('AccountClose', function () {
+describe('AccountClose', () => {
   let deleteMock: jest.Mock;
   const soloOrgSlug = 'solo-owner';
   const nonSingleOwnerSlug = 'non-single-owner';
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: '/organizations/',
@@ -41,7 +41,7 @@ describe('AccountClose', function () {
     });
   });
 
-  it('lists all orgs user is an owner of', async function () {
+  it('lists all orgs user is an owner of', async () => {
     render(<AccountClose />);
     renderGlobalModal();
 
@@ -60,8 +60,13 @@ describe('AccountClose', function () {
     expect(nonSingleOwner).toBeChecked();
 
     // Delete
-    await userEvent.click(screen.getByRole('button', {name: 'Close Account'}));
+    await userEvent.click(
+      screen.getByRole('button', {name: 'Close Account and Delete Organizations'})
+    );
 
+    // Confirm dialog shows account email and orgs to be deleted
+    expect(screen.getByText('foo@example.com')).toBeInTheDocument();
+    expect(screen.getByText(/solo-owner, non-single-owner/)).toBeInTheDocument();
     expect(
       screen.getByText(
         'WARNING! This is permanent and cannot be undone, are you really sure you want to do this?'

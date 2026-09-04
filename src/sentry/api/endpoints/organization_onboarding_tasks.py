@@ -6,9 +6,10 @@ from rest_framework.response import Response
 from sentry import onboarding_tasks
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
 from sentry.api.serializers import serialize
+from sentry.models.organization import Organization
 from sentry.models.organizationonboardingtask import OnboardingTask, OnboardingTaskStatus
 
 
@@ -16,13 +17,13 @@ class OnboardingTaskPermission(OrganizationPermission):
     scope_map = {"POST": ["org:read"], "GET": ["org:read"]}
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class OrganizationOnboardingTaskEndpoint(OrganizationEndpoint):
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
         "GET": ApiPublishStatus.PRIVATE,
     }
-    owner = ApiOwner.TELEMETRY_EXPERIENCE
+    owner = ApiOwner.VALUE_DISCOVERY
     permission_classes = (OnboardingTaskPermission,)
 
     def post(self, request: Request, organization) -> Response:
@@ -56,7 +57,7 @@ class OrganizationOnboardingTaskEndpoint(OrganizationEndpoint):
         if completion_seen:
             values["completion_seen"] = timezone.now()
 
-        rows_affected, created = onboarding_tasks.create_or_update_onboarding_task(
+        instance, created = onboarding_tasks.create_or_update_onboarding_task(
             organization=organization,
             task=task_id,
             user=request.user,
@@ -66,17 +67,17 @@ class OrganizationOnboardingTaskEndpoint(OrganizationEndpoint):
         if created and task_id == OnboardingTask.FIRST_PROJECT:
             scope = sentry_sdk.get_current_scope()
             scope.set_extra("org", organization.id)
+            scope.set_attribute("org", organization.id)
             sentry_sdk.capture_message(
                 f"Onboarding task {task_id} was created unexpectedly. It should have been updated instead.",
                 level="warning",
             )
 
-        if rows_affected or created:
-            onboarding_tasks.try_mark_onboarding_complete(organization.id)
+        onboarding_tasks.try_mark_onboarding_complete(organization.id)
 
         return Response(status=204)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         tasks_to_serialize = list(
             onboarding_tasks.fetch_onboarding_tasks(organization, request.user)
         )

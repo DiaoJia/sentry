@@ -6,9 +6,9 @@ from django.test import override_settings
 from django.urls import reverse
 
 from sentry import options
-from sentry.api.utils import generate_region_url
+from sentry.api.utils import generate_locality_url
 from sentry.auth import superuser
-from sentry.deletions.models.scheduleddeletion import RegionScheduledDeletion
+from sentry.deletions.models.scheduleddeletion import CellScheduledDeletion
 from sentry.deletions.tasks.scheduled import run_deletion
 from sentry.models.apitoken import ApiToken
 from sentry.models.organization import Organization, OrganizationStatus
@@ -16,73 +16,26 @@ from sentry.models.organizationmember import OrganizationMember
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.options import override_options
-from sentry.testutils.silo import assume_test_silo_mode, create_test_regions, region_silo_test
+from sentry.testutils.silo import (
+    assume_test_silo_mode,
+    cell_silo_test,
+    control_silo_test,
+    create_test_cells,
+)
 from sentry.utils import json
-
-
-class CrossDomainXmlTest(TestCase):
-    @cached_property
-    def path(self):
-        return reverse("sentry-api-crossdomain-xml", kwargs={"project_id": self.project.id})
-
-    def test_inaccessible_in_control_silo(self):
-        with override_settings(SILO_MODE=SiloMode.CONTROL):
-            resp = self.client.get(self.path)
-            assert resp.status_code == 404
-
-    @mock.patch("sentry.web.api.get_origins")
-    def test_output_with_global(self, get_origins):
-        get_origins.return_value = "*"
-        resp = self.client.get(self.path)
-        get_origins.assert_called_once_with(self.project)
-        assert resp.status_code == 200, resp.content
-        self.assertEqual(resp["Content-Type"], "application/xml")
-        self.assertTemplateUsed(resp, "sentry/crossdomain.xml")
-        assert b'<allow-access-from domain="*" secure="false" />' in resp.content
-
-    @mock.patch("sentry.web.api.get_origins")
-    def test_output_with_allowed_origins(self, get_origins):
-        get_origins.return_value = ["disqus.com", "www.disqus.com"]
-        resp = self.client.get(self.path)
-        get_origins.assert_called_once_with(self.project)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp["Content-Type"], "application/xml")
-        self.assertTemplateUsed(resp, "sentry/crossdomain.xml")
-        assert b'<allow-access-from domain="disqus.com" secure="false" />' in resp.content
-        assert b'<allow-access-from domain="www.disqus.com" secure="false" />' in resp.content
-
-    @mock.patch("sentry.web.api.get_origins")
-    def test_output_with_no_origins(self, get_origins):
-        get_origins.return_value = []
-        resp = self.client.get(self.path)
-        get_origins.assert_called_once_with(self.project)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp["Content-Type"], "application/xml")
-        self.assertTemplateUsed(resp, "sentry/crossdomain.xml")
-        assert b"<allow-access-from" not in resp.content
-
-    def test_output_allows_x_sentry_auth(self):
-        resp = self.client.get(self.path)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp["Content-Type"], "application/xml")
-        self.assertTemplateUsed(resp, "sentry/crossdomain.xml")
-        assert (
-            b'<allow-http-request-headers-from domain="*" headers="*" secure="false" />'
-            in resp.content
-        )
 
 
 class RobotsTxtTest(TestCase):
     @cached_property
-    def path(self):
+    def path(self) -> str:
         return reverse("sentry-robots-txt")
 
-    def test_robots(self):
+    def test_robots(self) -> None:
         resp = self.client.get(self.path)
         assert resp.status_code == 200
         assert resp["Content-Type"] == "text/plain"
 
-    def test_self_hosted_mode(self):
+    def test_self_hosted_mode(self) -> None:
         with override_settings(SENTRY_MODE="self_hosted"):
             response = self.client.get("/robots.txt")
 
@@ -95,7 +48,7 @@ Disallow: /
         )
         assert response["Content-Type"] == "text/plain"
 
-    def test_saas_mode(self):
+    def test_saas_mode(self) -> None:
         with override_settings(SENTRY_MODE="saas"):
             response = self.client.get("/robots.txt")
 
@@ -103,6 +56,7 @@ Disallow: /
         assert (
             response.content
             == b"""User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
 Disallow: /api/
 Allow: /
 
@@ -110,8 +64,9 @@ Sitemap: https://sentry.io/sitemap-index.xml
 """
         )
         assert response["Content-Type"] == "text/plain"
+        assert b"Content-Signal:" in response.content
 
-    def test_region_domain(self):
+    def test_region_domain(self) -> None:
         HTTP_HOST = "us.testserver"
         response = self.client.get("/robots.txt", HTTP_HOST=HTTP_HOST)
 
@@ -124,7 +79,7 @@ Disallow: /
         )
         assert response["Content-Type"] == "text/plain"
 
-    def test_customer_domain(self):
+    def test_customer_domain(self) -> None:
         HTTP_HOST = "albertos-apples.testserver"
         response = self.client.get("/robots.txt", HTTP_HOST=HTTP_HOST)
 
@@ -138,13 +93,13 @@ Disallow: /
         assert response["Content-Type"] == "text/plain"
 
 
-@region_silo_test(regions=create_test_regions("us", "eu"), include_monolith_run=True)
+@cell_silo_test(cells=create_test_cells("us", "eu"), include_monolith_run=True)
 class ClientConfigViewTest(TestCase):
     @cached_property
-    def path(self):
+    def path(self) -> str:
         return reverse("sentry-api-client-config")
 
-    def test_cookie_names(self):
+    def test_cookie_names(self) -> None:
         resp = self.client.get(self.path)
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
@@ -155,7 +110,7 @@ class ClientConfigViewTest(TestCase):
         assert data["superUserCookieName"] == "su"
         assert data["superUserCookieName"] == superuser.COOKIE_NAME
 
-    def test_has_user_registration(self):
+    def test_has_user_registration(self) -> None:
         with self.options({"auth.allow-registration": True}):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
@@ -175,7 +130,7 @@ class ClientConfigViewTest(TestCase):
                 "organizations:create",
             ]
 
-    def test_org_create_feature(self):
+    def test_org_create_feature(self) -> None:
         with self.feature({"organizations:create": True}):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
@@ -192,7 +147,7 @@ class ClientConfigViewTest(TestCase):
             data = json.loads(resp.content)
             assert data["features"] == []
 
-    def test_customer_domain_feature(self):
+    def test_customer_domain_feature(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -229,7 +184,7 @@ class ClientConfigViewTest(TestCase):
             data = json.loads(resp.content)
             assert data["features"] == ["organizations:create"]
 
-    def test_unauthenticated(self):
+    def test_unauthenticated(self) -> None:
         resp = self.client.get(self.path)
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
@@ -240,7 +195,7 @@ class ClientConfigViewTest(TestCase):
         assert data["features"] == ["organizations:create"]
         assert data["customerDomain"] is None
 
-    def test_authenticated(self):
+    def test_authenticated(self) -> None:
         user = self.create_user("foo@example.com")
         self.login_as(user)
 
@@ -323,7 +278,7 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == other_org.slug
             assert data["links"] == {
                 "organizationUrl": f"http://{other_org.slug}.testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
                 "superuserUrl": f"http://{self.organization.slug}.testserver",
             }
@@ -335,18 +290,18 @@ class ClientConfigViewTest(TestCase):
                 "sentryUrl": "http://testserver",
             }
 
-    def test_superuser(self):
+    def test_superuser(self) -> None:
         self._run_test_with_privileges(is_superuser=True, is_staff=False)
 
     @override_options({"staff.ga-rollout": True})
-    def test_staff(self):
+    def test_staff(self) -> None:
         self._run_test_with_privileges(is_superuser=False, is_staff=True)
 
     @override_options({"staff.ga-rollout": True})
-    def test_superuser_and_staff(self):
+    def test_superuser_and_staff(self) -> None:
         self._run_test_with_privileges(is_superuser=True, is_staff=True)
 
-    def test_superuser_cookie_domain(self):
+    def test_superuser_cookie_domain(self) -> None:
         # Cannot set the superuser cookie domain using override_settings().
         # So we set them and restore them manually.
         old_super_cookie_domain = superuser.COOKIE_DOMAIN
@@ -369,7 +324,7 @@ class ClientConfigViewTest(TestCase):
         # Restore values
         superuser.COOKIE_DOMAIN = old_super_cookie_domain
 
-    def test_links_unauthenticated(self):
+    def test_links_unauthenticated(self) -> None:
         resp = self.client.get(self.path)
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
@@ -384,7 +339,7 @@ class ClientConfigViewTest(TestCase):
             "sentryUrl": "http://testserver",
         }
 
-    def test_links_authenticated(self):
+    def test_links_authenticated(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -404,11 +359,11 @@ class ClientConfigViewTest(TestCase):
         assert data["lastOrganization"] == self.organization.slug
         assert data["links"] == {
             "organizationUrl": f"http://{self.organization.slug}.testserver",
-            "regionUrl": generate_region_url(),
+            "regionUrl": generate_locality_url(),
             "sentryUrl": "http://testserver",
         }
 
-    def test_organization_url_region(self):
+    def test_organization_url_region(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -418,7 +373,7 @@ class ClientConfigViewTest(TestCase):
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
 
-        with override_settings(SENTRY_REGION="eu"):
+        with override_settings(SENTRY_LOCAL_CELL="eu"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -429,11 +384,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": f"http://{self.organization.slug}.testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-    def test_organization_url_organization_base_hostname(self):
+    def test_organization_url_organization_base_hostname(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -443,7 +398,7 @@ class ClientConfigViewTest(TestCase):
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
 
-        with self.options({"system.organization-base-hostname": "invalid"}):
+        with override_settings(SENTRY_ORGANIZATION_BASE_HOSTNAME="invalid"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -454,11 +409,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": "http://testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-        with self.options({"system.organization-base-hostname": "{slug}.testserver"}):
+        with override_settings(SENTRY_ORGANIZATION_BASE_HOSTNAME="{slug}.testserver"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -469,11 +424,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": f"http://{self.organization.slug}.testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-    def test_organization_url_organization_url_template(self):
+    def test_organization_url_organization_url_template(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -483,7 +438,7 @@ class ClientConfigViewTest(TestCase):
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
 
-        with self.options({"system.organization-url-template": "invalid"}):
+        with override_settings(SENTRY_ORGANIZATION_URL_TEMPLATE="invalid"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -494,11 +449,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": "invalid",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-        with self.options({"system.organization-url-template": None}):
+        with override_settings(SENTRY_ORGANIZATION_URL_TEMPLATE=None):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -509,11 +464,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": "http://testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-        with self.options({"system.organization-url-template": "ftp://{hostname}"}):
+        with override_settings(SENTRY_ORGANIZATION_URL_TEMPLATE="ftp://{hostname}"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -524,11 +479,11 @@ class ClientConfigViewTest(TestCase):
             assert data["lastOrganization"] == self.organization.slug
             assert data["links"] == {
                 "organizationUrl": f"ftp://{self.organization.slug}.testserver",
-                "regionUrl": generate_region_url(),
+                "regionUrl": generate_locality_url(),
                 "sentryUrl": "http://testserver",
             }
 
-    def test_deleted_last_organization(self):
+    def test_deleted_last_organization(self) -> None:
         self.login_as(self.user)
 
         # Check lastOrganization
@@ -562,10 +517,10 @@ class ClientConfigViewTest(TestCase):
 
         # Delete lastOrganization
         assert Organization.objects.filter(slug=self.organization.slug).count() == 1
-        assert RegionScheduledDeletion.objects.count() == 0
+        assert CellScheduledDeletion.objects.count() == 0
 
         self.organization.update(status=OrganizationStatus.PENDING_DELETION)
-        deletion = RegionScheduledDeletion.schedule(self.organization, days=0)
+        deletion = CellScheduledDeletion.schedule(self.organization, days=0)
         deletion.update(in_progress=True)
 
         with self.tasks():
@@ -584,7 +539,7 @@ class ClientConfigViewTest(TestCase):
         assert data["lastOrganization"] is None
         assert "activeorg" not in self.client.session
 
-    def test_not_member_of_last_org(self):
+    def test_not_member_of_last_org(self) -> None:
         self.login_as(self.user)
         other_org = self.create_organization(
             name="other_org", owner=self.create_user("bar@example.com")
@@ -637,7 +592,7 @@ class ClientConfigViewTest(TestCase):
         assert data["lastOrganization"] is None
         assert "activeorg" not in self.client.session
 
-    def test_api_token(self):
+    def test_api_token(self) -> None:
         with assume_test_silo_mode(SiloMode.CONTROL):
             api_token = ApiToken.objects.create(
                 user=self.user, scope_list=["org:write", "org:read"]
@@ -668,7 +623,7 @@ class ClientConfigViewTest(TestCase):
             "sentryUrl": "http://testserver",
         }
 
-    def test_region_api_url_template(self):
+    def test_region_api_url_template(self) -> None:
         self.login_as(self.user)
 
         # Induce last active organization
@@ -678,7 +633,7 @@ class ClientConfigViewTest(TestCase):
         assert resp.status_code == 200
         assert resp["Content-Type"] == "application/json"
 
-        with self.options({"system.region-api-url-template": "http://foobar.{region}.testserver"}):
+        with override_settings(SENTRY_REGION_API_URL_TEMPLATE="http://foobar.{region}.testserver"):
             resp = self.client.get(self.path)
             assert resp.status_code == 200
             assert resp["Content-Type"] == "application/json"
@@ -687,7 +642,7 @@ class ClientConfigViewTest(TestCase):
 
             expected_region_url = (
                 "http://foobar.us.testserver"
-                if SiloMode.get_current_mode() == SiloMode.REGION
+                if SiloMode.get_current_mode() == SiloMode.CELL
                 else options.get("system.url-prefix")
             )
             assert data["isAuthenticated"] is True
@@ -698,7 +653,7 @@ class ClientConfigViewTest(TestCase):
                 "sentryUrl": "http://testserver",
             }
 
-    def test_customer_domain(self):
+    def test_customer_domain(self) -> None:
         # With customer domain
         resp = self.client.get(self.path, HTTP_HOST="albertos-apples.testserver")
         assert resp.status_code == 200
@@ -720,3 +675,244 @@ class ClientConfigViewTest(TestCase):
         data = json.loads(resp.content)
         assert not data["isAuthenticated"]
         assert data["customerDomain"] is None
+
+
+@control_silo_test
+class McpJsonTest(TestCase):
+    @cached_property
+    def path(self) -> str:
+        return reverse("sentry-mcp-json")
+
+    def test_mcp_json_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/mcp.json")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/json"
+
+        data = json.loads(response.content)
+        assert data["name"] == "Sentry"
+        assert data["description"] == "Connect to Sentry, debug faster."
+        assert data["endpoint"] == "https://mcp.sentry.dev/mcp"
+
+    def test_mcp_json_self_hosted_mode(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/mcp.json")
+
+        assert response.status_code == 404
+
+    def test_mcp_json_cache_control(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/mcp.json")
+
+        assert response.status_code == 200
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+
+
+@control_silo_test
+class ApiCatalogTest(TestCase):
+    def test_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/api-catalog")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/linkset+json"
+        assert response["Access-Control-Allow-Origin"] == "*"
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+        data = json.loads(response.content)
+        assert "linkset" in data
+        entry = data["linkset"][0]
+        assert entry["anchor"] == "https://sentry.io"
+        hrefs = [item["href"] for item in entry["item"]]
+        assert "https://sentry.io/api/0/" in hrefs
+        assert "https://mcp.sentry.dev/mcp" in hrefs
+
+    def test_non_saas_mode_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/api-catalog")
+        assert response.status_code == 404
+        assert "no-store" in response.get("Cache-Control", "")
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/.well-known/api-catalog")
+        assert response.status_code == 404
+        assert "no-store" in response.get("Cache-Control", "")
+
+    def test_subdomain_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get(
+                "/.well-known/api-catalog", HTTP_HOST="albertos-apples.testserver"
+            )
+        assert response.status_code == 404
+
+
+@control_silo_test
+class OauthAuthorizationServerTest(TestCase):
+    def test_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/oauth-authorization-server")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/json"
+        assert response["Access-Control-Allow-Origin"] == "*"
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+        data = json.loads(response.content)
+        assert data["issuer"] == "https://sentry.io"
+        assert data["authorization_endpoint"] == "https://sentry.io/oauth/authorize/"
+        assert data["token_endpoint"] == "https://sentry.io/oauth/token/"
+        assert isinstance(data["scopes_supported"], list)
+        assert "org:read" in data["scopes_supported"]
+
+    def test_non_saas_mode_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/oauth-authorization-server")
+        assert response.status_code == 404
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/.well-known/oauth-authorization-server")
+        assert response.status_code == 404
+
+    def test_subdomain_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get(
+                "/.well-known/oauth-authorization-server", HTTP_HOST="albertos-apples.testserver"
+            )
+        assert response.status_code == 404
+
+
+@control_silo_test
+class OauthProtectedResourceTest(TestCase):
+    def test_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/oauth-protected-resource")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/json"
+        assert response["Access-Control-Allow-Origin"] == "*"
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+        data = json.loads(response.content)
+        assert data["resource"] == "https://sentry.io"
+        assert isinstance(data["scopes_supported"], list)
+        assert "org:read" in data["scopes_supported"]
+
+    def test_non_saas_mode_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/oauth-protected-resource")
+        assert response.status_code == 404
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/.well-known/oauth-protected-resource")
+        assert response.status_code == 404
+
+    def test_subdomain_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get(
+                "/.well-known/oauth-protected-resource", HTTP_HOST="albertos-apples.testserver"
+            )
+        assert response.status_code == 404
+
+
+@control_silo_test
+class McpServerCardTest(TestCase):
+    def test_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/mcp/server-card.json")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/json"
+        assert response["Access-Control-Allow-Origin"] == "*"
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+        data = json.loads(response.content)
+        assert data["name"] == "Sentry"
+        assert data["url"] == "https://mcp.sentry.dev/mcp"
+
+    def test_non_saas_mode_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/mcp/server-card.json")
+        assert response.status_code == 404
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/.well-known/mcp/server-card.json")
+        assert response.status_code == 404
+
+    def test_subdomain_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get(
+                "/.well-known/mcp/server-card.json", HTTP_HOST="albertos-apples.testserver"
+            )
+        assert response.status_code == 404
+
+
+@control_silo_test
+class AgentSkillsIndexTest(TestCase):
+    def test_saas_mode(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/.well-known/agent-skills/index.json")
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/json"
+        assert response["Access-Control-Allow-Origin"] == "*"
+        assert "max-age=3600" in response["Cache-Control"]
+        assert "public" in response["Cache-Control"]
+        data = json.loads(response.content)
+        assert data == {"skills": []}
+
+    def test_non_saas_mode_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/.well-known/agent-skills/index.json")
+        assert response.status_code == 404
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/.well-known/agent-skills/index.json")
+        assert response.status_code == 404
+
+    def test_subdomain_returns_404(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get(
+                "/.well-known/agent-skills/index.json", HTTP_HOST="albertos-apples.testserver"
+            )
+        assert response.status_code == 404
+
+
+class AgentDiscoveryMiddlewareTest(TestCase):
+    def test_html_response_gets_link_header(self) -> None:
+        with override_settings(SENTRY_MODE="saas"):
+            response = self.client.get("/")
+
+        assert "Link" in response
+        assert "api-catalog" in response["Link"]
+
+    def test_api_response_no_link_header(self) -> None:
+        from django.http import HttpRequest, HttpResponse
+
+        from sentry.middleware.agent_discovery import AgentDiscoveryMiddleware
+
+        inner_response = HttpResponse("ok", content_type="text/html")
+
+        def get_response(request):
+            return inner_response
+
+        middleware = AgentDiscoveryMiddleware(get_response)
+        request = HttpRequest()
+        request.method = "GET"
+        request.path = "/api/0/organizations/"
+        request.subdomain = None
+
+        with override_settings(SENTRY_MODE="saas"):
+            response = middleware(request)
+
+        assert "api-catalog" not in response.get("Link", "")
+
+    def test_non_saas_no_link_header(self) -> None:
+        with override_settings(SENTRY_MODE="self_hosted"):
+            response = self.client.get("/")
+        assert "api-catalog" not in response.get("Link", "")
+
+        with override_settings(SENTRY_MODE="single_tenant"):
+            response = self.client.get("/")
+        assert "api-catalog" not in response.get("Link", "")

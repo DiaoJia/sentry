@@ -38,23 +38,6 @@ describe('balanceSampleRate', () => {
     expect(usedBudget).toBeCloseTo(600);
   });
 
-  it('respects minBudget parameter', () => {
-    const items = [
-      {id: '1', count: 1000, sampleRate: 0.1},
-      {id: '2', count: 1000, sampleRate: 0.1},
-    ];
-
-    const {balancedItems, usedBudget} = balanceSampleRate({
-      items,
-      targetSampleRate: 0.2,
-      minBudget: 500,
-    });
-
-    expect(usedBudget).toBeGreaterThanOrEqual(500);
-    expect(balancedItems[0]!.sampleRate).toBeGreaterThan(0.2);
-    expect(balancedItems[1]!.sampleRate).toBeGreaterThan(0.2);
-  });
-
   it('caps sample rate at 1.0', () => {
     const items = [
       {id: '1', count: 100, sampleRate: 0.1},
@@ -66,8 +49,8 @@ describe('balanceSampleRate', () => {
       targetSampleRate: 0.8,
     });
 
-    expect(balancedItems[0]!.sampleRate).toBe(1.0); // Small count item should be capped at 1.0
-    expect(balancedItems[1]!.sampleRate).toBeLessThan(1.0);
+    expect(balancedItems[0]!.sampleRate).toBe(1); // Small count item should be capped at 1
+    expect(balancedItems[1]!.sampleRate).toBeLessThan(1);
   });
 
   it('handles empty items array', () => {

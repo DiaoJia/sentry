@@ -6,7 +6,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
 from sentry.apidocs.constants import RESPONSE_FORBIDDEN
 from sentry.apidocs.examples.project_examples import ProjectExamples
@@ -20,7 +20,7 @@ class ProjectFilterResponse(TypedDict):
     active: bool | list[str]
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Projects"])
 class ProjectFiltersEndpoint(ProjectEndpoint):
     owner = ApiOwner.UNOWNED
@@ -29,7 +29,8 @@ class ProjectFiltersEndpoint(ProjectEndpoint):
     }
 
     @extend_schema(
-        operation_id="List a Project's Data Filters",
+        operation_id="listProjectFilters",
+        summary="List a Project's Data Filters",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             GlobalParams.PROJECT_ID_OR_SLUG,
@@ -42,12 +43,12 @@ class ProjectFiltersEndpoint(ProjectEndpoint):
         },
         examples=ProjectExamples.GET_PROJECT_FILTERS,
     )
-    def get(self, request: Request, project) -> Response:
+    def get(self, request: Request, project) -> Response[list[ProjectFilterResponse]]:
         """
         Retrieve a list of filters for a given project.
         `active` will be either a boolean or a list for the legacy browser filters.
         """
-        results = []
+        results: list[ProjectFilterResponse] = []
         for flt in inbound_filters.get_all_filter_specs():
             results.append(
                 {

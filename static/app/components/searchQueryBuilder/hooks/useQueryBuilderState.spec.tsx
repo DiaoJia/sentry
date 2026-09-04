@@ -1,255 +1,471 @@
-import type {Token, TokenResult} from 'sentry/components/searchSyntax/parser';
+import type {FocusOverride} from 'sentry/components/searchQueryBuilder/types';
+import {parseQueryBuilderValue} from 'sentry/components/searchQueryBuilder/utils';
+import {
+  TermOperator,
+  Token,
+  WildcardOperators,
+} from 'sentry/components/searchSyntax/parser';
+import {FieldKind, FieldValueType, type FieldDefinition} from 'sentry/utils/fields';
 
-import {addWildcardToToken, removeWildcardFromToken} from './useQueryBuilderState';
+import {
+  modifyFilterOperatorQuery,
+  modifyFilterValue,
+  multiSelectTokenValue,
+  replaceFreeTextTokens,
+} from './useQueryBuilderState';
 
-describe('addWildcardToToken', function () {
-  const testCases = [
-    // --- contains ---
-    {
-      input: {
-        token: {value: 'firefox'},
-        isContains: true,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: '*firefox*',
-    },
-    {
-      input: {
-        token: {value: '*firefox'},
-        isContains: true,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: '*firefox*',
-    },
-    {
-      input: {
-        token: {value: 'firefox*'},
-        isContains: true,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: '*firefox*',
-    },
-    {
-      input: {
-        token: {value: 'e m'},
-        isContains: true,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: '*e m*',
-    },
-    // --- starts with ---
-    {
-      input: {
-        token: {value: 'firefox'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'firefox*',
-    },
-    {
-      input: {
-        token: {value: '*firefox'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: '*firefox*',
-    },
-    {
-      input: {
-        token: {value: 'firefox*'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'firefox*',
-    },
-    {
-      input: {
-        token: {value: 'e m'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'e m*',
-    },
-    // --- ends with ---
-    {
-      input: {
-        token: {value: 'firefox'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox',
-    },
-    {
-      input: {
-        token: {value: '*firefox'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox',
-    },
-    {
-      input: {
-        token: {value: 'firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox*',
-    },
-    {
-      input: {
-        token: {value: 'e m'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*e m',
-    },
-  ];
+function getFirstFilterToken(
+  query: string,
+  getFieldDefinition: Parameters<typeof parseQueryBuilderValue>[1] = () => null,
+  options?: Parameters<typeof parseQueryBuilderValue>[2]
+) {
+  const parsed = parseQueryBuilderValue(query, getFieldDefinition, options);
+  const token = parsed?.find(t => t.type === Token.FILTER);
+  if (!token) {
+    throw new Error(`No filter token found in query: ${query}`);
+  }
+  return token;
+}
 
-  it.each(testCases)('should add wildcard to token', function ({input, expected}) {
-    const result = addWildcardToToken(
-      input.token as TokenResult<Token.VALUE_TEXT>,
-      input.isContains,
-      input.isStartsWith,
-      input.isEndsWith
-    );
-    expect(result).toBe(expected);
+describe('replaceFreeTextTokens', () => {
+  describe('when there are free text tokens', () => {
+    type TestCase = {
+      description: string;
+      expected: {
+        focusOverride: FocusOverride | undefined;
+        query: string | undefined;
+      };
+      input: {
+        currentQuery: string;
+        rawSearchReplacement: string[];
+      };
+    };
+
+    const testCases: TestCase[] = [
+      {
+        description: 'when there are no tokens',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: '',
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when the replace raw search keys is empty',
+        input: {
+          rawSearchReplacement: [],
+          currentQuery: '',
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when the replace raw search keys is an empty string',
+        input: {
+          rawSearchReplacement: [''],
+          currentQuery: '',
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when there is no raw search replacement',
+        input: {
+          rawSearchReplacement: [],
+          currentQuery: `browser.name:${WildcardOperators.CONTAINS}"firefox"`,
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when there are no free text tokens',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: `browser.name:${WildcardOperators.CONTAINS}"firefox"`,
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when there only valid action tokens',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'span.op:eq',
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when there only space free text tokens in the action',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'span.op:eq    ',
+        },
+        expected: {
+          query: undefined,
+          focusOverride: undefined,
+        },
+      },
+      {
+        description: 'when there is one free text token',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'test',
+        },
+        expected: {
+          query: `span.description:${WildcardOperators.CONTAINS}test`,
+          focusOverride: {itemKey: 'freeText:1'},
+        },
+      },
+      {
+        description: 'when there is one free text token that has a space',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'test test',
+        },
+        expected: {
+          query: 'span.description:"*test*test*"',
+          focusOverride: {itemKey: 'freeText:1'},
+        },
+      },
+      {
+        description: 'when there is already a token present',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'span.op:eq test',
+        },
+        expected: {
+          query: `span.op:eq span.description:${WildcardOperators.CONTAINS}test`,
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+      {
+        description: 'when there is already a replace token present',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: `span.description:${WildcardOperators.CONTAINS}test test2`,
+        },
+        expected: {
+          query: `span.description:${WildcardOperators.CONTAINS}test span.description:${WildcardOperators.CONTAINS}test2`,
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+      {
+        description: 'when there is already a replace token present with a space',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: `span.description:${WildcardOperators.CONTAINS}test other value`,
+        },
+        expected: {
+          query: `span.description:${WildcardOperators.CONTAINS}test span.description:"*other*value*"`,
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+      {
+        description:
+          'when there is already a replace token present with a different operator',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'span.description:test other value',
+        },
+        expected: {
+          query: 'span.description:test span.description:"*other*value*"',
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+      {
+        description: 'when the value contains an asterisks, it sets to is',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'span.description:test te*st',
+        },
+        expected: {
+          query: 'span.description:test span.description:te*st',
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+      {
+        description: 'when the value contains a space and asterisks, it sets to is',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'te*st test',
+        },
+        expected: {
+          query: 'span.description:"te*st test"',
+          focusOverride: {itemKey: 'freeText:1'},
+        },
+      },
+      {
+        description:
+          'when the value contains multiple spaces, it removes them and will replace them with a single space, and apply fuzzy matching',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'test  test',
+        },
+        expected: {
+          query: 'span.description:"*test*test*"',
+          focusOverride: {itemKey: 'freeText:1'},
+        },
+      },
+      {
+        description: 'when the value is an aggregate filter token, it ignores it',
+        input: {
+          rawSearchReplacement: ['span.description'],
+          currentQuery: 'p75(span.duration):>300ms test',
+        },
+        expected: {
+          query: `p75(span.duration):>300ms span.description:${WildcardOperators.CONTAINS}test`,
+          focusOverride: {itemKey: 'freeText:2'},
+        },
+      },
+    ];
+
+    it.each(testCases)('$description', ({input, expected}) => {
+      const result = replaceFreeTextTokens(
+        input.currentQuery,
+        (query: string) =>
+          parseQueryBuilderValue(
+            query,
+            (key: string) => {
+              if (key === 'span.duration') {
+                return {
+                  desc: 'The total time taken by the span',
+                  kind: 'metric',
+                  valueType: 'duration',
+                } as FieldDefinition;
+              }
+              return null;
+            },
+            {
+              disallowUnsupportedFilters: true,
+              filterKeys: {
+                'span.duration': {
+                  key: 'span.duration',
+                  name: 'span.duration',
+                  kind: FieldKind.MEASUREMENT,
+                },
+              },
+            }
+          ),
+        input.rawSearchReplacement,
+        'test'
+      );
+
+      expect(result?.newQuery).toBe(expected.query);
+      expect(result?.focusOverride).toStrictEqual(expected.focusOverride);
+    });
   });
 });
 
-describe('removeWildcardFromToken', function () {
-  const testCases = [
-    // --- contains ---
-    {
-      input: {
-        token: {value: '*firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: 'firefox',
+describe('multiSelectTokenValue', () => {
+  const filterKeys = {
+    'browser.name': {
+      key: 'browser.name',
+      name: 'browser.name',
+      kind: FieldKind.FIELD,
     },
-    {
-      input: {
-        token: {value: '*firefox'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: 'firefox',
+    release: {
+      key: 'release',
+      name: 'release',
+      kind: FieldKind.FIELD,
     },
-    {
-      input: {
-        token: {value: 'firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: 'firefox',
-    },
-    {
-      input: {
-        token: {value: '*e m*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: false,
-      },
-      expected: 'e m',
-    },
-    // --- starts with ---
-    {
-      input: {
-        token: {value: '*firefox*'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'firefox*',
-    },
-    {
-      input: {
-        token: {value: '*firefox'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'firefox',
-    },
-    {
-      input: {
-        token: {value: 'firefox*'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'firefox*',
-    },
-    {
-      input: {
-        token: {value: '*e m*'},
-        isContains: false,
-        isStartsWith: true,
-        isEndsWith: false,
-      },
-      expected: 'e m*',
-    },
-    // --- ends with ---
-    {
-      input: {
-        token: {value: '*firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox',
-    },
-    {
-      input: {
-        token: {value: '*firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox',
-    },
-    {
-      input: {
-        token: {value: '*firefox*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*firefox',
-    },
-    {
-      input: {
-        token: {value: '*e m*'},
-        isContains: false,
-        isStartsWith: false,
-        isEndsWith: true,
-      },
-      expected: '*e m',
-    },
-  ];
+  };
 
-  it.each(testCases)('should remove wildcard from token', function ({input, expected}) {
-    const result = removeWildcardFromToken(
-      input.token as TokenResult<Token.VALUE_TEXT>,
-      input.isContains,
-      input.isStartsWith,
-      input.isEndsWith
+  function runToggle(query: string, value: string) {
+    const token = getFirstFilterToken(query, () => null, {filterKeys});
+
+    const state = {
+      query,
+      committedQuery: query,
+      focusOverride: null,
+      clearAskSeerFeedback: false,
+    };
+    return multiSelectTokenValue(state, {type: 'TOGGLE_FILTER_VALUE', token, value});
+  }
+
+  it('removes a manually-typed wildcard value when toggled off with its escaped form (list)', () => {
+    // User typed `browser.name:[test*,foo]` (wildcard). Suggestion checkbox
+    // dispatches the escaped `test\*` to toggle off.
+    const result = runToggle('browser.name:[test*,foo]', 'test\\*');
+    expect(result.query).toBe('browser.name:foo');
+  });
+
+  it('removes a manually-typed wildcard single value when toggled off with its escaped form', () => {
+    const result = runToggle('browser.name:test*', 'test\\*');
+    expect(result.query).toBe('browser.name:""');
+  });
+
+  it('appends a new value that does not match the existing raw value', () => {
+    const result = runToggle('browser.name:[test*,foo]', 'bar');
+    expect(result.query).toBe('browser.name:[test*,foo,bar]');
+  });
+
+  it('removes an already-escaped list value when toggled off with the same escaped form', () => {
+    const result = runToggle('browser.name:[test\\*,foo]', 'test\\*');
+    expect(result.query).toBe('browser.name:foo');
+  });
+
+  it('removes an existing release value from a list when toggled off', () => {
+    const result = runToggle('release:[1.0.0,2.0.0]', '1.0.0');
+    expect(result.query).toBe('release:2.0.0');
+  });
+
+  it('removes a quoted release value when toggled off with its escaped form', () => {
+    const result = runToggle('release:["1.0.0+build 1",2.0.0]', '"1.0.0+build 1"');
+    expect(result.query).toBe('release:2.0.0');
+  });
+
+  it.each([
+    ['release:["org/repo@1.0.0",2.0.0]', 'org/repo@1.0.0'],
+    ['release:["1.0.0+build 1",2.0.0]', '"1.0.0+build 1"'],
+    ['release:["1.0.0 (build 1)",2.0.0]', '"1.0.0 (build 1)"'],
+    ['release:["1.0.0,build1",2.0.0]', '"1.0.0,build1"'],
+    ['release:[1.0.0\\*,2.0.0]', '1.0.0\\*'],
+  ])('removes special-character value %s', (query, value) => {
+    const result = runToggle(query, value);
+    expect(result.query).toBe('release:2.0.0');
+  });
+
+  it('keeps repeated checkbox clicks from duplicating equivalent quoted values', () => {
+    const firstToggle = runToggle('release:2.0.0', '"1.0.0+build 1"');
+    expect(firstToggle.query).toBe('release:[2.0.0,"1.0.0+build 1"]');
+
+    const secondToggle = runToggle(firstToggle.query, '"1.0.0+build 1"');
+    expect(secondToggle.query).toBe('release:2.0.0');
+
+    const thirdToggle = runToggle(secondToggle.query, '"1.0.0+build 1"');
+    expect(thirdToggle.query).toBe('release:[2.0.0,"1.0.0+build 1"]');
+  });
+});
+
+describe('typed filter keys containing colons', () => {
+  const filterKey = 'imaginary.attribute:made_up_key';
+  const fieldDefinition: FieldDefinition = {
+    kind: FieldKind.FIELD,
+    valueType: FieldValueType.STRING,
+  };
+  const filterKeys = {
+    [filterKey]: {
+      key: filterKey,
+      name: filterKey,
+      kind: FieldKind.TAG,
+    },
+  };
+
+  it('preserves quoted key syntax when updating a value', () => {
+    const query = `"${filterKey}":foo`;
+
+    expect(
+      modifyFilterValue(
+        query,
+        getFirstFilterToken(query, () => fieldDefinition, {filterKeys}),
+        'bar'
+      )
+    ).toBe(`"${filterKey}":bar`);
+  });
+
+  it('preserves quoted key syntax when updating an operator', () => {
+    const query = `"${filterKey}":foo`;
+
+    expect(
+      modifyFilterOperatorQuery(
+        query,
+        getFirstFilterToken(query, () => fieldDefinition, {filterKeys}),
+        TermOperator.NOT_EQUAL
+      )
+    ).toBe(`!"${filterKey}":foo`);
+  });
+
+  it('preserves quoted key syntax when toggling a multi-select value', () => {
+    const query = `"${filterKey}":foo`;
+    const state = {
+      query,
+      committedQuery: query,
+      focusOverride: null,
+      clearAskSeerFeedback: false,
+    };
+
+    expect(
+      multiSelectTokenValue(state, {
+        type: 'TOGGLE_FILTER_VALUE',
+        token: getFirstFilterToken(query, () => fieldDefinition, {filterKeys}),
+        value: 'bar',
+      }).query
+    ).toBe(`"${filterKey}":[foo,bar]`);
+  });
+});
+
+describe('array membership filters', () => {
+  it('negates an array membership filter instead of emitting an operator sentinel', () => {
+    const query = 'csv_headers[*]:foo';
+
+    expect(
+      modifyFilterOperatorQuery(query, getFirstFilterToken(query), TermOperator.NOT_EQUAL)
+    ).toBe('!csv_headers[*]:foo');
+  });
+
+  it('un-negates an array membership filter back to includes', () => {
+    const query = '!csv_headers[*]:foo';
+
+    expect(
+      modifyFilterOperatorQuery(query, getFirstFilterToken(query), TermOperator.DEFAULT)
+    ).toBe('csv_headers[*]:foo');
+  });
+});
+
+describe('syntax-bearing filter keys', () => {
+  it('preserves an aggregate key when updating its value', () => {
+    const query = 'count():>100';
+
+    expect(modifyFilterValue(query, getFirstFilterToken(query), '200')).toBe(
+      'count():>200'
     );
-    expect(result).toBe(expected);
+  });
+
+  it('preserves an aggregate key and arguments when updating its operator', () => {
+    const query = 'count_if(imaginary_field,equals,fictional_value):>100';
+
+    expect(
+      modifyFilterOperatorQuery(query, getFirstFilterToken(query), TermOperator.LESS_THAN)
+    ).toBe('count_if(imaginary_field,equals,fictional_value):<100');
+  });
+
+  it('preserves untyped explicit tag syntax when updating a value', () => {
+    const query = 'tags[imaginary_tag]:fictional_value';
+
+    expect(
+      modifyFilterValue(query, getFirstFilterToken(query), 'alternate_fictional_value')
+    ).toBe('tags[imaginary_tag]:alternate_fictional_value');
+  });
+
+  it('preserves untyped explicit tag syntax when toggling a multi-select value', () => {
+    const query = 'tags[imaginary_tag]:fictional_value';
+    const state = {
+      query,
+      committedQuery: query,
+      focusOverride: null,
+      clearAskSeerFeedback: false,
+    };
+
+    expect(
+      multiSelectTokenValue(state, {
+        type: 'TOGGLE_FILTER_VALUE',
+        token: getFirstFilterToken(query),
+        value: 'alternate_fictional_value',
+      }).query
+    ).toBe('tags[imaginary_tag]:[fictional_value,alternate_fictional_value]');
   });
 });

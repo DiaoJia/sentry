@@ -2,21 +2,24 @@ import {Fragment, useState} from 'react';
 import {css} from '@emotion/react';
 import type {Location} from 'history';
 
+import {Button} from '@sentry/scraps/button';
+import {CodeBlock} from '@sentry/scraps/code';
+
 import {createDashboard} from 'sentry/actionCreators/dashboards';
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import type {Client} from 'sentry/api';
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import {Button} from 'sentry/components/core/button';
 import {IconUpload} from 'sentry/icons';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
-import {browserHistory} from 'sentry/utils/browserHistory';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useNavigate} from 'sentry/utils/useNavigate';
 import {
   assignDefaultLayout,
+  assignTempId,
   getInitialColumnDepths,
 } from 'sentry/views/dashboards/layoutUtils';
+import {enforceLayoutMinHeight} from 'sentry/views/dashboards/utils/enforceLayoutMinHeight';
 import {Wrapper} from 'sentry/views/discover/table/quickContext/styles';
 
 export interface ImportDashboardFromFileModalProps {
@@ -34,6 +37,7 @@ function ImportDashboardFromFileModal({
   api,
   location,
 }: ModalRenderProps & ImportDashboardFromFileModalProps) {
+  const navigate = useNavigate();
   const [dashboardData, setDashboardData] = useState('');
   const [validated, setValidated] = useState(false);
 
@@ -69,15 +73,15 @@ function ImportDashboardFromFileModal({
     const dashboard = JSON.parse(dashboardData);
 
     try {
-      const newDashboard = await createDashboard(
-        api,
-        organization.slug,
-        {
-          ...dashboard,
-          widgets: assignDefaultLayout(dashboard.widgets, getInitialColumnDepths()),
-        },
-        true
-      );
+      const newDashboard = await createDashboard(api, organization.slug, {
+        ...dashboard,
+        widgets: enforceLayoutMinHeight(
+          assignDefaultLayout(
+            dashboard.widgets.map(assignTempId),
+            getInitialColumnDepths()
+          )
+        ),
+      });
 
       addSuccessMessage(`${dashboard.title} dashboard template successfully added`);
       loadDashboard(newDashboard.id);
@@ -87,7 +91,7 @@ function ImportDashboardFromFileModal({
   };
 
   const loadDashboard = (dashboardId: string) => {
-    browserHistory.push(
+    navigate(
       normalizeUrl({
         pathname: `/organizations/${organization.slug}/dashboards/${dashboardId}/`,
         query: location.query,
@@ -108,7 +112,7 @@ function ImportDashboardFromFileModal({
           <Button
             onClick={handleUploadClick}
             disabled={!validated}
-            priority="primary"
+            variant="primary"
             icon={<IconUpload />}
           >
             {t('Import')}
@@ -121,7 +125,7 @@ function ImportDashboardFromFileModal({
           <Wrapper>
             <h4>{t('Preview')}</h4>
           </Wrapper>
-          <CodeSnippet language="json">{dashboardData}</CodeSnippet>
+          <CodeBlock language="json">{dashboardData}</CodeBlock>
         </Fragment>
       )}
     </Fragment>

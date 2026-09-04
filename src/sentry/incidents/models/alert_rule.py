@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import abc
 import logging
 from collections.abc import Callable, Collection, Iterable
 from enum import Enum, IntEnum, StrEnum
@@ -20,13 +19,12 @@ from sentry.db.models import (
     FlexibleForeignKey,
     JSONField,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 from sentry.db.models.manager.base import BaseManager
 from sentry.db.models.manager.base_query_set import BaseQuerySet
-from sentry.incidents.models.incident import Incident, IncidentStatus, IncidentTrigger
 from sentry.models.organization import Organization
 from sentry.models.organizationmember import OrganizationMember
 from sentry.models.project import Project
@@ -36,10 +34,8 @@ from sentry.notifications.models.notificationaction import (
     ActionService,
     ActionTarget,
 )
-from sentry.seer.anomaly_detection.delete_rule import delete_rule_in_seer
 from sentry.snuba.models import QuerySubscription
 from sentry.types.actor import Actor
-from sentry.utils import metrics
 
 if TYPE_CHECKING:
     from sentry.incidents.action_handlers import ActionHandler
@@ -94,7 +90,7 @@ class AlertRuleManager(BaseManager["AlertRule"]):
 
     def fetch_for_organization(
         self, organization: Organization, projects: Collection[Project] | None = None
-    ):
+    ) -> BaseQuerySet[AlertRule]:
         queryset = self.filter(organization=organization)
         if projects is not None:
             queryset = queryset.filter(projects__in=projects).distinct()
@@ -108,7 +104,7 @@ class AlertRuleManager(BaseManager["AlertRule"]):
     def __build_subscription_cache_key(cls, subscription_id: int) -> str:
         return cls.CACHE_SUBSCRIPTION_KEY % subscription_id
 
-    def get_for_subscription(self, subscription: Model) -> AlertRule:
+    def get_for_subscription(self, subscription: QuerySubscription) -> AlertRule:
         """
         Fetches the AlertRule associated with a Subscription. Attempts to fetch from
         cache then hits the database
@@ -122,7 +118,7 @@ class AlertRuleManager(BaseManager["AlertRule"]):
         return alert_rule
 
     @classmethod
-    def clear_subscription_cache(cls, instance, **kwargs: Any) -> None:
+    def clear_subscription_cache(cls, instance: QuerySubscription, **kwargs: Any) -> None:
         cache.delete(cls.__build_subscription_cache_key(instance.id))
         assert cache.get(cls.__build_subscription_cache_key(instance.id)) is None
 
@@ -140,20 +136,8 @@ class AlertRuleManager(BaseManager["AlertRule"]):
                 for sub_id in subscription_ids
             )
 
-    @classmethod
-    def delete_data_in_seer(cls, instance: AlertRule, **kwargs: Any) -> None:
-        if instance.detection_type == AlertRuleDetectionType.DYNAMIC:
-            success = delete_rule_in_seer(alert_rule=instance)
-            if not success:
-                logger.error(
-                    "Call to delete rule data in Seer failed",
-                    extra={
-                        "rule_id": instance.id,
-                    },
-                )
 
-
-@region_silo_model
+@cell_silo_model
 class AlertRuleProjects(Model):
     """
     Specify a project for the AlertRule
@@ -185,7 +169,7 @@ class ComparisonDeltaChoices(models.IntegerChoices):
     ONE_MONTH = (2592000, "1 month ago")
 
 
-@region_silo_model
+@cell_silo_model
 class AlertRule(Model):
     __relocation_scope__ = RelocationScope.Organization
 
@@ -302,7 +286,7 @@ class AlertRuleThresholdType(Enum):
     ABOVE_AND_BELOW = 2
 
 
-@region_silo_model
+@cell_silo_model
 class AlertRuleTrigger(Model):
     """
     This model represents the *threshold* trigger for an AlertRule
@@ -318,9 +302,6 @@ class AlertRuleTrigger(Model):
     threshold_type = models.SmallIntegerField(null=True)
     alert_threshold = models.FloatField()
     resolve_threshold = models.FloatField(null=True)
-    triggered_incidents = models.ManyToManyField(
-        "sentry.Incident", related_name="triggers", through=IncidentTrigger
-    )
     date_added = models.DateTimeField(default=timezone.now)
 
     objects: ClassVar[AlertRuleTriggerManager] = AlertRuleTriggerManager()
@@ -345,12 +326,8 @@ class AlertRuleTriggerActionManager(BaseManager["AlertRuleTriggerAction"]):
         return super().get_queryset().exclude(status=ObjectStatus.PENDING_DELETION)
 
 
-class ActionHandlerFactory(abc.ABC):
-    """A factory for action handlers tied to a specific incident service.
-
-    The factory's builder method is augmented with metadata about which service it is
-    for and which target types that service supports.
-    """
+class ActionHandlerFactory:
+    """Metadata for an incident action service: slug, supported target types, and integration provider."""
 
     def __init__(
         self,
@@ -363,32 +340,6 @@ class ActionHandlerFactory(abc.ABC):
         self.service_type = service_type
         self.supported_target_types = frozenset(supported_target_types)
         self.integration_provider = integration_provider
-
-    @abc.abstractmethod
-    def build_handler(self) -> ActionHandler:
-        raise NotImplementedError
-
-
-class _AlertRuleActionHandlerClassFactory(ActionHandlerFactory):
-    """A factory derived from a concrete ActionHandler class.
-
-    The factory builds a handler simply by instantiating the provided class. The
-    `AlertRuleTriggerAction.register_type` decorator provides the rest of the metadata.
-    """
-
-    def __init__(
-        self,
-        slug: str,
-        service_type: ActionService,
-        supported_target_types: Iterable[ActionTarget],
-        integration_provider: str | None,
-        trigger_action_class: type[ActionHandler],
-    ) -> None:
-        super().__init__(slug, service_type, supported_target_types, integration_provider)
-        self.trigger_action_class = trigger_action_class
-
-    def build_handler(self) -> ActionHandler:
-        return self.trigger_action_class()
 
 
 class _FactoryRegistry:
@@ -406,7 +357,7 @@ class _FactoryRegistry:
         self.by_slug[factory.slug] = factory
 
 
-@region_silo_model
+@cell_silo_model
 class AlertRuleTriggerAction(AbstractNotificationAction):
     """
     This model represents an action that occurs when a trigger (over/under) is fired. This is
@@ -420,8 +371,6 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
     Type = ActionService
     TargetType = ActionTarget
 
-    # As a test utility, TemporaryAlertRuleTriggerActionRegistry has privileged
-    # access to this otherwise private class variable
     _factory_registrations = _FactoryRegistry()
 
     INTEGRATION_TYPES = frozenset(
@@ -438,7 +387,7 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
     EXEMPT_SERVICES = frozenset((Type.SENTRY_NOTIFICATION.value,))
 
     objects: ClassVar[AlertRuleTriggerActionManager] = AlertRuleTriggerActionManager()
-    objects_for_deletion: ClassVar[BaseManager] = BaseManager()
+    objects_for_deletion: ClassVar[BaseManager[Self]] = BaseManager()
 
     alert_rule_trigger = FlexibleForeignKey("sentry.AlertRuleTrigger")
 
@@ -474,7 +423,10 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
 
         elif self.target_type == self.TargetType.TEAM.value:
             try:
-                return Team.objects.get(id=int(self.target_identifier))
+                return Team.objects.get(
+                    id=int(self.target_identifier),
+                    organization_id=self.alert_rule_trigger.alert_rule.organization_id,
+                )
             except Team.DoesNotExist:
                 pass
 
@@ -483,55 +435,6 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
             # ok to contact this email.
             return self.target_identifier
         return None
-
-    @staticmethod
-    def build_handler(type: ActionService) -> ActionHandler | None:
-        factory = AlertRuleTriggerAction._factory_registrations.by_action_service.get(type)
-        if factory is not None:
-            return factory.build_handler()
-        else:
-            metrics.incr(f"alert_rule_trigger.unhandled_type.{type}")
-            return None
-
-    def fire(
-        self,
-        action: AlertRuleTriggerAction,
-        incident: Incident,
-        project: Project,
-        metric_value: int | float | None,
-        new_status: IncidentStatus,
-        notification_uuid: str | None = None,
-    ) -> None:
-        handler = AlertRuleTriggerAction.build_handler(AlertRuleTriggerAction.Type(self.type))
-        if handler:
-            return handler.fire(
-                action=action,
-                incident=incident,
-                project=project,
-                new_status=new_status,
-                metric_value=metric_value,
-                notification_uuid=notification_uuid,
-            )
-
-    def resolve(
-        self,
-        action: AlertRuleTriggerAction,
-        incident: Incident,
-        project: Project,
-        metric_value: int | float | None,
-        new_status: IncidentStatus,
-        notification_uuid: str | None = None,
-    ) -> None:
-        handler = AlertRuleTriggerAction.build_handler(AlertRuleTriggerAction.Type(self.type))
-        if handler:
-            return handler.resolve(
-                action=action,
-                incident=incident,
-                project=project,
-                metric_value=metric_value,
-                new_status=new_status,
-                notification_uuid=notification_uuid,
-            )
 
     def get_single_sentry_app_config(self) -> dict[str, Any] | None:
         value = self.sentry_app_config
@@ -552,7 +455,7 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
         integration_provider: str | None = None,
     ) -> Callable[[type[ActionHandler]], type[ActionHandler]]:
         """
-        Register a factory for the decorated ActionHandler class, for a given service type.
+        Register a metadata factory for the decorated ActionHandler class, for a given service type.
 
         :param slug: A string representing the name of this type registration
         :param service_type: The action service type the decorated handler supports.
@@ -562,12 +465,8 @@ class AlertRuleTriggerAction(AbstractNotificationAction):
         """
 
         def inner(handler: type[ActionHandler]) -> type[ActionHandler]:
-            """
-            :param handler: A subclass of `ActionHandler` that accepts the
-                            `AlertRuleActionHandler` and `Incident`.
-            """
-            factory = _AlertRuleActionHandlerClassFactory(
-                slug, service_type, supported_target_types, integration_provider, handler
+            factory = ActionHandlerFactory(
+                slug, service_type, supported_target_types, integration_provider
             )
             cls.register_factory(factory)
             return handler
@@ -602,7 +501,7 @@ class AlertRuleActivityType(Enum):
     DEACTIVATED = 8
 
 
-@region_silo_model
+@cell_silo_model
 class AlertRuleActivity(Model):
     """
     Provides an audit log of activity for the alert rule
@@ -624,7 +523,6 @@ class AlertRuleActivity(Model):
 
 
 post_delete.connect(AlertRuleManager.clear_subscription_cache, sender=QuerySubscription)
-post_delete.connect(AlertRuleManager.delete_data_in_seer, sender=AlertRule)
 post_save.connect(AlertRuleManager.clear_subscription_cache, sender=QuerySubscription)
 post_save.connect(AlertRuleManager.clear_alert_rule_subscription_caches, sender=AlertRule)
 post_delete.connect(AlertRuleManager.clear_alert_rule_subscription_caches, sender=AlertRule)

@@ -1,161 +1,137 @@
 from datetime import timedelta
 
-from sentry.models.rule import Rule
-from sentry.models.rulefirehistory import RuleFireHistory
 from sentry.rules.history.backends.postgres import PostgresRuleHistoryBackend
 from sentry.rules.history.base import RuleGroupHistory
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.datetime import before_now, freeze_time
 from sentry.testutils.skips import requires_snuba
+from sentry.workflow_engine.models import WorkflowFireHistory
+from tests.sentry.workflow_engine.test_base import BaseWorkflowTest
 
 pytestmark = [requires_snuba]
 
 
 class BasePostgresRuleHistoryBackendTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.backend = PostgresRuleHistoryBackend()
 
 
-class RecordTest(BasePostgresRuleHistoryBackendTest):
-    def test(self):
-        rule = Rule.objects.create(project=self.event.project)
-        self.backend.record(rule, self.group)
-        assert RuleFireHistory.objects.filter(rule=rule, group=self.group).count() == 1
-        self.backend.record(rule, self.group)
-        assert RuleFireHistory.objects.filter(rule=rule, group=self.group).count() == 2
-        group_2 = self.create_group()
-        self.backend.record(rule, group_2)
-        assert RuleFireHistory.objects.filter(rule=rule, group=self.group).count() == 2
-        assert RuleFireHistory.objects.filter(rule=rule, group=group_2).count() == 1
-        assert RuleFireHistory.objects.filter(rule=rule).count() == 3
-
-    def test_returns_new_instance(self) -> None:
-        rule = Rule.objects.create(project=self.event.project)
-        new_instance = self.backend.record(rule, self.group)
-        assert new_instance is not None
-
-
 @freeze_time()
-class FetchRuleGroupsPaginatedTest(BasePostgresRuleHistoryBackendTest):
-    def run_test(self, rule, start, end, expected, cursor=None, per_page=25):
-        result = self.backend.fetch_rule_groups_paginated(rule, start, end, cursor, per_page)
+class FetchRuleGroupsPaginatedTest(BasePostgresRuleHistoryBackendTest, BaseWorkflowTest):
+    def run_test(self, workflow, start, end, expected, cursor=None, per_page=25):
+        result = self.backend.fetch_rule_groups_paginated(workflow, start, end, cursor, per_page)
         assert result.results == expected, (result.results, expected)
         return result
 
-    def test(self):
-        history = []
-        rule = Rule.objects.create(project=self.event.project)
-        for i in range(3):
-            history.append(
-                RuleFireHistory(
-                    project=rule.project,
-                    rule=rule,
-                    group=self.group,
-                    date_added=before_now(days=i + 1),
-                )
-            )
-        group_2 = self.create_group()
-        history.append(
-            RuleFireHistory(
-                project=rule.project, rule=rule, group=group_2, date_added=before_now(days=1)
-            )
+    def _create_workflow(self):
+        workflow_triggers = self.create_data_condition_group()
+        return self.create_workflow(
+            when_condition_group=workflow_triggers,
+            organization=self.organization,
         )
+
+    def test(self) -> None:
+        workflow = self._create_workflow()
+        for i in range(3):
+            wfh = WorkflowFireHistory.objects.create(workflow=workflow, group=self.group)
+            wfh.update(date_added=before_now(days=i + 1))
+        group_2 = self.create_group()
+        wfh = WorkflowFireHistory.objects.create(workflow=workflow, group=group_2)
+        wfh.update(date_added=before_now(days=1))
         group_3 = self.create_group()
         for i in range(2):
-            history.append(
-                RuleFireHistory(
-                    project=rule.project,
-                    rule=rule,
-                    group=group_3,
-                    date_added=before_now(days=i + 1),
-                )
-            )
-        rule_2 = Rule.objects.create(project=self.event.project)
-        history.append(
-            RuleFireHistory(
-                project=rule.project, rule=rule_2, group=self.group, date_added=before_now(days=0)
-            )
-        )
-        RuleFireHistory.objects.bulk_create(history)
+            wfh = WorkflowFireHistory.objects.create(workflow=workflow, group=group_3)
+            wfh.update(date_added=before_now(days=i + 1))
+        workflow_2 = self._create_workflow()
+        wfh = WorkflowFireHistory.objects.create(workflow=workflow_2, group=self.group)
+        wfh.update(date_added=before_now(days=0))
 
         base_triggered_date = before_now(days=1)
 
         self.run_test(
-            rule,
+            workflow,
             before_now(days=6),
             before_now(days=0),
             [
-                RuleGroupHistory(self.group, count=3, last_triggered=base_triggered_date),
-                RuleGroupHistory(group_3, count=2, last_triggered=base_triggered_date),
-                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date),
+                RuleGroupHistory(
+                    self.group, count=3, last_triggered=base_triggered_date, event_id=""
+                ),
+                RuleGroupHistory(group_3, count=2, last_triggered=base_triggered_date, event_id=""),
+                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date, event_id=""),
             ],
         )
         result = self.run_test(
-            rule,
+            workflow,
             before_now(days=6),
             before_now(days=0),
             [
-                RuleGroupHistory(self.group, count=3, last_triggered=base_triggered_date),
+                RuleGroupHistory(
+                    self.group, count=3, last_triggered=base_triggered_date, event_id=""
+                ),
             ],
             per_page=1,
         )
         result = self.run_test(
-            rule,
+            workflow,
             before_now(days=6),
             before_now(days=0),
             [
-                RuleGroupHistory(group_3, count=2, last_triggered=base_triggered_date),
+                RuleGroupHistory(group_3, count=2, last_triggered=base_triggered_date, event_id=""),
             ],
             cursor=result.next,
             per_page=1,
         )
         self.run_test(
-            rule,
+            workflow,
             before_now(days=6),
             before_now(days=0),
             [
-                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date),
+                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date, event_id=""),
             ],
             cursor=result.next,
             per_page=1,
         )
 
         self.run_test(
-            rule,
+            workflow,
             before_now(days=1),
             before_now(days=0),
             [
-                RuleGroupHistory(self.group, count=1, last_triggered=base_triggered_date),
-                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date),
-                RuleGroupHistory(group_3, count=1, last_triggered=base_triggered_date),
+                RuleGroupHistory(
+                    self.group, count=1, last_triggered=base_triggered_date, event_id=""
+                ),
+                RuleGroupHistory(group_2, count=1, last_triggered=base_triggered_date, event_id=""),
+                RuleGroupHistory(group_3, count=1, last_triggered=base_triggered_date, event_id=""),
             ],
         )
 
         self.run_test(
-            rule,
+            workflow,
             before_now(days=3),
             before_now(days=2),
             [
                 RuleGroupHistory(
-                    self.group, count=1, last_triggered=base_triggered_date - timedelta(days=2)
+                    self.group,
+                    count=1,
+                    last_triggered=base_triggered_date - timedelta(days=2),
+                    event_id="",
                 ),
             ],
         )
 
-    def test_event_id(self):
-        rule = Rule.objects.create(project=self.event.project)
+    def test_event_id(self) -> None:
+        workflow = self._create_workflow()
         for i in range(3):
-            RuleFireHistory.objects.create(
-                project=rule.project,
-                rule=rule,
+            wfh = WorkflowFireHistory.objects.create(
+                workflow=workflow,
                 group=self.group,
-                date_added=before_now(days=i + 1),
-                event_id=i,
+                event_id=str(i),
             )
+            wfh.update(date_added=before_now(days=i + 1))
 
         base_triggered_date = before_now(days=1)
         self.run_test(
-            rule,
+            workflow,
             before_now(days=3),
             before_now(days=0),
             [
@@ -167,15 +143,14 @@ class FetchRuleGroupsPaginatedTest(BasePostgresRuleHistoryBackendTest):
 
         group_2 = self.create_group()
         for i in range(3):
-            RuleFireHistory.objects.create(
-                project=rule.project,
-                rule=rule,
+            wfh = WorkflowFireHistory.objects.create(
+                workflow=workflow,
                 group=group_2,
-                date_added=before_now(days=i + 4),
-                event_id=i + 3,
+                event_id=str(i + 3),
             )
+            wfh.update(date_added=before_now(days=i + 4))
         self.run_test(
-            rule,
+            workflow,
             before_now(days=5),
             before_now(days=2),
             [
@@ -196,39 +171,39 @@ class FetchRuleGroupsPaginatedTest(BasePostgresRuleHistoryBackendTest):
 
 
 @freeze_time()
-class FetchRuleHourlyStatsPaginatedTest(BasePostgresRuleHistoryBackendTest):
-    def test(self):
-        rule = Rule.objects.create(project=self.event.project)
-        rule_2 = Rule.objects.create(project=self.event.project)
-        history = []
+class FetchRuleHourlyStatsPaginatedTest(BasePostgresRuleHistoryBackendTest, BaseWorkflowTest):
+    def _create_workflow(self):
+        workflow_triggers = self.create_data_condition_group()
+        return self.create_workflow(
+            when_condition_group=workflow_triggers,
+            organization=self.organization,
+        )
+
+    def test(self) -> None:
+        workflow = self._create_workflow()
+        workflow_2 = self._create_workflow()
 
         for i in range(3):
             for _ in range(i + 1):
-                history.append(
-                    RuleFireHistory(
-                        project=rule.project,
-                        rule=rule,
-                        group=self.group,
-                        date_added=before_now(hours=i + 1),
-                    )
+                wfh = WorkflowFireHistory.objects.create(
+                    workflow=workflow,
+                    group=self.group,
                 )
+                wfh.update(date_added=before_now(hours=i + 1))
 
         for i in range(2):
-            history.append(
-                RuleFireHistory(
-                    project=rule_2.project,
-                    rule=rule_2,
-                    group=self.group,
-                    date_added=before_now(hours=i + 1),
-                )
+            wfh = WorkflowFireHistory.objects.create(
+                workflow=workflow_2,
+                group=self.group,
             )
+            wfh.update(date_added=before_now(hours=i + 1))
 
-        RuleFireHistory.objects.bulk_create(history)
-
-        results = self.backend.fetch_rule_hourly_stats(rule, before_now(hours=24), before_now())
+        results = self.backend.fetch_rule_hourly_stats(workflow, before_now(hours=24), before_now())
         assert len(results) == 24
         assert [r.count for r in results[-5:]] == [0, 3, 2, 1, 0]
 
-        results = self.backend.fetch_rule_hourly_stats(rule_2, before_now(hours=24), before_now())
+        results = self.backend.fetch_rule_hourly_stats(
+            workflow_2, before_now(hours=24), before_now()
+        )
         assert len(results) == 24
         assert [r.count for r in results[-5:]] == [0, 0, 1, 1, 0]

@@ -16,7 +16,7 @@ export function GitHubIntegrationFixture(
       aspects: {
         alerts: [
           {
-            type: 'warning',
+            variant: 'warning',
             text: 'This is a an alert example',
           },
         ],
@@ -24,6 +24,7 @@ export function GitHubIntegrationFixture(
       canDisable: false,
       slug: '',
     },
+    scopes: null,
     externalIssues: [],
     accountType: '',
     gracePeriodEnd: '',

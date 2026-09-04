@@ -1,4 +1,4 @@
-import MarkLine from 'sentry/components/charts/components/markLine';
+import {markLine} from 'sentry/components/charts/components/markLine';
 import {t} from 'sentry/locale';
 import type {Theme} from 'sentry/utils/theme';
 
@@ -8,8 +8,8 @@ interface Props {
   label?: string;
 }
 
-export function BaselineMarkLine({theme, value, label}: Props) {
-  return MarkLine({
+export function createBaselineMarkLine({theme, value, label}: Props) {
+  return markLine({
     data: [
       {
         valueDim: 'y',
@@ -18,14 +18,14 @@ export function BaselineMarkLine({theme, value, label}: Props) {
       },
     ],
     lineStyle: {
-      color: theme.gray400,
+      color: theme.colors.gray500,
     },
     emphasis: {disabled: true},
     label: {
       position: 'insideEndBottom',
       formatter: () => label ?? t('Baseline'),
       fontSize: 14,
-      color: theme.tokens.content.muted,
+      color: theme.tokens.content.secondary,
       backgroundColor: theme.tokens.background.primary,
     },
   });

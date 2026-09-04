@@ -4,7 +4,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import ProjectEndpoint
 from sentry.api.bases.project import ProjectAlertRulePermission
 from sentry.api.serializers import serialize
@@ -16,11 +16,11 @@ from sentry.apidocs.constants import (
 )
 from sentry.apidocs.parameters import GlobalParams
 from sentry.models.project import Project
-from sentry.uptime.endpoints.serializers import ProjectUptimeSubscriptionSerializer
+from sentry.uptime.endpoints.serializers import UptimeDetectorSerializer
 from sentry.uptime.endpoints.validators import UptimeMonitorValidator
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Uptime Monitors"])
 class ProjectUptimeAlertIndexEndpoint(ProjectEndpoint):
     publish_status = {
@@ -34,7 +34,7 @@ class ProjectUptimeAlertIndexEndpoint(ProjectEndpoint):
         parameters=[GlobalParams.ORG_ID_OR_SLUG],
         request=UptimeMonitorValidator,
         responses={
-            201: ProjectUptimeSubscriptionSerializer,
+            201: UptimeDetectorSerializer,
             400: RESPONSE_BAD_REQUEST,
             401: RESPONSE_UNAUTHORIZED,
             403: RESPONSE_FORBIDDEN,
@@ -57,4 +57,6 @@ class ProjectUptimeAlertIndexEndpoint(ProjectEndpoint):
         if not validator.is_valid():
             return self.respond(validator.errors, status=400)
 
-        return self.respond(serialize(validator.save(), request.user))
+        return self.respond(
+            serialize(validator.save(), request.user, serializer=UptimeDetectorSerializer())
+        )

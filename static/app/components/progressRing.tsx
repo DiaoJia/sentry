@@ -1,10 +1,7 @@
-import {useMemo} from 'react';
 import type {SerializedStyles, Theme} from '@emotion/react';
-import {useTheme} from '@emotion/react';
+import {useTheme, css} from '@emotion/react';
 import styled from '@emotion/styled';
 import {AnimatePresence, motion} from 'framer-motion';
-
-import testableTransition from 'sentry/utils/testableTransition';
 
 type TextProps = {
   percent: number;
@@ -27,7 +24,6 @@ type Props = React.HTMLAttributes<SVGSVGElement> & {
    */
   barWidth?: number;
   maxValue?: number;
-  minValue?: number;
   /**
    * The color of the ring bar. A function may be provided to compute the color
    * based on the percent value filled of the progress bar.
@@ -56,8 +52,8 @@ const Text = styled('div')<Omit<TextProps, 'theme'>>`
   justify-content: center;
   height: 100%;
   width: 100%;
-  color: ${p => p.theme.chartLabel};
-  font-size: ${p => p.theme.fontSize.xs};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.xs};
   transition: color 100ms;
   ${p => p.textCss?.(p)}
 `;
@@ -68,12 +64,10 @@ const animatedTextDefaultProps = {
   initial: {opacity: 0, y: -10},
   animate: {opacity: 1, y: 0},
   exit: {opacity: 0, y: 10},
-  transition: testableTransition(),
 };
 
-function ProgressRing({
+export function ProgressRing({
   value,
-  minValue = 0,
   maxValue = 100,
   size = 20,
   barWidth = 3,
@@ -84,13 +78,13 @@ function ProgressRing({
   ...p
 }: Props) {
   const theme = useTheme();
-  const progressColor = p.progressColor ?? theme.green300;
-  const backgroundColor = p.backgroundColor ?? theme.gray200;
+  const progressColor = p.progressColor ?? theme.colors.green400;
+  const backgroundColor = p.backgroundColor ?? theme.colors.gray200;
   const radius = size / 2 - barWidth / 2;
   const circumference = 2 * Math.PI * radius;
 
-  const boundedValue = Math.min(Math.max(value, minValue), maxValue);
-  const progress = (boundedValue - minValue) / (maxValue - minValue);
+  const boundedValue = Math.min(Math.max(value, 0), maxValue);
+  const progress = boundedValue / maxValue;
   const percent = progress * 100;
   const progressOffset = (1 - progress) * circumference;
 
@@ -112,19 +106,6 @@ function ProgressRing({
     textNode
   );
 
-  const ringCommonProps = useMemo(() => {
-    return {
-      strokeDashoffset: progressOffset,
-      strokeLinecap: progressEndcaps,
-      circumference,
-      r: radius,
-      barWidth,
-      cx: radius + barWidth / 2,
-      cy: radius + barWidth / 2,
-      color: progressColor,
-    };
-  }, [progressOffset, progressEndcaps, circumference, radius, barWidth, progressColor]);
-
   return (
     <RingSvg
       role="img"
@@ -139,16 +120,17 @@ function ProgressRing({
         cy={radius + barWidth / 2}
         color={backgroundColor}
       />
-      {animate ? (
-        <MotionRingBar
-          {...ringCommonProps}
-          initial={{strokeDashoffset: circumference}}
-          animate={{strokeDashoffset: progressOffset}}
-          transition={{duration: 1.5, ease: 'easeInOut'}}
-        />
-      ) : (
-        <RingBar {...ringCommonProps} />
-      )}
+      <RingBar
+        strokeDashoffset={progressOffset}
+        strokeLinecap={progressEndcaps}
+        circumference={circumference}
+        r={radius}
+        barWidth={barWidth}
+        cx={radius + barWidth / 2}
+        cy={radius + barWidth / 2}
+        color={progressColor}
+        animate={animate}
+      />
       <foreignObject height="100%" width="100%">
         {text !== undefined && textNode}
       </foreignObject>
@@ -171,6 +153,7 @@ const RingBar = styled('circle')<{
   barWidth: number;
   circumference: number;
   color: string;
+  animate?: boolean;
 }>`
   fill: none;
   stroke: ${p => p.color};
@@ -178,14 +161,11 @@ const RingBar = styled('circle')<{
   stroke-dasharray: ${p => p.circumference} ${p => p.circumference};
   transform: rotate(-90deg);
   transform-origin: 50% 50%;
-  transition:
-    stroke-dashoffset 200ms,
-    stroke 100ms;
+  ${p =>
+    p.animate &&
+    css`
+      transition:
+        stroke-dashoffset 200ms,
+        stroke 100ms;
+    `}
 `;
-
-const MotionRingBar = motion.create(RingBar);
-
-export default ProgressRing;
-
-// We export components to allow for css selectors
-export {RingBackground, RingBar, Text as RingText};

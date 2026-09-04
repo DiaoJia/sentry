@@ -23,15 +23,21 @@ class ActivationResult:
     type: str
 
 
+class ActivationRateLimited(Exception):
+    pass
+
+
 class ActivationMessageResult(ActivationResult):
     def __init__(
         self,
         message: str | _StrPromise,
         type: Literal["error", "warning", "info"] = "info",
+        expires_in: int | None = None,
     ) -> None:
         assert type in ("error", "warning", "info")
         self.type = type
         self.message = message
+        self.expires_in = expires_in
 
     def __str__(self) -> str:
         return str(self.message)
@@ -59,18 +65,18 @@ class NewEnrollmentDisallowed(Exception):
 
 
 class AuthenticatorInterface:
-    type = -1
+    type: int = -1
     interface_id: str
     name: str | _StrPromise
     description: str | _StrPromise
     rotation_warning: str | _StrPromise | None = None
-    is_backup_interface = False
-    enroll_button = _("Enroll")
-    configure_button = _("Info")
+    is_backup_interface: bool = False
+    enroll_button: str | _StrPromise = _("Enroll")
+    configure_button: str | _StrPromise = _("Info")
     remove_button: str | _StrPromise | None = _("Remove 2FA method")
-    is_available = True
-    allow_multi_enrollment = False
-    allow_rotation_in_place = False
+    is_available: bool = True
+    allow_multi_enrollment: bool = False
+    allow_rotation_in_place: bool = False
     authenticator: Authenticator | None
     status: EnrollmentStatus
     _unbound_config: dict[Any, Any]
@@ -190,7 +196,9 @@ class AuthenticatorInterface:
         """
         return False
 
-    def validate_response(self, request: Request, challenge, response) -> bool:
+    def validate_response(
+        self, request: Request, challenge: bytes | None, response: dict[str, Any]
+    ) -> bool:
         """If the activation generates a challenge that needs to be
         responded to this validates the response for that challenge.  This
         is only ever called for challenges emitted by the activation of this

@@ -3,47 +3,64 @@ import styled from '@emotion/styled';
 import upperFirst from 'lodash/upperFirst';
 import moment from 'moment-timezone';
 
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import ExternalLink from 'sentry/components/links/externalLink';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {InfoText} from '@sentry/scraps/info';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {ConfigStore} from 'sentry/stores/configStore';
 import {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import {defined} from 'sentry/utils';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {getLocalities} from 'sentry/utils/cells';
+import {defined} from 'sentry/utils/defined';
+import {useApiQuery} from 'sentry/utils/queryClient';
 import {toTitleCase} from 'sentry/utils/string/toTitleCase';
 
-import ChangeARRAction from 'admin/components/changeARRAction';
-import ChangeContractEndDateAction from 'admin/components/changeContractEndDateAction';
-import CustomerContact from 'admin/components/customerContact';
-import CustomerStatus from 'admin/components/customerStatus';
-import DetailLabel from 'admin/components/detailLabel';
-import DetailList from 'admin/components/detailList';
-import DetailsContainer from 'admin/components/detailsContainer';
+import {openAdminConfirmModal} from 'admin/components/adminConfirmationModal';
+import {ChangeARRAction} from 'admin/components/changeARRAction';
+import {ChangeContractEndDateAction} from 'admin/components/changeContractEndDateAction';
+import {CustomerContact} from 'admin/components/customerContact';
+import {CustomerStatus} from 'admin/components/customerStatus';
+import {DetailLabel} from 'admin/components/detailLabel';
+import {DetailList} from 'admin/components/detailList';
+import {DetailsContainer} from 'admin/components/detailsContainer';
+import {ExtendProductTrialAction} from 'admin/components/extendProductTrialAction';
 import {getLogQuery} from 'admin/utils';
 import {BILLED_DATA_CATEGORY_INFO, UNLIMITED} from 'getsentry/constants';
 import type {
+  AddOn,
   Plan,
   ReservedBudget,
   ReservedBudgetMetricHistory,
   Subscription,
 } from 'getsentry/types';
-import {BillingType, OnDemandBudgetMode} from 'getsentry/types';
 import {
+  AddOnCategory,
+  BillingType,
+  OnDemandBudgetMode,
+  ReservedBudgetCategoryType,
+} from 'getsentry/types';
+import {
+  displayBudgetName,
   formatBalance,
   formatReservedWithUnits,
   getActiveProductTrial,
+  getBilledCategory,
   getProductTrial,
+  isTrial,
+  normalizeMetricHistory,
+  RETENTION_SETTINGS_CATEGORIES,
 } from 'getsentry/utils/billing';
 import {
   getPlanCategoryName,
   getReservedBudgetDisplayName,
   sortCategories,
 } from 'getsentry/utils/dataCategory';
-import formatCurrency from 'getsentry/utils/formatCurrency';
+import {formatCurrency} from 'getsentry/utils/formatCurrency';
 import {getCountryByCode} from 'getsentry/utils/ISO3166codes';
-import titleCase from 'getsentry/utils/titleCase';
+import {titleCase} from 'getsentry/utils/titleCase';
 import {displayPriceWithCents} from 'getsentry/views/amCheckout/utils';
 
 type SubscriptionSummaryProps = {
@@ -74,10 +91,9 @@ function SoftCapTypeDetail({
               {`${getPlanCategoryName({
                 plan,
                 category: categoryHistory.category,
-                capitalize: true,
                 hadCustomDynamicSampling: shouldUseDsNames,
               })}: `}
-              {`${softCapName}`}
+              {softCapName}
             </small>
             <br />
           </Fragment>
@@ -85,7 +101,7 @@ function SoftCapTypeDetail({
       }
       return null;
     })
-    .filter(i => i);
+    .filter(Boolean);
   return <Fragment>{softCapTypes.length ? softCapTypes : <span>None</span>}</Fragment>;
 }
 
@@ -112,34 +128,27 @@ function SubscriptionSummary({customer, onAction}: SubscriptionSummaryProps) {
           <br />
           <small>{customer.billingInterval}</small>
         </DetailLabel>
-        {customer.contractPeriodStart && (
+        {customer.billingPeriodStart && (
           <DetailLabel title="Contract Period">
-            {`${moment(customer.contractPeriodStart).format('ll')} › `}
-            {(customer.contractInterval === 'annual' &&
+            {`${moment(customer.billingPeriodStart).format('ll')} › `}
+            {(customer.billingInterval === 'annual' &&
               customer.type === BillingType.INVOICED && (
                 <ChangeContractEndDateAction
-                  contractPeriodEnd={customer.contractPeriodEnd}
+                  contractPeriodEnd={customer.billingPeriodEnd}
                   onAction={onAction}
                 />
               )) ||
-              `${moment(customer.contractPeriodEnd).format('ll')}`}
+              moment(customer.billingPeriodEnd).format('ll')}
 
             <br />
-            <small>{customer.contractInterval}</small>
+            <small>{customer.billingInterval}</small>
           </DetailLabel>
         )}
+        {/* TODO(billing): Should we start calling On-Demand periods "Pay-as-you-go" periods? */}
         <DetailLabel title="On-Demand">
           <OnDemandSummary customer={customer} />
         </DetailLabel>
         <DetailLabel title="Can Trial" yesNo={customer.canTrial} />
-        <DetailLabel title="Can Grace Period" yesNo={customer.canGracePeriod} />
-        <DetailLabel title="Legacy Soft Cap" yesNo={customer.hasSoftCap} />
-        {customer.hasSoftCap && (
-          <DetailLabel
-            title="Overage Notifications Disabled"
-            yesNo={customer.hasOverageNotificationsDisabled}
-          />
-        )}
         <DetailLabel title="Soft Cap By Category">
           <SoftCapTypeDetail
             categories={customer.categories}
@@ -211,7 +220,9 @@ function ReservedData({customer}: ReservedDataProps) {
                   : 'None'}
               </DetailLabel>
               {customer.onDemandInvoicedManual && (
-                <DetailLabel title={`Pay-as-you-go Cost-Per-Event ${categoryName}`}>
+                <DetailLabel
+                  title={`${displayBudgetName(customer.planDetails, {title: true})} Cost-Per-Event ${categoryName}`}
+                >
                   {typeof categoryHistory.paygCpe === 'number'
                     ? displayPriceWithCents({
                         cents: categoryHistory.paygCpe,
@@ -237,12 +248,12 @@ function ReservedData({customer}: ReservedDataProps) {
 }
 
 function ReservedBudgetsData({customer}: ReservedDataProps) {
-  if (!customer.hasReservedBudgets || !customer.reservedBudgets) {
+  if (!customer.reservedBudgets) {
     return null;
   }
 
   return (
-    <Fragment>
+    <div data-test-id="reserved-budgets-data">
       {customer.reservedBudgets.map(reservedBudget => {
         return (
           <Fragment key={reservedBudget.id}>
@@ -250,7 +261,7 @@ function ReservedBudgetsData({customer}: ReservedDataProps) {
           </Fragment>
         );
       })}
-    </Fragment>
+    </div>
   );
 }
 
@@ -290,6 +301,115 @@ function ReservedBudgetData({
   );
 }
 
+function seerAddOnStatus(
+  addOn: AddOn | undefined,
+  onTrial: boolean
+): {active: boolean; label: string; variant: 'success' | 'warning' | 'muted'} | null {
+  if (!addOn) {
+    return null;
+  }
+  if (addOn.enabled) {
+    return {label: 'Enabled', variant: 'success', active: true};
+  }
+  if (onTrial) {
+    return {label: 'Trial', variant: 'warning', active: true};
+  }
+  return {
+    label: addOn.isAvailable ? 'Available' : 'Unavailable',
+    variant: 'muted',
+    active: false,
+  };
+}
+
+function SeerPlanSummary({customer}: {customer: Subscription}) {
+  const seerAddOn = customer.addOns?.[AddOnCategory.SEER];
+  const legacySeerAddOn = customer.addOns?.[AddOnCategory.LEGACY_SEER];
+  const trials = customer.productTrials ?? null;
+
+  const onSeatTrial = !!getActiveProductTrial(trials, DataCategory.SEER_USER);
+  const onLegacyTrial = !!getActiveProductTrial(trials, DataCategory.SEER_AUTOFIX);
+  const seatStatus = seerAddOnStatus(seerAddOn, onSeatTrial);
+  const legacyStatus = seerAddOnStatus(legacySeerAddOn, onLegacyTrial);
+
+  const seerUsers = normalizeMetricHistory(
+    DataCategory.SEER_USER,
+    customer.categories?.[DataCategory.SEER_USER]
+  );
+  const legacyBudget = customer.reservedBudgets?.find(
+    budget => budget.apiName === ReservedBudgetCategoryType.SEER
+  );
+
+  return (
+    <div data-test-id="seer-plan-summary">
+      <h6>Seer</h6>
+      <DetailList>
+        {!seatStatus && !legacyStatus && (
+          <DetailLabel title="Plan">
+            <Tag variant="muted">
+              {customer.planDetails?.name
+                ? `Not available on the ${customer.planDetails.name} plan`
+                : 'Not available on this plan'}
+            </Tag>
+          </DetailLabel>
+        )}
+        {seatStatus && (
+          <Fragment>
+            <DetailLabel title="Seat-based">
+              <Tag variant={seatStatus.variant}>{seatStatus.label}</Tag>
+            </DetailLabel>
+            {seatStatus.active && (
+              <Fragment>
+                <DetailLabel title="Reserved Seats">
+                  {formatReservedWithUnits(seerUsers.reserved, DataCategory.SEER_USER)}
+                </DetailLabel>
+                <DetailLabel title="Active Contributors (billed this period)">
+                  {seerUsers.usage.toLocaleString()}
+                </DetailLabel>
+                <DetailLabel title="Gifted Seats">
+                  {formatReservedWithUnits(seerUsers.free, DataCategory.SEER_USER, {
+                    isGifted: true,
+                  })}
+                </DetailLabel>
+                {typeof seerUsers.customPrice === 'number' && (
+                  <DetailLabel title="Custom Price">
+                    {displayPriceWithCents({cents: seerUsers.customPrice})}
+                  </DetailLabel>
+                )}
+              </Fragment>
+            )}
+          </Fragment>
+        )}
+        {legacyStatus && (
+          <Fragment>
+            <DetailLabel title="Legacy (budget)">
+              <Tag variant={legacyStatus.variant}>{legacyStatus.label}</Tag>
+            </DetailLabel>
+            {legacyStatus.active &&
+              (legacyBudget ? (
+                <Fragment>
+                  <DetailLabel title="Reserved Budget">
+                    {displayPriceWithCents({cents: legacyBudget.reservedBudget})}
+                  </DetailLabel>
+                  <DetailLabel title="Budget Used">
+                    {displayPriceWithCents({cents: legacyBudget.totalReservedSpend})} /{' '}
+                    {displayPriceWithCents({
+                      cents: legacyBudget.reservedBudget + legacyBudget.freeBudget,
+                    })}{' '}
+                    ({(legacyBudget.percentUsed * 100).toFixed(2)}%)
+                  </DetailLabel>
+                </Fragment>
+              ) : legacySeerAddOn?.enabled ? (
+                <DetailLabel title="Budget">
+                  <Tag variant="danger">Enabled but no budget data found</Tag>
+                </DetailLabel>
+              ) : null)}
+          </Fragment>
+        )}
+      </DetailList>
+    </div>
+  );
+}
+
 type OnDemandSummaryProps = {
   customer: Subscription;
 };
@@ -305,10 +425,7 @@ function OnDemandSummary({customer}: OnDemandSummaryProps) {
   ) {
     const {onDemandBudgets} = customer;
 
-    if (
-      onDemandBudgets &&
-      onDemandBudgets.budgetMode === OnDemandBudgetMode.PER_CATEGORY
-    ) {
+    if (onDemandBudgets?.budgetMode === OnDemandBudgetMode.PER_CATEGORY) {
       return (
         <Fragment>
           {onDemandPeriod}
@@ -393,63 +510,163 @@ function isWithinAcceptedMargin(
   return difference >= 0 && difference <= desiredSampleRate * 0.1;
 }
 
-function DynamicSampling({organization}: {organization: Organization}) {
-  if (organization.features?.includes('dynamic-sampling')) {
-    const effectiveSampleRate = organization.effectiveSampleRate
-      ? organization.effectiveSampleRate * 100
-      : null;
-    const desiredSampleRate = organization.desiredSampleRate
-      ? organization.desiredSampleRate * 100
-      : null;
-    const diffSampleRate =
-      effectiveSampleRate && desiredSampleRate
-        ? Math.abs(effectiveSampleRate - desiredSampleRate)
-        : null;
+const formatRate = (rate: number) => `${rate.toFixed(2)}%`;
 
+type SampleRateRowProps = {
+  desiredSampleRate: number | null;
+  label: string;
+  rate: number | null;
+};
+
+function SampleRateRow({label, rate, desiredSampleRate}: SampleRateRowProps) {
+  if (!defined(rate)) {
     return (
-      <ThresholdLabel
-        positive={
-          effectiveSampleRate && desiredSampleRate
-            ? isWithinAcceptedMargin(effectiveSampleRate, desiredSampleRate)
-            : false
-        }
-      >
-        {effectiveSampleRate && desiredSampleRate
-          ? `${effectiveSampleRate.toFixed(2)}% instead of ${desiredSampleRate.toFixed(2)}% (~${diffSampleRate?.toFixed(2)}%)`
-          : desiredSampleRate
-            ? `${desiredSampleRate.toFixed(2)}%`
-            : 'n/a'}
+      <ThresholdLabel label={label} positive={false}>
+        n/a
       </ThresholdLabel>
     );
   }
-  return <ThresholdLabel positive={false}>Disabled</ThresholdLabel>;
+
+  const effectiveSampleRate = rate * 100;
+
+  const getSampleRateValue = (): string => {
+    if (effectiveSampleRate && desiredSampleRate) {
+      // When rates match, show just the rate instead of "X% instead of X% (~0%)"
+      if (formatRate(effectiveSampleRate) === formatRate(desiredSampleRate)) {
+        return formatRate(effectiveSampleRate);
+      }
+      const diffSampleRate = Math.abs(effectiveSampleRate - desiredSampleRate);
+      return `${formatRate(effectiveSampleRate)} instead of ${formatRate(desiredSampleRate)} (~${formatRate(diffSampleRate)})`;
+    }
+    if (desiredSampleRate) {
+      return formatRate(desiredSampleRate);
+    }
+    return 'n/a';
+  };
+
+  return (
+    <ThresholdLabel
+      label={label}
+      positive={
+        effectiveSampleRate && desiredSampleRate
+          ? isWithinAcceptedMargin(effectiveSampleRate, desiredSampleRate)
+          : false
+      }
+    >
+      {getSampleRateValue()}
+    </ThresholdLabel>
+  );
 }
 
-function CustomerOverview({customer, onAction, organization}: Props) {
+const SAMPLE_RATE_SOURCES = [
+  {key: 'effectiveSampleRate', label: 'Sample Rate (24h, Generic Metrics)'},
+  {key: 'eapEffectiveSampleRate', label: 'Sample Rate (24h, EAP)'},
+] as const;
+
+// Every state renders one row per source, so the label column keeps its width
+// when the request resolves.
+function SampleRateStatusRows({children}: {children: React.ReactNode}) {
+  return (
+    <Fragment>
+      {SAMPLE_RATE_SOURCES.map(({key, label}) => (
+        <ThresholdLabel key={key} label={label} positive={false}>
+          {children}
+        </ThresholdLabel>
+      ))}
+    </Fragment>
+  );
+}
+
+function DynamicSampling({organization}: {organization: Organization}) {
+  const dynamicSamplingEnabled = organization.features?.includes('dynamic-sampling');
+
+  const {data, isPending, isError} = useApiQuery<{
+    eapEffectiveSampleRate: number | null;
+    effectiveSampleRate: number | null;
+  }>(
+    [
+      getApiUrl('/organizations/$organizationIdOrSlug/sampling/effective-sample-rate/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
+    ],
+    {
+      staleTime: Infinity,
+      enabled: dynamicSamplingEnabled,
+    }
+  );
+
+  if (!dynamicSamplingEnabled) {
+    return <SampleRateStatusRows>Disabled</SampleRateStatusRows>;
+  }
+  if (isError) {
+    return <SampleRateStatusRows>Error loading data</SampleRateStatusRows>;
+  }
+  if (isPending) {
+    return <SampleRateStatusRows>Loading...</SampleRateStatusRows>;
+  }
+
+  const desiredSampleRate = organization.desiredSampleRate
+    ? organization.desiredSampleRate * 100
+    : null;
+
+  return (
+    <Fragment>
+      {SAMPLE_RATE_SOURCES.map(({key, label}) => (
+        <SampleRateRow
+          key={key}
+          label={label}
+          rate={data[key]}
+          desiredSampleRate={desiredSampleRate}
+        />
+      ))}
+    </Fragment>
+  );
+}
+
+export function CustomerOverview({customer, onAction, organization}: Props) {
   let orgUrl = `/organizations/${organization.slug}/issues/`;
   const configFeatures = ConfigStore.get('features');
   if (configFeatures.has('system:multi-region')) {
     orgUrl = `${organization.links.organizationUrl}/issues/`;
   }
 
-  const regionMap = ConfigStore.get('regions').reduce(
-    (acc, region) => {
-      acc[region.url] = region.name;
-      return acc;
-    },
-    {} as Record<string, string>
-  );
-  const region = regionMap[organization.links.regionUrl] ?? '??';
+  const localityMap = getLocalities().reduce<Record<string, string>>((acc, locality) => {
+    acc[locality.url] = locality.name;
+    return acc;
+  }, {});
+  // TODO(cells) We also should show the customer's cell.
+  const locality = localityMap[organization.links.regionUrl] ?? '??';
 
   const productTrialCategories = Object.values(BILLED_DATA_CATEGORY_INFO).filter(
-    categoryInfo =>
-      categoryInfo.canProductTrial &&
-      customer.planDetails?.categories.includes(categoryInfo.plural)
+    categoryInfo => {
+      // Category must be in the plan's categories
+      if (!customer.planDetails?.categories.includes(categoryInfo.plural)) {
+        return false;
+      }
+      // Include if regular product trial is enabled
+      if (categoryInfo.canProductTrial) {
+        return true;
+      }
+      // Include admin-only product trials if graduated (true) or feature flag is enabled
+      if (categoryInfo.adminOnlyProductTrialFeature === true) {
+        // Graduated flag - always include without feature flag check
+        return true;
+      }
+      if (
+        typeof categoryInfo.adminOnlyProductTrialFeature === 'string' &&
+        organization.features?.includes(categoryInfo.adminOnlyProductTrialFeature)
+      ) {
+        return true;
+      }
+      return false;
+    }
   );
 
-  const productTrialCategoryGroups = Object.values(
-    customer.planDetails?.availableReservedBudgetTypes || {}
-  ).filter(group => group.canProductTrial);
+  const productTrialAddOns = Object.values(customer.addOns || {}).filter(
+    // TODO(billing): Right now all our add-ons can use product trials, but in future we should distinguish this
+    // like we do for other product types
+    addOn => addOn.isAvailable
+  );
 
   const categoryHasUsedProductTrial = (category: DataCategory) => {
     const trial = getProductTrial(customer.productTrials ?? [], category);
@@ -468,7 +685,8 @@ function CustomerOverview({customer, onAction, organization}: Props) {
   const getTrialManagementActions = (
     category: DataCategory,
     apiName: string,
-    trialName: string
+    trialName: string,
+    isAdminOnly = false
   ) => {
     const formattedApiName = upperFirst(apiName);
     const formattedTrialName = toTitleCase(trialName, {allowInnerUpperCase: true});
@@ -483,11 +701,31 @@ function CustomerOverview({customer, onAction, organization}: Props) {
       moment(activeProductTrial?.endDate).add(1, 'day').diff(moment(), 'days') < 1;
     const hasUsedProductTrial =
       hasActiveProductTrial || categoryHasUsedProductTrial(category);
+
+    const handleExtendTrial = () => {
+      if (!activeProductTrial) {
+        return;
+      }
+      openAdminConfirmModal({
+        header: <h4>Extend {formattedTrialName} Trial</h4>,
+        confirmText: 'Extend Trial',
+        renderModalSpecificContent: deps => (
+          <ExtendProductTrialAction
+            activeProductTrial={activeProductTrial}
+            apiName={apiName}
+            trialName={formattedTrialName}
+            {...deps}
+          />
+        ),
+        onConfirm: onAction,
+      });
+    };
+
     return (
       <DetailLabel key={apiName} title={formattedTrialName}>
-        <TrialState>
+        <Stack gap="md">
           <StyledTag
-            type={
+            variant={
               lessThanOneDayLeft
                 ? 'promotion'
                 : hasActiveProductTrial
@@ -498,23 +736,25 @@ function CustomerOverview({customer, onAction, organization}: Props) {
             }
           >
             {hasActiveProductTrial
-              ? `Active${lessThanOneDayLeft ? ` (${moment(activeProductTrial.endDate).add(1, 'day').fromNow(true)} left)` : ''}`
+              ? `Active (until ${moment.utc(activeProductTrial.endDate).format('MMM D, YYYY')} UTC)`
               : hasUsedProductTrial
                 ? 'Used'
                 : 'Available'}
           </StyledTag>
-          <TrialActions>
+          <Flex align="center" wrap="wrap" gap="md">
             <Button
               size="xs"
               onClick={() => updateCustomerStatus(`allowTrial${formattedApiName}`)}
               disabled={!hasUsedProductTrial || hasActiveProductTrial}
-              title={
-                hasActiveProductTrial
+              tooltipProps={{
+                title: hasActiveProductTrial
                   ? `A product trial is currently active for ${formattedTrialName}`
                   : hasUsedProductTrial
-                    ? `Allow customer to start a new trial for ${formattedTrialName}`
-                    : `A product trial is already available for ${formattedTrialName}`
-              }
+                    ? isAdminOnly
+                      ? `Reset trial eligibility for ${formattedTrialName}`
+                      : `Allow customer to start a new trial for ${formattedTrialName}`
+                    : `A product trial is already available for ${formattedTrialName}`,
+              }}
             >
               Allow Trial
             </Button>
@@ -522,13 +762,13 @@ function CustomerOverview({customer, onAction, organization}: Props) {
               size="xs"
               onClick={() => updateCustomerStatus(`startTrial${formattedApiName}`)}
               disabled={hasActiveProductTrial || hasUsedProductTrial}
-              title={
-                hasActiveProductTrial
+              tooltipProps={{
+                title: hasActiveProductTrial
                   ? `A product trial is currently active for ${formattedTrialName}`
                   : hasUsedProductTrial
                     ? `No product trial is available for ${formattedTrialName}`
-                    : `Start the 14-day ${formattedTrialName} product trial`
-              }
+                    : `Start the 14-day ${formattedTrialName} product trial`,
+              }}
             >
               Start Trial
             </Button>
@@ -536,18 +776,30 @@ function CustomerOverview({customer, onAction, organization}: Props) {
               size="xs"
               onClick={() => updateCustomerStatus(`stopTrial${formattedApiName}`)}
               disabled={!hasActiveProductTrial || lessThanOneDayLeft}
-              title={
-                lessThanOneDayLeft
-                  ? `Current product trial will end in less than one day`
+              tooltipProps={{
+                title: lessThanOneDayLeft
+                  ? 'Current product trial will end in less than one day'
                   : hasActiveProductTrial
                     ? `Stop the current product trial for ${formattedTrialName}`
-                    : `No product trial is active for ${formattedTrialName}`
-              }
+                    : `No product trial is active for ${formattedTrialName}`,
+              }}
             >
               Stop Trial
             </Button>
-          </TrialActions>
-        </TrialState>
+            <Button
+              size="xs"
+              onClick={handleExtendTrial}
+              disabled={!hasActiveProductTrial}
+              tooltipProps={{
+                title: hasActiveProductTrial
+                  ? `Extend the current ${formattedTrialName} product trial`
+                  : `No active product trial to extend for ${formattedTrialName}`,
+              }}
+            >
+              Extend Trial
+            </Button>
+          </Flex>
+        </Stack>
       </DetailLabel>
     );
   };
@@ -558,7 +810,7 @@ function CustomerOverview({customer, onAction, organization}: Props) {
         <DetailList>
           <DetailLabel title="Status">
             <CustomerStatus customer={customer} />
-            {customer.isTrial && (
+            {isTrial(customer) && (
               <div>
                 <small>
                   <strong>{moment(customer.trialEnd).fromNow(true)} remaining</strong>{' '}
@@ -611,9 +863,12 @@ function CustomerOverview({customer, onAction, organization}: Props) {
             <ExternalLink href={orgUrl}>{customer.slug}</ExternalLink>
           </DetailLabel>
           <DetailLabel title="Internal ID">{customer.id}</DetailLabel>
-          <DetailLabel title="Data Storage Location">{region}</DetailLabel>
+          <DetailLabel title="Data Storage Location">{locality}</DetailLabel>
           <DetailLabel title="Data Retention">
-            {customer.dataRetention || '90d'}
+            {customer.orgRetention?.standard ??
+              customer.categories?.errors?.retention?.standard ??
+              90}
+            {' days'}
           </DetailLabel>
           <DetailLabel title="Joined">
             {moment(customer.dateJoined).fromNow()}
@@ -622,6 +877,11 @@ function CustomerOverview({customer, onAction, organization}: Props) {
             {customer.owner ? <CustomerContact owner={customer.owner} /> : 'n/a'}{' '}
           </DetailLabel>
           <DetailLabel title="Type">{customer.type || 'n/a'}</DetailLabel>
+          <DetailLabel title="Managed" yesNo={customer.isManaged} />
+          <DetailLabel
+            title="Billing Platform"
+            yesNo={customer.hasMigratedToBillingPlatform}
+          />
           <DetailLabel title="Channel">{customer.channel || 'n/a'}</DetailLabel>
           <DetailLabel title="Sponsored Type">
             {customer.sponsoredType || 'n/a'}
@@ -655,9 +915,12 @@ function CustomerOverview({customer, onAction, organization}: Props) {
           </DetailLabel>
           <DetailLabel
             title={
-              <Tooltip title="A partner account is managed by a third-party (such as Heroku).">
+              <InfoText
+                variant="inherit"
+                title="A partner account is managed by a third-party (such as Heroku)."
+              >
                 <abbr>Partner</abbr>
-              </Tooltip>
+              </InfoText>
             }
           >
             {customer.partner ? (
@@ -668,14 +931,27 @@ function CustomerOverview({customer, onAction, organization}: Props) {
                     (active)
                     <br />
                     <Button
-                      priority="link"
+                      variant="link"
                       onClick={() => updateCustomerStatus('deactivatePartnerAccount')}
                     >
                       Deactivate Partner
                     </Button>
                   </Fragment>
                 ) : (
-                  <Fragment>(migrated)</Fragment>
+                  <Fragment>
+                    (migrated)
+                    {customer.isPartner && customer.isManaged && (
+                      <Fragment>
+                        <br />
+                        <Button
+                          variant="link"
+                          onClick={() => updateCustomerStatus('deactivatePartnerAccount')}
+                        >
+                          Reset partner billing to self-serve
+                        </Button>
+                      </Fragment>
+                    )}
+                  </Fragment>
                 )}
                 <br />
                 <small>ID: {customer.partner.externalId}</small>
@@ -730,7 +1006,7 @@ function CustomerOverview({customer, onAction, organization}: Props) {
             </ExternalLink>
           </DetailLabel>
         </DetailList>
-        {productTrialCategories.length + productTrialCategoryGroups.length > 0 && (
+        {productTrialCategories.length + productTrialAddOns.length > 0 && (
           <Fragment>
             <h6>Product Trials</h6>
             <ProductTrialsDetailListContainer>
@@ -743,16 +1019,19 @@ function CustomerOverview({customer, onAction, organization}: Props) {
                 return getTrialManagementActions(
                   categoryInfo.plural,
                   categoryInfo.plural,
-                  categoryName
+                  categoryName,
+                  !!categoryInfo.adminOnlyProductTrialFeature
                 );
               })}
-              {productTrialCategoryGroups.map(group => {
-                const category = group.dataCategories[0]; // doesn't matter which category we use
+              {productTrialAddOns.map(addOn => {
+                const category = getBilledCategory(customer, addOn.apiName);
                 if (category) {
                   return getTrialManagementActions(
                     category,
-                    group.apiName,
-                    group.productName
+                    addOn.apiName,
+                    addOn.apiName === AddOnCategory.LEGACY_SEER
+                      ? addOn.productName + ' (Legacy)'
+                      : addOn.productName
                   );
                 }
                 return null;
@@ -760,23 +1039,54 @@ function CustomerOverview({customer, onAction, organization}: Props) {
             </ProductTrialsDetailListContainer>
           </Fragment>
         )}
+        <Fragment>
+          <h6>Retention Settings</h6>
+          <table style={{borderSpacing: '15px', borderCollapse: 'separate'}}>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Standard</th>
+                <th>
+                  <InfoText
+                    variant="inherit"
+                    title="Null means use the Downsample default"
+                  >
+                    Downsampled
+                  </InfoText>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortCategories(customer.categories || {})
+                .filter(bmh => RETENTION_SETTINGS_CATEGORIES.has(bmh.category))
+                .map(bmh => (
+                  <tr key={bmh.category}>
+                    <td>
+                      {getPlanCategoryName({
+                        plan: customer.planDetails,
+                        category: bmh.category,
+                      })}
+                    </td>
+                    <td>
+                      {bmh.retention?.standard === null
+                        ? 'null'
+                        : bmh.retention?.standard}
+                    </td>
+                    <td>
+                      {bmh.retention?.downsampled === null
+                        ? 'null'
+                        : bmh.retention?.downsampled}
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </Fragment>
+        <SeerPlanSummary customer={customer} />
       </div>
     </DetailsContainer>
   );
 }
-
-const TrialState = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(1)};
-`;
-
-const TrialActions = styled('div')`
-  display: flex;
-  gap: ${space(1)};
-  flex-wrap: wrap;
-  align-items: center;
-`;
 
 const ProductTrialsDetailListContainer = styled(DetailList)`
   align-items: baseline;
@@ -799,20 +1109,19 @@ const StyledTag = styled(Tag)`
 
 type ThresholdLabelProps = {
   children: React.ReactNode;
+  label: string;
   positive: boolean;
 };
 
-function ThresholdLabel({positive, children}: ThresholdLabelProps) {
+function ThresholdLabel({label, positive, children}: ThresholdLabelProps) {
   return (
     <Fragment>
-      <dt>Sample Rate (24h):</dt>
+      <dt>{label}:</dt>
       <ThresholdValue positive={positive}>{children}</ThresholdValue>
     </Fragment>
   );
 }
 
 const ThresholdValue = styled('dd')<{positive: boolean}>`
-  color: ${p => (p.positive ? p.theme.green400 : p.theme.red400)};
+  color: ${p => (p.positive ? p.theme.colors.green500 : p.theme.colors.red500)};
 `;
-
-export default CustomerOverview;

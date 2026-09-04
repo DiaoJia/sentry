@@ -1,23 +1,29 @@
 import {DataScrubbingRelayPiiConfigFixture} from 'sentry-fixture/dataScrubbingRelayPiiConfig';
+import {OrganizationFixture} from 'sentry-fixture/organization';
+import {createMockTraceItemAttributesResponse} from 'sentry-fixture/traceItemAttributeKeys';
 
-import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
+import {selectEvent} from 'sentry-test/selectEvent';
 
 import {
   makeClosableHeader,
   makeCloseButton,
   ModalBody,
   ModalFooter,
-} from 'sentry/components/globalModal/components';
+} from '@sentry/scraps/modal';
+
+import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 import {convertRelayPiiConfig} from 'sentry/views/settings/components/dataScrubbing/convertRelayPiiConfig';
-import Edit from 'sentry/views/settings/components/dataScrubbing/modals/edit';
-import submitRules from 'sentry/views/settings/components/dataScrubbing/submitRules';
+import {Edit} from 'sentry/views/settings/components/dataScrubbing/modals/edit';
 import {MethodType, RuleType} from 'sentry/views/settings/components/dataScrubbing/types';
 import {
   getMethodLabel,
   getRuleLabel,
   valueSuggestions,
 } from 'sentry/views/settings/components/dataScrubbing/utils';
+
+jest.mock('sentry/actionCreators/indicator');
 
 const relayPiiConfig = DataScrubbingRelayPiiConfigFixture();
 const stringRelayPiiConfig = JSON.stringify(relayPiiConfig);
@@ -29,10 +35,12 @@ const projectId = 'foo';
 const endpoint = `/projects/${organizationSlug}/${projectId}/`;
 const api = new MockApiClient();
 
-jest.mock('sentry/views/settings/components/dataScrubbing/submitRules');
+describe('Edit Modal', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
 
-describe('Edit Modal', function () {
-  it('open Edit Rule Modal', async function () {
+  it('open Edit Rule Modal', async () => {
     const handleCloseModal = jest.fn();
 
     render(
@@ -58,8 +66,7 @@ describe('Edit Modal', function () {
 
     // Method Field
     expect(screen.getByText('Method')).toBeInTheDocument();
-    await userEvent.hover(screen.getAllByTestId('more-information')[0]!);
-    expect(await screen.findByText('What to do')).toBeInTheDocument();
+    expect(screen.getByText('What to do')).toBeInTheDocument();
     await userEvent.click(screen.getByText('Replace'));
 
     Object.values(MethodType)
@@ -70,17 +77,15 @@ describe('Edit Modal', function () {
 
     // Placeholder Field
     expect(screen.getByText('Custom Placeholder (Optional)')).toBeInTheDocument();
-    await userEvent.hover(screen.getAllByTestId('more-information')[1]!);
     expect(
-      await screen.findByText('It will replace the default placeholder [Filtered]')
+      screen.getByText('It will replace the default placeholder [Filtered]')
     ).toBeInTheDocument();
     expect(screen.getByPlaceholderText('[Filtered]')).toBeInTheDocument();
 
     // Type Field
     expect(screen.getByText('Data Type')).toBeInTheDocument();
-    await userEvent.hover(screen.getAllByTestId('more-information')[2]!);
     expect(
-      await screen.findByText(
+      screen.getByText(
         'What to look for. Use an existing pattern or define your own using regular expressions.'
       )
     ).toBeInTheDocument();
@@ -96,14 +101,10 @@ describe('Edit Modal', function () {
 
     // Regex matches Field
     expect(screen.getAllByText('Regex matches')).toHaveLength(2);
-    await userEvent.hover(screen.getAllByTestId('more-information')[3]!);
     expect(
-      await screen.findByText('Custom regular expression (see documentation)')
+      screen.getByText('Custom regular expression (see documentation)')
     ).toBeInTheDocument();
-    expect(screen.getByRole('textbox', {name: 'Regex matches'})).toHaveAttribute(
-      'placeholder',
-      '[a-zA-Z0-9]+'
-    );
+    expect(screen.getByPlaceholderText('[a-zA-Z0-9]+')).toBeInTheDocument();
 
     // Event ID
     expect(
@@ -112,12 +113,6 @@ describe('Edit Modal', function () {
 
     // Source Field
     expect(screen.getByText('Source')).toBeInTheDocument();
-    await userEvent.hover(screen.getAllByTestId('more-information')[4]!);
-    expect(
-      await screen.findByText(
-        'Where to look. In the simplest case this can be an attribute name.'
-      )
-    ).toBeInTheDocument();
     expect(screen.getByRole('textbox', {name: 'Source'})).toHaveAttribute(
       'placeholder',
       'Enter a custom attribute, variable or header name'
@@ -128,7 +123,13 @@ describe('Edit Modal', function () {
     expect(handleCloseModal).toHaveBeenCalled();
   });
 
-  it('edit Rule Modal', async function () {
+  it('edit Rule Modal', async () => {
+    const mockPutRequest = MockApiClient.addMockResponse({
+      url: endpoint,
+      method: 'PUT',
+      body: {relayPiiConfig: '{}'},
+    });
+
     render(
       <Edit
         Body={ModalBody}
@@ -168,23 +169,209 @@ describe('Edit Modal', function () {
     // Save rule
     await userEvent.click(screen.getByRole('button', {name: 'Save Rule'}));
 
-    expect(submitRules).toHaveBeenCalledWith(api, endpoint, [
-      {
-        id: 0,
-        method: 'replace',
-        type: 'password',
-        source: 'password',
-        placeholder: 'Scrubbed',
-      },
-      {id: 1, method: 'mask', type: 'creditcard', source: '$message'},
-      {
-        id: 2,
-        method: 'mask',
-        pattern: '',
-        placeholder: '',
-        type: 'anything',
-        source: valueSuggestions[2]!.value,
-      },
-    ]);
+    await waitFor(() => {
+      expect(mockPutRequest).toHaveBeenCalled();
+    });
+
+    // Verify the submitted PII config has the edited rule
+    const submittedData = JSON.parse(mockPutRequest.mock.calls[0][1].data.relayPiiConfig);
+    // Rule at index 2 should now be "anything" type with "mask" method
+    expect(submittedData.rules['2']).toEqual({
+      type: 'anything',
+      redaction: {method: 'mask'},
+    });
+  });
+
+  it('does not show dataset selector without ourlogs-enabled feature', () => {
+    render(
+      <Edit
+        Body={ModalBody}
+        closeModal={jest.fn()}
+        CloseButton={makeCloseButton(jest.fn())}
+        Header={makeClosableHeader(jest.fn())}
+        Footer={ModalFooter}
+        projectId={projectId}
+        savedRules={rules}
+        api={api}
+        endpoint={endpoint}
+        orgSlug={organizationSlug}
+        onSubmitSuccess={jest.fn()}
+        rule={rule}
+      />
+    );
+
+    expect(screen.queryByText('Dataset')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Errors, Transactions, Attachments')
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Dataset')).not.toBeInTheDocument();
+    expect(screen.queryByText('Logs')).not.toBeInTheDocument();
+  });
+
+  it('surfaces invalid selector error on source field', async () => {
+    MockApiClient.addMockResponse({
+      url: endpoint,
+      method: 'PUT',
+      statusCode: 400,
+      body: {relayPiiConfig: ['invalid selector: \n1 | bad$$selector']},
+    });
+
+    render(
+      <Edit
+        Body={ModalBody}
+        closeModal={jest.fn()}
+        CloseButton={makeCloseButton(jest.fn())}
+        Header={makeClosableHeader(jest.fn())}
+        Footer={ModalFooter}
+        projectId={projectId}
+        savedRules={rules}
+        api={api}
+        endpoint={endpoint}
+        orgSlug={organizationSlug}
+        onSubmitSuccess={jest.fn()}
+        rule={rule}
+      />
+    );
+
+    await selectEvent.select(screen.getByText('Replace'), 'Mask');
+    await userEvent.click(screen.getByRole('button', {name: 'Save Rule'}));
+
+    expect(await screen.findByText(/Invalid source value/)).toBeInTheDocument();
+  });
+
+  it('surfaces regex parse error on pattern field', async () => {
+    MockApiClient.addMockResponse({
+      url: endpoint,
+      method: 'PUT',
+      statusCode: 400,
+      body: {relayPiiConfig: ['regex parse error:\nerror: unclosed group']},
+    });
+
+    render(
+      <Edit
+        Body={ModalBody}
+        closeModal={jest.fn()}
+        CloseButton={makeCloseButton(jest.fn())}
+        Header={makeClosableHeader(jest.fn())}
+        Footer={ModalFooter}
+        projectId={projectId}
+        savedRules={rules}
+        api={api}
+        endpoint={endpoint}
+        orgSlug={organizationSlug}
+        onSubmitSuccess={jest.fn()}
+        rule={rule}
+      />
+    );
+
+    await selectEvent.select(screen.getByText('Replace'), 'Mask');
+    await userEvent.click(screen.getByRole('button', {name: 'Save Rule'}));
+
+    expect(await screen.findByText(/Invalid regex/)).toBeInTheDocument();
+  });
+
+  it('shows toast for unknown server error', async () => {
+    MockApiClient.addMockResponse({
+      url: endpoint,
+      method: 'PUT',
+      statusCode: 400,
+      body: {relayPiiConfig: ['something unexpected']},
+    });
+
+    render(
+      <Edit
+        Body={ModalBody}
+        closeModal={jest.fn()}
+        CloseButton={makeCloseButton(jest.fn())}
+        Header={makeClosableHeader(jest.fn())}
+        Footer={ModalFooter}
+        projectId={projectId}
+        savedRules={rules}
+        api={api}
+        endpoint={endpoint}
+        orgSlug={organizationSlug}
+        onSubmitSuccess={jest.fn()}
+        rule={rule}
+      />
+    );
+
+    await selectEvent.select(screen.getByText('Replace'), 'Mask');
+    await userEvent.click(screen.getByRole('button', {name: 'Save Rule'}));
+
+    await waitFor(() => {
+      expect(addErrorMessage).toHaveBeenCalledWith(
+        'An unknown error occurred while saving data scrubbing rule'
+      );
+    });
+  });
+});
+
+describe('Edit Modal with ourlogs-enabled', () => {
+  const organization = OrganizationFixture({
+    features: ['ourlogs-enabled'],
+  });
+
+  beforeEach(() => {
+    localStorage.clear();
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      url: `/organizations/${organization.slug}/trace-items/attributes/`,
+      method: 'GET',
+      body: createMockTraceItemAttributesResponse(),
+    });
+  });
+
+  it('shows dataset selector when ourlogs-enabled', () => {
+    render(
+      <OrganizationContext.Provider value={organization}>
+        <Edit
+          Body={ModalBody}
+          closeModal={jest.fn()}
+          CloseButton={makeCloseButton(jest.fn())}
+          Header={makeClosableHeader(jest.fn())}
+          Footer={ModalFooter}
+          projectId={projectId}
+          savedRules={rules}
+          api={api}
+          endpoint={endpoint}
+          orgSlug={organizationSlug}
+          onSubmitSuccess={jest.fn()}
+          rule={rule}
+        />
+      </OrganizationContext.Provider>
+    );
+
+    expect(screen.getByText('Dataset')).toBeInTheDocument();
+    expect(screen.getByText('Errors, Transactions, Attachments')).toBeInTheDocument();
+    expect(screen.getByText('Logs')).toBeInTheDocument();
+  });
+
+  it('shows attribute field when logs dataset is selected', async () => {
+    render(
+      <OrganizationContext.Provider value={organization}>
+        <Edit
+          Body={ModalBody}
+          closeModal={jest.fn()}
+          CloseButton={makeCloseButton(jest.fn())}
+          Header={makeClosableHeader(jest.fn())}
+          Footer={ModalFooter}
+          projectId={projectId}
+          savedRules={rules}
+          api={api}
+          endpoint={endpoint}
+          orgSlug={organizationSlug}
+          onSubmitSuccess={jest.fn()}
+          rule={rule}
+        />
+      </OrganizationContext.Provider>
+    );
+
+    await userEvent.click(screen.getByLabelText('Logs'));
+
+    expect(screen.getByText('Attribute')).toBeInTheDocument();
+    expect(screen.queryByText('Source')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {name: 'Use event ID for auto-completion'})
+    ).not.toBeInTheDocument();
   });
 });

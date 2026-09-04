@@ -1,22 +1,23 @@
 import {useMemo} from 'react';
 import * as Sentry from '@sentry/react';
+import {skipToken, useQuery} from '@tanstack/react-query';
 
 import {useFetchEventAttachments} from 'sentry/actionCreators/events';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import {getAttachmentUrl} from 'sentry/components/events/attachmentViewers/utils';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import {
   getPlatform,
   getPlatformViewConfig,
 } from 'sentry/components/events/viewHierarchy/utils';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {t} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
-import type {IssueAttachment} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getRequestErrorUserMessage} from 'sentry/utils/requestError/getRequestErrorUserMessage';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 import type {ViewHierarchyData} from './viewHierarchy';
 import {ViewHierarchy} from './viewHierarchy';
@@ -38,80 +39,93 @@ function EventViewHierarchyContent({event, project, disableCollapsePersistence}:
     },
     {notifyOnChangeProps: ['data']}
   );
-  const viewHierarchies =
-    attachments?.filter(attachment => attachment.type === 'event.view_hierarchy') ?? [];
-  const hierarchyMeta: IssueAttachment | undefined = viewHierarchies[0];
+  const hierarchyMeta = attachments?.find(
+    attachment => attachment.type === 'event.view_hierarchy'
+  );
 
-  // There should be only one view hierarchy
-  const {isPending, data} = useApiQuery<string | ViewHierarchyData>(
-    [
-      defined(hierarchyMeta)
-        ? getAttachmentUrl({
-            attachment: hierarchyMeta,
-            eventId: hierarchyMeta.event_id,
-            orgSlug: organization.slug,
-            projectSlug: project.slug,
-          })
-        : '',
+  // There should be only one view hierarchy.
+  const hierarchyQuery = useQuery({
+    ...apiOptions.as<string | ViewHierarchyData>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/events/$eventId/attachments/$attachmentId/',
       {
+        path: hierarchyMeta
+          ? {
+              organizationIdOrSlug: organization.slug,
+              projectIdOrSlug: project.slug,
+              eventId: hierarchyMeta.event_id,
+              attachmentId: hierarchyMeta.id,
+            }
+          : skipToken,
         headers: {
           Accept: '*/*; charset=utf-8',
         },
-      },
-    ],
-    {staleTime: Infinity, enabled: defined(hierarchyMeta)}
-  );
+        query: {
+          download: true,
+        },
+        staleTime: Infinity,
+      }
+    ),
+    retry: false,
+  });
 
   // Memoize the JSON parsing because downstream hooks depend on
   // referential equality of objects in the data
-  const hierarchy = useMemo<ViewHierarchyData>(() => {
-    if (!data) {
+  const hierarchy = useMemo(() => {
+    if (!hierarchyQuery.data) {
       return null;
     }
 
-    if (data && typeof data !== 'string') {
-      return data;
+    if (typeof hierarchyQuery.data !== 'string') {
+      return hierarchyQuery.data;
     }
 
     try {
-      return JSON.parse(data);
+      return JSON.parse(hierarchyQuery.data) as ViewHierarchyData;
     } catch (err) {
       Sentry.captureException(err);
       return null;
     }
-  }, [data]);
+  }, [hierarchyQuery.data]);
 
-  if (viewHierarchies.length === 0) {
+  if (!hierarchyMeta) {
     return null;
-  }
-
-  if (isPending || !data) {
-    return <LoadingIndicator />;
   }
 
   const platform = getPlatform({event, project});
   const platformViewConfig = getPlatformViewConfig(platform);
 
   return (
-    <InterimSection
+    <FoldSection
+      sectionKey={SectionKey.VIEW_HIERARCHY}
       title={platformViewConfig.title}
-      type={SectionKey.VIEW_HIERARCHY}
       disableCollapsePersistence={disableCollapsePersistence}
     >
-      <ErrorBoundary mini>
-        <ViewHierarchy
-          viewHierarchy={hierarchy}
-          platform={platform}
-          emptyMessage={platformViewConfig.emptyMessage}
-          showWireframe={platformViewConfig.showWireframe}
-          nodeField={platformViewConfig.nodeField}
+      {hierarchyQuery.isPending ? (
+        <LoadingIndicator />
+      ) : hierarchyQuery.isError ? (
+        <LoadingError
+          message={getRequestErrorUserMessage(
+            hierarchyQuery.error,
+            t('Failed to load view hierarchy.')
+          )}
+          onRetry={hierarchyQuery.refetch}
         />
-      </ErrorBoundary>
-    </InterimSection>
+      ) : (
+        <ErrorBoundary mini>
+          <ViewHierarchy
+            viewHierarchy={hierarchy}
+            platform={platform}
+            emptyMessage={platformViewConfig.emptyMessage}
+            showWireframe={platformViewConfig.showWireframe}
+            nodeField={platformViewConfig.nodeField}
+          />
+        </ErrorBoundary>
+      )}
+    </FoldSection>
   );
 }
 
-function EventViewHierarchy(props: Props) {
+export function EventViewHierarchy(props: Props) {
   const organization = useOrganization();
 
   if (!organization.features.includes('event-attachments')) {
@@ -120,5 +134,3 @@ function EventViewHierarchy(props: Props) {
 
   return <EventViewHierarchyContent {...props} />;
 }
-
-export {EventViewHierarchy};

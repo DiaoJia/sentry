@@ -1,21 +1,22 @@
 import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
 
-import {UPSELL_TIER} from 'getsentry/constants';
-import {type BillingConfig, PlanTier, type Subscription} from 'getsentry/types';
+import {BillingConfigTier} from 'getsentry/constants';
+import type {BillingConfig} from 'getsentry/types';
 
 interface UseBillingConfigProps {
   organization: Organization;
-  subscription: Subscription;
 }
 
-export function useBillingConfig({organization, subscription}: UseBillingConfigProps) {
-  const upsellTier =
-    subscription.planTier === PlanTier.AM3 || subscription.trialTier === PlanTier.AM3
-      ? PlanTier.AM3
-      : UPSELL_TIER;
+export function useBillingConfig({organization}: UseBillingConfigProps) {
   return useApiQuery<BillingConfig>(
-    [`/customers/${organization.slug}/billing-config/`, {query: {tier: upsellTier}}],
+    [
+      getApiUrl('/customers/$organizationIdOrSlug/billing-config/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
+      {query: {tier: BillingConfigTier.UPSELL}},
+    ],
     {staleTime: Infinity}
   );
 }

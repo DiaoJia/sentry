@@ -2,8 +2,6 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-import sentry_sdk
-
 from sentry.exceptions import InvalidSearchQuery
 from sentry.search.events.builder.profile_functions import (
     ProfileFunctionsQueryBuilder,
@@ -16,6 +14,7 @@ from sentry.snuba.discover import transform_tips, zerofill
 from sentry.snuba.metrics.extraction import MetricSpecType
 from sentry.snuba.query_sources import QuerySource
 from sentry.utils.snuba import SnubaTSResult
+from sentry.utils.tracing import set_span_data, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,6 @@ def query(
     offset: int = 0,
     limit: int = 50,
     limitby: tuple[str, int] | None = None,
-    referrer: str = "",
     auto_fields: bool = False,
     auto_aggregations: bool = False,
     use_aggregate_conditions: bool = False,
@@ -38,12 +36,12 @@ def query(
     transform_alias_to_input_format: bool = False,
     has_metrics: bool = False,
     functions_acl: list[str] | None = None,
-    use_metrics_layer: bool = False,
     on_demand_metrics_enabled: bool = False,
     on_demand_metrics_type: MetricSpecType | None = None,
     fallback_to_transactions=False,
     query_source: QuerySource | None = None,
-    debug: bool = False,
+    *,
+    referrer: str,
 ) -> Any:
     if not selected_columns:
         raise InvalidSearchQuery("No columns selected")
@@ -71,8 +69,8 @@ def query(
     result = builder.process_results(
         builder.run_query(referrer=referrer, query_source=query_source)
     )
-    if debug:
-        result["meta"]["query"] = str(builder.get_snql_query().query)
+    if snuba_params.debug:
+        result["meta"]["debug_info"] = {"query": str(builder.get_snql_query().query)}
     result["meta"]["tips"] = transform_tips(builder.tips)
     return result
 
@@ -82,20 +80,19 @@ def timeseries_query(
     query: str | None,
     snuba_params: SnubaParams,
     rollup: int,
-    referrer: str = "",
     zerofill_results: bool = True,
     comparison_delta: timedelta | None = None,
     functions_acl: list[str] | None = None,
     allow_metric_aggregates: bool = False,
     has_metrics: bool = False,
-    use_metrics_layer: bool = False,
     on_demand_metrics_enabled: bool = False,
     on_demand_metrics_type: MetricSpecType | None = None,
     query_source: QuerySource | None = None,
     fallback_to_transactions: bool = False,
     transform_alias_to_input_format: bool = False,
+    *,
+    referrer: str,
 ) -> Any:
-
     builder = ProfileFunctionsTimeseriesQueryBuilder(
         dataset=Dataset.Functions,
         params={},
@@ -143,7 +140,6 @@ def top_events_timeseries(
     limit,
     organization,
     equations=None,
-    referrer=None,
     top_events=None,
     allow_empty=True,
     zerofill_results=True,
@@ -155,11 +151,13 @@ def top_events_timeseries(
     query_source: QuerySource | None = None,
     fallback_to_transactions: bool = False,
     transform_alias_to_input_format: bool = False,
+    *,
+    referrer: str,
 ):
     assert not include_other, "Other is not supported"  # TODO: support other
 
     if top_events is None:
-        with sentry_sdk.start_span(op="discover.discover", name="top_events.fetch_events"):
+        with start_span(op="discover.discover", name="top_events.fetch_events"):
             top_events = query(
                 selected_columns,
                 query=user_query,
@@ -235,10 +233,10 @@ def format_top_events_timeseries_results(
             rollup,
         )
 
-    with sentry_sdk.start_span(op="discover.discover", name="top_events.transform_results") as span:
+    with start_span(op="discover.discover", name="top_events.transform_results") as span:
         result = query_builder.strip_alias_prefix(result)
 
-        span.set_data("result_count", len(result.get("data", [])))
+        set_span_data(span, "result_count", len(result.get("data", [])))
         processed_result = query_builder.process_results(result)
 
         if result_key_order is None:

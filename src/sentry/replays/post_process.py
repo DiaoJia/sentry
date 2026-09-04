@@ -5,9 +5,8 @@ from collections.abc import Generator, Iterable, Iterator, MutableMapping
 from itertools import zip_longest
 from typing import Any, TypedDict
 
-from drf_spectacular.utils import extend_schema_serializer
-
-from sentry.replays.validators import VALID_FIELD_SET
+from sentry.apidocs.omissions import sentry_schema_serializer
+from sentry.utils.tracing import trace
 
 
 class DeviceResponseType(TypedDict, total=False):
@@ -54,7 +53,12 @@ class OTAUpdatesResponseType(TypedDict, total=False):
     update_id: str | None
 
 
-@extend_schema_serializer(exclude_fields=["info_ids", "warning_ids"])
+@sentry_schema_serializer(
+    omit_from_public_schema={
+        "info_ids": "Internal breadcrumb index used by the replay UI.",
+        "warning_ids": "Internal breadcrumb index used by the replay UI.",
+    }
+)
 class ReplayDetailsResponse(TypedDict, total=False):
     id: str
     project_id: str
@@ -70,6 +74,7 @@ class ReplayDetailsResponse(TypedDict, total=False):
     ota_updates: OTAUpdatesResponseType
     is_archived: bool | None
     urls: list[str] | None
+    segment_names: list[str] | None
     clicks: list[dict[str, Any]]
     count_dead_clicks: int | None
     count_rage_clicks: int | None
@@ -91,6 +96,7 @@ class ReplayDetailsResponse(TypedDict, total=False):
     has_viewed: bool
 
 
+@trace
 def process_raw_response(
     response: list[dict[str, Any]], fields: list[str]
 ) -> list[ReplayDetailsResponse]:
@@ -121,7 +127,7 @@ def generate_normalized_output(response: list[dict[str, Any]]) -> Generator[Repl
     for item in response:
         ret_item: ReplayDetailsResponse = {}
         if item["isArchived"]:
-            yield _archived_row(item["replay_id"], item["agg_project_id"])  # type: ignore[misc]
+            yield _archived_row(item["replay_id"], item["agg_project_id"])
             continue
 
         ret_item["id"] = _strip_dashes(item.pop("replay_id", None))
@@ -179,6 +185,7 @@ def generate_normalized_output(response: list[dict[str, Any]]) -> Generator[Repl
 
         item.pop("agg_urls", None)
         ret_item["urls"] = item.pop("urls_sorted", None)
+        ret_item["segment_names"] = item.pop("segment_names", None)
 
         ret_item["is_archived"] = bool(item.pop("isArchived", 0))
 
@@ -231,12 +238,14 @@ def dict_unique_list(items: Iterable[tuple[str, str]]) -> dict[str, list[str]]:
     return {key: list(value_set) for key, value_set in unique.items()}
 
 
-def _archived_row(replay_id: str, project_id: int) -> dict[str, Any]:
-    archived_replay_response = {
+def _archived_row(replay_id: str, project_id: int) -> ReplayDetailsResponse:
+    return {
         "id": _strip_dashes(replay_id),
         "project_id": str(project_id),
         "trace_ids": [],
         "error_ids": [],
+        "info_ids": [],
+        "warning_ids": [],
         "environment": None,
         "tags": [],
         "user": {
@@ -258,10 +267,13 @@ def _archived_row(replay_id: str, project_id: int) -> dict[str, Any]:
         "device": {"name": None, "brand": None, "model": None, "family": None},
         "ota_updates": {"channel": None, "runtime_version": None, "update_id": None},
         "urls": None,
+        "segment_names": None,
         "activity": None,
         "count_dead_clicks": None,
         "count_rage_clicks": None,
         "count_errors": None,
+        "count_warnings": None,
+        "count_infos": None,
         "duration": None,
         "finished_at": None,
         "started_at": None,
@@ -270,14 +282,10 @@ def _archived_row(replay_id: str, project_id: int) -> dict[str, Any]:
         "count_urls": None,
         "dist": None,
         "platform": None,
-        "releases": None,
-        "clicks": None,
+        "releases": [],
+        "clicks": [],
+        "has_viewed": False,
     }
-    for field in VALID_FIELD_SET:
-        if field not in archived_replay_response:
-            archived_replay_response[field] = None
-
-    return archived_replay_response
 
 
 CLICK_FIELD_MAP = {

@@ -6,6 +6,7 @@ from typing import Any
 from django.http.request import HttpRequest
 
 from sentry import audit_log
+from sentry.audit_log.metadata import AGENT_DELEGATION_DATA_KEY, SEER_AGENT_DELEGATION
 from sentry.audit_log.services.log import log_service
 from sentry.models.apikey import ApiKey
 from sentry.models.auditlogentry import AuditLogEntry
@@ -19,18 +20,29 @@ from sentry.models.project import Project
 from sentry.models.team import Team
 from sentry.organizations.services.organization import RpcOrganization, organization_service
 from sentry.organizations.services.organization.model import RpcAuditLogEntryActor
-from sentry.silo.base import region_silo_function
+from sentry.seer.agent_token import is_agent_auth
+from sentry.silo.base import cell_silo_function
 from sentry.users.models.user import User
 from sentry.users.services.user import RpcUser
+from sentry.users.services.user.service import user_service
+from sentry.viewer_context import ActorType, get_viewer_context
 
 
 def create_audit_entry(
     request: HttpRequest,
     transaction_id: int | str | None = None,
     logger: Logger | None = None,
+    *,
+    data: dict[str, Any],
     **kwargs: Any,
 ) -> AuditLogEntry:
+    auth = getattr(request, "auth", None)
     user = kwargs.pop("actor", request.user if request.user.is_authenticated else None)
+    if user is None:
+        # An agent token acts on behalf of a member but authenticates as a non-user actor,
+        # so attribute the audit entry to the delegating user.
+        if auth is not None and is_agent_auth(auth) and auth.user_id is not None:
+            user = user_service.get_user(user_id=auth.user_id)
     api_key = get_api_key_for_audit_log(request)
     org_auth_token = get_org_auth_token_for_audit_log(request)
 
@@ -40,7 +52,14 @@ def create_audit_entry(
         kwargs["actor_label"] = org_auth_token.name
 
     return create_audit_entry_from_user(
-        user, api_key, request.META["REMOTE_ADDR"], transaction_id, logger, **kwargs
+        user,
+        api_key,
+        request.META["REMOTE_ADDR"],
+        transaction_id,
+        logger,
+        data=data,
+        agent_delegation=SEER_AGENT_DELEGATION if is_agent_auth(auth) else None,
+        **kwargs,
     )
 
 
@@ -72,16 +91,31 @@ def create_audit_entry_from_user(
     logger: Logger | None = None,
     organization: Organization | RpcOrganization | None = None,
     organization_id: int | None = None,
+    *,
+    data: dict[str, Any],
+    agent_delegation: str | None = None,
     **kwargs: Any,
 ) -> AuditLogEntry:
     organization_id = _org_id(organization, organization_id)
     assert user is not None or api_key is not None or ip_address is not None
+
+    if agent_delegation is None:
+        viewer_context = get_viewer_context()
+        if viewer_context is not None and viewer_context.actor_type == ActorType.AGENT:
+            agent_delegation = SEER_AGENT_DELEGATION
+
+    data = dict(data)
+    if agent_delegation is None:
+        data.pop(AGENT_DELEGATION_DATA_KEY, None)
+    else:
+        data[AGENT_DELEGATION_DATA_KEY] = agent_delegation
 
     entry = AuditLogEntry(
         actor_id=user.id if user else None,
         actor_key=api_key,
         ip_address=ip_address,
         organization_id=organization_id,
+        data=data,
         **kwargs,
     )
 
@@ -139,7 +173,7 @@ def get_org_auth_token_for_audit_log(request: HttpRequest) -> OrgAuthToken | Non
     )
 
 
-@region_silo_function
+@cell_silo_function
 def create_org_delete_log(organization_id: int, audit_log_actor: RpcAuditLogEntryActor) -> None:
     delete_log = DeletedOrganization()
     organization = Organization.objects.get(id=organization_id)
@@ -151,7 +185,7 @@ def create_org_delete_log(organization_id: int, audit_log_actor: RpcAuditLogEntr
     _complete_delete_log(delete_log=delete_log, audit_log_actor=audit_log_actor)
 
 
-@region_silo_function
+@cell_silo_function
 def _create_project_delete_log(
     entry: AuditLogEntry, audit_log_actor: RpcAuditLogEntryActor
 ) -> None:
@@ -171,7 +205,7 @@ def _create_project_delete_log(
     _complete_delete_log(delete_log=delete_log, audit_log_actor=audit_log_actor)
 
 
-@region_silo_function
+@cell_silo_function
 def _create_team_delete_log(entry: AuditLogEntry, audit_log_actor: RpcAuditLogEntryActor) -> None:
     delete_log = DeletedTeam()
 
@@ -188,7 +222,7 @@ def _create_team_delete_log(entry: AuditLogEntry, audit_log_actor: RpcAuditLogEn
     _complete_delete_log(delete_log=delete_log, audit_log_actor=audit_log_actor)
 
 
-@region_silo_function
+@cell_silo_function
 def _complete_delete_log(delete_log: DeletedEntry, audit_log_actor: RpcAuditLogEntryActor) -> None:
     """
     Adds common information on a delete log from an audit entry and
@@ -207,6 +241,8 @@ def create_system_audit_entry(
     logger: Logger | None = None,
     organization: Organization | None = None,
     organization_id: int | None = None,
+    *,
+    data: dict[str, Any],
     **kwargs: Any,
 ) -> AuditLogEntry:
     """
@@ -214,7 +250,9 @@ def create_system_audit_entry(
     systems and do not have an associated Sentry user as the "actor".
     """
     organization_id = _org_id(organization, organization_id)
-    entry = AuditLogEntry(actor_label="Sentry", organization_id=organization_id, **kwargs)
+    entry = AuditLogEntry(
+        actor_label="Sentry", organization_id=organization_id, data=data, **kwargs
+    )
     if entry.event is not None:
         log_service.record_audit_log(event=entry.as_event())
 

@@ -1,21 +1,19 @@
+import {DashboardFixture} from 'sentry-fixture/dashboard';
 import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import type {DashboardDetails, Widget} from 'sentry/views/dashboards/types';
 import {DisplayType, WidgetType} from 'sentry/views/dashboards/types';
 import {
-  constructWidgetFromQuery,
   eventViewFromWidget,
   flattenErrors,
-  getDashboardsMEPQueryParams,
+  getCurrentPageFilters,
   getFieldsFromEquations,
   getNumEquations,
+  getSavedFiltersAsPageFilters,
   getWidgetDiscoverUrl,
   getWidgetIssueUrl,
   hasUnsavedFilterChanges,
-  isCustomMeasurementWidget,
-  isUsingPerformanceScore,
-  isWidgetUsingTransactionName,
 } from 'sentry/views/dashboards/utils';
 
 describe('Dashboards util', () => {
@@ -29,81 +27,6 @@ describe('Dashboards util', () => {
     environments: [],
     projects: [],
   };
-  describe('constructWidgetFromQuery', () => {
-    let baseQuery!: NonNullable<Parameters<typeof constructWidgetFromQuery>[0]>;
-    beforeEach(() => {
-      baseQuery = {
-        displayType: 'line',
-        interval: '5m',
-        queryConditions: ['title:test', 'event.type:test'],
-        queryFields: ['count()', 'failure_count()'],
-        queryAggregates: ['count()', 'failure_count()'],
-        queryColumns: [],
-        queryNames: ['1', '2'],
-        queryOrderby: '',
-        title: 'Widget Title',
-      };
-    });
-    it('returns a widget when given a valid query', () => {
-      const widget = constructWidgetFromQuery(baseQuery);
-      expect(widget?.displayType).toEqual(DisplayType.LINE);
-      expect(widget?.interval).toBe('5m');
-      expect(widget?.title).toBe('Widget Title');
-      expect(widget?.queries).toEqual([
-        {
-          name: '1',
-          fields: ['count()', 'failure_count()'],
-          aggregates: ['count()', 'failure_count()'],
-          columns: [],
-          conditions: 'title:test',
-          orderby: '',
-        },
-        {
-          name: '2',
-          fields: ['count()', 'failure_count()'],
-          aggregates: ['count()', 'failure_count()'],
-          columns: [],
-          conditions: 'event.type:test',
-          orderby: '',
-        },
-      ]);
-      expect(widget?.widgetType).toBe('discover');
-    });
-    it('returns undefined if query is missing title', () => {
-      baseQuery.title = '';
-      const widget = constructWidgetFromQuery(baseQuery);
-      expect(widget).toBeUndefined();
-    });
-    it('returns undefined if query is missing interval', () => {
-      baseQuery.interval = '';
-      const widget = constructWidgetFromQuery(baseQuery);
-      expect(widget).toBeUndefined();
-    });
-    it('returns undefined if query is missing displayType', () => {
-      baseQuery.displayType = '';
-      const widget = constructWidgetFromQuery(baseQuery);
-      expect(widget).toBeUndefined();
-    });
-    it('returns a widget when given string fields and conditions', () => {
-      baseQuery.queryConditions = 'title:test';
-      baseQuery.queryFields = 'count()';
-      baseQuery.queryAggregates = 'count()';
-      const widget = constructWidgetFromQuery(baseQuery);
-      expect(widget?.displayType).toEqual(DisplayType.LINE);
-      expect(widget?.interval).toBe('5m');
-      expect(widget?.title).toBe('Widget Title');
-      expect(widget?.queries).toEqual([
-        {
-          name: '1',
-          fields: ['count()'],
-          aggregates: ['count()'],
-          columns: [],
-          conditions: 'title:test',
-          orderby: '',
-        },
-      ]);
-    });
-  });
   describe('eventViewFromWidget', () => {
     let widget!: Widget;
     beforeEach(() => {
@@ -132,7 +55,47 @@ describe('Dashboards util', () => {
     });
   });
 
-  describe('getFieldsFromEquations', function () {
+  describe('getSavedFiltersAsPageFilters', () => {
+    it('uses the dashboard default when no datetime is saved', () => {
+      expect(
+        getSavedFiltersAsPageFilters(
+          DashboardFixture([], {
+            environment: ['production'],
+            projects: [1],
+            utc: false,
+          })
+        )
+      ).toEqual({
+        datetime: {
+          end: null,
+          period: '24h',
+          start: null,
+          utc: false,
+        },
+        environments: ['production'],
+        projects: [1],
+      });
+    });
+
+    it('preserves a saved absolute datetime and UTC setting', () => {
+      expect(
+        getSavedFiltersAsPageFilters(
+          DashboardFixture([], {
+            end: '2026-08-31T14:00:00',
+            start: '2026-08-31T12:00:00',
+            utc: true,
+          })
+        ).datetime
+      ).toEqual({
+        end: '2026-08-31T14:00:00',
+        period: null,
+        start: '2026-08-31T12:00:00',
+        utc: true,
+      });
+    });
+  });
+
+  describe('getFieldsFromEquations', () => {
     it('returns a list of fields that includes individual terms of provided equations', () => {
       const fields = [
         'equation|(count_if(transaction.duration,greater,300) / count()) * 100',
@@ -148,7 +111,7 @@ describe('Dashboards util', () => {
     });
   });
 
-  describe('getWidgetDiscoverUrl', function () {
+  describe('getWidgetDiscoverUrl', () => {
     let widget!: Widget;
     beforeEach(() => {
       widget = {
@@ -176,7 +139,7 @@ describe('Dashboards util', () => {
         OrganizationFixture()
       );
       expect(url).toBe(
-        '/organizations/org-slug/discover/results/?field=count%28%29&name=Test%20Query&query=&statsPeriod=7d&yAxis=count%28%29'
+        '/organizations/org-slug/explore/discover/results/?field=count%28%29&name=Test%20Query&project=&query=&statsPeriod=7d&yAxis=count%28%29'
       );
     });
     it('returns the discover url of a topn widget query', () => {
@@ -203,7 +166,7 @@ describe('Dashboards util', () => {
         OrganizationFixture()
       );
       expect(url).toBe(
-        '/organizations/org-slug/discover/results/?display=top5&field=error.type&field=count%28%29&name=Test%20Query&query=error.unhandled%3Atrue&sort=-count&statsPeriod=7d&yAxis=count%28%29'
+        '/organizations/org-slug/explore/discover/results/?display=top5&field=error.type&field=count%28%29&name=Test%20Query&project=&query=error.unhandled%3Atrue&sort=-count&statsPeriod=7d&yAxis=count%28%29'
       );
     });
     it('applies the dashboard filters to the query', () => {
@@ -236,7 +199,7 @@ describe('Dashboards util', () => {
       );
     });
   });
-  describe('getWidgetIssueUrl', function () {
+  describe('getWidgetIssueUrl', () => {
     let widget!: Widget;
     beforeEach(() => {
       widget = {
@@ -259,7 +222,7 @@ describe('Dashboards util', () => {
     it('returns the issue url of the widget query', () => {
       const url = getWidgetIssueUrl(widget, undefined, selection, OrganizationFixture());
       expect(url).toBe(
-        '/organizations/org-slug/issues/?query=is%3Aunresolved&sort=date&statsPeriod=7d'
+        '/organizations/org-slug/issues/?project=&query=is%3Aunresolved&sort=date&statsPeriod=7d'
       );
     });
     it('applies the dashboard filters to the query', () => {
@@ -271,11 +234,35 @@ describe('Dashboards util', () => {
       );
       const queryString = url.split('?')[1];
       const urlParams = new URLSearchParams(queryString);
-      expect(urlParams.get('query')).toBe('(is:unresolved) release:["1.0.0","2.0.0"] ');
+      expect(urlParams.get('query')).toBe('is:unresolved release:["1.0.0","2.0.0"] ');
+    });
+    it('applies global filters scoped to the issue dataset', () => {
+      const url = getWidgetIssueUrl(
+        widget,
+        {
+          globalFilter: [
+            {
+              dataset: WidgetType.ISSUE,
+              tag: {key: 'transaction', name: 'transaction'},
+              value: 'transaction:/api/foo',
+            },
+            {
+              dataset: WidgetType.DISCOVER,
+              tag: {key: 'transaction', name: 'transaction'},
+              value: 'transaction:/api/bar',
+            },
+          ],
+        },
+        selection,
+        OrganizationFixture()
+      );
+      const queryString = url.split('?')[1];
+      const urlParams = new URLSearchParams(queryString);
+      expect(urlParams.get('query')).toBe('is:unresolved transaction:/api/foo');
     });
   });
 
-  describe('flattenErrors', function () {
+  describe('flattenErrors', () => {
     it('flattens nested errors', () => {
       const errorResponse = {
         widgets: [
@@ -296,23 +283,12 @@ describe('Dashboards util', () => {
     });
   });
 
-  describe('getDashboardsMEPQueryParams', function () {
-    it('returns correct params if enabled', function () {
-      expect(getDashboardsMEPQueryParams(true)).toEqual({
-        dataset: 'metricsEnhanced',
-      });
-    });
-    it('returns empty object if disabled', function () {
-      expect(getDashboardsMEPQueryParams(false)).toEqual({});
-    });
-  });
-
-  describe('getNumEquations', function () {
-    it('returns 0 if there are no equations', function () {
+  describe('getNumEquations', () => {
+    it('returns 0 if there are no equations', () => {
       expect(getNumEquations(['count()', 'epm()', 'count_unique(user)'])).toBe(0);
     });
 
-    it('returns the count of equations if there are multiple', function () {
+    it('returns the count of equations if there are multiple', () => {
       expect(
         getNumEquations([
           'count()',
@@ -323,55 +299,13 @@ describe('Dashboards util', () => {
       ).toBe(2);
     });
 
-    it('returns 0 if the possible equations array is empty', function () {
+    it('returns 0 if the possible equations array is empty', () => {
       expect(getNumEquations([])).toBe(0);
     });
   });
 
-  describe('isCustomMeasurementWidget', function () {
-    it('returns false on a non custom measurement widget', function () {
-      const widget: Widget = {
-        title: 'Title',
-        interval: '5m',
-        displayType: DisplayType.LINE,
-        widgetType: WidgetType.DISCOVER,
-        queries: [
-          {
-            conditions: '',
-            fields: [],
-            aggregates: ['count()', 'p99(measurements.lcp)'],
-            columns: [],
-            name: 'widget',
-            orderby: '',
-          },
-        ],
-      };
-      expect(isCustomMeasurementWidget(widget)).toBe(false);
-    });
-
-    it('returns true on a custom measurement widget', function () {
-      const widget: Widget = {
-        title: 'Title',
-        interval: '5m',
-        displayType: DisplayType.LINE,
-        widgetType: WidgetType.DISCOVER,
-        queries: [
-          {
-            conditions: '',
-            fields: [],
-            aggregates: ['p99(measurements.custom.measurement)'],
-            columns: [],
-            name: 'widget',
-            orderby: '',
-          },
-        ],
-      };
-      expect(isCustomMeasurementWidget(widget)).toBe(true);
-    });
-  });
-
-  describe('hasUnsavedFilterChanges', function () {
-    it('ignores the order of projects', function () {
+  describe('hasUnsavedFilterChanges', () => {
+    it('ignores the order of projects', () => {
       const initialDashboard = {
         projects: [1, 2],
       } as DashboardDetails;
@@ -385,7 +319,7 @@ describe('Dashboards util', () => {
       expect(hasUnsavedFilterChanges(initialDashboard, location)).toBe(false);
     });
 
-    it('ignores the order of environments', function () {
+    it('ignores the order of environments', () => {
       const initialDashboard = {
         environment: ['alpha', 'beta'],
       } as DashboardDetails;
@@ -399,7 +333,7 @@ describe('Dashboards util', () => {
       expect(hasUnsavedFilterChanges(initialDashboard, location)).toBe(false);
     });
 
-    it('ignores the order of releases', function () {
+    it('ignores the order of releases', () => {
       const initialDashboard = {
         filters: {
           release: ['v1', 'v2'],
@@ -418,57 +352,75 @@ describe('Dashboards util', () => {
   });
 });
 
-describe('isWidgetUsingTransactionName', () => {
-  let baseQuery!: NonNullable<Parameters<typeof constructWidgetFromQuery>[0]>;
-  beforeEach(() => {
-    baseQuery = {
-      displayType: 'line',
-      interval: '5m',
-      queryConditions: ['title:test', 'event.type:test'],
-      queryFields: ['count()', 'failure_count()'],
-      queryNames: ['1', '2'],
-      queryOrderby: '',
-      title: 'Widget Title',
-    };
-  });
-
-  it('returns false when widget does not use transaction', () => {
-    const widget = constructWidgetFromQuery(baseQuery)!;
-    expect(isWidgetUsingTransactionName(widget)).toBe(false);
-  });
-
-  it('returns true when widget uses transaction as a selected field', () => {
-    (baseQuery.queryFields as string[]).push('transaction');
-    const widget = constructWidgetFromQuery(baseQuery)!;
-    expect(isWidgetUsingTransactionName(widget)).toBe(true);
-  });
-
-  it('returns true when widget uses transaction as part of the query filter', () => {
-    baseQuery.queryConditions = ['transaction:test'];
-    const widget = constructWidgetFromQuery(baseQuery)!;
-    expect(isWidgetUsingTransactionName(widget)).toBe(true);
-  });
-
-  describe('isUsingPerformanceScore', () => {
-    it('returns false when widget does not use performance_score', () => {
-      const widget = constructWidgetFromQuery(baseQuery)!;
-      expect(isUsingPerformanceScore(widget)).toBe(false);
+describe('getCurrentPageFilters', () => {
+  it('returns empty array for environment when not defined in location query', () => {
+    const location = LocationFixture({
+      query: {
+        project: '1',
+        statsPeriod: '7d',
+      },
     });
 
-    it('returns true when widget uses performance_score as aggregate', () => {
-      (baseQuery.queryFields as string[]).push(
-        'performance_score(measurements.score.total)'
-      );
-      const widget = constructWidgetFromQuery(baseQuery)!;
-      expect(isUsingPerformanceScore(widget)).toBe(true);
+    const result = getCurrentPageFilters(location);
+
+    expect(result.environment).toEqual([]);
+    expect(result.projects).toEqual([1]);
+    expect(result.period).toBe('7d');
+  });
+
+  it('returns empty array for environment when environment is undefined', () => {
+    const location = LocationFixture({
+      query: {
+        project: '1',
+        environment: undefined,
+        statsPeriod: '7d',
+      },
     });
 
-    it('returns true when widget uses performance_score as condition', () => {
-      (baseQuery.queryConditions as string[]).push(
-        'performance_score(measurements.score.total):>0.5'
-      );
-      const widget = constructWidgetFromQuery(baseQuery)!;
-      expect(isUsingPerformanceScore(widget)).toBe(true);
+    const result = getCurrentPageFilters(location);
+
+    expect(result.environment).toEqual([]);
+  });
+
+  it('returns empty array for environment when environment is null', () => {
+    const location = LocationFixture({
+      query: {
+        project: '1',
+        environment: null,
+        statsPeriod: '7d',
+      },
     });
+
+    const result = getCurrentPageFilters(location);
+
+    expect(result.environment).toEqual([]);
+  });
+
+  it('converts single environment string to array', () => {
+    const location = LocationFixture({
+      query: {
+        project: '1',
+        environment: 'production',
+        statsPeriod: '7d',
+      },
+    });
+
+    const result = getCurrentPageFilters(location);
+
+    expect(result.environment).toEqual(['production']);
+  });
+
+  it('preserves environment array when already an array', () => {
+    const location = LocationFixture({
+      query: {
+        project: '1',
+        environment: ['production', 'staging'],
+        statsPeriod: '7d',
+      },
+    });
+
+    const result = getCurrentPageFilters(location);
+
+    expect(result.environment).toEqual(['production', 'staging']);
   });
 });

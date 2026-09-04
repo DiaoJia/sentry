@@ -17,6 +17,7 @@ from sentry.consumers import get_stream_processor
 from sentry.eventstream.types import EventStreamEventType
 from sentry.testutils.cases import TestCase
 from sentry.testutils.skips import requires_kafka
+from sentry.testutils.thread_leaks.pytest import thread_leak_allowlist
 from sentry.utils import json, kafka_config
 from sentry.utils.batching_kafka_consumer import wait_for_topics
 
@@ -50,6 +51,7 @@ def kafka_message_payload() -> Any:
     ]
 
 
+@thread_leak_allowlist(reason="post process forwarder", issue=97038)
 class PostProcessForwarderTest(TestCase):
     def _get_producer(self, cluster_name: str) -> Producer:
         conf = settings.KAFKA_CLUSTERS[cluster_name]["common"]
@@ -64,6 +66,10 @@ class PostProcessForwarderTest(TestCase):
             KAFKA_TOPIC_OVERRIDES={
                 "events": self.events_topic,
                 "transactions": self.events_topic,
+            },
+            KAFKA_TOPIC_TO_CLUSTER={
+                **settings.KAFKA_TOPIC_TO_CLUSTER,
+                self.events_topic: settings.KAFKA_TOPIC_TO_CLUSTER["events"],
             },
         )
 
@@ -90,7 +96,6 @@ class PostProcessForwarderTest(TestCase):
             topic=self.events_topic,
             synchronize_commit_log_topic=self.commit_log_topic,
             synchronize_commit_group=synchronize_commit_group,
-            cluster=None,
             group_id=consumer_group,
             auto_offset_reset="earliest",
             strict_offset_reset=False,
@@ -128,9 +133,9 @@ class PostProcessForwarderTest(TestCase):
             key=f"{self.events_topic}:0:{synchronize_commit_group}".encode(),
             value=b'{"orig_message_ts": 123456, "offset": 1}',
         )
-        assert (
-            commit_log_producer.flush(5) == 0
-        ), "snuba-commit-log producer did not successfully flush queue"
+        assert commit_log_producer.flush(5) == 0, (
+            "snuba-commit-log producer did not successfully flush queue"
+        )
 
         with patch("sentry.eventstream.kafka.dispatch.dispatch_post_process_group_task") as mock:
             # Run the loop for sometime

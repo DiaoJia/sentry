@@ -1,13 +1,14 @@
 import {Fragment} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import type {TooltipProps} from 'sentry/components/core/tooltip';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Flex} from '@sentry/scraps/layout';
+import {Text} from '@sentry/scraps/text';
+import type {TooltipProps} from '@sentry/scraps/tooltip';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {DateTime} from 'sentry/components/dateTime';
-import Text from 'sentry/components/text';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {ColorOrAlias} from 'sentry/utils/theme';
 
 import type {JobTickData, TickStyle, TimeWindowConfig} from './types';
 
@@ -27,7 +28,7 @@ interface CheckInTooltipProps<Status extends string> extends Omit<TooltipProps, 
   /**
    * Configures the styling of the tooltip labels
    */
-  statusStyle: Record<Status, TickStyle>;
+  statusStyle: TickStyle<Status>;
   timeWindowConfig: TimeWindowConfig;
 }
 
@@ -45,9 +46,12 @@ export function CheckInTooltip<Status extends string>({
   const representsSingleJob =
     Object.values<number>(stats).reduce((sum, count) => sum + count, 0) === 1;
 
+  const theme = useTheme();
+  const labelColors = statusStyle(theme);
+
   const tooltipTitle = (
     <Fragment>
-      <TooltipTimeLabel>
+      <Flex justify="center">
         <DateTime date={startTs * 1000} format={dateLabelFormat} />
         {!representsSingleJob && (
           <Fragment>
@@ -55,7 +59,7 @@ export function CheckInTooltip<Status extends string>({
             <DateTime date={endTs * 1000} format={dateLabelFormat} />
           </Fragment>
         )}
-      </TooltipTimeLabel>
+      </Flex>
       <StatusCountContainer>
         <thead>
           <tr>
@@ -69,7 +73,11 @@ export function CheckInTooltip<Status extends string>({
             ([status, count]) =>
               count > 0 && (
                 <tr key={status}>
-                  <StatusLabel labelColor={statusStyle[status]?.labelColor ?? 'disabled'}>
+                  <StatusLabel
+                    labelColor={
+                      labelColors[status]?.labelColor ?? theme.tokens.content.disabled
+                    }
+                  >
                     {statusLabel[status]}
                   </StatusLabel>
                   <StatusCount>{count}</StatusCount>
@@ -94,7 +102,7 @@ const StatusCountContainer = styled('table')`
   margin: 0;
   display: grid;
   grid-template-columns: max-content max-content max-content;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 
   /* Visually hide the tooltip headers but keep them for accessability */
   thead {
@@ -119,13 +127,8 @@ const StatusCountContainer = styled('table')`
   }
 `;
 
-const TooltipTimeLabel = styled('div')`
-  display: flex;
-  justify-content: center;
-`;
-
-const StatusLabel = styled('td')<{labelColor: ColorOrAlias}>`
-  color: ${p => p.theme[p.labelColor]};
+const StatusLabel = styled('td')<{labelColor: string}>`
+  color: ${p => p.labelColor};
 `;
 
 const StatusCount = styled('td')`
@@ -133,5 +136,5 @@ const StatusCount = styled('td')`
 `;
 
 const StatusUnit = styled('td')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

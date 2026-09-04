@@ -1,7 +1,6 @@
-import type {DateTimeProps} from 'sentry/components/dateTime';
-import type {ColorOrAlias} from 'sentry/utils/theme';
+import type {Theme} from '@emotion/react';
 
-export type TimeWindow = '1h' | '24h' | '7d' | '30d';
+import type {DateTimeProps} from 'sentry/components/dateTime';
 
 interface MarkerIntervals {
   /**
@@ -89,26 +88,35 @@ export interface TimeWindowConfig {
   start: Date;
   /**
    * The width in pixels of the timeline. This value is clamped such that there
-   * may be some underscan. See the RollupConfig for more details.
+   * may be some underscan, this value does not include the width of the
+   * underscan. See the RollupConfig for more details.
    */
   timelineWidth: number;
+  /**
+   * The timezone to use for grid line calculations and date formatting
+   */
+  timezone: string;
 }
 
-export interface TickStyle {
+interface StatusStyle {
   /**
    * The color of the tooltip label
    */
-  labelColor: ColorOrAlias;
+  labelColor: string;
   /**
    * The color of the tick
    */
-  tickColor: ColorOrAlias;
+  tickColor: string;
   /**
    * Use a cross hatch fill for the tick instead of a solid color. The tick
    * color will be used as the border color
    */
-  hatchTick?: ColorOrAlias;
+  hatchTick?: string;
 }
+
+export type TickStyle<Status extends string> = (
+  theme: Theme
+) => Record<Status, StatusStyle>;
 
 export type CheckInBucket<Status extends string> = [
   timestamp: number,

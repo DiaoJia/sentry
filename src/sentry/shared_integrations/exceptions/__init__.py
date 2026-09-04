@@ -17,6 +17,7 @@ __all__ = (
     "ApiError",
     "ApiConflictError",
     "ApiHostError",
+    "ApiPaginationTruncated",
     "ApiTimeoutError",
     "ApiUnauthorized",
     "ApiRateLimitedError",
@@ -89,6 +90,8 @@ class ApiError(Exception):
             return ApiConflictError(response.text, url=url)
         elif response.status_code == 400:
             return ApiInvalidRequestError(response.text, url=url)
+        elif response.status_code == 403:
+            return ApiForbiddenError(response.text, url=url)
 
         return cls(response.text, response.status_code, url=url)
 
@@ -112,6 +115,10 @@ class ApiHostError(ApiError):
     def from_request(cls, request: _RequestHasUrl) -> ApiHostError:
         host = urlparse(request.url).netloc
         return cls(f"Unable to reach host: {host}", url=request.url)
+
+
+class UnknownHostError(ApiError):
+    code = 500
 
 
 class ApiRetryError(ApiError):
@@ -159,17 +166,42 @@ class ApiInvalidRequestError(ApiError):
     code = 400
 
 
+class ApiForbiddenError(ApiError):
+    code = 403
+
+
 class UnsupportedResponseType(ApiError):
     @property
     def content_type(self) -> str:
         return self.text
 
 
+class ApiPaginationTruncated(Exception):
+    """
+    Raised by paginated fetch helpers when they hit a cap (e.g. a
+    `page_number_limit`) while more pages were still available on the provider.
+
+    Callers that opt in use this to distinguish "we got everything" from "we got a prefix, there's more."
+    The partial results fetched before the cap are attached as ``partial_data`` so
+    callers can still use what was retrieved.
+    """
+
+    def __init__(self, partial_data: list[Any], message: str = "pagination truncated") -> None:
+        self.partial_data = partial_data
+        super().__init__(message)
+
+
 class IntegrationError(Exception):
-    pass
+    message: Any | None = None
+    error_code: int | None = None
+
+    def __init__(self, message: Any | None = None, error_code: int | None = None) -> None:
+        self.message = message
+        self.error_code = error_code
+        super().__init__(message)
 
 
-class IntegrationInstallationConfigurationError(Exception):
+class IntegrationConfigurationError(IntegrationError):
     """
     Error when external API access is blocked due to configuration issues
     like permissions, visibility changes, or invalid project settings.
@@ -178,6 +210,12 @@ class IntegrationInstallationConfigurationError(Exception):
     """
 
     pass
+
+
+class IntegrationResourceNotFoundError(IntegrationError):
+    """
+    Error when an external API resource is not found.
+    """
 
 
 class IntegrationProviderError(Exception):
@@ -202,6 +240,6 @@ class IntegrationFormError(IntegrationError):
 class ClientError(RequestException):
     """4xx Error Occurred"""
 
-    def __init__(self, status_code: str, url: str, response: Response | None = None) -> None:
+    def __init__(self, status_code: str | int, url: str, response: Response | None = None) -> None:
         http_error_msg = f"{status_code} Client Error: for url: {url}"
         super().__init__(http_error_msg, response=response)

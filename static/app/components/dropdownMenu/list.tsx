@@ -1,5 +1,5 @@
 import {createContext, Fragment, useContext, useMemo, useRef} from 'react';
-import {useTheme} from '@emotion/react';
+import {useTheme, css} from '@emotion/react';
 import styled from '@emotion/styled';
 import {FocusScope} from '@react-aria/focus';
 import {useKeyboard} from '@react-aria/interactions';
@@ -13,13 +13,12 @@ import type {Node} from '@react-types/shared';
 import omit from 'lodash/omit';
 
 import {Overlay, PositionWrapper} from 'sentry/components/overlay';
-import {space} from 'sentry/styles/space';
-import type useOverlay from 'sentry/utils/useOverlay';
+import type {useOverlay} from 'sentry/utils/useOverlay';
 
 import {DropdownMenu} from './index';
 import type {MenuItemProps} from './item';
-import DropdownMenuItem from './item';
-import DropdownMenuSection from './section';
+import {DropdownMenuItem} from './item';
+import {DropdownMenuSection} from './section';
 
 type OverlayState = ReturnType<typeof useOverlay>['state'];
 
@@ -39,7 +38,8 @@ interface DropdownMenuContextValue {
 export const DropdownMenuContext = createContext<DropdownMenuContextValue>({});
 
 export interface DropdownMenuListProps
-  extends Omit<
+  extends
+    Omit<
       AriaMenuOptions<MenuItemProps>,
       | 'selectionMode'
       | 'selectedKeys'
@@ -58,6 +58,10 @@ export interface DropdownMenuListProps
    */
   closeOnSelect?: boolean;
   /**
+   * Prevent users from highlighting text inside the menu.
+   */
+  disableTextSelection?: boolean;
+  /**
    * To be displayed below the menu items
    */
   menuFooter?: React.ReactNode;
@@ -65,22 +69,25 @@ export interface DropdownMenuListProps
    * Title to display on top of the menu
    */
   menuTitle?: React.ReactNode;
-  /**
-   * Minimum menu width
-   */
-  minMenuWidth?: number;
   size?: MenuItemProps['size'];
+  /**
+   * Style overrides applied to the position wrapper. Useful for overriding
+   * the default z-index (e.g. when the menu is inside a high z-index container
+   * like a sidebar).
+   */
+  zIndex?: number;
 }
 
-function DropdownMenuList({
+export function DropdownMenuList({
   closeOnSelect = true,
   onClose,
-  minMenuWidth,
   size,
   menuTitle,
   menuFooter,
+  disableTextSelection,
   overlayState,
   overlayPositionProps,
+  zIndex,
   ...props
 }: DropdownMenuListProps) {
   const {rootOverlayState, parentMenuState} = useContext(DropdownMenuContext);
@@ -114,7 +121,7 @@ function DropdownMenuList({
     // logically follows from the tree-like structure and single-selection
     // nature of menus.
     const isLeafSubmenu = !stateCollection.some(node => {
-      const isSection = node.hasChildNodes && !node.value?.isSubmenu;
+      const isSection = node.hasChildNodes && !node.value?.submenu;
       // A submenu with key [key] is expanded if
       // state.selectionManager.isSelected([key]) = true
       return isSection
@@ -158,6 +165,9 @@ function DropdownMenuList({
       return null;
     }
 
+    const submenuConfig = node.value.submenu;
+    const submenuOptions = typeof submenuConfig === 'object' ? submenuConfig : {};
+
     const trigger = (triggerProps: any) => (
       <DropdownMenuItem
         renderAs="div"
@@ -183,13 +193,12 @@ function DropdownMenuList({
         trigger={trigger}
         onClose={onClose}
         closeOnSelect={closeOnSelect}
-        menuTitle={node.value.submenuTitle}
-        isDismissable={false}
+        disableTextSelection={disableTextSelection}
+        menuTitle={submenuOptions.title}
         shouldCloseOnBlur={false}
-        shouldCloseOnInteractOutside={() => false}
         preventOverflowOptions={{boundary: document.body, altAxis: true}}
         renderWrapAs="li"
-        position="right-start"
+        position={submenuOptions.position ?? 'right-start'}
         offset={-4}
         size={size}
       />
@@ -212,7 +221,7 @@ function DropdownMenuList({
           </DropdownMenuSection>
         );
       } else {
-        itemToRender = node.value?.isSubmenu
+        itemToRender = node.value?.submenu
           ? renderItemWithSubmenu(node)
           : renderItem(node);
       }
@@ -235,17 +244,20 @@ function DropdownMenuList({
   );
   return (
     <FocusScope restoreFocus autoFocus>
-      <PositionWrapper zIndex={theme.zIndex.dropdown} {...overlayPositionProps}>
+      <PositionWrapper
+        zIndex={zIndex === undefined ? theme.zIndex.dropdown : Number(zIndex)}
+        {...overlayPositionProps}
+      >
         <DropdownMenuContext value={contextValue}>
           <StyledOverlay>
             {menuTitle && <MenuTitle>{menuTitle}</MenuTitle>}
             <DropdownMenuListWrap
               ref={menuRef}
               hasTitle={!!menuTitle}
+              disableTextSelection={disableTextSelection}
               {...mergeProps(modifiedMenuProps, keyboardProps)}
               style={{
                 maxHeight: overlayPositionProps.style?.maxHeight,
-                minWidth: minMenuWidth ?? overlayPositionProps.style?.minWidth,
               }}
             >
               {renderCollection(stateCollection)}
@@ -258,21 +270,36 @@ function DropdownMenuList({
   );
 }
 
-export default DropdownMenuList;
-
 const StyledOverlay = styled(Overlay)`
   display: flex;
   flex-direction: column;
 `;
 
-const DropdownMenuListWrap = styled('ul')<{hasTitle: boolean}>`
+const DropdownMenuListWrap = styled('ul')<{
+  hasTitle: boolean;
+  disableTextSelection?: boolean;
+}>`
   margin: 0;
-  padding: ${space(0.5)} 0;
-  font-size: ${p => p.theme.fontSize.md};
+  padding: ${p => p.theme.space.xs} 0;
+  font-size: ${p => p.theme.font.size.md};
   overflow-x: hidden;
   overflow-y: auto;
 
-  ${p => p.hasTitle && `padding-top: calc(${space(0.5)} + 1px);`}
+  ${p =>
+    p.disableTextSelection &&
+    css`
+      &,
+      * {
+        -webkit-user-select: none;
+        user-select: none;
+      }
+    `}
+
+  ${p =>
+    p.hasTitle &&
+    css`
+      padding-top: calc(${p.theme.space.xs} + 1px);
+    `}
 
   &:focus {
     outline: none;
@@ -281,17 +308,18 @@ const DropdownMenuListWrap = styled('ul')<{hasTitle: boolean}>`
 
 const MenuTitle = styled('div')`
   flex-shrink: 0;
-  font-weight: ${p => p.theme.fontWeightBold};
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.headingColor};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.primary};
   white-space: nowrap;
-  padding: ${space(0.75)} ${space(1.5)};
-  box-shadow: 0 1px 0 0 ${p => p.theme.translucentInnerBorder};
+  padding: ${p => p.theme.space.sm} ${p => p.theme.space.lg};
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  box-shadow: 0 1px 0 0 ${p => p.theme.tokens.border.transparent.neutral.muted};
   z-index: 2;
 `;
 
 const Separator = styled('li')`
   list-style-type: none;
-  border-top: solid 1px ${p => p.theme.innerBorder};
-  margin: ${space(0.5)} ${space(1.5)};
+  border-top: solid 1px ${p => p.theme.tokens.border.secondary};
+  margin: ${p => p.theme.space.xs} ${p => p.theme.space.lg};
 `;

@@ -1,34 +1,41 @@
 import logging
-from typing import Any
+from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any, cast
 
 from django.conf import settings
 from django.contrib.auth import logout
 from django.db import router, transaction
+from django.utils import timezone as django_timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
-from rest_framework.exceptions import ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
+from sentry_sdk import capture_exception
 
-from sentry import roles
+from sentry import analytics, audit_log, roles
+from sentry.analytics.events.user_removed import UserRemovedEvent
 from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.base import control_silo_endpoint
 from sentry.api.decorators import sudo_required
-from sentry.api.endpoints.organization_details import post_org_pending_deletion
 from sentry.api.serializers import serialize
 from sentry.api.serializers.rest_framework import CamelSnakeModelSerializer
+from sentry.audit_log.services.log import AuditLogEvent, log_service
 from sentry.auth.elevated_mode import has_elevated_mode
+from sentry.conf.types.sentry_config import SentryMode
 from sentry.constants import LANGUAGES
+from sentry.core.endpoints.organization_details import post_org_pending_deletion
+from sentry.models.authidentity import AuthIdentity
 from sentry.models.organization import OrganizationStatus
 from sentry.models.organizationmapping import OrganizationMapping
 from sentry.models.organizationmembermapping import OrganizationMemberMapping
 from sentry.organizations.services.organization import organization_service
 from sentry.organizations.services.organization.model import RpcOrganizationDeleteState
+from sentry.security.utils import capture_security_activity
 from sentry.users.api.bases.user import UserAndStaffPermission, UserEndpoint
 from sentry.users.api.serializers.user import DetailedSelfUserSerializer
 from sentry.users.models.user import User
 from sentry.users.models.user_option import UserOption
-from sentry.users.models.useremail import UserEmail
 from sentry.users.services.user.serial import serialize_generic_user
 from sentry.utils.dates import get_timezone_choices
 
@@ -39,15 +46,82 @@ delete_logger = logging.getLogger("sentry.deletions.api")
 TIMEZONE_CHOICES = get_timezone_choices()
 
 
-def validate_quick_start_display(value: dict[str, int] | None) -> None:
-    if value is not None:
-        for display_value in value.values():
-            if not isinstance(display_value, int):
-                raise ValidationError("The value should be an integer.")
-            if display_value <= 0:
-                raise ValidationError("The value cannot be less than or equal to 0.")
-            if display_value > 2:
-                raise ValidationError("The value cannot exceed 2.")
+def user_can_elevate(target_user: User) -> bool:
+    if settings.SUPERUSER_ORG_ID is None:
+        return False
+
+    try:
+        org_member_exists = OrganizationMemberMapping.objects.filter(
+            organization_id=settings.SUPERUSER_ORG_ID,
+            user=target_user,
+        ).exists()
+    except Exception:
+        # If anything goes wrong, default to not allowing elevation
+        return False
+
+    return org_member_exists
+
+
+def record_user_deactivation(*, user: User, actor: Any, ip_address: str) -> None:
+    deactivation_datetime = django_timezone.now()
+    scheduled_deletion_datetime = deactivation_datetime + timedelta(days=30)
+
+    try:
+        analytics.record(
+            UserRemovedEvent(
+                user_id=user.id,
+                actor_id=actor.id,
+                deletion_request_datetime=deactivation_datetime.isoformat(),
+                deletion_datetime=scheduled_deletion_datetime.isoformat(),
+            )
+        )
+    except Exception as e:
+        capture_exception(e)
+
+    capture_security_activity(
+        account=user,
+        type="user.deactivated",
+        actor=actor,
+        ip_address=ip_address,
+        context={
+            "deactivation_datetime": deactivation_datetime,
+            "scheduled_deletion_datetime": scheduled_deletion_datetime,
+        },
+        send_email=True,
+        current_datetime=deactivation_datetime,
+    )
+
+
+def record_hard_user_deletion(
+    *, user_id: int, user_email: str, actor: Any, ip_address: str
+) -> None:
+    deletion_datetime = django_timezone.now()
+
+    try:
+        analytics.record(
+            UserRemovedEvent(
+                user_id=user_id,
+                actor_id=actor.id,
+                deletion_request_datetime=deletion_datetime.isoformat(),
+                deletion_datetime=deletion_datetime.isoformat(),
+            )
+        )
+    except Exception as e:
+        capture_exception(e)
+
+    # We create a minimal object with id and email since the User was already deleted.
+    # This is only used for email template rendering.
+    account_info = SimpleNamespace(id=user_id, email=user_email)
+
+    capture_security_activity(
+        account=cast(Any, account_info),
+        type="user.removed",
+        actor=actor,
+        ip_address=ip_address,
+        context={"deletion_datetime": deletion_datetime},
+        send_email=True,
+        current_datetime=deletion_datetime,
+    )
 
 
 class UserOptionsSerializer(serializers.Serializer[UserOption]):
@@ -79,43 +153,16 @@ class UserOptionsSerializer(serializers.Serializer[UserOption]):
         required=False,
     )
     prefersIssueDetailsStreamlinedUI = serializers.BooleanField(required=False)
-    prefersNextjsInsightsOverview = serializers.BooleanField(required=False)
-    prefersStackedNavigation = serializers.BooleanField(required=False)
-    prefersChonkUI = serializers.BooleanField(required=False)
-    prefersAgentsInsightsModule = serializers.BooleanField(required=False)
-
-    quickStartDisplay = serializers.JSONField(
-        required=False,
-        allow_null=True,
-        validators=[validate_quick_start_display],
-        help_text="Tracks whether the quick start guide was already automatically shown to the user during their second visit.",
-    )
 
 
 class BaseUserSerializer(CamelSnakeModelSerializer[User]):
     def validate_username(self, value: str) -> str:
         assert isinstance(self.instance, User), "Should be a single record not a sequence"
 
-        if (
-            User.objects.filter(username__iexact=value)
-            # Django throws an exception if `id` is `None`, which it will be when we're importing
-            # new users via the relocation logic on the `User` model. So we cast `None` to `0` to
-            # make Django happy here.
-            .exclude(id=self.instance.id if hasattr(self.instance, "id") else 0).exists()
-        ):
+        if not User.is_username_available(value, exclude_user_id=self.instance.id or 0):
             raise serializers.ValidationError("That username is already in use.")
+
         return value
-
-    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
-        attrs = super().validate(attrs)
-
-        assert isinstance(self.instance, User), "Should be a single record not a sequence"
-        if self.instance.email == self.instance.username:
-            if attrs.get("username", self.instance.email) != self.instance.email:
-                # ... this probably needs to handle newsletters and such?
-                attrs.setdefault("email", attrs["username"])
-
-        return attrs
 
     def update(self, instance: User, validated_data: dict[str, Any]) -> User:
         if "isActive" not in validated_data:
@@ -138,10 +185,66 @@ class UserSerializer(BaseUserSerializer):
 
 class SuperuserUserSerializer(BaseUserSerializer):
     is_active = serializers.BooleanField()
+    is_suspended = serializers.BooleanField(required=False)
 
     class Meta:
         model = User
-        fields = ("name", "username", "is_active")
+        fields = ("name", "username", "is_active", "is_suspended")
+
+    def validate_is_suspended(self, value: bool) -> bool:
+        if value and self.instance:
+            request = self.context.get("request")
+            if request and request.user.id == self.instance.id:
+                raise serializers.ValidationError("You cannot suspend your own account.")
+            if self.instance.is_sentry_app:
+                raise serializers.ValidationError("Cannot suspend Sentry App proxy users.")
+        return value
+
+    def update(self, instance: User, validated_data: dict[str, Any]) -> User:
+        request = self.context.get("request")
+        should_audit = False
+        suspension_changed = (
+            "is_suspended" in validated_data
+            and instance.is_suspended != validated_data["is_suspended"]
+        )
+
+        if request:
+            privileged_fields = {"is_active", "is_staff", "is_superuser", "is_suspended"}
+            changed_fields = {
+                field
+                for field in privileged_fields
+                if field in validated_data and getattr(instance, field) != validated_data[field]
+            }
+            should_audit = bool(changed_fields)
+
+        if suspension_changed and validated_data["is_suspended"]:
+            instance.refresh_session_nonce()
+
+        user = super().update(instance, validated_data)
+
+        if should_audit and request:
+            audit_logger.info(
+                "user.edit",
+                extra={
+                    "user_id": user.id,
+                    "actor_id": getattr(request.user, "id", None),
+                    "ip_address": request.META.get("REMOTE_ADDR"),
+                    "form_data": getattr(request, "data", None),
+                    "changed_fields": changed_fields,
+                },
+            )
+
+        if suspension_changed and request:
+            capture_security_activity(
+                account=user,
+                type="user.suspended" if user.is_suspended else "user.unsuspended",
+                actor=request.user,
+                ip_address=request.META.get("REMOTE_ADDR", ""),
+                context={"actor_id": getattr(request.user, "id", None)},
+                send_email=False,
+            )
+
+        return user
 
 
 class PrivilegedUserSerializer(SuperuserUserSerializer):
@@ -150,7 +253,7 @@ class PrivilegedUserSerializer(SuperuserUserSerializer):
 
     class Meta:
         model = User
-        fields = ("name", "username", "is_active", "is_staff", "is_superuser")
+        fields = ("name", "username", "is_active", "is_suspended", "is_staff", "is_superuser")
 
 
 class DeleteUserSerializer(serializers.Serializer[User]):
@@ -198,17 +301,8 @@ class UserDetailsEndpoint(UserEndpoint):
         :param string default_issue_event: Event displayed by default, "recommended", "latest" or "oldest"
         :auth: required
         """
-        email = None
-        if "email" in request.data and len(request.data["email"]) > 0:
-            email = request.data["email"]
-        elif "username" in request.data and len(request.data["username"]) > 0:
-            email = request.data["username"]
-        if email:
-            verified_email_found = UserEmail.objects.filter(
-                user_id=user.id, email=email, is_verified=True
-            ).exists()
-            if not verified_email_found:
-                return Response({"detail": "Verified email address is not found."}, status=400)
+        # `email` is not writable here: primary email changes go through UserEmailsEndpoint
+        # `username` is only editable if it does not match `email`, changing `username` does not change `email`.
 
         # We want to prevent superusers from setting users to superuser or staff
         # because this is only done through _admin. This will always be enforced
@@ -239,7 +333,9 @@ class UserDetailsEndpoint(UserEndpoint):
             serializer_cls = SuperuserUserSerializer
         else:
             serializer_cls = UserSerializer
-        serializer = serializer_cls(instance=user, data=request.data, partial=True)
+        serializer = serializer_cls(
+            instance=user, data=request.data, partial=True, context={"request": request}
+        )
 
         serializer_options = UserOptionsSerializer(
             data=request.data.get("options", {}), partial=True
@@ -248,6 +344,31 @@ class UserDetailsEndpoint(UserEndpoint):
         # This serializer should NOT include privileged fields e.g. password
         if not serializer.is_valid() or not serializer_options.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # We want to do extra checks in SaaS mode for superuser/staff elevation.
+        # The users have to also be a member of the default organization to be able to elevate
+        # to superuser/staff.
+        if settings.SENTRY_MODE == SentryMode.SAAS:
+            validated_data = serializer.validated_data
+            requested_superuser = validated_data.get("is_superuser")
+            requested_staff = validated_data.get("is_staff")
+
+            is_updating_superuser = requested_superuser is not None
+            is_updating_staff = requested_staff is not None
+
+            if is_updating_superuser or is_updating_staff:
+                if not user_can_elevate(user):
+                    # Revoke superuser/staff privileges if the user is not a member of the default organization.
+                    # Clear validated_data so only the revocation fields are persisted,
+                    # avoiding side effects from other fields in the rejected request.
+                    serializer.validated_data.clear()
+                    serializer.save(is_superuser=False, is_staff=False)
+                    return Response(
+                        {
+                            "detail": "User must be a member to the default organization to enable SuperUser mode. Superuser/staff privileges have been revoked."
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         # map API keys to keys in model
         key_map = {
@@ -258,49 +379,18 @@ class UserDetailsEndpoint(UserEndpoint):
             "defaultIssueEvent": "default_issue_event",
             "clock24Hours": "clock_24_hours",
             "prefersIssueDetailsStreamlinedUI": "prefers_issue_details_streamlined_ui",
-            "prefersStackedNavigation": "prefers_stacked_navigation",
-            "prefersNextjsInsightsOverview": "prefers_nextjs_insights_overview",
-            "prefersChonkUI": "prefers_chonk_ui",
-            "prefersAgentsInsightsModule": "prefers_agents_insights_module",
-            "quickStartDisplay": "quick_start_display",
         }
 
         options_result = serializer_options.validated_data
 
         for key in key_map:
             if key in options_result:
-                if key == "quickStartDisplay":
-                    current_value = UserOption.objects.get_value(
-                        user=user, key=key_map.get(key, key)
-                    )
-
-                    if current_value is None:
-                        current_value = {}
-
-                    new_value = options_result.get(key)
-
-                    current_value.update(new_value)
-
-                    UserOption.objects.set_value(
-                        user=user, key=key_map.get(key, key), value=current_value
-                    )
-                else:
-                    UserOption.objects.set_value(
-                        user=user, key=key_map.get(key, key), value=options_result.get(key)
-                    )
+                UserOption.objects.set_value(
+                    user=user, key=key_map.get(key, key), value=options_result.get(key)
+                )
 
         with transaction.atomic(using=router.db_for_write(User)):
             user = serializer.save()
-
-            if any(k in request.data for k in ("isStaff", "isSuperuser", "isActive")):
-                audit_logger.info(
-                    "user.edit",
-                    extra={
-                        "user_id": user.id,
-                        "actor_id": request.user.id,
-                        "form_data": request.data,
-                    },
-                )
 
         return Response(serialize(user, request.user, DetailedSelfUserSerializer()))
 
@@ -377,6 +467,19 @@ class UserDetailsEndpoint(UserEndpoint):
                     organization_id=member_mapping.organization_id,
                     organization_member_id=member_mapping.organizationmember_id,
                 )
+                log_service.record_audit_log(
+                    event=AuditLogEvent(
+                        organization_id=member_mapping.organization_id,
+                        date_added=django_timezone.now(),
+                        event_id=audit_log.get_event_id("MEMBER_REMOVE"),
+                        actor_user_id=request.user.id,
+                        actor_label=request.user.username,
+                        ip_address=request.META["REMOTE_ADDR"],
+                        target_object_id=member_mapping.organizationmember_id,
+                        target_user_id=user.id,
+                        data={"email": user.email},
+                    )
+                )
 
         logging_data = {
             "actor_id": request.user.id,
@@ -399,11 +502,26 @@ class UserDetailsEndpoint(UserEndpoint):
         is_current_user = request.user.id == user.id
 
         if hard_delete:
+            user_id = user.id
+            user_email = user.email
             user.delete()
             delete_logger.info("user.removed", extra=logging_data)
+            record_hard_user_deletion(
+                user_id=user_id,
+                user_email=user_email,
+                actor=request.user,
+                ip_address=request.META["REMOTE_ADDR"],
+            )
         else:
             User.objects.filter(id=user.id).update(is_active=False)
+            for auth_identity in AuthIdentity.objects.filter(user_id=user.id):
+                auth_identity.delete()
             delete_logger.info("user.deactivate", extra=logging_data)
+            record_user_deactivation(
+                user=user,
+                actor=request.user,
+                ip_address=request.META["REMOTE_ADDR"],
+            )
 
         # if the user deleted their own account log them out
         if is_current_user:

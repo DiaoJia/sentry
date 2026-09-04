@@ -1,3 +1,5 @@
+import logging
+
 from sentry.incidents.models.incident import TriggerStatus
 from sentry.incidents.typings.metric_detector import (
     AlertContext,
@@ -15,6 +17,8 @@ from sentry.notifications.notification_action.registry import metric_alert_handl
 from sentry.notifications.notification_action.types import BaseMetricAlertHandler
 from sentry.rules.actions.notify_event_service import send_incident_alert_notification
 from sentry.workflow_engine.models import Action
+
+logger = logging.getLogger(__name__)
 
 
 @metric_alert_handler_registry.register(Action.Type.SENTRY_APP)
@@ -37,11 +41,19 @@ class SentryAppMetricAlertHandler(BaseMetricAlertHandler):
 
         incident_serialized_response = get_incident_serializer(open_period)
 
+        logger.info(
+            "notification_action.execute_via_metric_alert_handler.sentry_app",
+            extra={
+                "action_id": alert_context.action_identifier_id,
+            },
+        )
+
         send_incident_alert_notification(
             notification_context=notification_context,
             alert_context=alert_context,
             metric_issue_context=metric_issue_context,
             incident_serialized_response=incident_serialized_response,
             organization=organization,
+            project_id=project.id,
             notification_uuid=notification_uuid,
         )

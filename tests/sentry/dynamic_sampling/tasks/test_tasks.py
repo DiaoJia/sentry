@@ -1,11 +1,13 @@
 from collections.abc import Callable
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.utils import timezone
 
 from sentry.dynamic_sampling import RuleType, generate_rules, get_redis_client_for_ds
+from sentry.dynamic_sampling.models.common import RebalancedItem
+from sentry.dynamic_sampling.per_org import cache as per_org_cache
 from sentry.dynamic_sampling.rules.base import NEW_MODEL_THRESHOLD_IN_MINUTES
 from sentry.dynamic_sampling.rules.biases.recalibration_bias import RecalibrationBias
 from sentry.dynamic_sampling.tasks.boost_low_volume_projects import boost_low_volume_projects
@@ -29,10 +31,11 @@ from sentry.dynamic_sampling.tasks.helpers.sliding_window import (
 from sentry.dynamic_sampling.tasks.recalibrate_orgs import recalibrate_orgs
 from sentry.dynamic_sampling.tasks.sliding_window_org import sliding_window_org
 from sentry.dynamic_sampling.types import DynamicSamplingMode
-from sentry.snuba.metrics.naming_layer.mri import SpanMRI, TransactionMRI
+from sentry.snuba.metrics.naming_layer.mri import SpanMRI
 from sentry.testutils.cases import BaseMetricsLayerTestCase, SnubaTestCase, TestCase
 from sentry.testutils.helpers import with_feature
 from sentry.testutils.helpers.datetime import freeze_time
+from sentry.testutils.helpers.options import override_options
 
 MOCK_DATETIME = (timezone.now() - timedelta(days=1)).replace(
     hour=0, minute=0, second=0, microsecond=0
@@ -66,7 +69,9 @@ class TasksTestCase(BaseMetricsLayerTestCase, TestCase, SnubaTestCase):
 
     def create_project_and_add_metrics(self, name, count, org, tags=None, is_old=True):
         if tags is None:
-            tags = {"transaction": "foo_transaction"}
+            tags = {"transaction": "foo_transaction", "is_segment": "true"}
+        elif "is_segment" not in tags:
+            tags = {**tags, "is_segment": "true"}
 
         if is_old:
             proj = self.create_old_project(name=name, organization=org)
@@ -76,7 +81,7 @@ class TasksTestCase(BaseMetricsLayerTestCase, TestCase, SnubaTestCase):
         self.disable_all_biases(project=proj)
 
         self.store_performance_metric(
-            name=TransactionMRI.COUNT_PER_ROOT_PROJECT.value,
+            name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
             tags=tags,
             minutes_before_now=30,
             value=count,
@@ -128,11 +133,8 @@ class TestBoostLowVolumeProjectsTasks(TasksTestCase):
     def forecasted_volume_side_effect(*args, **kwargs):
         return kwargs["volume"]
 
-    @patch("sentry.dynamic_sampling.tasks.boost_low_volume_projects.model_factory")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_boost_low_volume_projects_with_no_dynamic_sampling(
-        self, get_blended_sample_rate, model_factory
-    ):
+    def test_boost_low_volume_projects_with_no_dynamic_sampling(self, get_blended_sample_rate):
         get_blended_sample_rate.return_value = 0.25
         test_org = self.create_old_organization(name="sample-org")
 
@@ -144,8 +146,6 @@ class TestBoostLowVolumeProjectsTasks(TasksTestCase):
         with self.tasks():
             sliding_window_org()
             boost_low_volume_projects()
-
-        model_factory.assert_not_called()
 
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
@@ -330,7 +330,7 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
     def now(self):
         return MOCK_DATETIME
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.orgs_info = []
         num_orgs = 3
@@ -348,8 +348,8 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
                     idx = org_idx * num_orgs + proj_idx
                     num_transactions = self.get_count_for_transaction(idx, name)
                     self.store_performance_metric(
-                        name=TransactionMRI.COUNT_PER_ROOT_PROJECT.value,
-                        tags={"transaction": name},
+                        name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                        tags={"transaction": name, "is_segment": "true"},
                         minutes_before_now=30,
                         value=num_transactions,
                         project_id=p.id,
@@ -407,10 +407,9 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
             )
         )
 
-    @patch("sentry.dynamic_sampling.tasks.boost_low_volume_transactions.model_factory")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
     def test_boost_low_volume_transactions_with_blended_sample_rate_and_no_dynamic_sampling(
-        self, get_blended_sample_rate, model_factory
+        self, get_blended_sample_rate
     ):
         """
         Create orgs projects & transactions and then check that the rebalancing model is not called because dynamic
@@ -422,11 +421,11 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
         with self.tasks():
             boost_low_volume_transactions()
 
-        model_factory.assert_not_called()
-
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_boost_low_volume_transactions_with_blended_sample_rate(self, get_blended_sample_rate):
+    def test_boost_low_volume_transactions_with_blended_sample_rate(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
         """
         Create orgs projects & transactions and then check that the task creates rebalancing data
         in Redis.
@@ -452,7 +451,9 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
 
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_boost_low_volume_transactions_with_sliding_window_org(self, get_blended_sample_rate):
+    def test_boost_low_volume_transactions_with_sliding_window_org(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
         """
         Create orgs projects & transactions and then check that the task creates rebalancing data
         in Redis with the sliding window per org enabled.
@@ -501,7 +502,9 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
 
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_boost_low_volume_transactions_partial(self, get_blended_sample_rate):
+    def test_boost_low_volume_transactions_partial(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
         """
         Test the V2 algorithm is used, only specified projects are balanced and the
         rest get a global rate
@@ -515,7 +518,6 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
         with self.options(
             {
                 "dynamic-sampling.prioritise_transactions.num_explicit_large_transactions": 1,
-                "dynamic-sampling.prioritise_transactions.num_explicit_small_transactions": 1,
                 "dynamic-sampling.prioritise_transactions.rebalance_intensity": 0.7,
             }
         ):
@@ -530,12 +532,12 @@ class TestBoostLowVolumeTransactionsTasks(TasksTestCase):
                     org_id=org_id, proj_id=proj_id, default_rate=0.1
                 )
                 # explicit transactions
-                for transaction_name in ["ts1", "tl5"]:
+                for transaction_name in ["tl5"]:
                     assert (
                         transaction_name in tran_rate
                     )  # check we have some rate calculated for each transaction
                 # implicit transactions
-                for transaction_name in ["ts2", "tm3", "tl4"]:
+                for transaction_name in ["ts1", "ts2", "tm3", "tl4"]:
                     assert (
                         transaction_name not in tran_rate
                     )  # check we have some rate calculated for each transaction
@@ -549,7 +551,7 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
     def now(self):
         return MOCK_DATETIME
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.orgs_info = []
         self.orgs = []
@@ -568,25 +570,54 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
                 self.add_metrics(org, p, org_rate)
 
     def add_metrics(self, org, project, sample_rate):
-        for mri in [TransactionMRI.COUNT_PER_ROOT_PROJECT, SpanMRI.COUNT_PER_ROOT_PROJECT]:
-            if sample_rate < 100:
-                self.store_performance_metric(
-                    name=mri.value,
-                    tags={"transaction": "trans-x", "decision": "drop"},
-                    minutes_before_now=2,
-                    value=100 - sample_rate,
-                    project_id=project.id,
-                    org_id=org.id,
-                )
-            if sample_rate > 0:
-                self.store_performance_metric(
-                    name=mri.value,
-                    tags={"transaction": "trans-x", "decision": "keep"},
-                    minutes_before_now=2,
-                    value=sample_rate,
-                    project_id=project.id,
-                    org_id=org.id,
-                )
+        base_tags = {"transaction": "trans-x", "is_segment": "true"}
+
+        if sample_rate < 100:
+            self.store_performance_metric(
+                name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                tags={**base_tags, "decision": "drop"},
+                minutes_before_now=2,
+                value=100 - sample_rate,
+                project_id=project.id,
+                org_id=org.id,
+            )
+        if sample_rate > 0:
+            self.store_performance_metric(
+                name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                tags={**base_tags, "decision": "keep"},
+                minutes_before_now=2,
+                value=sample_rate,
+                project_id=project.id,
+                org_id=org.id,
+            )
+
+    def add_measure_metrics(
+        self,
+        org,
+        project,
+        *,
+        segment_keep: int,
+        segment_drop: int,
+    ) -> None:
+        segment_tags = {"transaction": "trans-x", "is_segment": "true"}
+        if segment_drop:
+            self.store_performance_metric(
+                name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                tags={**segment_tags, "decision": "drop"},
+                minutes_before_now=2,
+                value=segment_drop,
+                project_id=project.id,
+                org_id=org.id,
+            )
+        if segment_keep:
+            self.store_performance_metric(
+                name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                tags={**segment_tags, "decision": "keep"},
+                minutes_before_now=2,
+                value=segment_keep,
+                project_id=project.id,
+                org_id=org.id,
+            )
 
     @staticmethod
     def set_sliding_window_org_cache_entry(org_id: int, value: str):
@@ -625,7 +656,9 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
 
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_recalibrate_orgs_with_sliding_window_org(self, get_blended_sample_rate):
+    def test_recalibrate_orgs_with_sliding_window_org(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
         """
         Test that the org are going to be rebalanced at 20% and that the sample rate used is the one from the sliding
         window org.
@@ -682,8 +715,67 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
                 assert float(val) == 0.25
 
     @with_feature("organizations:dynamic-sampling")
+    @override_options({"dynamic-sampling.per_org.serving-rollout-rate": 1.0})
+    @patch("sentry.quotas.backend.get_blended_sample_rate")
+    def test_recalibrate_orgs_skips_orgs_served_the_per_org_factor(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
+        """An org served the per-org factor keeps the legacy cache untouched.
+
+        Both loops step by previous * target / measured. Writing here as well would step a
+        factor nothing applies, so it would walk to a rebalance bound.
+        """
+        get_blended_sample_rate.return_value = 0.1
+        self.set_sliding_window_org_sample_rate_for_all(0.2)
+
+        served_org = self.orgs[0]
+        per_org_cache.set_project_sample_rates(
+            served_org.id,
+            [RebalancedItem(id=self.orgs_info[0]["project_ids"][0], count=10, new_sample_rate=0.2)],
+        )
+
+        redis_client = get_redis_client_for_ds()
+
+        with self.tasks():
+            recalibrate_orgs()
+
+        # The served org sampled at 10% against a 20% target, so the legacy task would have
+        # written a factor of 2.0 here.
+        assert redis_client.get(generate_recalibrate_orgs_cache_key(served_org.id)) is None
+
+        # Every other org still has its factor written by the legacy task.
+        other_factor = redis_client.get(generate_recalibrate_orgs_cache_key(self.orgs[2].id))
+        assert other_factor is not None
+        assert float(other_factor) == 0.5
+
+    @with_feature("organizations:dynamic-sampling")
+    def test_recalibrate_orgs_continues_from_the_per_org_factor_after_switching_back(
+        self,
+    ) -> None:
+        """An org switched back to the legacy pipeline steps from the factor it was served.
+
+        The legacy key expired while the per-org pipeline served the org, so without the
+        carry-over the correction would restart from 1.0 and drop the whole boost.
+        """
+        self.set_sliding_window_org_sample_rate_for_all(0.2)
+
+        # This org stored metrics at a 10% sampling rate, so it measures at 0.1.
+        switched_back_org = self.orgs[0]
+        per_org_cache.set_adjusted_factor(switched_back_org.id, 3.0)
+
+        redis_client = get_redis_client_for_ds()
+
+        with self.tasks():
+            recalibrate_orgs()
+
+        # 3.0 * (0.2 target / 0.1 measured), instead of the 2.0 a restart from 1.0 gives.
+        factor = redis_client.get(generate_recalibrate_orgs_cache_key(switched_back_org.id))
+        assert factor is not None
+        assert float(factor) == 6.0
+
+    @with_feature("organizations:dynamic-sampling")
     @with_feature("organizations:dynamic-sampling-custom")
-    def test_recalibrate_orgs_with_custom_ds(self):
+    def test_recalibrate_orgs_with_custom_ds(self) -> None:
         """
         Test several organizations with mixed sampling mode.
 
@@ -738,7 +830,9 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
 
     @with_feature("organizations:dynamic-sampling")
     @patch("sentry.quotas.backend.get_blended_sample_rate")
-    def test_rules_generation_with_recalibrate_orgs(self, get_blended_sample_rate):
+    def test_rules_generation_with_recalibrate_orgs(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
         """
         Test that we pass rebalancing values all the way to the rules.
         """
@@ -773,3 +867,126 @@ class TestRecalibrateOrgsTasks(TasksTestCase):
                             "id": 1004,
                         }
                     ]
+
+    @with_feature("organizations:dynamic-sampling")
+    @patch("sentry.quotas.backend.get_blended_sample_rate")
+    def test_recalibrate_orgs_uses_segments_measure(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
+        """
+        Test that all orgs use segment metrics (SEGMENTS measure) for recalibration.
+        """
+        get_blended_sample_rate.return_value = 0.1
+        self.set_sliding_window_org_sample_rate_for_all(0.2)
+
+        redis_client = get_redis_client_for_ds()
+
+        with self.tasks():
+            recalibrate_orgs()
+
+        # First org should be recalibrated (sampled at 10%, target 20% -> factor 2.0)
+        cache_key = generate_recalibrate_orgs_cache_key(self.orgs[0].id)
+        val = redis_client.get(cache_key)
+        assert val is not None
+        assert float(val) == 2.0
+
+        # Second org sampled at 20%, target 20% -> no adjustment needed
+        cache_key = generate_recalibrate_orgs_cache_key(self.orgs[1].id)
+        val = redis_client.get(cache_key)
+        assert val is None
+
+        # Third org sampled at 40%, target 20% -> factor 0.5
+        cache_key = generate_recalibrate_orgs_cache_key(self.orgs[2].id)
+        val = redis_client.get(cache_key)
+        assert val is not None
+        assert float(val) == 0.5
+
+    @with_feature("organizations:dynamic-sampling")
+    @patch("sentry.quotas.backend.get_blended_sample_rate")
+    def test_recalibrate_orgs_multiple_orgs_with_different_volumes(
+        self, get_blended_sample_rate: MagicMock
+    ) -> None:
+        get_blended_sample_rate.return_value = 0.2
+        org1 = self.create_old_organization("org-1")
+        org2 = self.create_old_organization("org-2")
+        project1 = self.create_old_project(name="project-1", organization=org1)
+        project2 = self.create_old_project(name="project-2", organization=org2)
+
+        self.add_measure_metrics(
+            org1,
+            project1,
+            segment_keep=10,
+            segment_drop=90,
+        )
+        self.add_measure_metrics(
+            org2,
+            project2,
+            segment_keep=50,
+            segment_drop=50,
+        )
+
+        self.set_sliding_window_org_sample_rate(org1.id, 0.2)
+        self.set_sliding_window_org_sample_rate(org2.id, 0.2)
+
+        with self.tasks():
+            recalibrate_orgs()
+
+        redis_client = get_redis_client_for_ds()
+        org1_value = redis_client.get(generate_recalibrate_orgs_cache_key(org1.id))
+        org2_value = redis_client.get(generate_recalibrate_orgs_cache_key(org2.id))
+
+        assert org1_value is not None
+        assert org2_value is not None
+        assert float(org1_value) == pytest.approx(2.0)
+        assert float(org2_value) == pytest.approx(0.4)
+
+
+@freeze_time(MOCK_DATETIME)
+class TestSlidingWindowOrgTask(TasksTestCase):
+    """Tests for the sliding_window_org task with measure parameter support."""
+
+    @property
+    def now(self):
+        return MOCK_DATETIME
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.orgs = []
+        # Create orgs with different volumes
+        for i, volume in enumerate([100, 500, 1000]):
+            org = self.create_old_organization(f"test-org-{i}")
+            self.orgs.append(org)
+            project = self.create_old_project(name=f"test-project-{i}", organization=org)
+
+            self.store_performance_metric(
+                name=SpanMRI.COUNT_PER_ROOT_PROJECT.value,
+                tags={"transaction": "foo", "is_segment": "true"},
+                minutes_before_now=30,
+                value=volume,
+                project_id=project.id,
+                org_id=org.id,
+            )
+
+    @with_feature("organizations:dynamic-sampling")
+    @patch("sentry.dynamic_sampling.tasks.common.extrapolate_monthly_volume")
+    @patch("sentry.quotas.backend.get_transaction_sampling_tier_for_volume")
+    def test_sliding_window_org_processes_all_orgs_by_default(
+        self,
+        get_transaction_sampling_tier_for_volume: MagicMock,
+        extrapolate_monthly_volume: MagicMock,
+    ) -> None:
+        """
+        Test that sliding_window_org processes all orgs using SEGMENTS measure by default.
+        """
+        extrapolate_monthly_volume.side_effect = lambda volume, hours: volume
+        get_transaction_sampling_tier_for_volume.return_value = (1000, 0.25)
+        redis_client = get_redis_client_for_ds()
+
+        with self.tasks():
+            sliding_window_org()
+
+        # All orgs should have cache entries
+        for org in self.orgs:
+            cache_key = generate_sliding_window_org_cache_key(org.id)
+            val = redis_client.get(cache_key)
+            assert val is not None, f"Org {org.id} should have sliding window cache entry"

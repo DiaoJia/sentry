@@ -2,28 +2,31 @@ import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 import * as qs from 'query-string';
 
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {RevealOnHover} from '@sentry/scraps/revealOnHover';
+
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
 import {hasEveryAccess} from 'sentry/components/acl/access';
 import {DropdownMenu, type MenuItemProps} from 'sentry/components/dropdownMenu';
 import type {TagTreeContent} from 'sentry/components/events/eventTags/eventTagsTree';
-import EventTagsValue from 'sentry/components/events/eventTags/eventTagsValue';
+import {EventTagsValue} from 'sentry/components/events/eventTags/eventTagsValue';
 import {AnnotatedTextErrors} from 'sentry/components/events/meta/annotatedText/annotatedTextErrors';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import Version from 'sentry/components/version';
-import VersionHoverCard from 'sentry/components/versionHoverCard';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
+import {Version} from 'sentry/components/version';
+import {VersionHoverCard} from 'sentry/components/versionHoverCard';
 import {IconEllipsis} from 'sentry/icons';
-import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {t, tct} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
-import type {Project} from 'sentry/types/project';
-import {escapeIssueTagKey, generateQueryWithTag} from 'sentry/utils';
-import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
-import {isUrl} from 'sentry/utils/string/isUrl';
-import useCopyToClipboard from 'sentry/utils/useCopyToClipboard';
+import type {DetailedProject} from 'sentry/types/project';
+import {useUpdateProject} from 'sentry/utils/project/useUpdateProject';
+import {escapeIssueTagKey, generateQueryWithTag} from 'sentry/utils/queryString';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
+import {useCopyToClipboard} from 'sentry/utils/useCopyToClipboard';
 import {useLocation} from 'sentry/utils/useLocation';
-import useMutateProject from 'sentry/utils/useMutateProject';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeReleasesPathname} from 'sentry/views/explore/releases/utils/pathnames';
+import {makeReplaysPathname} from 'sentry/views/explore/replays/pathnames';
 import {Tab, TabPaths} from 'sentry/views/issueDetails/types';
 import {traceAnalytics} from 'sentry/views/performance/newTraceDetails/traceAnalytics';
 import {
@@ -31,8 +34,7 @@ import {
   TraceDrawerActionKind,
 } from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 import {getTransactionSummaryBaseUrl} from 'sentry/views/performance/transactionSummary/utils';
-import {makeReleasesPathname} from 'sentry/views/releases/utils/pathnames';
-import {makeReplaysPathname} from 'sentry/views/replays/pathnames';
+import {getSizeBuildPath} from 'sentry/views/preprod/utils/buildLinkUtils';
 
 interface EventTagTreeRowConfig {
   // Omits the dropdown of actions applicable to this tag
@@ -46,14 +48,14 @@ interface EventTagTreeRowConfig {
 export interface EventTagsTreeRowProps {
   content: TagTreeContent;
   event: Event;
-  project: Project;
+  project: DetailedProject;
   tagKey: string;
   config?: EventTagTreeRowConfig;
   isLast?: boolean;
   spacerCount?: number;
 }
 
-export default function EventTagsTreeRow({
+export function EventTagsTreeRow({
   event,
   content,
   tagKey,
@@ -66,7 +68,7 @@ export default function EventTagsTreeRow({
   const originalTag = content.originalTag;
   const tagErrors = content.meta?.value?.['']?.err ?? [];
   const hasTagErrors = tagErrors.length > 0 && !config?.disableErrors;
-  const hasStem = !isLast && isEmptyObject(content.subtree);
+  const hasStem = !isLast && content.subtree.size === 0;
 
   if (!originalTag) {
     return (
@@ -94,31 +96,35 @@ export default function EventTagsTreeRow({
   );
 
   return (
-    <TreeRow hasErrors={hasTagErrors} {...props}>
-      <TreeKeyTrunk spacerCount={spacerCount}>
-        {spacerCount > 0 && (
-          <Fragment>
-            <TreeSpacer spacerCount={spacerCount} hasStem={hasStem} />
-            <TreeBranchIcon hasErrors={hasTagErrors} />
-          </Fragment>
-        )}
-        <TreeSearchKey aria-hidden>{originalTag.key}</TreeSearchKey>
-        <TreeKey hasErrors={hasTagErrors} title={originalTag.key}>
-          {tagKey}
-        </TreeKey>
-      </TreeKeyTrunk>
-      <TreeValueTrunk>
-        <TreeValue hasErrors={hasTagErrors}>
-          <EventTagsTreeValue
-            config={config}
-            content={content}
-            event={event}
-            project={project}
-          />
-        </TreeValue>
-        {!config?.disableActions && tagActions}
-      </TreeValueTrunk>
-    </TreeRow>
+    <RevealOnHover>
+      {({className}) => (
+        <TreeRow hasErrors={hasTagErrors} {...props} className={className}>
+          <TreeKeyTrunk spacerCount={spacerCount}>
+            {spacerCount > 0 && (
+              <Fragment>
+                <TreeSpacer spacerCount={spacerCount} hasStem={hasStem} />
+                <TreeBranchIcon hasErrors={hasTagErrors} />
+              </Fragment>
+            )}
+            <TreeSearchKey aria-hidden>{originalTag.key}</TreeSearchKey>
+            <TreeKey hasErrors={hasTagErrors} title={originalTag.key}>
+              {tagKey}
+            </TreeKey>
+          </TreeKeyTrunk>
+          <TreeValueTrunk>
+            <TreeValue hasErrors={hasTagErrors}>
+              <EventTagsTreeValue
+                config={config}
+                content={content}
+                event={event}
+                project={project}
+              />
+            </TreeValue>
+            {!config?.disableActions && tagActions}
+          </TreeValueTrunk>
+        </TreeRow>
+      )}
+    </RevealOnHover>
   );
 }
 
@@ -130,11 +136,9 @@ function EventTagsTreeRowDropdown({
   const location = useLocation();
   const organization = useOrganization();
   const hasExploreEnabled = organization.features.includes('visibility-explore-view');
-  const {onClick: handleCopy} = useCopyToClipboard({
-    text: content.value,
-  });
-  const {mutate: saveTag} = useMutateProject({organization, project});
-  const [isVisible, setIsVisible] = useState(false);
+  const {copy} = useCopyToClipboard();
+  const {mutate: saveTag} = useUpdateProject(project);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const originalTag = content.originalTag;
 
   if (!originalTag) {
@@ -142,7 +146,7 @@ function EventTagsTreeRowDropdown({
   }
 
   const referrer = 'event-tags-table';
-  const highlightTagSet = new Set(project?.highlightTags ?? []);
+  const highlightTagSet = new Set(project?.highlightTags);
   const hideAddHighlightsOption =
     // Check for existing highlight record to prevent replacing all with a single tag if we receive a project summary (instead of a detailed project)
     project?.highlightTags &&
@@ -155,6 +159,7 @@ function EventTagsTreeRowDropdown({
       key: escapeIssueTagKey(originalTag.key),
     }
   );
+  const globalSelectionParams = extractSelectionParameters(location.query);
 
   const isProjectAdmin = hasEveryAccess(['project:admin'], {
     organization,
@@ -179,7 +184,7 @@ function EventTagsTreeRowDropdown({
       hidden: !event.groupID || isFeedback,
       to: {
         pathname: `/organizations/${organization.slug}/issues/${event.groupID}/events/`,
-        query,
+        query: {...globalSelectionParams, ...query},
       },
     },
     {
@@ -188,16 +193,16 @@ function EventTagsTreeRowDropdown({
       hidden: isFeedback,
       to: {
         pathname: `/organizations/${organization.slug}/issues/`,
-        query,
+        query: {...globalSelectionParams, ...query},
       },
     },
     {
       key: 'view-feedback',
-      label: t('Search feedbacks with this tag value'),
+      label: t('Search feedback with this tag value'),
       hidden: !isFeedback,
       to: {
-        pathname: `/organizations/${organization.slug}/feedback/`,
-        query,
+        pathname: `/organizations/${organization.slug}/issues/feedback/`,
+        query: {...globalSelectionParams, ...query},
       },
     },
     {
@@ -225,16 +230,35 @@ function EventTagsTreeRowDropdown({
     {
       key: 'copy-value',
       label: t('Copy tag value to clipboard'),
-      onAction: handleCopy,
+      onAction: () =>
+        copy(content.value, {successMessage: t('Tag value copied to clipboard.')}),
     },
     {
       key: 'add-to-highlights',
       label: t('Add to event highlights'),
       hidden: hideAddHighlightsOption || !isProjectAdmin || isFeedback,
       onAction: () => {
-        saveTag({
-          highlightTags: [...(project?.highlightTags ?? []), originalTag.key],
-        });
+        saveTag(
+          {
+            highlightTags: [...(project?.highlightTags ?? []), originalTag.key],
+          },
+          {
+            onError: () => {
+              addErrorMessage(
+                tct("Failed to update '[projectName]' project", {
+                  projectName: project.name,
+                })
+              );
+            },
+            onSuccess: () => {
+              addSuccessMessage(
+                tct("Successfully updated '[projectName]' project", {
+                  projectName: project.name,
+                })
+              );
+            },
+          }
+        );
       },
     },
     {
@@ -283,7 +307,7 @@ function EventTagsTreeRowDropdown({
     {
       key: 'external-link',
       label: t('Visit this external link'),
-      hidden: !isUrl(content.value),
+      hidden: !isValidUrl(content.value),
       onAction: () => {
         openNavigateToExternalLinkModal({linkText: content.value});
       },
@@ -291,20 +315,22 @@ function EventTagsTreeRowDropdown({
   ];
 
   return (
-    <TreeValueDropdown
-      preventOverflowOptions={{padding: 4}}
-      className={isVisible ? '' : 'invisible'}
-      position="bottom-end"
-      size="xs"
-      onOpenChange={isOpen => setIsVisible(isOpen)}
-      triggerProps={{
-        'aria-label': t('Tag Actions Menu'),
-        icon: <IconEllipsis />,
-        showChevron: false,
-        className: 'tag-button',
-      }}
-      items={items}
-    />
+    <RevealOnHover.Action visible={isMenuOpen}>
+      <TreeValueDropdown
+        preventOverflowOptions={{padding: 4}}
+        position="bottom-end"
+        size="xs"
+        isOpen={isMenuOpen}
+        onOpenChange={setIsMenuOpen}
+        triggerProps={{
+          'aria-label': t('Tag Actions Menu'),
+          icon: <IconEllipsis />,
+          showChevron: false,
+          className: 'tag-button',
+        }}
+        items={items}
+      />
+    </RevealOnHover.Action>
   );
 }
 
@@ -339,7 +365,7 @@ function EventTagsTreeValue({
           projectSlug={project.slug}
           releaseVersion={content.value}
           showUnderline
-          underlineColor="linkUnderline"
+          underlineColor="muted"
         >
           <Version version={content.value} truncate shouldWrapText />
         </VersionHoverCard>
@@ -379,16 +405,38 @@ function EventTagsTreeValue({
       );
       break;
     }
+    case 'head.artifact_id':
+    case 'base.artifact_id': {
+      const buildPath = getSizeBuildPath({
+        organizationSlug: organization.slug,
+        baseArtifactId: content.value,
+      });
+      if (buildPath) {
+        tagValue = (
+          <TagLinkText>
+            <Link to={buildPath}>{content.value}</Link>
+          </TagLinkText>
+        );
+      }
+      break;
+    }
     default:
       tagValue = defaultValue;
   }
 
-  return isUrl(content.value) ? (
+  return isValidUrl(content.value) ? (
     <TagLinkText>
       <ExternalLink
+        tabIndex={0}
         onClick={e => {
           e.preventDefault();
           openNavigateToExternalLinkModal({linkText: content.value});
+        }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            openNavigateToExternalLinkModal({linkText: content.value});
+          }
         }}
       >
         {content.value}
@@ -400,51 +448,47 @@ function EventTagsTreeValue({
 }
 
 const TreeRow = styled('div')<{hasErrors: boolean}>`
-  border-radius: ${space(0.5)};
-  padding-left: ${space(1)};
+  border-radius: ${p => p.theme.space.xs};
+  padding-left: ${p => p.theme.space.md};
   position: relative;
+  &:focus-within {
+    z-index: 1;
+  }
   display: grid;
   align-items: center;
   grid-column: span 2;
-  column-gap: ${space(1.5)};
+  column-gap: ${p => p.theme.space.lg};
   grid-template-columns: subgrid;
   :nth-child(odd) {
     background-color: ${p =>
-      p.hasErrors ? p.theme.alert.error.backgroundLight : p.theme.backgroundSecondary};
+      p.hasErrors ? p.theme.colors.red100 : p.theme.tokens.background.secondary};
   }
-  .invisible {
-    visibility: hidden;
-  }
-  &:hover,
-  &:active {
-    .invisible {
-      visibility: visible;
-    }
-  }
-  color: ${p => (p.hasErrors ? p.theme.alert.error.color : p.theme.subText)};
+  color: ${p => (p.hasErrors ? p.theme.colors.red500 : p.theme.tokens.content.secondary)};
   background-color: ${p =>
-    p.hasErrors ? p.theme.alert.error.backgroundLight : p.theme.background};
+    p.hasErrors ? p.theme.colors.red100 : p.theme.tokens.background.primary};
   box-shadow: inset 0 0 0 1px
-    ${p => (p.hasErrors ? p.theme.alert.error.border : 'transparent')};
+    ${p => (p.hasErrors ? p.theme.colors.red200 : 'transparent')};
 `;
 
 const TreeSpacer = styled('div')<{hasStem: boolean; spacerCount: number}>`
   grid-column: span 1;
   /* Allows TreeBranchIcons to appear connected vertically */
-  border-right: 1px solid ${p => (p.hasStem ? p.theme.border : 'transparent')};
+  border-right: 1px solid
+    ${p => (p.hasStem ? p.theme.tokens.border.primary : 'transparent')};
   margin-right: -1px;
   height: 100%;
   width: ${p => (p.spacerCount - 1) * 20 + 3}px;
 `;
 
 const TreeBranchIcon = styled('div')<{hasErrors: boolean}>`
-  border: 1px solid ${p => (p.hasErrors ? p.theme.alert.error.border : p.theme.border)};
+  border: 1px solid
+    ${p => (p.hasErrors ? p.theme.colors.red200 : p.theme.tokens.border.primary)};
   border-width: 0 0 1px 1px;
   border-radius: 0 0 0 5px;
   grid-column: span 1;
   height: 12px;
   align-self: start;
-  margin-right: ${space(0.5)};
+  margin-right: ${p => p.theme.space.xs};
 `;
 
 const TreeKeyTrunk = styled('div')<{spacerCount: number}>`
@@ -452,7 +496,7 @@ const TreeKeyTrunk = styled('div')<{spacerCount: number}>`
   display: grid;
   height: 100%;
   align-items: center;
-  grid-template-columns: ${p => (p.spacerCount > 0 ? `auto 1rem 1fr` : '1fr')};
+  grid-template-columns: ${p => (p.spacerCount > 0 ? 'auto 1rem 1fr' : '1fr')};
 `;
 
 const TreeValueTrunk = styled('div')`
@@ -462,21 +506,21 @@ const TreeValueTrunk = styled('div')`
   align-items: center;
   min-height: 22px;
   grid-template-columns: 1fr auto;
-  grid-column-gap: ${space(0.5)};
+  grid-column-gap: ${p => p.theme.space.xs};
 `;
 
 const TreeValue = styled('div')<{hasErrors?: boolean}>`
-  padding: ${space(0.25)} 0;
+  padding: ${p => p.theme.space['2xs']} 0;
   align-self: start;
-  font-family: ${p => p.theme.text.familyMono};
-  font-size: ${p => p.theme.fontSize.sm};
+  font-family: ${p => p.theme.font.family.mono};
+  font-size: ${p => p.theme.font.size.sm};
   word-break: break-word;
   grid-column: span 1;
-  color: ${p => (p.hasErrors ? 'inherit' : p.theme.textColor)};
+  color: ${p => (p.hasErrors ? 'inherit' : p.theme.tokens.content.primary)};
 `;
 
 const TreeKey = styled(TreeValue)<{hasErrors?: boolean}>`
-  color: ${p => (p.hasErrors ? 'inherit' : p.theme.subText)};
+  color: ${p => (p.hasErrors ? 'inherit' : p.theme.tokens.content.secondary)};
 `;
 
 /**
@@ -494,20 +538,20 @@ const TreeValueDropdown = styled(DropdownMenu)`
   .tag-button {
     height: 20px;
     min-height: 20px;
-    padding: 0 ${space(0.75)};
-    border-radius: ${space(0.5)};
+    padding: 0 ${p => p.theme.space.sm};
+    border-radius: ${p => p.theme.space.xs};
     z-index: 0;
   }
 `;
 
 const TreeValueErrors = styled('div')`
   height: 20px;
-  margin-right: ${space(0.75)};
+  margin-right: ${p => p.theme.space.sm};
 `;
 
 const TagLinkText = styled('span')`
-  color: ${p => p.theme.linkColor};
-  text-decoration: ${p => p.theme.linkUnderline} underline dotted;
+  color: ${p => p.theme.tokens.interactive.link.accent.rest};
+  text-decoration: ${p => p.theme.tokens.interactive.link.accent.rest} underline dotted;
   margin: 0;
   &:hover,
   &:focus {

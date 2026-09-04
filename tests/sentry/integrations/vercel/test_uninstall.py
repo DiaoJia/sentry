@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+
 import responses
 
 from fixtures.vercel import SECRET
@@ -69,7 +72,7 @@ POST_DELETE_RESPONSE = """{
 
 @control_silo_test
 class VercelUninstallTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.url = "/extensions/vercel/delete/"
         metadata = {
             "access_token": "my_access_token",
@@ -86,7 +89,7 @@ class VercelUninstallTest(APITestCase):
             metadata=metadata,
         )
 
-    def test_uninstall(self):
+    def test_uninstall(self) -> None:
         with override_options({"vercel.client-secret": SECRET}):
             response = self.client.post(
                 path=self.url,
@@ -103,8 +106,66 @@ class VercelUninstallTest(APITestCase):
 
 
 @control_silo_test
+class VercelDeleteSignatureTest(APITestCase):
+    def setUp(self) -> None:
+        self.url = "/extensions/vercel/delete/"
+        metadata = {
+            "access_token": "my_access_token",
+            "installation_id": "my_config_id",
+            "installation_type": "team",
+            "webhook_id": "my_webhook_id",
+        }
+        self.integration, _ = self.create_provider_integration_for(
+            self.organization,
+            user=None,
+            provider="vercel",
+            external_id="vercel_team_id",
+            name="My Vercel Team",
+            metadata=metadata,
+        )
+
+    def test_delete_without_signature(self) -> None:
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=PRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+            )
+        assert response.status_code == 401
+
+    def test_delete_with_invalid_signature(self) -> None:
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=PRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            )
+        assert response.status_code == 401
+
+    def test_delete_with_valid_signature(self) -> None:
+        sig = hmac.new(
+            SECRET.encode("utf-8"),
+            PRIMARY_UNINSTALL_RESPONSE.encode("utf-8"),
+            hashlib.sha1,
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=PRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=sig,
+            )
+        assert response.status_code == 204
+        assert not Integration.objects.filter(id=self.integration.id).exists()
+        assert not OrganizationIntegration.objects.filter(
+            integration_id=self.integration.id, organization_id=self.organization.id
+        ).exists()
+
+
+@control_silo_test
 class VercelUninstallWithConfigurationsTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.url = "/extensions/vercel/delete/"
         self.second_org = self.create_organization(name="Blah", owner=self.user)
         metadata = {
@@ -134,7 +195,7 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
         self.integration.add_organization(self.organization)
         self.integration.add_organization(self.second_org)
 
-    def test_uninstall_primary_configuration(self):
+    def test_uninstall_primary_configuration(self) -> None:
         """
         Test uninstalling the configuration whose credentials
             * access_token
@@ -144,11 +205,16 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
         """
 
         assert len(OrganizationIntegration.objects.all()) == 2
-        response = self.client.delete(
-            path=self.url,
-            data=PRIMARY_UNINSTALL_RESPONSE,
-            content_type="application/json",
-        )
+        sig = hmac.new(
+            SECRET.encode("utf-8"), PRIMARY_UNINSTALL_RESPONSE.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=PRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=sig,
+            )
 
         assert response.status_code == 204
         assert len(OrganizationIntegration.objects.all()) == 1
@@ -168,19 +234,23 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
             },
         }
 
-    def test_uninstall_non_primary_configuration(self):
+    def test_uninstall_non_primary_configuration(self) -> None:
         """
         Test uninstalling a configuration that is only stored
         in the "configurations" metadata.
         """
 
         assert len(OrganizationIntegration.objects.all()) == 2
-
-        response = self.client.delete(
-            path=self.url,
-            data=NONPRIMARY_UNINSTALL_RESPONSE,
-            content_type="application/json",
-        )
+        sig = hmac.new(
+            SECRET.encode("utf-8"), NONPRIMARY_UNINSTALL_RESPONSE.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=NONPRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=sig,
+            )
 
         assert response.status_code == 204
         assert len(OrganizationIntegration.objects.all()) == 1
@@ -200,7 +270,7 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
             },
         }
 
-    def test_uninstall_single_configuration(self):
+    def test_uninstall_single_configuration(self) -> None:
         """
         Test uninstalling an integration with only one organization
         associated with it.
@@ -227,11 +297,16 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
         )
         integration.add_organization(org)
 
-        response = self.client.delete(
-            path=self.url,
-            data=USERID_UNINSTALL_RESPONSE,
-            content_type="application/json",
-        )
+        sig = hmac.new(
+            SECRET.encode("utf-8"), USERID_UNINSTALL_RESPONSE.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=USERID_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=sig,
+            )
 
         assert response.status_code == 204
         assert not Integration.objects.filter(id=integration.id).exists()
@@ -240,7 +315,7 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
         ).exists()
 
     @responses.activate
-    def test_uninstall_from_sentry(self):
+    def test_uninstall_from_sentry(self) -> None:
         """
         Test flows of uninstalling from sentry first to make sure
         that uninstall webhook is valid even if the OrganizationIntegration
@@ -274,11 +349,16 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
             == 1
         )
 
-        response = self.client.delete(
-            path=self.url,
-            data=PRIMARY_UNINSTALL_RESPONSE,
-            content_type="application/json",
-        )
+        primary_sig = hmac.new(
+            SECRET.encode("utf-8"), PRIMARY_UNINSTALL_RESPONSE.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=PRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=primary_sig,
+            )
         assert response.status_code == 204
 
         integration = Integration.objects.get(id=self.integration.id)
@@ -319,16 +399,21 @@ class VercelUninstallWithConfigurationsTest(APITestCase):
             == 0
         )
 
-        response = self.client.delete(
-            path=self.url,
-            data=NONPRIMARY_UNINSTALL_RESPONSE,
-            content_type="application/json",
-        )
+        nonprimary_sig = hmac.new(
+            SECRET.encode("utf-8"), NONPRIMARY_UNINSTALL_RESPONSE.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        with override_options({"vercel.client-secret": SECRET}):
+            response = self.client.delete(
+                path=self.url,
+                data=NONPRIMARY_UNINSTALL_RESPONSE,
+                content_type="application/json",
+                HTTP_X_VERCEL_SIGNATURE=nonprimary_sig,
+            )
         assert response.status_code == 204
         assert not Integration.objects.filter(id=self.integration.id).exists()
 
     @responses.activate
-    def test_uninstall_from_sentry_error(self):
+    def test_uninstall_from_sentry_error(self) -> None:
         """
         Test that if we uninstall from Sentry and fail to remove the integration using Vercel's
         delete integration endpoint, we continue and delete the integration in Sentry.

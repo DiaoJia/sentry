@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, DefaultDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from django.db.models import F, Q
-from django.http import HttpResponse
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -14,7 +13,7 @@ from rest_framework.response import Response
 
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects
 from sentry.api.bases.organization import OrganizationReleasesBaseEndpoint
 from sentry.api.endpoints.release_thresholds.constants import CRASH_SESSIONS_DISPLAY
@@ -29,14 +28,21 @@ from sentry.api.endpoints.release_thresholds.utils import (
     get_errors_counts_timeseries_by_project_and_release,
     get_new_issue_counts,
 )
+from sentry.api.helpers.projects import (
+    ProjectIdOrSlug,
+    ProjectIdOrSlugField,
+    parse_id_or_slug_params,
+)
 from sentry.api.serializers import serialize
 from sentry.apidocs.constants import RESPONSE_BAD_REQUEST
 from sentry.apidocs.examples.release_threshold_examples import ReleaseThresholdExamples
 from sentry.apidocs.parameters import GlobalParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
 from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.models.release import Release
 from sentry.models.release_threshold.constants import ReleaseThresholdType
 from sentry.organizations.services.organization import RpcOrganization
+from sentry.release_health.base import SessionsQueryResult
 from sentry.utils import metrics
 
 logger = logging.getLogger("sentry.release_threshold_status")
@@ -49,7 +55,18 @@ if TYPE_CHECKING:
     from sentry.models.releaseprojectenvironment import ReleaseProjectEnvironment
 
 
-class ReleaseThresholdStatusIndexSerializer(serializers.Serializer):
+class ReleaseThresholdStatusIndexData(TypedDict, total=False):
+    start: datetime
+    end: datetime
+    environment: list[str]
+    projectSlug: list[str]
+    release: list[str]
+    project: list[ProjectIdOrSlug]
+
+
+class ReleaseThresholdStatusIndexSerializer(
+    serializers.Serializer[ReleaseThresholdStatusIndexData]
+):
     start = serializers.DateTimeField(
         help_text="The start of the time series range as an explicit datetime, either in UTC ISO8601 or epoch seconds. "
         "Use along with `end`.",
@@ -71,7 +88,7 @@ class ReleaseThresholdStatusIndexSerializer(serializers.Serializer):
     projectSlug = serializers.ListField(
         required=False,
         allow_empty=True,
-        child=serializers.CharField(),
+        child=serializers.CharField(allow_blank=True),
         help_text=("A list of project slugs to filter your results by."),
     )
     release = serializers.ListField(
@@ -80,23 +97,30 @@ class ReleaseThresholdStatusIndexSerializer(serializers.Serializer):
         child=serializers.CharField(),
         help_text=("A list of release versions to filter your results by."),
     )
+    project = serializers.ListField(
+        required=False,
+        allow_empty=True,
+        child=ProjectIdOrSlugField(),
+        help_text=("A list of project IDs or slugs to filter your results by."),
+    )
 
-    def validate(self, data):
+    def validate(self, data: ReleaseThresholdStatusIndexData) -> ReleaseThresholdStatusIndexData:
         if data["start"] >= data["end"]:
             raise serializers.ValidationError("Start datetime must be after End")
         return data
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 @extend_schema(tags=["Releases"])
 class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
-    owner: ApiOwner = ApiOwner.ENTERPRISE
+    owner: ApiOwner = ApiOwner.REPLAY
     publish_status = {
         "GET": ApiPublishStatus.PUBLIC,
     }
 
     @extend_schema(
-        operation_id="Retrieve Statuses of Release Thresholds (Alpha)",
+        operation_id="listOrganizationReleaseThresholdStatuses",
+        summary="Retrieve Statuses of Release Thresholds (Alpha)",
         parameters=[GlobalParams.ORG_ID_OR_SLUG, ReleaseThresholdStatusIndexSerializer],
         request=None,
         responses={
@@ -107,7 +131,9 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
         },
         examples=ReleaseThresholdExamples.THRESHOLD_STATUS_RESPONSE,
     )
-    def get(self, request: Request, organization: Organization | RpcOrganization) -> HttpResponse:
+    def get(
+        self, request: Request, organization: Organization | RpcOrganization
+    ) -> Response[dict[str, list[EnrichedThreshold]]] | Response[ValidationErrorResponse]:
         r"""
         **`[WARNING]`**: This API is an experimental Alpha feature and is subject to change!
 
@@ -123,23 +149,37 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
         # NOTE: start/end parameters determine window to query for releases
         # This is NOT the window to query snuba for event data - nor the individual threshold windows
         # ========================================================================
-        serializer = ReleaseThresholdStatusIndexSerializer(
-            data=request.query_params,
-        )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=400)
+        query_params = self.get_query_params_with_project_slug_precedence(request)
 
-        environments_list = serializer.validated_data.get(
-            "environment"
-        )  # list of environment names
-        project_slug_list = serializer.validated_data.get("projectSlug")
-        releases_list = serializer.validated_data.get("release")  # list of release versions
+        serializer = ReleaseThresholdStatusIndexSerializer(data=query_params)
+        if not serializer.is_valid():
+            return Response(as_validation_errors(serializer), status=400)
+
+        validated_data = serializer.validated_data
+        environments_list = validated_data.get("environment")  # list of environment names
+        releases_list = validated_data.get("release")  # list of release versions
+
+        project_ids: set[int] | None = None
+        project_slugs = {slug for slug in validated_data.get("projectSlug", []) if slug} or None
+        if project_slugs is None:
+            requested_project = parse_id_or_slug_params(validated_data.get("project", []))
+            project_ids = requested_project.ids or None
+            project_slugs = requested_project.slugs or None
+
         try:
             filter_params = self.get_filter_params(
-                request, organization, date_filter_optional=True, project_slugs=project_slug_list
+                request,
+                organization,
+                date_filter_optional=True,
+                project_ids=project_ids,
+                project_slugs=project_slugs,
             )
         except NoProjects:
             raise NoProjects("No projects available")
+
+        # Use project IDs from get_filter_params instead of raw project filters so
+        # project access is checked before fetching threshold data.
+        validated_project_ids = set(filter_params["project_id"])
 
         start: datetime | None = filter_params["start"]
         end: datetime | None = filter_params["end"]
@@ -160,10 +200,9 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
             release_query &= Q(
                 releaseprojectenvironment__environment__name__in=environments_list,
             )
-        if project_slug_list:
-            release_query &= Q(
-                projects__slug__in=project_slug_list,
-            )
+        release_query &= Q(
+            projects__id__in=validated_project_ids,
+        )
         if releases_list:
             release_query &= Q(
                 version__in=releases_list,
@@ -176,17 +215,19 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
             )
             .order_by("-date")
             .distinct()
+            # prefetch the release_thresholds via the projects model
+            .prefetch_related(
+                "projects__release_thresholds__environment",
+                "releaseprojectenvironment_set",
+                "deploy_set",
+            )
         )
-        # prefetching the release_thresholds via the projects model
-        queryset.prefetch_related("projects__release_thresholds__environment")
-        queryset.prefetch_related("releaseprojectenvironment_set")
-        queryset.prefetch_related("deploy_set")
 
         logger.info(
             "Fetched releases",
             extra={
                 "results": len(queryset),
-                "project_slugs": project_slug_list,
+                "project_slugs": project_slugs,
                 "releases": releases_list,
                 "environments": environments_list,
             },
@@ -195,17 +236,13 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
         # ========================================================================
         # Step 3: flatten thresholds and compile projects/release-thresholds by type
         # ========================================================================
-        thresholds_by_type: DefaultDict[int, dict[str, list]] = defaultdict()
-        query_windows_by_type: DefaultDict[int, dict[str, datetime]] = defaultdict()
+        thresholds_by_type: defaultdict[int, dict[str, list[Any]]] = defaultdict()
+        query_windows_by_type: defaultdict[int, dict[str, datetime]] = defaultdict()
         for release in queryset:
             # TODO:
             # We should update release model to preserve threshold states.
             # if release.failed_thresholds/passed_thresholds exists - then skip calculating and just return thresholds
-            project_list = [
-                p
-                for p in release.projects.all()
-                if (project_slug_list and p.slug in project_slug_list) or (not project_slug_list)
-            ]
+            project_list = [p for p in release.projects.all() if p.id in validated_project_ids]
 
             for project in project_list:
                 thresholds_list: list[ReleaseThreshold] = [
@@ -297,7 +334,7 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
         # ========================================================================
         # Step 4: Determine threshold status per threshold type and return results
         # ========================================================================
-        release_threshold_health = defaultdict(list)
+        release_threshold_health: dict[str, list[EnrichedThreshold]] = defaultdict(list)
         for threshold_type, filter_list in thresholds_by_type.items():
             project_id_list = [proj_id for proj_id in filter_list["project_ids"]]
             release_value_list = [release_version for release_version in filter_list["releases"]]
@@ -389,7 +426,7 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
             elif threshold_type == ReleaseThresholdType.CRASH_FREE_SESSION_RATE:
                 metrics.incr("release.threshold_health_status.check.crash_free_session_rate")
                 query_window = query_windows_by_type[threshold_type]
-                sessions_data = {}
+                sessions_data: SessionsQueryResult | None = None
                 try:
                     sessions_data = fetch_sessions_data(
                         end=query_window["end"],
@@ -416,7 +453,7 @@ class ReleaseThresholdStatusIndexEndpoint(OrganizationReleasesBaseEndpoint):
                 if sessions_data:
                     for ethreshold in category_thresholds:
                         is_healthy, rate = is_crash_free_rate_healthy_check(
-                            ethreshold, sessions_data, CRASH_SESSIONS_DISPLAY
+                            ethreshold, dict(sessions_data), CRASH_SESSIONS_DISPLAY
                         )
                         ethreshold.update({"is_healthy": is_healthy, "metric_value": rate})
                         release_threshold_health[ethreshold["key"]].append(ethreshold)

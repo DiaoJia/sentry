@@ -1,16 +1,13 @@
-import type {Theme} from '@emotion/react';
 import type {FocusTrap} from 'focus-trap';
 
-import type {ApiResult} from 'sentry/api';
-import type {exportedGlobals} from 'sentry/bootstrap/exportGlobals';
+import type {ApiResult} from 'sentry/types/api';
 
-import type {ParntershipAgreementType} from './hooks';
+import type {ParntershipAgreementType} from './overrides';
 import type {User} from './user';
 
 export enum SentryInitRenderReactComponent {
   INDICATORS = 'Indicators',
   SETUP_WIZARD = 'SetupWizard',
-  SYSTEM_ALERTS = 'SystemAlerts',
   WEB_AUTHN_ASSSERT = 'WebAuthnAssert',
   SU_STAFF_ACCESS_FORM = 'SuperuserStaffAccessForm',
 }
@@ -29,7 +26,7 @@ export type OnSentryInitConfiguration =
     }
   | {
       name: 'onReady';
-      onReady: (globals: typeof exportedGlobals) => void;
+      onReady: (globals: Record<string, any>) => void;
     };
 
 declare global {
@@ -68,10 +65,6 @@ declare global {
      */
     __openAllTooltips: () => void;
     /**
-     * Pipeline
-     */
-    __pipelineInitialData: PipelineInitialData;
-    /**
      * Assets public location
      */
     __sentryGlobalStaticPrefix: string;
@@ -80,7 +73,6 @@ declare global {
     // TODO: improve typing
     SentryApp?: {
       ConfigStore: any;
-      HookStore: any;
       Modal: any;
       getModalPortal: () => HTMLElement;
       modalFocusTrap?: {
@@ -101,11 +93,11 @@ declare global {
      */
     __sentry_preload?: {
       orgSlug?: string;
-      organization?: Promise<ApiResult>;
+      organization?: Promise<ApiResult | null>;
       organization_fallback?: Promise<ApiResult>;
-      projects?: Promise<ApiResult>;
+      projects?: Promise<ApiResult | null>;
       projects_fallback?: Promise<ApiResult>;
-      teams?: Promise<ApiResult>;
+      teams?: Promise<ApiResult | null>;
       teams_fallback?: Promise<ApiResult>;
     };
     /**
@@ -127,12 +119,24 @@ declare global {
      */
     superUserCookieName?: string;
   }
+  interface FocusOptions {
+    /**
+     * https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/focus#focusvisible
+     */
+    focusVisible?: boolean;
+  }
 }
 
-export interface Region {
+export interface Cell {
+  locality_url: string;
+  name: string;
+}
+export interface Locality {
   name: string;
   url: string;
 }
+// Deprecated - Use Locality instead
+export interface Region extends Locality {}
 interface CustomerDomain {
   organizationUrl: string | undefined;
   sentryUrl: string;
@@ -140,6 +144,7 @@ interface CustomerDomain {
 }
 export interface Config {
   apmSampling: number;
+  cells: Cell[];
   csrfCookieName: string;
   customerDomain: CustomerDomain | null;
   demoMode: boolean;
@@ -168,28 +173,31 @@ export interface Config {
     sentryUrl: string;
     superuserUrl?: string;
   };
-  // A list of regions that the user has membership in.
-  memberRegions: Region[];
+  // The list of localities (formerly regions) that are available
+  localities: Locality[];
   /**
    * This comes from django (django.contrib.messages)
    */
-  messages: Array<{level: keyof Theme['alert']; message: string}>;
+  messages: Array<{
+    // Default django message level tags. See client config in ./src/sentry/web/client_config.py
+    level: 'debug' | 'info' | 'success' | 'warning' | 'error';
+    message: string;
+  }>;
   needsUpgrade: boolean;
   privacyUrl: string | null;
-  // The list of regions the user has has access to.
-  regions: Region[];
   sentryConfig: {
     allowUrls: string[];
     dsn: string;
     release: string;
     tracePropagationTargets: string[];
     environment?: string;
-    profilesSampleRate?: number;
+    profileSessionSampleRate?: number;
   };
   // sentryMode intends to supersede isSelfHosted,
   // so we can differentiate between "SELF_HOSTED", "SINGLE_TENANT", and "SAAS".
   sentryMode: 'SELF_HOSTED' | 'SINGLE_TENANT' | 'SAAS';
   shouldPreloadData: boolean;
+  signupLocalities: string[];
   singleOrganization: boolean;
   superUserCookieDomain: string | null;
   superUserCookieName: string;
@@ -216,24 +224,17 @@ export interface Config {
     latest: string;
     upgradeAvailable: boolean;
   };
+  intercomAppId?: string;
   partnershipAgreementPrompt?: {
     agreements: ParntershipAgreementType[];
     partnerDisplayName: string;
   } | null;
-  relocationConfig?: {
-    selectableRegions: string[];
-  };
   shouldShowBeaconConsentPrompt?: boolean;
   statuspage?: {
     api_host: string;
     id: string;
   };
 }
-
-export type PipelineInitialData = {
-  name: string;
-  props: Record<string, any>;
-};
 
 export interface Broadcast {
   dateCreated: string;
@@ -257,7 +258,7 @@ export interface Broadcast {
    * Category of the broadcast.
    * Synced with https://github.com/getsentry/sentry/blob/master/src/sentry/models/broadcast.py#L14
    */
-  category?: 'announcement' | 'feature' | 'blog' | 'event' | 'video';
+  category?: 'announcement' | 'feature' | 'blog' | 'event' | 'video' | 'sdk_update';
   /**
    * The text for the CTA link at the bottom of the panel item
    */
@@ -369,10 +370,6 @@ interface StatusPageAffectedComponent {
 
 export interface StatusPageIncidentUpdate {
   /**
-   * Components affected by the update
-   */
-  affected_components: StatusPageAffectedComponent[];
-  /**
    * Message to display for this update
    */
   body: string;
@@ -400,6 +397,10 @@ export interface StatusPageIncidentUpdate {
    * ISO Update update time
    */
   updated_at: string;
+  /**
+   * Components affected by the update
+   */
+  affected_components?: StatusPageAffectedComponent[];
 }
 
 // See: https://doers.statuspage.io/api/v2/incidents/

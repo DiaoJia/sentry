@@ -6,23 +6,22 @@ from sentry.db.models import (
     BoundedBigIntegerField,
     DefaultFieldsModelExisting,
     FlexibleForeignKey,
-    region_silo_model,
+    cell_silo_model,
 )
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
 
 
-@region_silo_model
+@cell_silo_model
 class RepositoryProjectPathConfig(DefaultFieldsModelExisting):
     __relocation_scope__ = RelocationScope.Excluded
 
-    repository = FlexibleForeignKey("sentry.Repository")
-    project = FlexibleForeignKey("sentry.Project", db_constraint=False)
+    project_repository = FlexibleForeignKey("sentry.ProjectRepository", on_delete=models.CASCADE)
 
     organization_integration_id = HybridCloudForeignKey(
         "sentry.OrganizationIntegration", on_delete="CASCADE"
     )
     organization_id = BoundedBigIntegerField(db_index=True)
-    # From a region point of view, you really only have per organization scoping.
+    # From a cell point of view, you really only have per organization scoping.
     integration_id = BoundedBigIntegerField(db_index=False)
     stack_root = models.TextField()
     source_root = models.TextField()
@@ -30,14 +29,23 @@ class RepositoryProjectPathConfig(DefaultFieldsModelExisting):
     # Indicates if Sentry created this mapping
     automatically_generated = models.BooleanField(default=False, db_default=False)
 
+    # Transient flag: when True, the post_save signal skips side effects.
+    # Used by the bulk endpoint to fire side effects once per batch.
+    _skip_post_save: bool = False
+
     class Meta:
         app_label = "sentry"
         db_table = "sentry_repositoryprojectpathconfig"
-        unique_together = (("project", "stack_root"),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project_repository", "stack_root", "source_root"],
+                name="sentry_repositoryproject_project_repository_id_st_b55e4224_uniq",
+            ),
+        ]
 
-    def __repr__(self) -> str:  # type: ignore[override]
+    def __repr__(self) -> str:
         return (
-            f"RepositoryProjectPathConfig(repo={self.repository.name}, "
+            f"RepositoryProjectPathConfig(repo={self.project_repository.repository.name}, "
             + f"branch={self.default_branch}, "
             + f"stack_root={self.stack_root}, "
             + f"source_root={self.source_root})"
@@ -45,10 +53,11 @@ class RepositoryProjectPathConfig(DefaultFieldsModelExisting):
 
 
 def process_resource_change(instance: RepositoryProjectPathConfig, **kwargs):
-    from sentry.models.group import Group
+    if instance._skip_post_save:
+        return
+
     from sentry.models.project import Project
     from sentry.tasks.codeowners import update_code_owners_schema
-    from sentry.utils.cache import cache
 
     def _spawn_update_schema_task():
         """
@@ -57,33 +66,19 @@ def process_resource_change(instance: RepositoryProjectPathConfig, **kwargs):
         try:
             update_code_owners_schema.apply_async(
                 kwargs={
-                    "organization": instance.project.organization_id,
-                    "projects": [instance.project_id],
+                    "organization": instance.project_repository.project.organization_id,
+                    "projects": [instance.project_repository.project_id],
                 }
             )
         except Project.DoesNotExist:
             pass
 
-    def _clear_commit_context_cache():
-        """
-        Once we have a new code mapping for a project, we want to give all groups in the project
-        a new chance to generate missing suspect commits. We debounce the process_commit_context task
-        if we cannot find the Suspect Committer from the given code mappings. Thus, need to clear the
-        cache to reprocess with the new code mapping
-        """
-
-        group_ids = Group.objects.filter(project_id=instance.project_id).values_list(
-            "id", flat=True
-        )
-        cache_keys = [f"process-commit-context-{group_id}" for group_id in group_ids]
-        cache.delete_many(cache_keys)
-
     transaction.on_commit(_spawn_update_schema_task, router.db_for_write(type(instance)))
-    transaction.on_commit(_clear_commit_context_cache, router.db_for_write(type(instance)))
 
 
 post_save.connect(
     lambda instance, **kwargs: process_resource_change(instance, **kwargs),
     sender=RepositoryProjectPathConfig,
     weak=False,
+    dispatch_uid="repository_project_path_config_post_save",
 )

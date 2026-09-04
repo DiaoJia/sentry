@@ -3,15 +3,12 @@ import styled from '@emotion/styled';
 
 import Feature from 'sentry/components/acl/feature';
 import {IconBusiness} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
 
 import PowerFeatureHovercard from 'getsentry/components/powerFeatureHovercard';
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
 import type {Subscription} from 'getsentry/types';
-import {isEnterprise} from 'getsentry/utils/billing';
 
 const SSO = 'sso';
-const RELAY = 'relay';
 const ALLOCATIONS = 'allocations-upsell';
 const TEAM_ROLES = 'team-roles-upsell';
 
@@ -36,11 +33,6 @@ const POWER_FEATURE_CONFIG = [
     id: SSO,
     features: ['sso-saml2'],
     partial: true,
-  },
-  {
-    id: RELAY,
-    features: ['relay'],
-    partial: false,
   },
   {
     id: ALLOCATIONS,
@@ -74,7 +66,7 @@ function LabelWithPowerIcon({children, id, subscription}: Props) {
     return children as React.ReactElement;
   }
 
-  if (!subscription?.plan || isEnterprise(subscription.plan)) {
+  if (!subscription?.plan || subscription.planDetails?.isEnterprise) {
     return children as React.ReactElement;
   }
 
@@ -115,7 +107,7 @@ const StyledLabel = styled('div')<{leftAligned?: boolean}>`
   width: 100%;
 
   > :last-child {
-    margin-left: ${space(1)};
+    margin-left: ${p => p.theme.space.md};
   }
 `;
 

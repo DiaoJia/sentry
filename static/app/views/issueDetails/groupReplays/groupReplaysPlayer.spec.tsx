@@ -1,15 +1,19 @@
 import {duration} from 'moment-timezone';
+import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
-import {RRWebInitFrameEventsFixture} from 'sentry-fixture/replay/rrweb';
+import {
+  RRWebFullSnapshotFrameEventFixture,
+  RRWebInitFrameEventsFixture,
+} from 'sentry-fixture/replay/rrweb';
 import {ReplayRecordFixture} from 'sentry-fixture/replayRecord';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render as baseRender, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import type {Organization} from 'sentry/types/organization';
-import ReplayReader from 'sentry/utils/replays/replayReader';
+import {ReplayReader} from 'sentry/utils/replays/replayReader';
+import {RequestError} from 'sentry/utils/requestError/requestError';
 
-import GroupReplaysPlayer from './groupReplaysPlayer';
+import {GroupReplaysPlayer} from './groupReplaysPlayer';
 
 jest.mock('sentry/utils/replays/hooks/useLoadReplayReader');
 
@@ -34,9 +38,14 @@ const mockReplay = ReplayReader.factory({
   }),
   errors: [],
   fetching: false,
-  attachments: RRWebInitFrameEventsFixture({
-    timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
-  }),
+  attachments: [
+    ...RRWebInitFrameEventsFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+    RRWebFullSnapshotFrameEventFixture({
+      timestamp: new Date('Sep 22, 2022 4:58:39 PM UTC'),
+    }),
+  ],
   clipWindow: {
     startTimestampMs: mockEventTimestampMs - 5_000,
     endTimestampMs: mockEventTimestampMs + 5_000,
@@ -44,20 +53,7 @@ const mockReplay = ReplayReader.factory({
 });
 
 const render = (children: React.ReactElement, orgParams: Partial<Organization> = {}) => {
-  const {organization} = initializeOrg({
-    organization: {slug: mockOrgSlug, ...orgParams},
-    router: {
-      routes: [
-        {path: '/'},
-        {path: '/organizations/:orgId/issues/:groupId/'},
-        {path: 'replays/'},
-      ],
-      location: {
-        pathname: '/organizations/org-slug/replays/',
-        query: {},
-      },
-    },
-  });
+  const organization = OrganizationFixture({slug: mockOrgSlug, ...orgParams});
 
   return baseRender(children, {
     organization,
@@ -117,5 +113,35 @@ describe('GroupReplaysPlayer', () => {
     expect(handleBackClick).toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', {name: 'Next Clip'}));
     expect(handleForwardClick).toHaveBeenCalled();
+  });
+
+  it('shows a retryable error when the recording-segment fetch fails', async () => {
+    const onRetry = jest.fn();
+
+    render(
+      <GroupReplaysPlayer
+        {...defaultProps}
+        handleBackClick={undefined}
+        handleForwardClick={undefined}
+        replayReaderResult={{
+          ...defaultProps.replayReaderResult,
+          attachmentError: [
+            new RequestError('GET', '/recording-segments/', new Error('boom'), {
+              status: 500,
+              statusText: '',
+              responseText: '',
+              responseJSON: {detail: 'boom'},
+              getResponseHeader: () => null,
+            }),
+          ],
+          isError: true,
+          status: 'error' as const,
+          onRetry,
+        }}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', {name: 'Retry'}));
+    expect(onRetry).toHaveBeenCalled();
   });
 });

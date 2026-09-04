@@ -1,17 +1,15 @@
-from sentry import options
+from django.conf import settings
+
 from sentry.utils.services import LazyServiceWrapper
 
-from .attribute import Attribute
 from .base import Analytics
-from .event import Event
+from .event import Event, eventclass
 from .event_manager import default_manager
-from .map import Map
 
 __all__ = (
     "Analytics",
-    "Attribute",
+    "eventclass",
     "Event",
-    "Map",
     "record",
     "record_event",
     "setup",
@@ -29,12 +27,12 @@ def _get_backend_path(path: str) -> str:
 
 backend = LazyServiceWrapper(
     backend_base=Analytics,
-    backend_path=_get_backend_path(options.get("analytics.backend")),
-    options=options.get("analytics.options"),
+    backend_path=_get_backend_path(settings.SENTRY_ANALYTICS_BACKEND),
+    options=settings.SENTRY_ANALYTICS_OPTIONS,
 )
 
 record = backend.record
-record_event = backend.record_event
+record_event_envelope = backend.record_event_envelope
 register = default_manager.register
 setup = backend.setup
 validate = backend.validate

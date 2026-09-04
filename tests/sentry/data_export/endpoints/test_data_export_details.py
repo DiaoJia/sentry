@@ -1,6 +1,7 @@
 from datetime import timedelta
 from hashlib import sha1
 from io import BytesIO
+from unittest.mock import patch
 
 from django.urls import reverse
 from django.utils import timezone
@@ -14,7 +15,7 @@ from sentry.testutils.cases import APITestCase
 class DataExportDetailsTest(APITestCase):
     endpoint = "sentry-api-0-organization-data-export-details"
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user()
         self.organization = self.create_organization(owner=self.user)
         self.login_as(user=self.user)
@@ -25,9 +26,8 @@ class DataExportDetailsTest(APITestCase):
             query_info={"env": "test"},
         )
 
-    def test_content(self):
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+    def test_content(self) -> None:
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["id"] == self.data_export.id
         assert response.data["user"] == {
             "id": str(self.user.id),
@@ -40,58 +40,53 @@ class DataExportDetailsTest(APITestCase):
             "info": self.data_export.query_info,
         }
 
-    def test_early(self):
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+    def test_early(self) -> None:
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["dateFinished"] is None
         assert response.data["dateExpired"] is None
         assert response.data["status"] == ExportStatus.Early
 
-    def test_valid(self):
+    def test_valid(self) -> None:
         self.data_export.update(
             date_finished=timezone.now() - timedelta(weeks=2),
             date_expired=timezone.now() + timedelta(weeks=1),
         )
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["dateFinished"] is not None
         assert response.data["dateFinished"] == self.data_export.date_finished
         assert response.data["dateExpired"] is not None
         assert response.data["dateExpired"] == self.data_export.date_expired
         assert response.data["status"] == ExportStatus.Valid
 
-    def test_expired(self):
+    def test_expired(self) -> None:
         self.data_export.update(
             date_finished=timezone.now() - timedelta(weeks=2),
             date_expired=timezone.now() - timedelta(weeks=1),
         )
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["dateFinished"] is not None
         assert response.data["dateFinished"] == self.data_export.date_finished
         assert response.data["dateExpired"] is not None
         assert response.data["dateExpired"] == self.data_export.date_expired
         assert response.data["status"] == ExportStatus.Expired
 
-    def test_no_file(self):
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+    def test_no_file(self) -> None:
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["checksum"] is None
         assert response.data["fileName"] is None
 
-    def test_file(self):
+    def test_file(self) -> None:
         contents = b"test"
         file = File.objects.create(
             name="test.csv", type="export.csv", headers={"Content-Type": "text/csv"}
         )
         file.putfile(BytesIO(contents))
         self.data_export.update(file_id=file.id)
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["checksum"] == sha1(contents).hexdigest()
         assert response.data["fileName"] == "test.csv"
 
-    def test_invalid_organization(self):
+    def test_invalid_organization(self) -> None:
         invalid_user = self.create_user()
         invalid_organization = self.create_organization(owner=invalid_user)
         self.login_as(user=invalid_user)
@@ -99,11 +94,36 @@ class DataExportDetailsTest(APITestCase):
             self.endpoint,
             args=[invalid_organization.slug, self.data_export.id],
         )
-        with self.feature("organizations:discover-query"):
-            response = self.client.get(url)
-            assert response.status_code == 404
+        response = self.client.get(url)
+        assert response.status_code == 404
 
-    def test_content_errors(self):
+    def test_cannot_access_another_members_export(self) -> None:
+        # A second member of the same organization must not be able to read
+        # another member's export by enumerating its id (IDOR).
+        other_user = self.create_user()
+        self.create_member(user=other_user, organization=self.organization, role="member")
+        self.login_as(user=other_user)
+        with patch("sentry.data_export.endpoints.data_export_details.metrics.incr") as mock_incr:
+            self.get_error_response(self.organization.slug, self.data_export.id, status_code=404)
+        mock_incr.assert_any_call("dataexport.details.cross_user_access", sample_rate=1.0)
+
+    def test_cannot_download_another_members_export(self) -> None:
+        contents = b"secret"
+        file = File.objects.create(
+            name="secret.csv", type="export.csv", headers={"Content-Type": "text/csv"}
+        )
+        file.putfile(BytesIO(contents))
+        self.data_export.update(file_id=file.id)
+
+        other_user = self.create_user()
+        self.create_member(user=other_user, organization=self.organization, role="member")
+        self.login_as(user=other_user)
+
+        url = reverse(self.endpoint, args=[self.organization.slug, self.data_export.id])
+        response = self.client.get(f"{url}?download")
+        assert response.status_code == 404
+
+    def test_content_errors(self) -> None:
         self.data_export = ExportedData.objects.create(
             user_id=self.user.id,
             organization=self.organization,
@@ -111,8 +131,7 @@ class DataExportDetailsTest(APITestCase):
             query_info={"dataset": "errors"},
         )
 
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["id"] == self.data_export.id
         assert response.data["user"] == {
             "id": str(self.user.id),
@@ -125,7 +144,7 @@ class DataExportDetailsTest(APITestCase):
             "info": self.data_export.query_info,
         }
 
-    def test_content_transactions(self):
+    def test_content_transactions(self) -> None:
         self.data_export = ExportedData.objects.create(
             user_id=self.user.id,
             organization=self.organization,
@@ -133,8 +152,7 @@ class DataExportDetailsTest(APITestCase):
             query_info={"dataset": "transactions"},
         )
 
-        with self.feature("organizations:discover-query"):
-            response = self.get_success_response(self.organization.slug, self.data_export.id)
+        response = self.get_success_response(self.organization.slug, self.data_export.id)
         assert response.data["id"] == self.data_export.id
         assert response.data["user"] == {
             "id": str(self.user.id),

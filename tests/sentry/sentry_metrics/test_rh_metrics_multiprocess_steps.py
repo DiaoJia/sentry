@@ -14,6 +14,7 @@ from arroyo.backends.kafka import KafkaPayload
 from arroyo.dlq import InvalidMessage
 from arroyo.processing.strategies import MessageRejected
 from arroyo.types import BrokerValue, Message, Partition, Topic, Value
+from django.test import override_settings
 
 from sentry.sentry_metrics.configuration import IndexerStorage, UseCaseKey, get_ingest_config
 from sentry.sentry_metrics.consumers.indexer.batch import valid_metric_name
@@ -131,7 +132,7 @@ def test_batch_messages() -> None:
     assert batch_messages_step._BatchMessages__batch is None
 
 
-def test_batch_messages_rejected_message():
+def test_batch_messages_rejected_message() -> None:
     next_step = Mock()
     next_step.submit.side_effect = MessageRejected()
 
@@ -155,7 +156,7 @@ def test_batch_messages_rejected_message():
     assert next_step.submit.called
 
 
-def test_batch_messages_join():
+def test_batch_messages_join() -> None:
     next_step = Mock()
 
     batch_messages_step, message1, _ = _batch_message_set_up(next_step)
@@ -169,7 +170,7 @@ def test_batch_messages_join():
     assert not next_step.submit.called
 
 
-def test_metrics_batch_builder():
+def test_metrics_batch_builder() -> None:
     max_batch_time = 3.0  # seconds
     max_batch_size = 2
 
@@ -459,12 +460,12 @@ def test_process_messages_invalid_messages(
 
 
 @pytest.mark.django_db
-def test_process_messages_rate_limited(caplog, settings) -> None:
+@override_settings(SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE=1.0)
+def test_process_messages_rate_limited(caplog) -> None:
     """
     Test handling of `None`-values coming from the indexer service, which
     happens when postgres writes are being rate-limited.
     """
-    settings.SENTRY_METRICS_INDEXER_DEBUG_LOG_SAMPLE_RATE = 1.0
     rate_limited_payload = deepcopy(distribution_payload)
     rate_limited_payload["tags"]["custom_tag"] = "rate_limited_test"
 
@@ -531,6 +532,6 @@ def test_valid_metric_name() -> None:
     assert valid_metric_name("invalid" * 200) is False
 
 
-def test_process_messages_is_pickleable():
+def test_process_messages_is_pickleable() -> None:
     # needed so that the parallel transform step starts up properly
     pickle.dumps(MESSAGE_PROCESSOR.process_messages)

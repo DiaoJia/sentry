@@ -1,38 +1,34 @@
-import type {Client} from 'sentry/api';
 import type {PageFilters} from 'sentry/types/core';
 import type {
   EventsStats,
   GroupedMultiSeriesEventsStats,
   MultiSeriesEventsStats,
-  Organization,
 } from 'sentry/types/organization';
 import type {EventsTableData, TableData} from 'sentry/utils/discover/discoverQuery';
 import type {MetricsResultsMetaMapKey} from 'sentry/utils/performance/contexts/metricsEnhancedPerformanceDataContext';
 import {useMetricsResultsMeta} from 'sentry/utils/performance/contexts/metricsEnhancedPerformanceDataContext';
 import {useMEPSettingContext} from 'sentry/utils/performance/contexts/metricsEnhancedSetting';
-import {OnDemandControlConsumer} from 'sentry/utils/performance/contexts/onDemandControl';
+import {useOnDemandControl} from 'sentry/utils/performance/contexts/onDemandControl';
 import {getDatasetConfig} from 'sentry/views/dashboards/datasetConfig/base';
 import {
+  WidgetType,
   type DashboardFilters,
   type Widget,
-  WidgetType,
 } from 'sentry/views/dashboards/types';
+import {SAMPLING_MODE} from 'sentry/views/explore/hooks/useProgressiveQuery';
 
 import {useDashboardsMEPContext} from './dashboardsMEPContext';
 import type {
-  GenericWidgetQueriesChildrenProps,
+  GenericWidgetQueriesResult,
   OnDataFetchedProps,
 } from './genericWidgetQueries';
-import GenericWidgetQueries from './genericWidgetQueries';
+import {useGenericWidgetQueries} from './genericWidgetQueries';
 
 type SeriesResult = EventsStats | MultiSeriesEventsStats | GroupedMultiSeriesEventsStats;
 type TableResult = TableData | EventsTableData;
 
 type Props = {
-  api: Client;
-  children: (props: GenericWidgetQueriesChildrenProps) => React.JSX.Element;
-  organization: Organization;
-  selection: PageFilters;
+  children: (props: GenericWidgetQueriesResult) => React.JSX.Element;
   widget: Widget;
   cursor?: string;
   dashboardFilters?: DashboardFilters;
@@ -40,13 +36,57 @@ type Props = {
   onDataFetchStart?: () => void;
   onDataFetched?: (results: OnDataFetchedProps) => void;
   onWidgetSplitDecision?: (splitDecision: WidgetType) => void;
+  // Optional selection override for widget viewer modal zoom functionality
+  selection?: PageFilters;
+  widgetInterval?: string;
 };
 
-function WidgetQueries({
-  api,
+function WidgetQueriesWithOnDemandControl({
   children,
-  organization,
+  widget,
+  dashboardFilters,
+  cursor,
+  limit,
+  onDataFetched,
+  onDataFetchStart,
   selection,
+  config,
+  afterFetchSeriesData,
+  afterFetchTableData,
+  mepSettingContext,
+  OnDemandControlContext,
+  widgetInterval,
+}: Omit<Props, 'onWidgetSplitDecision'> & {
+  OnDemandControlContext: any;
+  afterFetchSeriesData: (rawResults: SeriesResult) => void;
+  afterFetchTableData: (rawResults: TableResult) => void;
+  config: ReturnType<typeof getDatasetConfig>;
+  mepSettingContext: ReturnType<typeof useMEPSettingContext>;
+}) {
+  const props = useGenericWidgetQueries<SeriesResult, TableResult>({
+    config,
+    widget,
+    samplingMode:
+      widget.widgetType === WidgetType.SPANS ? SAMPLING_MODE.NORMAL : undefined,
+    cursor,
+    limit,
+    dashboardFilters,
+    onDataFetched,
+    onDataFetchStart,
+    selection,
+    afterFetchSeriesData,
+    afterFetchTableData,
+    mepSetting: mepSettingContext.metricSettingState,
+    onDemandControlContext: OnDemandControlContext,
+    widgetInterval,
+    ...OnDemandControlContext,
+  });
+
+  return children(props);
+}
+
+export function WidgetQueries({
+  children,
   widget,
   dashboardFilters,
   cursor,
@@ -54,6 +94,8 @@ function WidgetQueries({
   onDataFetched,
   onWidgetSplitDecision,
   onDataFetchStart,
+  selection,
+  widgetInterval,
 }: Props) {
   // Discover and Errors datasets are the only datasets processed in this component
   const config = getDatasetConfig(
@@ -62,11 +104,12 @@ function WidgetQueries({
   const context = useDashboardsMEPContext();
   const metricsMeta = useMetricsResultsMeta();
   const mepSettingContext = useMEPSettingContext();
+  const onDemandControlContext = useOnDemandControl();
 
   let setIsMetricsData: undefined | ((value?: boolean) => void);
   let setIsMetricsExtractedData:
     | undefined
-    | ((mapKey: MetricsResultsMetaMapKey, value?: boolean) => void);
+    | ((mapKey: MetricsResultsMetaMapKey, value: boolean) => void);
 
   if (context) {
     setIsMetricsData = context.setIsMetricsData;
@@ -79,6 +122,7 @@ function WidgetQueries({
   const isSeriesMetricsExtractedDataResults: Array<boolean | undefined> = [];
   const afterFetchSeriesData = (rawResults: SeriesResult) => {
     if (rawResults.data) {
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       rawResults = rawResults as EventsStats;
       if (rawResults.isMetricsData !== undefined) {
         isSeriesMetricsDataResults.push(rawResults.isMetricsData);
@@ -115,7 +159,7 @@ function WidgetQueries({
     );
 
     const resultValues = Object.values(rawResults);
-    let splitDecision: WidgetType | undefined = undefined;
+    let splitDecision: WidgetType | undefined;
     if (rawResults.meta) {
       splitDecision = (rawResults.meta as EventsStats['meta'])?.discoverSplitDecision;
     } else if (Object.values(rawResults).length > 0) {
@@ -158,30 +202,22 @@ function WidgetQueries({
   };
 
   return (
-    <OnDemandControlConsumer>
-      {OnDemandControlContext => (
-        <GenericWidgetQueries<SeriesResult, TableResult>
-          config={config}
-          api={api}
-          organization={organization}
-          selection={selection}
-          widget={widget}
-          cursor={cursor}
-          limit={limit}
-          dashboardFilters={dashboardFilters}
-          onDataFetched={onDataFetched}
-          onDataFetchStart={onDataFetchStart}
-          afterFetchSeriesData={afterFetchSeriesData}
-          afterFetchTableData={afterFetchTableData}
-          mepSetting={mepSettingContext.metricSettingState}
-          onDemandControlContext={OnDemandControlContext}
-          {...OnDemandControlContext}
-        >
-          {children}
-        </GenericWidgetQueries>
-      )}
-    </OnDemandControlConsumer>
+    <WidgetQueriesWithOnDemandControl
+      widget={widget}
+      dashboardFilters={dashboardFilters}
+      cursor={cursor}
+      limit={limit}
+      onDataFetched={onDataFetched}
+      onDataFetchStart={onDataFetchStart}
+      selection={selection}
+      config={config}
+      afterFetchSeriesData={afterFetchSeriesData}
+      afterFetchTableData={afterFetchTableData}
+      mepSettingContext={mepSettingContext}
+      OnDemandControlContext={onDemandControlContext}
+      widgetInterval={widgetInterval}
+    >
+      {children}
+    </WidgetQueriesWithOnDemandControl>
   );
 }
-
-export default WidgetQueries;

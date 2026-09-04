@@ -1,5 +1,6 @@
 import zoneinfo
 
+from django.http import HttpRequest, HttpResponse
 from django.utils.safestring import mark_safe
 from django.views.generic import View
 
@@ -9,16 +10,19 @@ from sentry.models.rule import Rule
 from sentry.notifications.utils import get_generic_data
 from sentry.notifications.utils.links import get_group_settings_link, get_rules
 from sentry.utils import json
+from sentry.web.frontend.base import internal_cell_silo_view
 
 from .mail import COMMIT_EXAMPLE, MailPreview, make_generic_event
 
 
+@internal_cell_silo_view
 class DebugGenericIssueEmailView(View):
-    def get(self, request):
+    def get(self, request: HttpRequest) -> HttpResponse:
         org = Organization(id=1, slug="example", name="Example")
         project = Project(id=1, slug="example", name="Example", organization=org)
 
         event = make_generic_event(project)
+        assert event.occurrence is not None
         group = event.group
 
         rule = Rule(id=1, label="An example rule")
@@ -31,13 +35,17 @@ class DebugGenericIssueEmailView(View):
             text_template="sentry/emails/generic.txt",
             context={
                 "rule": rule,
-                "rules": get_rules([rule], org, project),
+                "rules": get_rules([rule], org, project, group.type),
                 "group": group,
                 "event": event,
                 "timezone": zoneinfo.ZoneInfo("Europe/Vienna"),
                 # http://testserver/organizations/example/issues/<issue-id>/?referrer=alert_email
                 #       &alert_type=email&alert_timestamp=<ts>&alert_rule_id=1
-                "link": get_group_settings_link(group, None, get_rules([rule], org, project), 1337),
+                "link": get_group_settings_link(
+                    group,
+                    None,
+                    get_rules([rule], org, project, group.type),
+                ),
                 "generic_issue_data": [(section_header, mark_safe(generic_issue_data_html), None)],
                 "tags": event.tags,
                 "project_label": project.slug,

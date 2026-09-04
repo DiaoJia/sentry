@@ -1,59 +1,71 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useState, type PropsWithChildren} from 'react';
 import styled from '@emotion/styled';
-import {AnimatePresence, motion, useAnimation} from 'framer-motion';
+import {AnimatePresence, motion} from 'framer-motion';
 
-import {Button} from 'sentry/components/core/button';
-import Hook from 'sentry/components/hook';
-import Link from 'sentry/components/links/link';
-import LogoSentry from 'sentry/components/logoSentry';
-import {useOnboardingContext} from 'sentry/components/onboarding/onboardingContext';
+import {Button} from '@sentry/scraps/button';
+import {Container, Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+
+import {LogoSentry} from 'sentry/components/logoSentry';
+import {
+  OnboardingContextProvider,
+  useOnboardingContext,
+} from 'sentry/components/onboarding/onboardingContext';
+import {PageCorners} from 'sentry/components/onboarding/pageCorners';
+import {Stepper} from 'sentry/components/onboarding/stepper';
+import {useOnboardingSidebar} from 'sentry/components/onboarding/useOnboardingSidebar';
 import {useRecentCreatedProject} from 'sentry/components/onboarding/useRecentCreatedProject';
-import Redirect from 'sentry/components/redirect';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
-import categoryList from 'sentry/data/platformPickerCategories';
-import platforms from 'sentry/data/platforms';
+import {Override} from 'sentry/components/override';
+import {Redirect} from 'sentry/components/redirect';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {categoryList} from 'sentry/data/platformPickerCategories';
+import {allPlatforms as platforms} from 'sentry/data/platforms';
 import {IconArrow} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
 import type {OnboardingSelectedSDK} from 'sentry/types/onboarding';
-import {defined} from 'sentry/utils';
+import type {PlatformKey} from 'sentry/types/platform';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import testableTransition from 'sentry/utils/testableTransition';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
-import useOrganization from 'sentry/utils/useOrganization';
-import PageCorners from 'sentry/views/onboarding/components/pageCorners';
+import {defined} from 'sentry/utils/defined';
+import {useReplayForCriticalFlow} from 'sentry/utils/replays/useReplayForCriticalFlow';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useExperiment} from 'sentry/utils/useExperiment';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
 import {useBackActions} from 'sentry/views/onboarding/useBackActions';
-import {useOnboardingSidebar} from 'sentry/views/onboarding/useOnboardingSidebar';
 
-import Stepper from './components/stepper';
+import {FOOTER_HEIGHT} from './components/genericFooter';
+import {NewWelcomeUI} from './components/newWelcome';
+import {OnboardingSkipButton} from './components/onboardingSkipButton';
 import {PlatformSelection} from './platformSelection';
-import SetupDocs from './setupDocs';
-import type {StepDescriptor} from './types';
-import TargetedOnboardingWelcome from './welcome';
+import {ScmConnect} from './scmConnect';
+import {ScmMessaging, SCM_MESSAGING_TITLE} from './scmMessaging';
+import {ScmPlatformFeatures} from './scmPlatformFeatures';
+import {SetupDocs} from './setupDocs';
+import {OnboardingStepId, type StepDescriptor, type StepProps} from './types';
 
-type RouteParams = {
-  step: string;
-};
+// Genuine new-org onboarding happens shortly after org creation. Existing orgs
+// only reach /onboarding via stale links + login replay and are far older than
+// this window, so gating exposure on org age keeps them out of the experiment.
+const NEW_ORG_ONBOARDING_WINDOW_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
-type Props = RouteComponentProps<RouteParams>;
-
-export const onboardingSteps: StepDescriptor[] = [
+const legacyOnboardingSteps: StepDescriptor[] = [
   {
-    id: 'welcome',
+    id: OnboardingStepId.WELCOME,
     title: t('Welcome'),
-    Component: TargetedOnboardingWelcome,
+    Component: NewWelcomeUI,
     cornerVariant: 'top-right',
   },
   {
-    id: 'select-platform',
+    id: OnboardingStepId.SELECT_PLATFORM,
     title: t('Select platform'),
     Component: PlatformSelection,
     hasFooter: true,
     cornerVariant: 'top-left',
   },
   {
-    id: 'setup-docs',
+    id: OnboardingStepId.SETUP_DOCS,
     title: t('Install the Sentry SDK'),
     Component: SetupDocs,
     hasFooter: true,
@@ -61,20 +73,258 @@ export const onboardingSteps: StepDescriptor[] = [
   },
 ];
 
-function Onboarding(props: Props) {
+// Adapters bridge the SCM step components — which accept all flow state via
+// props — to the onboarding flow's OnboardingContext. They let the same step
+// components be reused by other flows (e.g. project creation) that source
+// state from somewhere other than session storage.
+
+function ScmConnectAdapter({onComplete, genBackButton}: StepProps) {
+  const {
+    selectedIntegration,
+    setSelectedIntegration,
+    selectedRepository,
+    setSelectedRepository,
+    clearDerivedState,
+  } = useOnboardingContext();
+
+  return (
+    <ScmConnect
+      selectedIntegration={selectedIntegration}
+      selectedRepository={selectedRepository}
+      onIntegrationChange={setSelectedIntegration}
+      onRepositoryChange={setSelectedRepository}
+      onClearDerivedState={clearDerivedState}
+      onComplete={onComplete}
+      genBackButton={genBackButton}
+    />
+  );
+}
+
+function ScmPlatformFeaturesAdapter({
+  deferProjectCreation,
+  genBackButton,
+  onComplete,
+}: StepProps & {deferProjectCreation: boolean}) {
+  const {
+    selectedRepository,
+    selectedPlatform,
+    setSelectedPlatform,
+    selectedFeatures,
+    setSelectedFeatures,
+    createdProjectSlug,
+    setCreatedProjectSlug,
+  } = useOnboardingContext();
+
+  return (
+    <ScmPlatformFeatures
+      selectedRepository={selectedRepository}
+      selectedPlatform={selectedPlatform}
+      selectedFeatures={selectedFeatures}
+      createdProjectSlug={createdProjectSlug}
+      deferProjectCreation={deferProjectCreation}
+      onPlatformChange={setSelectedPlatform}
+      onFeaturesChange={setSelectedFeatures}
+      onProjectCreated={setCreatedProjectSlug}
+      onComplete={onComplete}
+      genBackButton={genBackButton}
+    />
+  );
+}
+
+function ScmPlatformFeaturesControlAdapter(props: StepProps) {
+  return <ScmPlatformFeaturesAdapter {...props} deferProjectCreation={false} />;
+}
+
+function ScmPlatformFeaturesTreatmentAdapter(props: StepProps) {
+  return <ScmPlatformFeaturesAdapter {...props} deferProjectCreation />;
+}
+
+function ScmMessagingAdapter({genBackButton}: StepProps) {
+  const {messagingSetup, selectedPlatform, setMessagingSetup} = useOnboardingContext();
+
+  // Type-narrowing only. `isInvalidMessagingStep` below redirects away from
+  // this step before it renders without a platform, so this is unreachable —
+  // it is not an empty state and should not grow into one.
+  if (!selectedPlatform) {
+    return null;
+  }
+
+  return (
+    <ScmMessaging
+      messagingSetup={messagingSetup}
+      onMessagingSetupChange={setMessagingSetup}
+      selectedPlatform={selectedPlatform}
+      genBackButton={genBackButton}
+    />
+  );
+}
+
+const scmOnboardingSharedSteps: StepDescriptor[] = [
+  {
+    id: OnboardingStepId.WELCOME,
+    title: t('Welcome'),
+    Component: NewWelcomeUI,
+    cornerVariant: 'top-right',
+  },
+  {
+    id: OnboardingStepId.SCM_CONNECT,
+    title: t('Connect repository'),
+    Component: ScmConnectAdapter,
+    cornerVariant: 'top-left',
+  },
+];
+
+const scmOnboardingSteps: StepDescriptor[] = [
+  ...scmOnboardingSharedSteps,
+  {
+    id: OnboardingStepId.SCM_PLATFORM_FEATURES,
+    title: t('Create your first project'),
+    Component: ScmPlatformFeaturesControlAdapter,
+    cornerVariant: 'top-left',
+  },
+  {
+    id: OnboardingStepId.SETUP_DOCS,
+    title: t('Install the Sentry SDK'),
+    Component: SetupDocs,
+    hasFooter: true,
+    cornerVariant: 'top-left',
+  },
+];
+
+const scmMessagingOnboardingSteps: StepDescriptor[] = [
+  ...scmOnboardingSharedSteps,
+  {
+    id: OnboardingStepId.SCM_PLATFORM_FEATURES,
+    title: t('Create your first project'),
+    Component: ScmPlatformFeaturesTreatmentAdapter,
+    cornerVariant: 'top-left',
+  },
+  {
+    id: OnboardingStepId.SCM_MESSAGING,
+    title: SCM_MESSAGING_TITLE,
+    Component: ScmMessagingAdapter,
+    cornerVariant: 'top-left',
+  },
+  {
+    id: OnboardingStepId.SETUP_DOCS,
+    title: t('Install the Sentry SDK'),
+    Component: SetupDocs,
+    hasFooter: true,
+    cornerVariant: 'top-left',
+  },
+];
+
+function getOnboardingSteps({
+  hasScmOnboarding,
+  hasScmMessaging,
+}: {
+  hasScmMessaging: boolean;
+  hasScmOnboarding: boolean;
+}): StepDescriptor[] {
+  if (!hasScmOnboarding) {
+    return legacyOnboardingSteps;
+  }
+  return hasScmMessaging ? scmMessagingOnboardingSteps : scmOnboardingSteps;
+}
+
+interface ContainerVariableProps {
+  hasFooter: boolean;
+  hasScmOnboarding: boolean;
+  id: OnboardingStepId;
+}
+
+function ContainerVariable(props: PropsWithChildren<ContainerVariableProps>) {
+  const newWelcomeUIStep = props.id === OnboardingStepId.WELCOME;
+
+  if (newWelcomeUIStep && !props.hasScmOnboarding) {
+    return (
+      <OnboardingContainerNewWelcomeUI hasFooter>
+        {props.children}
+      </OnboardingContainerNewWelcomeUI>
+    );
+  }
+
+  return (
+    <OnboardingContainer
+      hasFooter={props.hasFooter}
+      hasScmOnboarding={props.hasScmOnboarding}
+    >
+      {props.children}
+    </OnboardingContainer>
+  );
+}
+
+interface OnboardingStepVariableProps {
+  hasScmOnboarding: boolean;
+  id: OnboardingStepId;
+}
+
+function OnboardingStepVariable(props: PropsWithChildren<OnboardingStepVariableProps>) {
+  const Component =
+    props.id === OnboardingStepId.WELCOME && !props.hasScmOnboarding
+      ? OnboardingStepNewUi
+      : OnboardingStep;
+
+  return (
+    <Component
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      variants={{animate: {}}}
+      transition={{
+        staggerChildren: 0.2,
+      }}
+      data-test-id={`onboarding-step-${props.id}`}
+    >
+      {props.children}
+    </Component>
+  );
+}
+
+export function OnboardingWithoutContext() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const {step: stepId} = useParams<{step: string}>();
   const organization = useOrganization();
   const onboardingContext = useOnboardingContext();
-  const selectedProjectSlug = onboardingContext.selectedPlatform?.key;
+  const selectedProjectSlug =
+    onboardingContext.createdProjectSlug ?? onboardingContext.selectedPlatform?.key;
 
-  const {
-    params: {step: stepId},
-  } = props;
+  // Only report experiment exposure for genuine new-org onboarding. Existing
+  // orgs can land on /onboarding via stale links, which would
+  // otherwise contaminate the experiment population. reportExposure does not
+  // affect the returned `inExperiment` assignment, so step selection below still
+  // works for everyone.
+  const [isNewOrgOnboarding] = useState(
+    () =>
+      Date.now() - new Date(organization.dateCreated).getTime() <
+      NEW_ORG_ONBOARDING_WINDOW_MS
+  );
+
+  const {inExperiment: hasScmOnboarding} = useExperiment({
+    feature: 'onboarding-scm-experiment',
+    reportExposure: isNewOrgOnboarding,
+  });
+
+  // VDY-146 owns treatment exposure and interaction analytics. For now the
+  // host consumes the nested assignment without reporting it.
+  const {inExperiment: hasScmMessaging} = useExperiment({
+    feature: 'onboarding-scm-messaging-experiment',
+    reportExposure: false,
+  });
+
+  const onboardingSteps = getOnboardingSteps({hasScmOnboarding, hasScmMessaging});
+
+  useReplayForCriticalFlow({
+    flowName: 'scm_onboarding',
+    enabled: hasScmOnboarding,
+    sampleRate: 0.5,
+  });
 
   const stepObj = onboardingSteps.find(({id}) => stepId === id);
   const stepIndex = onboardingSteps.findIndex(({id}) => stepId === id);
 
-  const projectSlug =
-    stepObj && stepObj.id === 'setup-docs' ? selectedProjectSlug : undefined;
+  const projectSlug = stepObj?.id === 'setup-docs' ? selectedProjectSlug : undefined;
 
   const {project: recentCreatedProject, isProjectActive} = useRecentCreatedProject({
     orgSlug: organization.slug,
@@ -83,36 +333,25 @@ function Onboarding(props: Props) {
     pollUntilFirstEvent: true,
   });
 
-  const cornerVariantTimeoutRed = useRef<number | undefined>(undefined);
-
   const {activateSidebar} = useOnboardingSidebar();
 
   useEffect(() => {
-    return () => {
-      window.clearTimeout(cornerVariantTimeoutRed.current);
-    };
-  }, []);
-
-  useEffect(() => {
     if (
-      normalizeUrl(props.location.pathname, {forceCustomerDomain: true}) ===
-        `/onboarding/${onboardingSteps[2]!.id}/` &&
-      props.location.query?.platform &&
+      normalizeUrl(location.pathname, {forceCustomerDomain: true}) ===
+        `/onboarding/${OnboardingStepId.SETUP_DOCS}/` &&
+      location.query?.platform &&
       onboardingContext.selectedPlatform === undefined
     ) {
-      const platformKey = Object.keys(platforms).find(
-        // @ts-expect-error TS(7015): Element implicitly has an 'any' type because index... Remove this comment to see the full error message
-        key => platforms[key].id === props.location.query.platform
+      const platform = Object.values(platforms).find(
+        p => p.id === location.query.platform
       );
 
-      // @ts-expect-error TS(7015): Element implicitly has an 'any' type because index... Remove this comment to see the full error message
-      const platform = platformKey ? platforms[platformKey] : undefined;
-
-      // if no platform found, we redirect the user to the platform select page
+      // if no platform found, redirect to the appropriate platform selection step
       if (!platform) {
-        props.router.push(
-          normalizeUrl(`/onboarding/${organization.slug}/${onboardingSteps[1]!.id}/`)
-        );
+        const fallbackStep = hasScmOnboarding
+          ? OnboardingStepId.SCM_PLATFORM_FEATURES
+          : OnboardingStepId.SELECT_PLATFORM;
+        navigate(normalizeUrl(`/onboarding/${organization.slug}/${fallbackStep}/`));
         return;
       }
 
@@ -122,7 +361,7 @@ function Onboarding(props: Props) {
         })?.id ?? 'all';
 
       onboardingContext.setSelectedPlatform({
-        key: props.location.query.platform,
+        key: location.query.platform as PlatformKey,
         category: frameworkCategory,
         language: platform.language,
         type: platform.type,
@@ -131,31 +370,19 @@ function Onboarding(props: Props) {
       });
     }
   }, [
-    props.location.query,
-    props.router,
+    location.query,
+    navigate,
     onboardingContext,
     organization.slug,
-    props.location.pathname,
+    location.pathname,
+    hasScmOnboarding,
   ]);
 
   const shallProjectBeDeleted =
     stepObj?.id === 'setup-docs' && defined(isProjectActive) && !isProjectActive;
 
-  const cornerVariantControl = useAnimation();
-  const updateCornerVariant = () => {
-    // TODO: find better way to delay the corner animation
-    window.clearTimeout(cornerVariantTimeoutRed.current);
-
-    cornerVariantTimeoutRed.current = window.setTimeout(
-      () => cornerVariantControl.start(stepIndex === 0 ? 'top-right' : 'top-left'),
-      1000
-    );
-  };
-
-  useEffect(updateCornerVariant, [stepIndex, cornerVariantControl]);
-
   // Called onExitComplete
-  const [containerHasFooter, setContainerHasFooter] = useState<boolean>(false);
+  const [containerHasFooter, setContainerHasFooter] = useState(false);
   const updateAnimationState = () => {
     if (!stepObj) {
       return;
@@ -169,39 +396,53 @@ function Onboarding(props: Props) {
       if (!stepObj) {
         return;
       }
-      if (step.cornerVariant !== stepObj.cornerVariant) {
-        cornerVariantControl.start('none');
-      }
-      props.router.push(normalizeUrl(`/onboarding/${organization.slug}/${step.id}/`));
+      navigate(normalizeUrl(`/onboarding/${organization.slug}/${step.id}/`));
     },
-    [cornerVariantControl, organization.slug, props.router, stepObj]
+    [organization.slug, navigate, stepObj]
   );
 
   const {handleGoBack} = useBackActions({
     stepIndex,
+    onboardingSteps,
     goToStep,
     recentCreatedProject,
     isRecentCreatedProjectActive: isProjectActive,
-    cornerVariantControl,
   });
 
-  const goNextStep = useCallback(
-    (step: StepDescriptor, platform?: OnboardingSelectedSDK) => {
-      const currentStepIndex = onboardingSteps.findIndex(s => s.id === step.id);
-      const nextStep = onboardingSteps[currentStepIndex + 1]!;
+  const goNextStep = (
+    step: StepDescriptor,
+    platform?: OnboardingSelectedSDK,
+    query?: Record<string, string[]>
+  ) => {
+    const currentStepIndex = onboardingSteps.findIndex(s => s.id === step.id);
+    const nextStep = onboardingSteps[currentStepIndex + 1]!;
 
-      if (nextStep.id === 'setup-docs' && !platform) {
-        return;
-      }
+    if (
+      nextStep.id === OnboardingStepId.SETUP_DOCS &&
+      !platform &&
+      !onboardingContext.selectedPlatform
+    ) {
+      return;
+    }
 
-      if (step.cornerVariant !== nextStep.cornerVariant) {
-        cornerVariantControl.start('none');
-      }
+    const pathname = `/onboarding/${organization.slug}/${nextStep.id}/`;
+    navigate(query ? normalizeUrl({pathname, query}) : normalizeUrl(pathname));
+  };
 
-      props.router.push(normalizeUrl(`/onboarding/${organization.slug}/${nextStep.id}/`));
-    },
-    [organization.slug, cornerVariantControl, props.router]
-  );
+  const genBackButton = () => {
+    if (!hasScmOnboarding || stepIndex <= 0) {
+      return null;
+    }
+    return (
+      <Button
+        onClick={() => handleGoBack()}
+        icon={<IconArrow direction="left" />}
+        variant="link"
+      >
+        {t('Back')}
+      </Button>
+    );
+  };
 
   const genSkipOnboardingLink = () => {
     const source = `targeted-onboarding-${stepId}`;
@@ -212,10 +453,10 @@ function Onboarding(props: Props) {
             organization,
             source,
           });
-          onboardingContext.setSelectedPlatform(undefined);
+          onboardingContext.resetOnboarding();
           activateSidebar({
             userClicked: false,
-            source: `targeted_onboarding_select_platform_skip`,
+            source: 'targeted_onboarding_select_platform_skip',
           });
         }}
         to={normalizeUrl(
@@ -228,143 +469,191 @@ function Onboarding(props: Props) {
   };
 
   // Redirect to the first step if we end up in an invalid state
-  const isInvalidDocsStep = stepId === 'setup-docs' && !projectSlug;
-  if (!stepObj || stepIndex === -1 || isInvalidDocsStep) {
+  const isInvalidDocsStep = stepId === OnboardingStepId.SETUP_DOCS && !projectSlug;
+  // Keyed off `stepObj` rather than the experiment flag so the fallback below is
+  // always a step in the active list: `scm-messaging` only exists alongside
+  // `scm-platform-features`. Testing the flag instead would send a flow whose
+  // step list has neither on a second redirect to reach the first step.
+  const isInvalidMessagingStep =
+    stepObj?.id === OnboardingStepId.SCM_MESSAGING && !onboardingContext.selectedPlatform;
+  if (!stepObj || stepIndex === -1 || isInvalidDocsStep || isInvalidMessagingStep) {
+    const fallbackStep = isInvalidMessagingStep
+      ? OnboardingStepId.SCM_PLATFORM_FEATURES
+      : onboardingSteps[0]!.id;
     return (
-      <Redirect
-        to={normalizeUrl(`/onboarding/${organization.slug}/${onboardingSteps[0]!.id}/`)}
-      />
+      <Redirect to={normalizeUrl(`/onboarding/${organization.slug}/${fallbackStep}/`)} />
     );
   }
 
   return (
-    <OnboardingWrapper data-test-id="targeted-onboarding">
+    <Stack as="main" flexGrow={1} data-test-id="targeted-onboarding">
       <SentryDocumentTitle title={stepObj.title} />
-      <Header>
-        <LogoSvg />
+      <Header
+        columns={{'screen:2xs': 'repeat(2, 1fr)', 'screen:md': 'repeat(3, 1fr)'}}
+        as="header"
+      >
+        <LogoSvg showWordmark={!hasScmOnboarding} />
         {stepIndex !== -1 && (
-          <StyledStepper
-            numSteps={onboardingSteps.length}
-            currentStepIndex={stepIndex}
-            onClick={i => {
-              if ((i as number) < stepIndex && shallProjectBeDeleted) {
-                // @ts-expect-error TS(2345): Argument of type 'number | MouseEvent<HTMLDivEleme... Remove this comment to see the full error message
-                handleGoBack(i);
-                return;
-              }
-
-              // @ts-expect-error TS(2538): Type 'MouseEvent<HTMLDivElement, MouseEvent>' cann... Remove this comment to see the full error message
-              goToStep(onboardingSteps[i]);
+          <Flex
+            justify="center"
+            display={{
+              'screen:2xs': 'none',
+              'screen:xs': 'none',
+              'screen:sm': 'none',
+              'screen:md': 'flex',
             }}
-          />
+          >
+            <Stepper
+              numSteps={onboardingSteps.length}
+              currentStepIndex={stepIndex}
+              onClick={i => {
+                if (i < stepIndex && shallProjectBeDeleted) {
+                  handleGoBack(i);
+                  return;
+                }
+
+                goToStep(onboardingSteps[i]!);
+              }}
+            />
+          </Flex>
         )}
-        <UpsellWrapper>
-          <Hook
+        <Flex align="center" justify="end" gap="md">
+          <Override
             name="onboarding:targeted-onboarding-header"
             source="targeted-onboarding"
           />
-        </UpsellWrapper>
+          {hasScmOnboarding && <OnboardingSkipButton stepId={stepObj.id} />}
+        </Flex>
       </Header>
-      <Container hasFooter={containerHasFooter}>
-        <BackMotionDiv
-          animate={stepIndex > 0 ? 'visible' : 'hidden'}
-          transition={testableTransition()}
-          variants={{
-            initial: {opacity: 0, visibility: 'hidden'},
-            visible: {
-              opacity: 1,
-              visibility: 'visible',
-              transition: testableTransition({delay: 1}),
-            },
-            hidden: {
-              opacity: 0,
-              transitionEnd: {
-                visibility: 'hidden',
-              },
-            },
-          }}
-        >
-          <Button
-            onClick={() => handleGoBack()}
-            icon={<IconArrow direction="left" />}
-            priority="link"
+      <ContainerVariable
+        hasFooter={containerHasFooter}
+        id={stepObj.id}
+        hasScmOnboarding={hasScmOnboarding}
+      >
+        {hasScmOnboarding ? null : (
+          <Container
+            position="absolute"
+            inset={0}
+            pointerEvents="none"
+            containerType="inline-size"
           >
-            {t('Back')}
-          </Button>
-        </BackMotionDiv>
-        <AnimatePresence mode="wait" onExitComplete={updateAnimationState}>
-          <OnboardingStep
+            <AdaptivePageCorners
+              // Controls the current corner variant
+              animateVariant={stepIndex === 0 ? 'top-right' : 'top-left'}
+            />
+          </Container>
+        )}
+        {stepIndex > 0 && !hasScmOnboarding && (
+          <BackMotionDiv
             initial="initial"
-            animate="animate"
-            exit="exit"
-            variants={{animate: {}}}
-            transition={testableTransition({
-              staggerChildren: 0.2,
-            })}
+            animate="visible"
+            variants={{
+              initial: {opacity: 0, visibility: 'hidden'},
+              visible: {
+                opacity: 1,
+                transition: {delay: 1},
+                transitionEnd: {
+                  visibility: 'visible',
+                },
+              },
+            }}
+          >
+            <Button
+              onClick={() => handleGoBack()}
+              icon={<IconArrow direction="left" />}
+              variant="link"
+            >
+              {t('Back')}
+            </Button>
+          </BackMotionDiv>
+        )}
+        <AnimatePresence mode="wait" onExitComplete={updateAnimationState}>
+          <OnboardingStepVariable
             key={stepObj.id}
-            data-test-id={`onboarding-step-${stepObj.id}`}
+            id={stepObj.id}
+            hasScmOnboarding={hasScmOnboarding}
           >
             {stepObj.Component && (
               <stepObj.Component
-                active
                 data-test-id={`onboarding-step-${stepObj.id}`}
                 stepIndex={stepIndex}
-                onComplete={platform => {
+                onComplete={(platform, query) => {
                   if (stepObj) {
-                    goNextStep(stepObj, platform);
+                    goNextStep(stepObj, platform, query);
                   }
                 }}
-                orgId={organization.slug}
-                search={props.location.search}
-                route={props.route}
-                router={props.router}
-                location={props.location}
                 recentCreatedProject={recentCreatedProject}
-                {...{
-                  genSkipOnboardingLink,
-                }}
+                genSkipOnboardingLink={genSkipOnboardingLink}
+                genBackButton={genBackButton}
               />
             )}
-          </OnboardingStep>
+          </OnboardingStepVariable>
         </AnimatePresence>
-        <AdaptivePageCorners animateVariant={cornerVariantControl} />
-      </Container>
-    </OnboardingWrapper>
+      </ContainerVariable>
+    </Stack>
   );
 }
 
-const Container = styled('div')<{hasFooter: boolean}>`
+function Onboarding() {
+  return (
+    <OnboardingContextProvider>
+      <OnboardingWithoutContext />
+    </OnboardingContextProvider>
+  );
+}
+
+const OnboardingContainerNewWelcomeUI = styled('div')<{
+  hasFooter: boolean;
+}>`
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  background: ${p => p.theme.tokens.background.primary};
+  padding: ${p => p.theme.space['2xl']};
+  overflow: hidden;
+
+  width: 100%;
+  margin: 0 auto;
+  margin-bottom: ${p => p.hasFooter && FOOTER_HEIGHT};
+
+  @media (max-width: ${p => p.theme.breakpoints.md}) {
+    padding: ${p => p.theme.space['3xl']} ${p => p.theme.space['2xl']};
+  }
+`;
+
+const OnboardingContainer = styled('div')<{
+  hasFooter: boolean;
+  hasScmOnboarding: boolean;
+}>`
   flex-grow: 1;
   display: flex;
   flex-direction: column;
   position: relative;
-  background: ${p => p.theme.background};
-  padding: 120px ${space(3)};
+  overflow-x: hidden;
+  background: ${p => p.theme.tokens.background.primary};
+  padding: ${p => (p.hasScmOnboarding ? '60px' : '120px')} ${p => p.theme.space['2xl']};
   width: 100%;
   margin: 0 auto;
-  padding-bottom: ${p => p.hasFooter && '72px'};
-  margin-bottom: ${p => p.hasFooter && '72px'};
+  padding-bottom: ${p => p.hasFooter && FOOTER_HEIGHT};
+  margin-bottom: ${p => p.hasFooter && FOOTER_HEIGHT};
 `;
 
-const Header = styled('header')`
-  background: ${p => p.theme.background};
-  padding-left: ${space(4)};
-  padding-right: ${space(4)};
+const Header = styled(Grid)`
+  background: ${p => p.theme.tokens.background.primary};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space['3xl']};
   position: sticky;
-  height: 80px;
+  min-height: 60px;
   align-items: center;
   top: 0;
   z-index: 100;
-  box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  justify-items: stretch;
+  border-bottom: 1px solid ${p => p.theme.tokens.border.secondary};
 `;
 
 const LogoSvg = styled(LogoSentry)`
-  width: 130px;
-  height: 30px;
-  color: ${p => p.theme.textColor};
+  height: 24px;
+  color: ${p => p.theme.tokens.content.primary};
 `;
 
 const OnboardingStep = styled(motion.div)`
@@ -373,17 +662,18 @@ const OnboardingStep = styled(motion.div)`
   flex-direction: column;
 `;
 
-const AdaptivePageCorners = styled(PageCorners)`
-  --corner-scale: 1;
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    --corner-scale: 0.5;
-  }
+const OnboardingStepNewUi = styled(motion.div)`
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 `;
 
-const StyledStepper = styled(Stepper)`
-  justify-self: center;
-  @media (max-width: ${p => p.theme.breakpoints.medium}) {
-    display: none;
+const AdaptivePageCorners = styled(PageCorners)`
+  --corner-scale: 1;
+  overflow: hidden;
+  @container (max-width: ${p => p.theme.container.xl}) {
+    --corner-scale: 0.5;
   }
 `;
 
@@ -393,23 +683,12 @@ const BackMotionDiv = styled(motion.div)`
   left: 20px;
 
   button {
-    font-size: ${p => p.theme.fontSize.sm};
+    font-size: ${p => p.theme.font.size.sm};
   }
 `;
 
 const SkipOnboardingLink = styled(Link)`
-  margin: auto ${space(4)};
-`;
-
-const UpsellWrapper = styled('div')`
-  grid-column: 3;
-  margin-left: auto;
-`;
-
-const OnboardingWrapper = styled('main')`
-  flex-grow: 1;
-  display: flex;
-  flex-direction: column;
+  margin: auto ${p => p.theme.space['3xl']};
 `;
 
 export default Onboarding;

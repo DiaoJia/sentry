@@ -1,9 +1,9 @@
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ProgressBar from 'sentry/components/progressBar';
+import {ProgressBar} from 'sentry/components/progressBar';
 
-describe('ProgressBar', function () {
-  it('basic', function () {
+describe('ProgressBar', () => {
+  it('basic', () => {
     const progressBarValue = 50;
     render(<ProgressBar value={progressBarValue} />);
 
@@ -12,10 +12,7 @@ describe('ProgressBar', function () {
     expect(elementProperties).toBeInTheDocument();
 
     // check aria attributes
-    expect(elementProperties).toHaveAttribute(
-      'aria-valuenow',
-      progressBarValue.toString()
-    );
+    expect(elementProperties).toHaveValue(progressBarValue);
     expect(elementProperties).toHaveAttribute('aria-valuemin', '0');
     expect(elementProperties).toHaveAttribute('aria-valuemax', '100');
   });

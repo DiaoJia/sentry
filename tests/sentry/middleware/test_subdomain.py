@@ -18,12 +18,7 @@ from sentry.testutils.silo import no_silo_test
 
 
 class SubdomainMiddlewareTest(TestCase):
-    def test_attaches_subdomain_attribute(self):
-
-        options = {
-            "system.base-hostname": "us.dev.getsentry.net:8000",
-        }
-
+    def test_attaches_subdomain_attribute(self) -> None:
         def request_with_host(host: str) -> tuple[HttpRequest, HttpResponseBase]:
             got_request = None
 
@@ -43,7 +38,7 @@ class SubdomainMiddlewareTest(TestCase):
         def run_response(host: str) -> HttpResponseBase:
             return request_with_host(host)[1]
 
-        with self.options(options):
+        with override_settings(SENTRY_BASE_HOSTNAME="us.dev.getsentry.net:8000"):
             assert run_request("foobar").subdomain is None
             assert run_request("dev.getsentry.net:8000").subdomain is None
             assert run_request("us.dev.getsentry.net:8000").subdomain is None
@@ -56,7 +51,7 @@ class SubdomainMiddlewareTest(TestCase):
                 run_response("_smtp._tcp.us.dev.getsentry.net:8000"), HttpResponseRedirect
             )
 
-        with self.options({}):
+        with override_settings(SENTRY_BASE_HOSTNAME="testserver"):
             assert run_request("foobar").subdomain is None
             assert run_request("dev.getsentry.net:8000").subdomain is None
             assert run_request("us.dev.getsentry.net:8000").subdomain is None
@@ -91,11 +86,11 @@ urlpatterns = [
 @no_silo_test
 @override_settings(ROOT_URLCONF=__name__, SENTRY_SELF_HOSTED=False)
 class End2EndTest(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.middleware = settings.MIDDLEWARE
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.create_organization(name="albertos-apples")
 
         response = self.client.get(

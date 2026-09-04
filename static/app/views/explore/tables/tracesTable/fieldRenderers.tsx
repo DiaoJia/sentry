@@ -1,34 +1,46 @@
 import {useState} from 'react';
-import {css, type Theme, useTheme} from '@emotion/react';
+import {css, useTheme, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Tag, type TagProps} from '@sentry/scraps/badge';
+import {InfoText} from '@sentry/scraps/info';
+import {Container, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {MultiHighlight} from 'sentry/components/highlight';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import Link from 'sentry/components/links/link';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {RowRectangle} from 'sentry/components/performance/waterfall/rowBar';
 import {pickBarColor} from 'sentry/components/performance/waterfall/utils';
-import PerformanceDuration from 'sentry/components/performanceDuration';
-import TimeSince from 'sentry/components/timeSince';
-import {t, tn} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {PerformanceDuration} from 'sentry/components/performanceDuration';
+import {TimeSince} from 'sentry/components/timeSince';
+import {t, tct, tn} from 'sentry/locale';
+import {defined} from 'sentry/utils/defined';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
 import {getShortEventId} from 'sentry/utils/events';
-import Projects from 'sentry/utils/projects';
+import {Projects} from 'sentry/utils/projects';
+import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import type {TraceResult} from 'sentry/views/explore/hooks/useTraces';
 import {BREAKDOWN_SLICES} from 'sentry/views/explore/hooks/useTraces';
-import type {SpanResult} from 'sentry/views/explore/hooks/useTraceSpans';
-import type {SpanIndexedField, SpanIndexedResponse} from 'sentry/views/insights/types';
+import type {SpanResult} from 'sentry/views/explore/tables/tracesTable/types';
+import type {SpanFields, SpanResponse} from 'sentry/views/insights/types';
 import {TraceViewSources} from 'sentry/views/performance/newTraceDetails/traceHeader/breadcrumbs';
 import {getTraceDetailsUrl} from 'sentry/views/performance/traceDetails/utils';
 
 import type {Field} from './data';
-import {getShortenedSdkName, getStylingSliceName} from './utils';
+import {
+  getShortenedSdkName,
+  getSimilarEventsUrl,
+  getStylingSliceName,
+  isPartialSpanOrTraceData,
+} from './utils';
 
 export const ProjectBadgeWrapper = styled('span')`
   /**
@@ -38,7 +50,15 @@ export const ProjectBadgeWrapper = styled('span')`
   min-width: 32px;
 `;
 
-export function SpanDescriptionRenderer({span}: {span: SpanResult<Field>}) {
+export function SpanDescriptionRenderer({
+  span,
+  highlightTerms = [],
+  caseSensitiveHighlighting = false,
+}: {
+  span: SpanResult<Field>;
+  caseSensitiveHighlighting?: boolean;
+  highlightTerms?: string[];
+}) {
   return (
     <Description data-test-id="span-description">
       <ProjectBadgeWrapper>
@@ -46,7 +66,14 @@ export function SpanDescriptionRenderer({span}: {span: SpanResult<Field>}) {
       </ProjectBadgeWrapper>
       <strong>{span['span.op']}</strong>
       <em>{'\u2014'}</em>
-      <WrappingText>{span['span.description']}</WrappingText>
+      <WrappingText>
+        <SpanDescriptionHighlight
+          caseSensitive={caseSensitiveHighlighting}
+          terms={highlightTerms}
+        >
+          {span['span.description']}
+        </SpanDescriptionHighlight>
+      </WrappingText>
       {<StatusTag status={span['span.status']} />}
     </Description>
   );
@@ -86,7 +113,7 @@ export function ProjectsRenderer({
         <Tooltip
           skipWrapper
           title={
-            <CollapsedProjects>
+            <Stack gap="xs" width="200px">
               {tn(
                 'This trace contains %s more project.',
                 'This trace contains %s more projects.',
@@ -95,7 +122,7 @@ export function ProjectsRenderer({
               {collapsedProjectAvatars.map(project => (
                 <ProjectBadge key={project.slug} project={project} avatarSize={16} />
               ))}
-            </CollapsedProjects>
+            </Stack>
           }
         >
           <CollapsedBadge size={20} fontSize={10} data-test-id="collapsed-projects-badge">
@@ -126,15 +153,7 @@ const ProjectList = styled('div')`
   padding-right: 8px;
 `;
 
-const CollapsedProjects = styled('div')`
-  width: 200px;
-  display: flex;
-  flex-direction: column;
-  gap: ${space(0.5)};
-`;
-
-const AvatarStyle = (p: any) => css`
-  border: 2px solid ${p.theme.background};
+const AvatarStyle = css`
   margin-right: -8px;
   cursor: default;
 
@@ -155,13 +174,13 @@ const CollapsedBadge = styled('div')<{fontSize: number; size: number}>`
   justify-content: center;
   position: relative;
   text-align: center;
-  font-weight: ${p => p.theme.fontWeightBold};
-  background-color: ${p => p.theme.gray200};
-  color: ${p => p.theme.subText};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  background-color: ${p => p.theme.colors.gray200};
+  color: ${p => p.theme.tokens.content.secondary};
   font-size: ${p => p.fontSize}px;
   width: ${p => p.size}px;
   height: ${p => p.size}px;
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
   ${AvatarStyle}
 `;
 
@@ -191,8 +210,18 @@ function ProjectRenderer({projectSlug, hideName}: ProjectRendererProps) {
 }
 
 const WrappingText = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   width: auto;
+`;
+
+const SpanDescriptionHighlight = styled(MultiHighlight)`
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  background-color: ${p => p.theme.colors.gray200};
+  margin-right: 2px;
+  margin-left: 2px;
 `;
 
 export const TraceBreakdownContainer = styled('div')<{hoveredIndex?: number}>`
@@ -200,7 +229,7 @@ export const TraceBreakdownContainer = styled('div')<{hoveredIndex?: number}>`
   display: flex;
   min-width: 200px;
   height: 15px;
-  background-color: ${p => p.theme.gray100};
+  background-color: ${p => p.theme.colors.gray100};
   ${p => `--hoveredSlice-${p.hoveredIndex ?? -1}-translateY: translateY(-3px)`};
 `;
 
@@ -231,7 +260,10 @@ const RectangleTraceBreakdown = styled(RowRectangle)<{
       )
     );
   `}
-  transition: filter,opacity,transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    filter,
+    opacity,
+    transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 `;
 
 export function TraceBreakdownRenderer({
@@ -321,7 +353,7 @@ export function SpanBreakdownSliceRenderer({
   const stylingSliceName = getStylingSliceName(sliceName, sliceSecondaryName);
   const sliceColor = stylingSliceName
     ? pickBarColor(stylingSliceName, theme)
-    : theme.gray100;
+    : theme.colors.gray100;
 
   const sliceWidth =
     sliceNumberWidth === undefined
@@ -369,15 +401,15 @@ export function SpanBreakdownSliceRenderer({
 }
 
 const Subtext = styled('span')`
-  font-weight: ${p => p.theme.fontWeightNormal};
-  color: ${p => p.theme.subText};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 const FlexContainer = styled('div')`
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: ${space(0.5)};
-  padding-bottom: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
+  padding-bottom: ${p => p.theme.space.xs};
 `;
 
 const BreakdownSlice = styled('div')<{
@@ -392,8 +424,10 @@ const BreakdownSlice = styled('div')<{
 `;
 
 interface SpanIdRendererProps {
-  projectSlug: string;
+  spanDescription: string | null;
   spanId: string;
+  spanOp: string;
+  spanProject: string;
   timestamp: string;
   traceId: string;
   transactionId: string;
@@ -401,18 +435,68 @@ interface SpanIdRendererProps {
 }
 
 export function SpanIdRenderer({
-  projectSlug,
   spanId,
   timestamp,
   traceId,
   transactionId,
   onClick,
+  spanDescription,
+  spanOp,
+  spanProject,
 }: SpanIdRendererProps) {
   const location = useLocation();
   const organization = useOrganization();
+  const {selection} = usePageFilters();
+
+  const shortSpanId = getShortEventId(spanId);
+
+  const {projects} = useProjects({slugs: [spanProject]});
+  const projectIds = projects
+    .filter(project => defined(project.id))
+    .map(project => parseInt(project.id, 10));
+
+  if (isPartialSpanOrTraceData(timestamp)) {
+    const search = new MutableSearch('');
+    if (spanOp) {
+      search.addFilterValue('span.op', spanOp);
+    }
+
+    if (spanDescription) {
+      search.addFilterValue('span.description', spanDescription);
+    }
+
+    return (
+      <InfoText
+        variant="muted"
+        title={
+          <Text>
+            {tct('Span is older than 30 days. [similarSpans] in the past 24 hours.', {
+              similarSpans: (
+                <Link
+                  to={getSimilarEventsUrl({
+                    queryString: search.formatString(),
+                    organization,
+                    projectIds,
+                    selection: {
+                      ...selection,
+                      projects: projectIds,
+                      datetime: {start: null, end: null, utc: null, period: '24h'},
+                    },
+                  })}
+                >
+                  {t('View similar spans')}
+                </Link>
+              ),
+            })}
+          </Text>
+        }
+      >
+        {shortSpanId}
+      </InfoText>
+    );
+  }
 
   const target = generateLinkToEventInTraceView({
-    projectSlug,
     traceSlug: traceId,
     timestamp,
     eventId: transactionId,
@@ -424,47 +508,102 @@ export function SpanIdRenderer({
 
   return (
     <Link to={target} onClick={onClick}>
-      {getShortEventId(spanId)}
+      {shortSpanId}
     </Link>
   );
 }
 
 interface TraceIdRendererProps {
   location: Location;
+  projectSlugs: string[];
   timestamp: number; // in milliseconds
   traceId: string;
+  traceName: string | null;
   onClick?: React.ComponentProps<typeof Link>['onClick'];
-  transactionId?: string;
 }
 
 export function TraceIdRenderer({
   traceId,
   timestamp,
-  transactionId,
   location,
   onClick,
+  traceName,
+  projectSlugs,
 }: TraceIdRendererProps) {
   const organization = useOrganization();
   const {selection} = usePageFilters();
 
+  const shortId = getShortEventId(traceId);
+
+  const {projects} = useProjects({slugs: projectSlugs, orgId: organization.slug});
+  const projectIds = projects
+    .filter(project => defined(project.id))
+    .map(project => parseInt(project.id, 10));
+
+  if (isPartialSpanOrTraceData(timestamp)) {
+    const search = new MutableSearch('');
+    if (traceName) {
+      search.addOp('(');
+      search.addFilterValue('transaction', traceName);
+      search.addOp('OR');
+      search.addFilterValue('span.name', traceName);
+      search.addOp('OR');
+      search.addFilterValue('span.description', traceName);
+      search.addOp(')');
+    }
+
+    return (
+      <Tooltip
+        showUnderline
+        isHoverable
+        title={
+          <Text>
+            {tct('Trace is older than 30 days. [similarTraces] in the past 24 hours.', {
+              similarTraces: (
+                <Link
+                  to={getSimilarEventsUrl({
+                    queryString: search.formatString(),
+                    table: 'trace',
+                    organization,
+                    projectIds,
+                    selection,
+                  })}
+                >
+                  {t('View similar traces')}
+                </Link>
+              ),
+            })}
+          </Text>
+        }
+      >
+        <Container minWidth="66px">
+          {props => (
+            <Text variant="muted" aria-disabled="true" role="link" {...props}>
+              {shortId}
+            </Text>
+          )}
+        </Container>
+      </Tooltip>
+    );
+  }
+
   const target = getTraceDetailsUrl({
     organization,
     traceSlug: traceId,
-    dateSelection: {
-      start: selection.datetime.start,
-      end: selection.datetime.end,
-      statsPeriod: selection.datetime.period,
-    },
+    dateSelection: normalizeDateTimeParams(selection.datetime),
     timestamp: timestamp / 1000,
-    eventId: transactionId,
     location,
     source: TraceViewSources.TRACES,
   });
 
   return (
-    <Link to={target} style={{minWidth: '66px', textAlign: 'right'}} onClick={onClick}>
-      {getShortEventId(traceId)}
-    </Link>
+    <Container minWidth="66px">
+      {props => (
+        <Link to={target} style={{textAlign: 'right'}} onClick={onClick} {...props}>
+          {shortId}
+        </Link>
+      )}
+    </Container>
   );
 }
 
@@ -485,14 +624,14 @@ export function SpanTimeRenderer({
   );
 }
 
-type SpanStatus = SpanIndexedResponse[SpanIndexedField.SPAN_STATUS];
+type SpanStatus = SpanResponse[SpanFields.SPAN_STATUS];
 
-const STATUS_TO_TAG_TYPE: Record<SpanStatus, keyof Theme['tag']> = {
+const STATUS_TO_TAG_TYPE: Record<SpanStatus, TagProps['variant']> = {
   ok: 'success',
   cancelled: 'warning',
   unknown: 'info',
   invalid_argument: 'warning',
-  deadline_exceeded: 'error',
+  deadline_exceeded: 'danger',
   not_found: 'warning',
   already_exists: 'warning',
   permission_denied: 'warning',
@@ -500,10 +639,11 @@ const STATUS_TO_TAG_TYPE: Record<SpanStatus, keyof Theme['tag']> = {
   failed_precondition: 'warning',
   aborted: 'warning',
   out_of_range: 'warning',
-  unimplemented: 'error',
-  internal_error: 'error',
-  unavailable: 'error',
-  data_loss: 'error',
+  unimplemented: 'danger',
+  internal_error: 'danger',
+  error: 'danger',
+  unavailable: 'danger',
+  data_loss: 'danger',
   unauthenticated: 'warning',
 };
 
@@ -528,7 +668,7 @@ function StatusTag({status, onClick}: {status: string; onClick?: () => void}) {
     return null;
   }
   return (
-    <StyledTag type={tagType} onClick={onClick}>
+    <StyledTag variant={tagType} onClick={onClick}>
       {status}
     </StyledTag>
   );
@@ -539,9 +679,12 @@ const StyledTag = styled(Tag)`
 `;
 
 export const Description = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;

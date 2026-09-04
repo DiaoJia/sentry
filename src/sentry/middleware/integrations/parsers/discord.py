@@ -5,12 +5,14 @@ from collections.abc import Sequence
 
 import sentry_sdk
 from django.http import HttpResponse, JsonResponse
+from django.http.response import HttpResponseBase
 from rest_framework import status
 from rest_framework.request import Request
 
 from sentry.hybridcloud.outbox.category import WebhookProviderIdentifier
 from sentry.integrations.discord.message_builder.base.flags import EPHEMERAL_FLAG
 from sentry.integrations.discord.requests.base import DiscordRequest, DiscordRequestError
+from sentry.integrations.discord.views.configure_redirect import DiscordConfigureRedirectView
 from sentry.integrations.discord.views.link_identity import DiscordLinkIdentityView
 from sentry.integrations.discord.views.unlink_identity import DiscordUnlinkIdentityView
 from sentry.integrations.discord.webhooks.base import DiscordInteractionsEndpoint
@@ -21,11 +23,8 @@ from sentry.integrations.middleware.hybrid_cloud.parser import (
 )
 from sentry.integrations.models.integration import Integration
 from sentry.integrations.types import EXTERNAL_PROVIDERS, ExternalProviders
-from sentry.integrations.web.discord_extension_configuration import (
-    DiscordExtensionConfigurationView,
-)
 from sentry.middleware.integrations.tasks import convert_to_async_discord_response
-from sentry.types.region import Region
+from sentry.types.cell import Cell
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ class DiscordRequestParser(BaseRequestParser):
     control_classes = [
         DiscordLinkIdentityView,
         DiscordUnlinkIdentityView,
-        DiscordExtensionConfigurationView,
+        DiscordConfigureRedirectView,
     ]
 
     # Dynamically set to avoid RawPostDataException from double reads
@@ -59,11 +58,11 @@ class DiscordRequestParser(BaseRequestParser):
         self._discord_request: DiscordRequest = self.view_class.discord_request_class(drf_request)
         return self._discord_request
 
-    def get_async_region_response(self, regions: Sequence[Region]) -> HttpResponse:
+    def get_async_cell_response(self, cells: Sequence[Cell]) -> HttpResponse:
         if self.discord_request:
             convert_to_async_discord_response.apply_async(
                 kwargs={
-                    "region_names": [r.name for r in regions],
+                    "cell_names": [c.name for c in cells],
                     "payload": create_async_request_payload(self.request),
                     "response_url": self.discord_request.response_url,
                 }
@@ -103,7 +102,7 @@ class DiscordRequestParser(BaseRequestParser):
 
         return None
 
-    def get_response(self):
+    def get_response(self) -> HttpResponseBase:
         if self.view_class in self.control_classes:
             return self.get_response_from_control_silo()
 
@@ -121,26 +120,26 @@ class DiscordRequestParser(BaseRequestParser):
                 return DiscordInteractionsEndpoint.respond_ping()
 
         try:
-            regions = self.get_regions_from_organizations()
+            cells = self.get_cells_from_organizations()
         except Integration.DoesNotExist:
             return self.get_default_missing_integration_response()
 
-        if len(regions) == 0:
+        if len(cells) == 0:
             return self.get_default_missing_integration_response()
 
         if is_discord_interactions_endpoint and self.discord_request:
             if self.discord_request.is_command():
                 return (
-                    self.get_async_region_response(regions=[regions[0]])
+                    self.get_async_cell_response(cells=[cells[0]])
                     if self.discord_request.response_url
-                    else self.get_response_from_first_region()
+                    else self.get_response_from_first_cell()
                 )
 
             if self.discord_request.is_message_component():
                 return (
-                    self.get_async_region_response(regions=regions)
+                    self.get_async_cell_response(cells=cells)
                     if self.discord_request.response_url
-                    else self.get_response_from_all_regions()
+                    else self.get_response_from_all_cells()
                 )
 
         return self.get_response_from_control_silo()

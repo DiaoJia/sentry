@@ -1,11 +1,13 @@
 import type {Location} from 'history';
 
+import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
 import {decodeList} from 'sentry/utils/queryString';
 import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
-import WidgetLegendNameEncoderDecoder from 'sentry/views/dashboards/widgetLegendNameEncoderDecoder';
+import {WidgetLegendNameEncoderDecoder} from 'sentry/views/dashboards/widgetLegendNameEncoderDecoder';
 
-import {type DashboardDetails, DisplayType, type Widget} from './types';
+import {widgetCanUseTimeSeriesVisualization} from './utils/widgetCanUseTimeSeriesVisualization';
+import {DisplayType, type DashboardDetails, type Widget} from './types';
 
 type Props = {
   dashboard: DashboardDetails | null;
@@ -19,9 +21,9 @@ type LegendSelection = Record<string, boolean>;
 const SERIES_LIST_DELIMITER = ',';
 const WIDGET_ID_DELIMITER = ':';
 
-const SERIES_NAME_DELIMITER = ';';
+const SERIES_NAME_DELIMITER = '|~|';
 
-class WidgetLegendSelectionState {
+export class WidgetLegendSelectionState {
   dashboard: DashboardDetails | null;
   location: Location;
   organization: Organization;
@@ -54,14 +56,24 @@ class WidgetLegendSelectionState {
         .filter(unselectedSeries => unselectedSeries !== undefined);
 
       const thisWidgetWithReleasesWasSelected =
-        Object.values(selected).filter(value => value === false).length !== 1 &&
-        Object.keys(selected).includes(`Releases${SERIES_NAME_DELIMITER}${widget.id}`);
+        Object.values(selected).filter(value => !value).length !== 1 &&
+        Object.keys(selected).includes(
+          `${t('Releases')}${SERIES_NAME_DELIMITER}${widget.id}`
+        );
 
       const thisWidgetWithoutReleasesWasSelected =
-        !Object.keys(selected).includes(`Releases${SERIES_NAME_DELIMITER}${widget.id}`) &&
-        Object.values(selected).filter(value => value === false).length === 1;
+        !Object.keys(selected).includes(
+          `${t('Releases')}${SERIES_NAME_DELIMITER}${widget.id}`
+        ) && Object.values(selected).filter(value => !value).length === 1;
 
-      if (thisWidgetWithReleasesWasSelected || thisWidgetWithoutReleasesWasSelected) {
+      // For new-path widgets the default is nothing hidden, so any toggle
+      // should update the URL. The two conditions above only cover old-path
+      // widgets where Releases-hidden was the implicit default state.
+      if (
+        thisWidgetWithReleasesWasSelected ||
+        thisWidgetWithoutReleasesWasSelected ||
+        !this.widgetRequiresLegendUnselection(widget)
+      ) {
         navigate(
           {
             ...location,
@@ -140,7 +152,7 @@ class WidgetLegendSelectionState {
       : this.widgetRequiresLegendUnselection(widget)
         ? {
             [WidgetLegendNameEncoderDecoder.encodeSeriesNameForLegend(
-              'Releases',
+              t('Releases'),
               widget.id
             )]: false,
           }
@@ -148,6 +160,12 @@ class WidgetLegendSelectionState {
   }
 
   widgetRequiresLegendUnselection(widget: Widget) {
+    // The new chart path renders releases as bubble markers that don't
+    // clutter the chart, so there's no need to hide them by default.
+    if (widgetCanUseTimeSeriesVisualization(widget)) {
+      return false;
+    }
+
     return (
       widget.displayType === DisplayType.AREA || widget.displayType === DisplayType.LINE
     );
@@ -164,7 +182,7 @@ class WidgetLegendSelectionState {
 
   formatLegendDefaultQuery(widget: Widget) {
     return this.widgetRequiresLegendUnselection(widget)
-      ? `${widget.id}${WIDGET_ID_DELIMITER}Releases`
+      ? `${widget.id}${WIDGET_ID_DELIMITER}${t('Releases')}`
       : undefined;
   }
 
@@ -177,7 +195,7 @@ class WidgetLegendSelectionState {
         .filter(key => !selected[key])
         .map(series =>
           encodeURIComponent(
-            WidgetLegendNameEncoderDecoder.decodeSeriesNameForLegend(series)!
+            WidgetLegendNameEncoderDecoder.decodeSeriesNameForLegend(series, true)
           )
         )
         .join(SERIES_LIST_DELIMITER)
@@ -193,7 +211,10 @@ class WidgetLegendSelectionState {
     );
     if (widgetLegendString) {
       const [_, seriesNameString] = widgetLegendString.split(WIDGET_ID_DELIMITER);
-      const seriesNames = seriesNameString!.split(SERIES_LIST_DELIMITER);
+      if (!seriesNameString) {
+        return {};
+      }
+      const seriesNames = seriesNameString.split(SERIES_LIST_DELIMITER);
       return seriesNames.reduce((acc, series) => {
         // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
         acc[
@@ -208,46 +229,10 @@ class WidgetLegendSelectionState {
   }
 
   // when a widget has been changed/added/deleted update legend to incorporate that
-  setMultipleWidgetSelectionStateURL(newDashboard: DashboardDetails, newWidget?: Widget) {
+  setMultipleWidgetSelectionStateURL(newDashboard: DashboardDetails) {
     const location = this.location;
     if (!location.query.unselectedSeries) {
       return location.query.unselectedSeries;
-    }
-
-    // if widget was updated it returns updated widget to default selection state
-    if (newWidget && newDashboard.widgets.includes(newWidget)) {
-      const formattedDefaultQuery = this.formatLegendDefaultQuery(newWidget);
-
-      const newQuery = Array.isArray(location.query.unselectedSeries)
-        ? location.query.unselectedSeries
-            .map(legend => {
-              if (legend.includes(newWidget.id!)) {
-                return this.formatLegendDefaultQuery(newWidget);
-              }
-              return legend;
-            })
-            .filter(Boolean)
-        : location.query.unselectedSeries.includes(newWidget.id!)
-          ? formattedDefaultQuery
-          : [location.query.unselectedSeries, formattedDefaultQuery].filter(Boolean);
-
-      return newQuery;
-    }
-
-    // if widget was deleted it removes it from the selection query (clean up the url)
-    if (newWidget) {
-      return Array.isArray(location.query.unselectedSeries)
-        ? location.query.unselectedSeries
-            .map(legend => {
-              if (legend.includes(newWidget.id!)) {
-                return undefined;
-              }
-              return legend;
-            })
-            .filter(Boolean)
-        : location.query.unselectedSeries.includes(newWidget.id!)
-          ? []
-          : location.query.unselectedSeries;
     }
 
     // widget added (since added widgets don't have an id until submitted), it sets selection state based on all widgets
@@ -270,5 +255,3 @@ class WidgetLegendSelectionState {
     return unselectedSeries;
   }
 }
-
-export default WidgetLegendSelectionState;

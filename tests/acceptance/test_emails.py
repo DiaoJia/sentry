@@ -19,7 +19,6 @@ EMAILS = (
     ("/debug/mail/resolved-in-release/", "resolved in release"),
     ("/debug/mail/resolved-in-release/upcoming/", "resolved in release upcoming"),
     ("/debug/mail/unassigned/", "unassigned"),
-    ("/debug/mail/unable-to-fetch-commits/", "unable to fetch commits"),
     ("/debug/mail/unable-to-delete-repo/", "unable to delete repo"),
     ("/debug/mail/error-alert/", "alert"),
     ("/debug/mail/performance-alert/transaction-n-plus-one", "performance"),
@@ -73,14 +72,14 @@ def replace_amp(text: str) -> str:
 
 @no_silo_test
 class EmailTestCase(AcceptanceTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         create_default_projects()
         # This email address is required to match FIXTURES.
         self.user = self.create_user("foo@example.com")
         self.login_as(self.user)
 
-    def test_emails(self):
+    def test_emails(self) -> None:
         for url, name in EMAILS:
             # HTML output is captured as a snapshot
             self.browser.get(build_url(url, "html"))

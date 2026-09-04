@@ -1,29 +1,37 @@
-import {Fragment, useCallback, useMemo, useState} from 'react';
-import {css} from '@emotion/react';
+import {Fragment, useMemo, useState} from 'react';
+import {css, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 
+import {Button} from '@sentry/scraps/button';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {Flex, Grid} from '@sentry/scraps/layout';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {Checkbox} from 'sentry/components/core/checkbox';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import {StatusMessage} from 'sentry/components/modals/inviteMembersModal/inviteStatusMessage';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
 import type {InviteStatus} from 'sentry/components/modals/inviteMembersModal/types';
 import type {MissingMemberInvite} from 'sentry/components/modals/inviteMissingMembersModal/types';
 import type {InviteModalRenderFunc} from 'sentry/components/modals/memberInviteModalCustomization';
 import {InviteModalHook} from 'sentry/components/modals/memberInviteModalCustomization';
-import PanelItem from 'sentry/components/panels/panelItem';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import RoleSelectControl from 'sentry/components/roleSelectControl';
-import TeamSelector from 'sentry/components/teamSelector';
+import {RoleSelectControl} from 'sentry/components/roleSelectControl';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TeamSelector} from 'sentry/components/teamSelector';
 import {IconCheckmark, IconCommit, IconGithub, IconInfo} from 'sentry/icons';
 import {t, tct, tn} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {MissingMember, Organization, OrgRole} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useApi from 'sentry/utils/useApi';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApi} from 'sentry/utils/useApi';
 import {StyledExternalLink} from 'sentry/views/settings/organizationMembers/inviteBanner';
+
+const INVITE_COLUMNS: TableColumnConfig[] = [
+  {key: 'select', width: 'max-content'},
+  {key: 'userInformation', width: '1fr'},
+  {key: 'recentCommits', width: 'max-content'},
+  {key: 'role', width: '1fr'},
+  {key: 'team', width: '1fr'},
+];
 
 export interface InviteMissingMembersModalProps extends ModalRenderProps {
   allowedRoles: OrgRole[];
@@ -49,8 +57,7 @@ export function InviteMissingMembersModal({
     externalId: member.externalId,
     selected: true,
   }));
-  const [memberInvites, setMemberInvites] =
-    useState<MissingMemberInvite[]>(initialMemberInvites);
+  const [memberInvites, setMemberInvites] = useState(initialMemberInvites);
   const referrer = 'github_nudge_invite';
   const [inviteStatus, setInviteStatus] = useState<InviteStatus>({});
   const [sendingInvites, setSendingInvites] = useState(false);
@@ -63,44 +70,35 @@ export function InviteMissingMembersModal({
     [allowedRoles]
   );
 
-  const setRole = useCallback(
-    (role: string, index: number) => {
-      setMemberInvites(prevInvites => {
-        const invites = prevInvites.map(i => ({...i}));
-        invites[index]!.role = role;
-        if (!allowedRolesMap[role]!.isTeamRolesAllowed) {
-          invites[index]!.teamSlugs = new Set([]);
-        }
-        return invites;
-      });
-    },
-    [allowedRolesMap]
-  );
+  const setRole = (role: string, index: number) => {
+    setMemberInvites(prevInvites => {
+      const invites = prevInvites.map(i => ({...i}));
+      invites[index]!.role = role;
+      if (!allowedRolesMap[role]!.isTeamRolesAllowed) {
+        invites[index]!.teamSlugs = new Set();
+      }
+      return invites;
+    });
+  };
 
-  const setTeams = useCallback((teamSlugs: string[], index: number) => {
+  const setTeams = (teamSlugs: string[], index: number) => {
     setMemberInvites(prevInvites => {
       const invites = prevInvites.map(i => ({...i}));
       invites[index]!.teamSlugs = new Set(teamSlugs);
       return invites;
     });
-  }, []);
+  };
 
-  const selectAll = useCallback(
-    (checked: boolean) => {
-      const selectedMembers = memberInvites.map(m => ({...m, selected: checked}));
-      setMemberInvites(selectedMembers);
-    },
-    [memberInvites]
-  );
+  const selectAll = (checked: boolean) => {
+    const selectedMembers = memberInvites.map(m => ({...m, selected: checked}));
+    setMemberInvites(selectedMembers);
+  };
 
-  const toggleCheckbox = useCallback(
-    (checked: boolean, index: number) => {
-      const selectedMembers = [...memberInvites];
-      selectedMembers[index]!.selected = checked;
-      setMemberInvites(selectedMembers);
-    },
-    [memberInvites]
-  );
+  const toggleCheckbox = (checked: boolean, index: number) => {
+    const selectedMembers = [...memberInvites];
+    selectedMembers[index]!.selected = checked;
+    setMemberInvites(selectedMembers);
+  };
 
   if (memberInvites.length === 0 || !organization.access.includes('org:write')) {
     return null;
@@ -109,10 +107,10 @@ export function InviteMissingMembersModal({
   const renderStatusMessage = () => {
     if (sendingInvites) {
       return (
-        <StatusMessage>
+        <Flex gap="md" align="center">
           <LoadingIndicator mini relative size={16} />
           {t('Sending organization invitations\u2026')}
-        </StatusMessage>
+        </Flex>
       );
     }
 
@@ -128,14 +126,14 @@ export function InviteMissingMembersModal({
       };
 
       return (
-        <StatusMessage status="success">
+        <Flex gap="md" align="center">
           <IconCheckmark size="sm" />
           <span>
             {errorCount > 0
               ? tct('Sent [invites], [failed] failed to send.', tctComponents)
               : tct('Sent [invites]', tctComponents)}
           </span>
-        </StatusMessage>
+        </Flex>
       );
     }
 
@@ -151,13 +149,15 @@ export function InviteMissingMembersModal({
 
     try {
       await api.requestPromise(
-        `/organizations/${organization?.slug}/members/?referrer=${referrer}`,
+        `${getApiUrl('/organizations/$organizationIdOrSlug/members/', {
+          path: {organizationIdOrSlug: String(organization?.slug)},
+        })}?referrer=${referrer}`,
         {
           method: 'POST',
           data,
         }
       );
-    } catch (err) {
+    } catch (err: any) {
       const errorResponse = err.responseJSON;
 
       // Use the email error message if available. This inconsistently is
@@ -208,29 +208,38 @@ export function InviteMissingMembersModal({
     });
   };
 
-  const hookRenderer: InviteModalRenderFunc = ({sendInvites, canSend, headerInfo}) => (
+  const overrideRenderer: InviteModalRenderFunc = ({
+    sendInvites,
+    canSend,
+    headerInfo,
+  }) => (
     <Fragment>
       <h4>{t('Invite Your Dev Team')}</h4>
       {headerInfo}
-      <StyledPanelTable
-        headers={[
-          <Checkbox
-            key={0}
-            aria-label={selectedAll ? t('Deselect All') : t('Select All')}
-            onChange={() => selectAll(!selectedAll)}
-            checked={selectedAll}
-          />,
-          t('User Information'),
-          <StyledHeader key={1}>
-            {t('Recent Commits')}
-            <Tooltip title={t('Based on the last 30 days of commit data')}>
-              <IconInfo size="xs" />
-            </Tooltip>
-          </StyledHeader>,
-          t('Role'),
-          t('Team'),
-        ]}
-        stickyHeaders
+      <StyledSimpleTable
+        columns={INVITE_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow sticky>
+            <SimpleTable.HeaderCell>
+              <Checkbox
+                aria-label={selectedAll ? t('Deselect All') : t('Select All')}
+                onChange={() => selectAll(!selectedAll)}
+                checked={selectedAll}
+              />
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('User Information')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>
+              <Flex gap="xs">
+                {t('Recent Commits')}
+                <Tooltip title={t('Based on the last 30 days of commit data')}>
+                  <IconInfo size="xs" />
+                </Tooltip>
+              </Flex>
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Role')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Team')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
         {memberInvites?.map((member, i) => {
           const checked = memberInvites[i]!.selected;
@@ -238,59 +247,64 @@ export function InviteMissingMembersModal({
           const isTeamRolesAllowed =
             allowedRolesMap[member.role]?.isTeamRolesAllowed ?? true;
           return (
-            <Fragment key={i}>
-              <div>
+            <SimpleTable.Row key={i}>
+              <SimpleTable.RowCell>
                 <Checkbox
                   aria-label={t('Select %s', member.email)}
                   checked={checked}
                   onChange={() => toggleCheckbox(!checked, i)}
                 />
-              </div>
+              </SimpleTable.RowCell>
               <StyledPanelItem>
-                <ContentRow>
+                <InlineContentRow>
                   <IconGithub size="sm" />
                   <StyledExternalLink href={`https://github.com/${username}`}>
                     @{username}
                   </StyledExternalLink>
-                </ContentRow>
+                </InlineContentRow>
                 <MemberEmail>{member.email}</MemberEmail>
               </StyledPanelItem>
               <ContentRow>
                 <IconCommit size="sm" />
                 {member.commitCount}
               </ContentRow>
-              <RoleSelectControl
-                aria-label={t('Role')}
-                data-test-id="select-role"
-                disabled={false}
-                value={member.role}
-                roles={allowedRoles}
-                disableUnallowed
-                onChange={value => setRole(value?.value, i)}
-                menuPortalTarget={modalContainerRef?.current}
-                isInsideModal
-              />
-              <TeamSelector
-                organization={organization}
-                aria-label={t('Add to Team')}
-                data-test-id="select-teams"
-                disabled={!isTeamRolesAllowed}
-                placeholder={isTeamRolesAllowed ? t('None') : t('Role cannot join teams')}
-                onChange={(opts: any) =>
-                  setTeams(opts ? opts.map((v: any) => v.value) : [], i)
-                }
-                multiple
-                clearable
-                menuPortalTarget={modalContainerRef?.current}
-                isInsideModal
-              />
-            </Fragment>
+              <SimpleTable.RowCell>
+                <RoleSelectControl
+                  aria-label={t('Role')}
+                  data-test-id="select-role"
+                  disabled={false}
+                  value={member.role}
+                  roles={allowedRoles}
+                  disableUnallowed
+                  onChange={value => setRole(value?.value, i)}
+                  menuPortalTarget={modalContainerRef?.current}
+                  isInsideModal
+                />
+              </SimpleTable.RowCell>
+              <SimpleTable.RowCell>
+                <TeamSelector
+                  aria-label={t('Add to Team')}
+                  data-test-id="select-teams"
+                  disabled={!isTeamRolesAllowed}
+                  placeholder={
+                    isTeamRolesAllowed ? t('None') : t('Role cannot join teams')
+                  }
+                  onChange={(opts: any) =>
+                    setTeams(opts ? opts.map((v: any) => v.value) : [], i)
+                  }
+                  multiple
+                  clearable
+                  menuPortalTarget={modalContainerRef?.current}
+                  isInsideModal
+                />
+              </SimpleTable.RowCell>
+            </SimpleTable.Row>
           );
         })}
-      </StyledPanelTable>
-      <Footer>
+      </StyledSimpleTable>
+      <Flex justify="between">
         <div>{renderStatusMessage()}</div>
-        <ButtonBar gap={1}>
+        <Grid flow="column" align="center" gap="md">
           <Button
             size="sm"
             onClick={() => {
@@ -301,7 +315,7 @@ export function InviteMissingMembersModal({
           </Button>
           <Button
             size="sm"
-            priority="primary"
+            variant="primary"
             aria-label={t('Send Invites')}
             onClick={sendInvites}
             disabled={!canSend || selectedCount === 0}
@@ -314,8 +328,8 @@ export function InviteMissingMembersModal({
           >
             {inviteButtonLabel()}
           </Button>
-        </ButtonBar>
-      </Footer>
+        </Grid>
+      </Flex>
     </Fragment>
   );
 
@@ -325,44 +339,43 @@ export function InviteMissingMembersModal({
       willInvite
       onSendInvites={sendMemberInvites}
     >
-      {hookRenderer}
+      {overrideRenderer}
     </InviteModalHook>
   );
 }
 
-const StyledPanelTable = styled(PanelTable)`
-  grid-template-columns: max-content 1fr max-content 1fr 1fr;
+const StyledSimpleTable = styled(SimpleTable)`
   overflow: scroll;
   max-height: 475px;
 `;
 
-const StyledHeader = styled('div')`
-  display: flex;
-  gap: ${space(0.5)};
-`;
-
-const StyledPanelItem = styled(PanelItem)`
+const StyledPanelItem = styled(SimpleTable.RowCell)`
   flex-direction: column;
+  align-items: start;
+  justify-content: center;
 `;
 
-const Footer = styled('div')`
-  display: flex;
-  justify-content: space-between;
-`;
-
-const ContentRow = styled('div')`
+const contentRowStyle = (p: {theme: Theme}) => css`
   display: flex;
   align-items: center;
-  font-size: ${p => p.theme.fontSize.md};
-  gap: ${space(0.75)};
+  font-size: ${p.theme.font.size.md};
+  gap: ${p.theme.space.sm};
+`;
+
+const ContentRow = styled(SimpleTable.RowCell)`
+  ${contentRowStyle}
+`;
+
+const InlineContentRow = styled('div')`
+  ${contentRowStyle}
 `;
 
 const MemberEmail = styled('div')`
   display: block;
   max-width: 150px;
-  font-size: ${p => p.theme.fontSize.sm};
-  font-weight: ${p => p.theme.fontWeightNormal};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+  color: ${p => p.theme.tokens.content.secondary};
   text-overflow: ellipsis;
   overflow: hidden;
 `;

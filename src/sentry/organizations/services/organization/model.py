@@ -143,7 +143,7 @@ class RpcOrganizationMember(RpcOrganizationMemberSummary):
     email: str = ""
     invitation_link: str | None = None
 
-    def get_audit_log_metadata(self, user_email: str | None = None) -> Mapping[str, Any]:
+    def get_audit_log_metadata(self, user_email: str | None = None) -> dict[str, Any]:
         from sentry.models.organizationmember import invite_status_names
 
         team_ids = [mt.team_id for mt in self.member_teams]
@@ -163,8 +163,8 @@ class RpcOrganizationMember(RpcOrganizationMemberSummary):
         }
 
 
-# Add new organization flags to RpcOrganizationFlags first, only add them here after
-# they have been replicated via Organization.handle_async_replication logic
+# Only flags that `serialize_organization_mapping_flags` populates belong here; anything else
+# silently reads as its default. Declare new organization flags on `RpcOrganizationFlags` below.
 class RpcOrganizationMappingFlags(RpcModel):
     early_adopter: bool = False
     require_2fa: bool = False
@@ -172,14 +172,15 @@ class RpcOrganizationMappingFlags(RpcModel):
     enhanced_privacy: bool = False
     disable_shared_issues: bool = False
     disable_new_visibility_features: bool = False
-    require_email_verification: bool = False
-    codecov_access: bool = False
     disable_member_project_creation: bool = False
     prevent_superuser_access: bool = False
     disable_member_invite: bool = False
 
 
 class RpcOrganizationFlags(RpcOrganizationMappingFlags):
+    require_email_verification: bool = False
+    codecov_access: bool = False
+
     def as_int(self) -> int:
         # Must maintain the same order as the ORM's `Organization.flags` fields
         return flags_to_bits(
@@ -203,7 +204,7 @@ class RpcOrganizationFlagsUpdate(TypedDict):
 
 class RpcOrganizationInvite(RpcModel):
     id: int = -1
-    token: str = ""
+    token: str = Field(repr=False, default="")
     email: str = ""
 
 
@@ -361,9 +362,9 @@ class RpcUserInviteContext(RpcUserOrganizationContext):
     invite_organization_member_id: int | None = 0
 
 
-class RpcRegionUser(RpcModel):
+class RpcCellUser(RpcModel):
     """
-    Represents user information that may be propagated to each region that a user belongs to, often to make
+    Represents user information that may be propagated to each cell that a user belongs to, often to make
     more performant queries on organization member information.
     """
 

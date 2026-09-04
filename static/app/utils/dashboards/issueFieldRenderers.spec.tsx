@@ -3,20 +3,27 @@ import {ProjectFixture} from 'sentry-fixture/project';
 import {UserFixture} from 'sentry-fixture/user';
 
 import {initializeOrg} from 'sentry-test/initializeOrg';
-import {act, render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+import {act, render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import GroupStore from 'sentry/stores/groupStore';
-import MemberListStore from 'sentry/stores/memberListStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import {getIssueFieldRenderer} from 'sentry/utils/dashboards/issueFieldRenderers';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import type {Group} from 'sentry/types/group';
+import {
+  getIssueFieldRenderer,
+  type IssueRowMetadata,
+} from 'sentry/utils/dashboards/issueFieldRenderers';
 
-describe('getIssueFieldRenderer', function () {
-  let location: any, context: any, project: any, organization: any, data: any, user: any;
+describe('getIssueFieldRenderer', () => {
+  let location: any,
+    context: any,
+    project: any,
+    organization: any,
+    theme: any,
+    data: any,
+    user: any;
 
-  beforeEach(function () {
+  beforeEach(() => {
     context = initializeOrg({
       organization,
-      router: {},
       projects: [ProjectFixture()],
     });
     organization = context.organization;
@@ -52,6 +59,7 @@ describe('getIssueFieldRenderer', function () {
       filteredEvents: 3000,
       events: 6000,
       period: '7d',
+      projectId: project.id,
       links: [{url: 'sentry.io', displayName: 'ANNO-123'}],
     };
 
@@ -71,90 +79,232 @@ describe('getIssueFieldRenderer', function () {
     });
   });
 
-  describe('Issue fields', () => {
-    it('can render assignee', async function () {
-      MemberListStore.loadInitialData([
-        UserFixture({
-          name: 'Test User',
-          email: 'test@sentry.io',
-          avatar: {
-            avatarType: 'letter_avatar',
-            avatarUuid: null,
-          },
-        }),
-      ]);
+  function makeIssueMeta(issueId: string, metadata: IssueRowMetadata) {
+    return {
+      issueRowMetadata: {
+        [issueId]: metadata,
+      },
+    };
+  }
 
-      const group = GroupFixture({
-        project,
-        assignedTo: {
-          email: 'test@sentry.io',
-          type: 'user',
-          id: '1',
-          name: 'Test User',
+  describe('Issue fields', () => {
+    it('can render assignee', async () => {
+      const assignedUser = UserFixture({
+        id: '1',
+        name: 'Test User',
+        email: 'test@sentry.io',
+        avatar: {
+          avatarType: 'letter_avatar',
+          avatarUuid: null,
         },
       });
-      GroupStore.add([group]);
-      const renderer = getIssueFieldRenderer('assignee');
+
+      const assignedTo = {
+        email: 'test@sentry.io',
+        type: 'user',
+        id: '1',
+        name: 'Test User',
+      } satisfies Group['assignedTo'];
+      const issueDetailMock = MockApiClient.addMockResponse({
+        method: 'GET',
+        url: `/organizations/${organization.slug}/issues/${data.id}/`,
+        body: GroupFixture({id: data.id, project, assignedTo}),
+      });
+      MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/users/`,
+        body: [{user: assignedUser}],
+      });
+      MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/members/`,
+        body: [{user: assignedUser}],
+      });
+      const renderer = getIssueFieldRenderer(
+        'assignee',
+        makeIssueMeta(data.id, {assignedTo, links: [], owners: []})
+      );
 
       render(
-        renderer!(data, {
+        renderer(data, {
           location,
+          navigate: jest.fn(),
           organization,
+          theme,
         }) as React.ReactElement
       );
-      await userEvent.hover(screen.getByText('TU'));
-      expect(await screen.findByText('Assigned to Test User')).toBeInTheDocument();
+      expect(await screen.findByText('TU')).toBeInTheDocument();
+      expect(issueDetailMock).not.toHaveBeenCalled();
     });
 
-    it('can render counts', async function () {
-      const renderer = getIssueFieldRenderer('events');
+    it('updates assignee when changed', async () => {
+      const users = [
+        UserFixture({
+          id: '1',
+          name: 'Test User',
+          email: 'test@sentry.io',
+        }),
+        UserFixture({
+          id: '2',
+          name: 'Next User',
+          email: 'next@sentry.io',
+        }),
+      ];
+
+      const assignedTo = {
+        email: 'test@sentry.io',
+        type: 'user',
+        id: '1',
+        name: 'Test User',
+      } satisfies Group['assignedTo'];
+
+      const issueDetailMock = MockApiClient.addMockResponse({
+        method: 'GET',
+        url: `/organizations/${organization.slug}/issues/${data.id}/`,
+        body: GroupFixture({id: data.id, project, assignedTo}),
+      });
+      MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/users/`,
+        body: users.map(memberUser => ({user: memberUser})),
+      });
+      MockApiClient.addMockResponse({
+        url: `/organizations/${organization.slug}/members/`,
+        body: users.map(memberUser => ({user: memberUser})),
+      });
+
+      const assignMock = MockApiClient.addMockResponse({
+        method: 'PUT',
+        url: `/organizations/${organization.slug}/issues/${data.id}/`,
+        body: {
+          ...GroupFixture({id: data.id, project, assignedTo}),
+          assignedTo: {
+            email: 'next@sentry.io',
+            type: 'user',
+            id: '2',
+            name: 'Next User',
+          },
+        },
+      });
+
+      const renderer = getIssueFieldRenderer(
+        'assignee',
+        makeIssueMeta(data.id, {assignedTo, links: [], owners: []})
+      );
 
       render(
-        renderer!(data, {
+        renderer(data, {
           location,
+          navigate: jest.fn(),
           organization,
+          theme,
         }) as React.ReactElement
       );
-      expect(screen.getByText('3k')).toBeInTheDocument();
-      expect(screen.getByText('6k')).toBeInTheDocument();
-      await userEvent.hover(screen.getByText('3k'));
+
+      await userEvent.click(
+        await screen.findByRole('button', {name: 'Modify issue assignee'})
+      );
+      await userEvent.click(await screen.findByText('Next User'));
+
+      await waitFor(() =>
+        expect(assignMock).toHaveBeenCalledWith(
+          `/organizations/${organization.slug}/issues/${data.id}/`,
+          expect.objectContaining({
+            data: {assignedTo: 'user:2', assignedBy: 'assignee_selector'},
+          })
+        )
+      );
+
+      expect(await screen.findByText('NU')).toBeInTheDocument();
+      expect(issueDetailMock).not.toHaveBeenCalled();
+    });
+
+    it('can render counts', async () => {
+      const renderer = getIssueFieldRenderer('events', {});
+
+      render(
+        renderer(data, {
+          location,
+          navigate: jest.fn(),
+          organization,
+          theme,
+        }) as React.ReactElement
+      );
+      expect(screen.getByText('3K')).toBeInTheDocument();
+      expect(screen.getByText('6K')).toBeInTheDocument();
+      await userEvent.hover(screen.getByText('3K'));
       expect(await screen.findByText('Total in last 7 days')).toBeInTheDocument();
       expect(screen.getByText('Matching search filters')).toBeInTheDocument();
       expect(screen.getByText('Since issue began')).toBeInTheDocument();
     });
+
+    it('forwards the dashboard page filters to the issue detail link', () => {
+      location.query = {
+        environment: 'production',
+        statsPeriod: '30d',
+        project: '2',
+        // Non page-filter params should not be forwarded.
+        widgetId: '5',
+      };
+      data['issue.id'] = '123';
+      data.issue = 'JS-456';
+
+      const renderer = getIssueFieldRenderer('issue', {});
+
+      render(
+        renderer(data, {
+          location,
+          navigate: jest.fn(),
+          organization,
+          theme,
+        }) as React.ReactElement
+      );
+
+      expect(screen.getByRole('link', {name: '123'})).toHaveAttribute(
+        'href',
+        `/organizations/${organization.slug}/issues/123/?environment=production&project=2&statsPeriod=30d`
+      );
+    });
   });
 
-  it('can render links', function () {
-    const renderer = getIssueFieldRenderer('links');
+  it('can render links', () => {
+    const renderer = getIssueFieldRenderer(
+      'links',
+      makeIssueMeta(data.id, {
+        assignedTo: null,
+        links: [{url: 'sentry.io', displayName: 'ANNO-123'}],
+        owners: [],
+      })
+    );
 
     render(
-      renderer!(data, {
+      renderer(data, {
         location,
+        navigate: jest.fn(),
         organization,
+        theme,
       }) as React.ReactElement
     );
     expect(screen.getByText('ANNO-123')).toBeInTheDocument();
   });
 
-  it('can render multiple links', function () {
-    const renderer = getIssueFieldRenderer('links');
+  it('can render multiple links', () => {
+    const renderer = getIssueFieldRenderer(
+      'links',
+      makeIssueMeta(data.id, {
+        assignedTo: null,
+        links: [
+          {url: 'sentry.io', displayName: 'ANNO-123'},
+          {url: 'sentry.io', displayName: 'ANNO-456'},
+        ],
+        owners: [],
+      })
+    );
 
     render(
-      renderer!(
-        {
-          data,
-          ...{
-            links: [
-              {url: 'sentry.io', displayName: 'ANNO-123'},
-              {url: 'sentry.io', displayName: 'ANNO-456'},
-            ],
-          },
-        },
-        {
-          location,
-          organization,
-        }
-      ) as React.ReactElement
+      renderer(data, {
+        location,
+        navigate: jest.fn(),
+        organization,
+        theme,
+      }) as React.ReactElement
     );
     expect(screen.getByText('ANNO-123')).toBeInTheDocument();
     expect(screen.getByText('ANNO-456')).toBeInTheDocument();

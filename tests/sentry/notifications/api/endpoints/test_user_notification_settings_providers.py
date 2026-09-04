@@ -17,11 +17,11 @@ class UserNotificationSettingsProvidersBaseTest(APITestCase):
 
 @control_silo_test
 class UserNotificationSettingsProvidersGetTest(UserNotificationSettingsProvidersBaseTest):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(self.user)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         other_user = self.create_user()
         NotificationSettingProvider.objects.create(
             user_id=self.user.id,
@@ -90,7 +90,7 @@ class UserNotificationSettingsProvidersGetTest(UserNotificationSettingsProviders
         )
         assert alert_slack_item["value"] == "always"
 
-    def test_invalid_type(self):
+    def test_invalid_type(self) -> None:
         response = self.get_error_response(
             "me",
             type="invalid",
@@ -103,11 +103,11 @@ class UserNotificationSettingsProvidersGetTest(UserNotificationSettingsProviders
 class UserNotificationSettingsProvidersPutTest(UserNotificationSettingsProvidersBaseTest):
     method = "PUT"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(self.user)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         response = self.get_success_response(
             "me",
             user_id=self.user.id,
@@ -126,9 +126,9 @@ class UserNotificationSettingsProvidersPutTest(UserNotificationSettingsProviders
             value=NotificationSettingsOptionEnum.ALWAYS.value,
             provider=ExternalProviderEnum.SLACK.value,
         ).exists()
-        assert len(response.data) == 3
+        assert len(response.data) == 4
 
-    def test_invalid_scope_type(self):
+    def test_invalid_scope_type(self) -> None:
         response = self.get_error_response(
             "me",
             user_id=self.user.id,
@@ -140,7 +140,7 @@ class UserNotificationSettingsProvidersPutTest(UserNotificationSettingsProviders
         )
         assert response.data["scopeType"] == ["Invalid scope type"]
 
-    def test_invalid_provider(self):
+    def test_invalid_provider(self) -> None:
         response = self.get_error_response(
             "me",
             user_id=self.user.id,

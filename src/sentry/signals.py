@@ -90,18 +90,16 @@ class BetterSignal(Signal):
 buffer_incr_complete = BetterSignal()  # ["model", "columns", "extra", "result"]
 pending_delete = BetterSignal()  # ["instance", "actor"]
 event_processed = BetterSignal()  # ["project", "event"]
-# When the organization and initial member have been created
-org_setup_complete = BetterSignal()  # ["organization", "user"]
 
 # This signal should eventually be removed as we should not send
 # transactions through post processing
 transaction_processed = BetterSignal()  # ["project", "event"]
 
-# DEPRECATED
-event_received = BetterSignal()  # ["ip", "project"]
+# Used in getsentry/getsentry to power live.sentry.io
 event_accepted = BetterSignal()  # ["ip", "data", "project"]
 
 # Organization Onboarding Signals
+organization_created = BetterSignal()  # ["organization", "user"]
 project_created = BetterSignal()  # ["project", "user", "default_rules"]
 project_transferred = BetterSignal()  # ["old_org_id", "project"]
 
@@ -119,6 +117,8 @@ first_cron_monitor_created = BetterSignal()  # ["project", "user", "from_upsert"
 cron_monitor_created = BetterSignal()  # ["project", "user", "from_upsert"]
 first_cron_checkin_received = BetterSignal()  # ["project", "monitor_id"]
 first_insight_span_received = BetterSignal()  # ["project", "module"]
+first_log_received = BetterSignal()  # ["project"]
+first_trace_metric_received = BetterSignal()  # ["project"]
 member_invited = BetterSignal()  # ["member", "user"]
 member_joined = BetterSignal()  # ["organization_member_id", "organization_id", "user_id"]
 plugin_enabled = BetterSignal()  # ["plugin", "project", "user"]
@@ -147,7 +147,7 @@ ownership_rule_created = BetterSignal()  # ["project"]
 issue_assigned = BetterSignal()  # ["project", "group", "user"]
 issue_unassigned = BetterSignal()  # ["project", "group", "user"]
 issue_deleted = BetterSignal()  # ["group", "user", "delete_type"]
-# ["organization_id", "project", "group", "user", "resolution_type"]
+# ["organization_id", "project", "group", "user", "resolution_type", "provider", "commit_id"]
 issue_resolved = BetterSignal()
 issue_unresolved = BetterSignal()  # ["project", "user", "group", "transition_type"]
 issue_ignored = BetterSignal()  # ["project", "user", "group_list", "activity_data"]

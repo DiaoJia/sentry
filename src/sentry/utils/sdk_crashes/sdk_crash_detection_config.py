@@ -12,7 +12,7 @@ from sentry.utils.sdk_crashes.path_replacer import (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class FunctionAndPathPattern:
     """Both the function and path pattern must match for a frame to be considered a SDK frame."""
 
@@ -35,6 +35,32 @@ class FunctionAndModulePattern:
     function_pattern: str
 
 
+@dataclass(frozen=True)
+class StacktraceIgnoreMatcher:
+    """Pattern group for ignoring SDK crashes based on the full stacktrace.
+
+    Unlike the matchers in sdk_crash_ignore_matchers, which are only evaluated for frames up to
+    the first SDK frame, a StacktraceIgnoreMatcher is evaluated against the entire stacktrace and
+    only ignores the crash when *every* pattern in the group matches some frame. This is useful
+    for crashes identified by a combination of frames rather than a single frame, e.g. an SDK
+    crash dispatched through a specific caller chain.
+
+    When require_sdk_frame_after is True, a frame matching the *last* pattern must additionally be
+    directly followed by an SDK frame (its callee). This tightens the match to a caller that
+    dispatches straight into SDK code, distinguishing it from a production caller chain that
+    passes through the same frames before reaching app code.
+    """
+
+    patterns: tuple[FunctionAndPathPattern, ...]
+    require_sdk_frame_after: bool = False
+
+    def __post_init__(self) -> None:
+        # An empty patterns tuple would make the detector's all(...) check vacuously true and
+        # ignore every SDK crash, so reject it at construction time.
+        if not self.patterns:
+            raise ValueError("StacktraceIgnoreMatcher requires at least one pattern.")
+
+
 @dataclass
 class SDKFrameConfig:
     function_patterns: set[str]
@@ -53,6 +79,7 @@ class SdkName(Enum):
     Java = "java"
     Native = "native"
     Dart = "dart"
+    Dotnet = "dotnet"
 
 
 @dataclass
@@ -82,6 +109,24 @@ class SDKCrashDetectionConfig:
     sdk_frame_config: SDKFrameConfig
     """The function and module patterns to ignore when detecting SDK crashes. For example, FunctionAndModulePattern("*", "**SentrySDK crash**") for any module with that function"""
     sdk_crash_ignore_matchers: set[FunctionAndModulePattern]
+    """The function patterns to ignore when they are the only SDK frames in the stacktrace.
+    These frames are typically SDK instrumentation frames that intercept calls, such as swizzling or monkey patching,
+    but don't cause crashes themselves. If there are other SDK frames anywhere in the stacktrace, the crash is still
+    reported as an SDK crash. For example, SentrySwizzleWrapper is used for method swizzling and shouldn't be reported
+    as an SDK crash when it's the only SDK frame, since it's highly unlikely the crash stems from that code."""
+    sdk_crash_ignore_when_only_sdk_frame_matchers: set[FunctionAndModulePattern] = field(
+        default_factory=set
+    )
+    """Matcher groups evaluated against the full stacktrace. The crash is ignored when every
+    pattern of any group matches some frame in the stacktrace (and, when a group sets
+    require_sdk_frame_after, its last pattern is directly followed by an SDK frame). Use this for
+    crashes that can only be identified by a combination of frames, e.g. Sentry.init being re-run
+    by the React Native dev server (Metro) on hot reload, where init is dispatched directly
+    through the device event emitter into SDK code — a path that never happens in production."""
+    sdk_crash_ignore_stacktrace_matchers: set[StacktraceIgnoreMatcher] = field(default_factory=set)
+    """The package names that identify the customer-facing hybrid SDK for an SDK event.
+    Maps the event SDK name to the hybrid SDK name and package name."""
+    hybrid_sdk_packages: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 class SDKCrashDetectionOptions(TypedDict):
@@ -132,12 +177,64 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
                 path_patterns={"Sentry**"},
                 path_replacer=FixedPathReplacer(path="Sentry.framework"),
             ),
-            # [SentrySDK crash] is a testing function causing a crash.
-            # Therefore, we don't want to mark it a as a SDK crash.
             sdk_crash_ignore_matchers={
+                # [SentrySDK crash] is a testing function causing a crash.
+                # Therefore, we don't want to mark it a as a SDK crash.
                 FunctionAndModulePattern(
                     module_pattern="*",
                     function_pattern="**SentrySDK crash**",
+                ),
+                # [SentrySDKInternal crash] is a testing function causing a crash.
+                # Therefore, we don't want to mark it a as a SDK crash.
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**SentrySDKInternal crash**",
+                ),
+                # SentryCrashExceptionApplicationHelper._crashOnException calls abort() intentionally, which would cause false positives.
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**SentryCrashExceptionApplicationHelper _crashOnException**",
+                ),
+                # SentryCoreDataSwizzlingHelper sets up the swizzle that routes through
+                # SentryCoreDataTracker. It always appears alongside the tracker frame and
+                # never causes crashes itself, so it is unconditionally ignored to avoid
+                # inflating the conditional SDK frame count in the detector.
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**SentryCoreDataSwizzlingHelper**",
+                ),
+            },
+            sdk_crash_ignore_when_only_sdk_frame_matchers={
+                # SentrySwizzleWrapper is used for method swizzling to intercept UI events.
+                # When it's the only SDK frame, it's highly unlikely the crash stems from the SDK.
+                # Only report as SDK crash if there are other SDK frames anywhere in the stacktrace.
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**SentrySwizzleWrapper**",
+                ),
+                # SentryCoreDataTracker swizzles NSManagedObjectContext save:/executeFetchRequest:
+                # to add tracing spans. It transparently calls the original implementation.
+                # Crashes inside CoreData internals (e.g., doesNotRecognizeSelector: during
+                # merge policy resolution or validation logging) are app-level CoreData
+                # misconfigurations, not SDK bugs.
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**SentryCoreDataTracker**",
+                ),
+                # CPPExceptionTerminate is our std::terminate handler installed by
+                # SentryCrashMonitor_CPPException. It captures crash reports for unhandled
+                # C++ exceptions but doesn't cause them. The crashes originate in system/app
+                # code (Metal GPU drivers, pthread cleanup, objc_exception_rethrow).
+                FunctionAndModulePattern(
+                    module_pattern="*",
+                    function_pattern="**CPPExceptionTerminate**",
+                ),
+            },
+            hybrid_sdk_packages={
+                "sentry.cocoa.flutter": ("sentry.dart.flutter", "pub:sentry_flutter"),
+                "sentry.cocoa.react-native": (
+                    "sentry.javascript.react-native",
+                    "npm:@sentry/react-native",
                 ),
             },
         )
@@ -199,6 +296,68 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
                     module_pattern="*",
                     function_pattern="sentryWrapped",
                 ),
+                # The fetch instrumentation wraps globalThis.fetch as a pass-through.
+                # When a user's fetch call fails (e.g., "Failed to fetch" network errors),
+                # the SDK wrapper frame appears in the stack but is not the cause.
+                # The `fetch` wrapper rethrows synchronously, while the `<anonymous>` promise
+                # rejection handler rethrows the error asynchronously (surfacing via
+                # onunhandledrejection), so both pass-through frames must be ignored.
+                # https://github.com/getsentry/sentry-javascript/blob/090d08c284089acf886d675f06cd516b3f6e06be/packages/core/src/instrument/fetch.ts
+                FunctionAndModulePattern(
+                    module_pattern="@sentry/core/*/instrument/fetch*",
+                    function_pattern="fetch",
+                ),
+                FunctionAndModulePattern(
+                    module_pattern="@sentry/core/*/instrument/fetch*",
+                    function_pattern="<anonymous>",
+                ),
+                # The Supabase integration wraps PostgREST queries and captures errors from
+                # Supabase responses via captureException. The Error is constructed inside SDK
+                # code, so the stack trace only contains SDK frames, triggering false positives.
+                # https://github.com/getsentry/sentry-javascript/blob/10.47.0/packages/core/src/integrations/supabase.ts
+                FunctionAndModulePattern(
+                    module_pattern="@sentry/core/*/integrations/supabase*",
+                    function_pattern="Reflect.apply.then$argument_0",
+                ),
+            },
+            sdk_crash_ignore_stacktrace_matchers={
+                # The React Native dev server (Metro) re-runs the app's entry code — including
+                # Sentry.init and SDK integration setup — on hot reload / Fast Refresh by pushing
+                # a message over its websocket. React Native delivers that message as a device
+                # event (RCTDeviceEventEmitter#emit) to the WebSocket module's listener, which
+                # dispatches straight into the SDK setup code. While the module graph is being
+                # swapped, an imported binding is transiently undefined and SDK setup throws a
+                # TypeError (observed in init, getDefaultIntegrations, _initNativeSdk, and
+                # _encodedAuth via new URLSearchParams). This is a development-only artifact, not a
+                # shippable SDK bug.
+                #
+                # We ignore an SDK crash only when its stacktrace contains both the device event
+                # emit and the React Native WebSocket listener AND that listener dispatches
+                # directly into an SDK frame (require_sdk_frame_after). The direct dispatch is the
+                # Metro module re-evaluation signature: in production the same two frames appear
+                # for every incoming websocket message, but the listener calls the app's own
+                # onmessage handler (app code) before any SDK frame, so a genuine SDK crash reached
+                # from a production websocket handler is not ignored. Crashes reached from app
+                # startup (no dev-server websocket frames) also remain detectable. The crashing SDK
+                # frame is intentionally not pinned by pattern, since it varies across reloads.
+                StacktraceIgnoreMatcher(
+                    patterns=(
+                        # React Native's native device event emitter dispatching the event.
+                        FunctionAndPathPattern(
+                            function_pattern="RCTDeviceEventEmitterImpl#emit",
+                            path_pattern="**/react-native/Libraries/EventEmitter/RCTDeviceEventEmitter.js",
+                        ),
+                        # The React Native WebSocket module's listener that receives the dev-server
+                        # (Metro) message and dispatches directly into the re-run SDK setup code.
+                        # Kept last: require_sdk_frame_after anchors the SDK-frame adjacency check
+                        # on this frame.
+                        FunctionAndPathPattern(
+                            function_pattern="_eventEmitter.addListener$argument_1",
+                            path_pattern="**/react-native/Libraries/WebSocket/WebSocket.js",
+                        ),
+                    ),
+                    require_sdk_frame_after=True,
+                ),
             },
         )
         configs.append(react_native_config)
@@ -217,6 +376,13 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
             project_id=java_options["project_id"],
             sample_rate=java_options["sample_rate"],
             organization_allowlist=java_options["organization_allowlist"],
+            hybrid_sdk_packages={
+                "sentry.java.android.flutter": ("sentry.dart.flutter", "pub:sentry_flutter"),
+                "sentry.java.android.react-native": (
+                    "sentry.javascript.react-native",
+                    "npm:@sentry/react-native",
+                ),
+            },
             sdk_names={
                 "sentry.java.android": java_min_sdk_version,
                 "sentry.java.android.capacitor": java_min_sdk_version,
@@ -283,6 +449,31 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
                 FunctionAndModulePattern(
                     module_pattern="io.sentry.graphql.SentryInstrumentation",
                     function_pattern="lambda$instrumentExecutionResult$0",
+                ),
+                FunctionAndModulePattern(
+                    module_pattern="io.sentry.graphql.SentryGraphqlInstrumentation",
+                    function_pattern="instrumentExecutionResultComplete",
+                ),
+                # WindowCallbackAdapter just forwards the calls to the next callback in the chain.
+                # It does not cause crashes/ANRs itself.
+                FunctionAndModulePattern(
+                    module_pattern="io.sentry.android.core.internal.gestures.WindowCallbackAdapter",
+                    function_pattern="*",
+                ),
+                # All functions that we delegate to are inside lambdas, so we ignore them.
+                FunctionAndModulePattern(
+                    module_pattern="io.sentry.android.sqlite.SentrySupportSQLiteStatement$*",
+                    function_pattern="invoke",
+                ),
+                # Our wrapper class does not override beginTransaction, so we ignore it.
+                FunctionAndModulePattern(
+                    module_pattern="io.sentry.android.sqlite.SentrySupportSQLiteDatabase",
+                    function_pattern="beginTransaction*",
+                ),
+                # Our wrapper class does not override any move* methods, so we ignore it.
+                FunctionAndModulePattern(
+                    module_pattern="io.sentry.android.sqlite.SentryCrossProcessCursor",
+                    function_pattern="move*",
                 ),
             },
         )
@@ -374,6 +565,7 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
             sdk_frame_config=SDKFrameConfig(
                 function_patterns=set(),
                 path_patterns={
+                    # non-obfuscated builds
                     r"package:sentry/**",  # sentry-dart
                     r"package:sentry_flutter/**",  # sentry-dart-flutter
                     # sentry-dart packages
@@ -384,6 +576,10 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
                     r"package:sentry_drift/**",
                     r"package:sentry_hive/**",
                     r"package:sentry_isar/**",
+                    r"package:sentry_link/**",
+                    r"package:sentry_firebase_remote_config/**",
+                    # obfuscated builds
+                    r"/**/.pub-cache/**/sentry**",
                 },
                 path_replacer=KeepFieldPathReplacer(fields={"package", "filename", "abs_path"}),
             ),
@@ -415,6 +611,77 @@ def build_sdk_crash_detection_configs() -> Sequence[SDKCrashDetectionConfig]:
             },
         )
         configs.append(dart_config)
+
+    dotnet_options = _get_options(sdk_name=SdkName.Dotnet, has_organization_allowlist=True)
+
+    if dotnet_options:
+        # Unity SDK contains .NET SDK, so the versions must match. 0.24.0 Unity release was
+        # based on 3.22.0 .NET release. From that point on SDK names and frames should be consistent.
+        dotnet_min_sdk_version = "3.22.0"
+        unity_min_sdk_version = "0.24.0"
+
+        dotnet_config = SDKCrashDetectionConfig(
+            sdk_name=SdkName.Dotnet,
+            project_id=dotnet_options["project_id"],
+            sample_rate=dotnet_options["sample_rate"],
+            organization_allowlist=dotnet_options["organization_allowlist"],
+            sdk_names={
+                "sentry.dotnet": dotnet_min_sdk_version,
+                "sentry.dotnet.android": dotnet_min_sdk_version,
+                "sentry.dotnet.aspnet": dotnet_min_sdk_version,
+                "sentry.dotnet.aspnetcore": dotnet_min_sdk_version,
+                "sentry.dotnet.aspnetcore.grpc": dotnet_min_sdk_version,
+                "sentry.dotnet.cocoa": dotnet_min_sdk_version,
+                "sentry.dotnet.ef": dotnet_min_sdk_version,
+                "sentry.dotnet.extensions.logging": dotnet_min_sdk_version,
+                "sentry.dotnet.google-cloud-function": dotnet_min_sdk_version,
+                "sentry.dotnet.log4net": dotnet_min_sdk_version,
+                "sentry.dotnet.maui": dotnet_min_sdk_version,
+                "sentry.dotnet.nlog": dotnet_min_sdk_version,
+                "sentry.dotnet.serilog": dotnet_min_sdk_version,
+                "sentry.dotnet.xamarin": dotnet_min_sdk_version,
+                "sentry.dotnet.xamarin-forms": dotnet_min_sdk_version,
+                "sentry.dotnet.unity": unity_min_sdk_version,
+                "sentry.unity": unity_min_sdk_version,
+                "sentry.unity.lite": unity_min_sdk_version,
+            },
+            # Report fatal errors, since there are no crashes in Unity
+            report_fatal_errors=True,
+            ignore_mechanism_type=set(),
+            allow_mechanism_type=set(),
+            system_library_path_patterns={
+                # .NET System libraries
+                r"System.**",
+                r"Microsoft.**",
+                r"mscorlib**",
+                r"netstandard**",
+                # Unity engine libraries
+                r"UnityEngine.**",
+                r"UnityEditor.**",
+                # Common .NET Core/Framework paths
+                r"**.NETCoreApp**",
+                r"**.NETFramework**",
+                r"**.NETStandard**",
+            },
+            sdk_frame_config=SDKFrameConfig(
+                function_patterns=set(),
+                path_patterns={
+                    # Main Sentry .NET SDK modules
+                    r"Sentry.**",
+                    # Unity-specific Sentry paths (for cases where abs_path is available)
+                    r"**/sentry-unity/**",
+                    r"**/sentry-dotnet/**",
+                },
+                path_replacer=KeepFieldPathReplacer(fields={"module", "package", "filename"}),
+            ),
+            sdk_crash_ignore_matchers={
+                FunctionAndModulePattern(
+                    module_pattern="Sentry.Samples.**",
+                    function_pattern="*",
+                ),
+            },
+        )
+        configs.append(dotnet_config)
 
     return configs
 

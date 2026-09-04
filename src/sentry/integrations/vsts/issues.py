@@ -9,15 +9,18 @@ from django.utils.translation import gettext as _
 from mistune import markdown
 from rest_framework.response import Response
 
+from sentry import options
 from sentry.constants import ObjectStatus
 from sentry.integrations.mixins import ResolveSyncAction
-from sentry.integrations.mixins.issues import IssueSyncIntegration
+from sentry.integrations.mixins.issues import IntegrationSyncTargetNotFound, IssueSyncIntegration
 from sentry.integrations.services.integration import integration_service
 from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
+from sentry.integrations.types import IntegrationIssueConfigField, IntegrationProviderSlug
 from sentry.models.activity import Activity
 from sentry.shared_integrations.exceptions import (
     ApiError,
     ApiUnauthorized,
+    IntegrationConfigurationError,
     IntegrationError,
     IntegrationFormError,
 )
@@ -46,7 +49,7 @@ VSTS_INTEGRATION_FORM_ERROR_CODES_SUBSTRINGS = ["TF401320"]
 
 class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
     description = "Integrate Azure DevOps work items by linking a project."
-    slug = "vsts"
+    slug = IntegrationProviderSlug.AZURE_DEVOPS.value
     conf_key = slug
 
     issue_fields = frozenset(["id", "title", "url"])
@@ -156,7 +159,7 @@ class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
     @all_silo_function
     def get_create_issue_config(
         self, group: Group | None, user: RpcUser | User, **kwargs: Any
-    ) -> list[dict[str, Any]]:
+    ) -> list[IntegrationIssueConfigField]:
         kwargs["link_referrer"] = "vsts_integration"
         fields = []
         if group:
@@ -294,11 +297,11 @@ class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
                         "issue_key": external_issue.key,
                     },
                 )
-                return
+                raise IntegrationSyncTargetNotFound("No matching VSTS user found.")
 
         try:
             client.update_work_item(external_issue.key, assigned_to=assignee)
-        except (ApiUnauthorized, ApiError):
+        except (ApiUnauthorized, ApiError) as e:
             self.logger.info(
                 "vsts.failed-to-assign",
                 extra={
@@ -307,6 +310,11 @@ class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
                     "issue_key": external_issue.key,
                 },
             )
+            if isinstance(e, ApiUnauthorized):
+                raise IntegrationConfigurationError(
+                    "Insufficient permissions to assign user to the VSTS issue."
+                ) from e
+            raise IntegrationError("There was an error assigning the issue.") from e
         except Exception as e:
             self.raise_error(e)
 
@@ -374,9 +382,9 @@ class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
         done_states = self._get_done_statuses(data["project"])
         return ResolveSyncAction.from_resolve_unresolve(
             should_resolve=(
-                not data["old_state"] in done_states and data["new_state"] in done_states
+                data["old_state"] not in done_states and data["new_state"] in done_states
             ),
-            should_unresolve=(not data["new_state"] in done_states or data["old_state"] is None),
+            should_unresolve=(data["new_state"] not in done_states or data["old_state"] is None),
         )
 
     def _get_done_statuses(self, project: str) -> set[str]:
@@ -417,7 +425,9 @@ class VstsIssuesSpec(IssueSyncIntegration, SourceCodeIssueIntegration, ABC):
         client = self.get_client()
 
         integration = integration_service.get_integration(
-            integration_id=self.org_integration.integration_id, status=ObjectStatus.ACTIVE
+            integration_id=self.org_integration.integration_id,
+            status=ObjectStatus.ACTIVE,
+            using_replica=options.get("integration_service.get_integration.using_replica"),
         )
         if not integration:
             raise IntegrationError("Azure DevOps integration not found")

@@ -7,19 +7,24 @@ from typing import Any, NoReturn
 
 from django.urls import reverse
 
-from sentry.eventstore.models import Event, GroupEvent
+from sentry import features
+from sentry.constants import ObjectStatus
 from sentry.integrations.mixins.issues import MAX_CHAR
 from sentry.integrations.models.external_issue import ExternalIssue
 from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
+from sentry.integrations.types import IntegrationIssueConfigField
 from sentry.issues.grouptype import GroupCategory
 from sentry.issues.issue_occurrence import IssueOccurrence
 from sentry.models.group import Group
+from sentry.models.repository import Repository
 from sentry.organizations.services.organization.service import organization_service
+from sentry.services.eventstore.models import Event, GroupEvent
 from sentry.shared_integrations.exceptions import (
     ApiError,
+    IntegrationConfigurationError,
     IntegrationError,
     IntegrationFormError,
-    IntegrationInstallationConfigurationError,
+    IntegrationResourceNotFoundError,
 )
 from sentry.silo.base import all_silo_function
 from sentry.users.models.identity import Identity
@@ -28,8 +33,16 @@ from sentry.users.services.user import RpcUser
 from sentry.utils.http import absolute_uri
 from sentry.utils.strings import truncatechars
 
+PAGE_LIMIT = 1
+
 
 class GitHubIssuesSpec(SourceCodeIssueIntegration):
+    @staticmethod
+    def _format_assignee(user: Mapping[str, Any]) -> tuple[str, str]:
+        login = user["login"]
+        name = user.get("name")
+        return login, f"{name} (@{login})" if name else login
+
     def raise_error(self, exc: Exception, identity: Identity | None = None) -> NoReturn:
         if isinstance(exc, ApiError):
             if exc.code == 422:
@@ -46,10 +59,19 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
                         {"detail": "Some given field was misconfigured"}
                     ) from exc
             elif exc.code == 410:
-                raise IntegrationInstallationConfigurationError(
-                    {
-                        "detail": "Issues are disabled for this repo, please check your repo's permissions"
-                    }
+                raise IntegrationConfigurationError(
+                    "Issues are disabled for this repository, please check your repository permissions"
+                ) from exc
+            elif exc.code == 404:
+                raise IntegrationResourceNotFoundError from exc
+            elif exc.code == 403:
+                if exc.json is not None:
+                    detail = exc.json.get("message")
+                    if detail:
+                        raise IntegrationConfigurationError(detail) from exc
+
+                raise IntegrationConfigurationError(
+                    "You are not authorized to create issues in this repository. Please check your repository permissions."
                 ) from exc
 
         raise super().raise_error(exc=exc, identity=identity)
@@ -114,10 +136,10 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
 
         repo, issue_num = external_issue.key.split("#")
         if not repo:
-            raise IntegrationError("repo must be provided")
+            raise IntegrationFormError({"repo": "Repository is required"})
 
         if not issue_num:
-            raise IntegrationError("issue number must be provided")
+            raise IntegrationFormError({"externalIssue": "Issue number is required"})
 
         comment = data.get("comment")
         if comment:
@@ -135,7 +157,7 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
     @all_silo_function
     def get_create_issue_config(
         self, group: Group | None, user: User | RpcUser, **kwargs: Any
-    ) -> list[dict[str, Any]]:
+    ) -> list[IntegrationIssueConfigField]:
         """
         We use the `group` to get three things: organization_slug, project
         defaults, and default title and description. In the case where we're
@@ -162,56 +184,89 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
             org = org_context.organization
 
         params = kwargs.pop("params", {})
-        default_repo, repo_choices = self.get_repository_choices(group, params, **kwargs)
-
-        assignees = self.get_allowed_assignees(default_repo) if default_repo else []
-        labels: Sequence[tuple[str, str]] = []
-        if default_repo:
-            owner, repo = default_repo.split("/")
-            labels = self.get_repo_labels(owner, repo)
+        prefetch_options = features.has("organizations:github-issue-form-prefetch", org, actor=user)
+        if prefetch_options:
+            defaults = self.get_project_defaults(group.project_id) if group else {}
+            configured_repo = params.get("repo") or defaults.get("repo")
+            default_repo = str(configured_repo) if configured_repo else ""
+            repo_choices = [self.create_default_repo_choice(default_repo)] if default_repo else []
+            assignees: Sequence[tuple[str, str]] = []
+            labels: Sequence[tuple[str, str]] = []
+        else:
+            default_repo, repo_choices = self.get_repository_choices(group, params, PAGE_LIMIT)
+            assignees = self.get_allowed_assignees(default_repo, PAGE_LIMIT) if default_repo else []
+            labels = []
+            if default_repo:
+                owner, repo = default_repo.split("/")
+                labels = self.get_repo_labels(owner, repo, PAGE_LIMIT)
 
         autocomplete_url = reverse(
             "sentry-integration-github-search", args=[org.slug, self.model.id]
         )
 
-        return [
-            {
-                "name": "repo",
-                "label": "GitHub Repository",
-                "type": "select",
-                "default": default_repo,
-                "choices": repo_choices,
-                "url": autocomplete_url,
-                "updatesForm": True,
-                "required": True,
-            },
-            *fields,
-            {
-                "name": "assignee",
-                "label": "Assignee",
-                "default": "",
-                "type": "select",
-                "required": False,
-                "choices": assignees,
-            },
-            {
-                "name": "labels",
-                "label": "Labels",
-                "default": [],
-                "type": "select",
-                "multiple": True,
-                "required": False,
-                "choices": labels,
-            },
-        ]
+        repo_field: IntegrationIssueConfigField = {
+            "name": "repo",
+            "label": "GitHub Repository",
+            "type": "select",
+            "default": default_repo,
+            "choices": repo_choices,
+            "url": autocomplete_url,
+            "updatesForm": True,
+            "required": True,
+        }
+        assignee_field: IntegrationIssueConfigField = {
+            "name": "assignee",
+            "label": "Assignee",
+            "default": "",
+            "type": "select",
+            "required": False,
+            "choices": assignees,
+        }
+        label_field: IntegrationIssueConfigField = {
+            "name": "labels",
+            "label": "Labels",
+            "default": [],
+            "type": "select",
+            "multiple": True,
+            "required": False,
+            "choices": labels,
+        }
+
+        if prefetch_options:
+            repo_field["prefetch"] = True
+            assignee_field["prefetch"] = True
+            assignee_field["dependsOn"] = ["repo"]
+            assignee_field["url"] = autocomplete_url
+            label_field["prefetch"] = True
+            label_field["dependsOn"] = ["repo"]
+            label_field["url"] = autocomplete_url
+
+        return [repo_field, *fields, assignee_field, label_field]
 
     def create_issue(self, data: Mapping[str, Any], **kwargs: Any) -> Mapping[str, Any]:
         client = self.get_client()
         repo = data.get("repo")
         if not repo:
-            raise IntegrationError("repo kwarg must be provided")
+            raise IntegrationFormError({"repo": "Repository is required"})
+
+        # Check the repository belongs to the integration
+        if not Repository.objects.filter(
+            name=repo,
+            integration_id=self.model.id,
+            organization_id=self.organization_id,
+            status=ObjectStatus.ACTIVE,
+        ).exists():
+            raise IntegrationFormError(
+                {"repo": f"Given repository, {repo} does not belong to this installation"}
+            )
 
         # Create clean issue data with required fields
+        if not data.get("title"):
+            raise IntegrationFormError({"title": "Title is required"})
+
+        if not data.get("description"):
+            raise IntegrationFormError({"description": "Description is required"})
+
         issue_data = {
             "title": data["title"],
             "body": data["description"],
@@ -238,7 +293,7 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
 
     def get_link_issue_config(self, group: Group, **kwargs: Any) -> list[dict[str, Any]]:
         params = kwargs.pop("params", {})
-        default_repo, repo_choices = self.get_repository_choices(group, params, **kwargs)
+        default_repo, repo_choices = self.get_repository_choices(group, params, PAGE_LIMIT)
 
         org = group.organization
         autocomplete_url = reverse(
@@ -296,10 +351,20 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
         client = self.get_client()
 
         if not repo:
-            raise IntegrationError("repo must be provided")
+            raise IntegrationFormError({"repo": "Repository is required"})
+
+        if not Repository.objects.filter(
+            name=repo,
+            integration_id=self.model.id,
+            organization_id=self.organization_id,
+            status=ObjectStatus.ACTIVE,
+        ).exists():
+            raise IntegrationFormError(
+                {"repo": f"Given repository, {repo} does not belong to this installation"}
+            )
 
         if not issue_num:
-            raise IntegrationError("issue must be provided")
+            raise IntegrationFormError({"externalIssue": "Issue number is required"})
 
         try:
             issue = client.get_issue(repo, issue_num)
@@ -314,21 +379,35 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
             "repo": repo,
         }
 
-    def get_allowed_assignees(self, repo: str) -> Sequence[tuple[str, str]]:
+    def get_allowed_assignees(
+        self, repo: str, page_number_limit: int | None = None
+    ) -> Sequence[tuple[str, str]]:
         client = self.get_client()
         try:
-            response = client.get_assignees(repo)
+            response = client.get_assignees(repo, page_number_limit=page_number_limit)
         except Exception as e:
             self.raise_error(e)
 
-        users = tuple((u["login"], u["login"]) for u in response)
+        users = tuple(self._format_assignee(user) for user in response)
 
         return (("", "Unassigned"),) + users
 
-    def get_repo_labels(self, owner: str, repo: str) -> Sequence[tuple[str, str]]:
+    def search_allowed_assignees(self, repo: str, query: str) -> Sequence[tuple[str, str]]:
         client = self.get_client()
         try:
-            response = client.get_labels(owner, repo)
+            response = client.search_issue_assignees(repo, query)
+        except Exception as e:
+            self.raise_error(e)
+
+        user_choices = tuple(self._format_assignee(user) for user in response)
+        return user_choices if query else (("", "Unassigned"),) + user_choices
+
+    def get_repo_labels(
+        self, owner: str, repo: str, page_number_limit: int | None = None
+    ) -> Sequence[tuple[str, str]]:
+        client = self.get_client()
+        try:
+            response = client.get_labels(owner, repo, page_number_limit=page_number_limit)
         except Exception as e:
             self.raise_error(e)
 
@@ -344,3 +423,12 @@ class GitHubIssuesSpec(SourceCodeIssueIntegration):
         )
 
         return labels
+
+    def search_repo_labels(self, repo: str, query: str) -> Sequence[tuple[str, str]]:
+        client = self.get_client()
+        try:
+            response = client.search_issue_labels(repo, query)
+        except Exception as e:
+            self.raise_error(e)
+
+        return tuple((label["name"], label["name"]) for label in response)

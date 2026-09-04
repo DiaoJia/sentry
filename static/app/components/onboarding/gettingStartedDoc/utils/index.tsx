@@ -1,110 +1,183 @@
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
-import type {DocsParams} from 'sentry/components/onboarding/gettingStartedDoc/types';
+import {Fragment} from 'react';
+
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {
+  docsFlowVariantParams,
+  resolveDocsFlowEvent,
+  SOURCE_MAPS_COPY_CLICKED_EVENT,
+  SOURCE_MAPS_SELECTED_AND_COPIED_EVENT,
+} from 'sentry/components/onboarding/gettingStartedDoc/docsFlowAnalytics';
+import {OnboardingCodeSnippet} from 'sentry/components/onboarding/gettingStartedDoc/onboardingCodeSnippet';
+import type {
+  DocsParams,
+  OnboardingStep,
+} from 'sentry/components/onboarding/gettingStartedDoc/types';
 import {IconCopy} from 'sentry/icons/iconCopy';
+import {IconCopyId} from 'sentry/icons/iconCopyId';
 import {t, tct} from 'sentry/locale';
+import type {ProjectKey} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useCopyToClipboard from 'sentry/utils/useCopyToClipboard';
+import {getSourceMapsWizardSnippet} from 'sentry/utils/getSourceMapsWizardSnippet';
+import {useCopyToClipboard} from 'sentry/utils/useCopyToClipboard';
 
 export function getUploadSourceMapsStep({
   guideLink,
   organization,
   platformKey,
-  projectId,
-  newOrg,
+  project,
+  docsFlow,
   isSelfHosted,
   description,
 }: DocsParams & {
   description?: React.ReactNode;
   guideLink?: string;
-}) {
-  const urlParam = isSelfHosted ? '' : '--saas';
+}): OnboardingStep {
+  function trackEvent(eventName: string) {
+    trackAnalytics(eventName, {
+      project_id: project.id,
+      platform: platformKey,
+      organization,
+      ...docsFlowVariantParams(docsFlow),
+    });
+  }
+
   return {
     collapsible: true,
     title: t('Upload Source Maps (Optional)'),
-    description: description ?? (
-      <p>
-        {tct(
-          'Automatically upload your source maps to enable readable stack traces for Errors. If you prefer to manually set up source maps, please follow [guideLink:this guide].',
-          {
-            guideLink: <ExternalLink href={guideLink} />,
-          }
-        )}
-      </p>
-    ),
-    configurations: [
+    content: [
       {
-        language: 'bash',
-        code: `npx @sentry/wizard@latest -i sourcemaps ${urlParam}`,
-        onCopy: () => {
-          if (!organization || !projectId || !platformKey) {
-            return;
-          }
-
-          trackAnalytics(
-            newOrg
-              ? 'onboarding.source_maps_wizard_button_copy_clicked'
-              : 'project_creation.source_maps_wizard_button_copy_clicked',
+        type: 'text',
+        text:
+          description ??
+          tct(
+            'Automatically upload your source maps to enable readable stack traces for Errors. If you prefer to manually set up source maps, please follow [guideLink:this guide].',
             {
-              project_id: projectId,
-              platform: platformKey,
-              organization,
+              guideLink: <ExternalLink href={guideLink} />,
             }
-          );
-        },
-        onSelectAndCopy: () => {
-          if (!organization || !projectId || !platformKey) {
-            return;
-          }
-
-          trackAnalytics(
-            newOrg
-              ? 'onboarding.source_maps_wizard_selected_and_copied'
-              : 'project_creation.source_maps_wizard_selected_and_copied',
-            {
-              project_id: projectId,
-              platform: platformKey,
-              organization,
+          ),
+      },
+      {
+        type: 'custom',
+        content: (
+          <OnboardingCodeSnippet
+            language="bash"
+            onCopy={() =>
+              trackEvent(resolveDocsFlowEvent(SOURCE_MAPS_COPY_CLICKED_EVENT, docsFlow))
             }
-          );
-        },
+            onSelectAndCopy={() =>
+              trackEvent(
+                resolveDocsFlowEvent(SOURCE_MAPS_SELECTED_AND_COPIED_EVENT, docsFlow)
+              )
+            }
+          >
+            {getSourceMapsWizardSnippet({
+              isSelfHosted,
+              organization,
+              project,
+            })}
+          </OnboardingCodeSnippet>
+        ),
       },
     ],
   };
 }
 
-function CopyRulesButton({rules}: {rules: string}) {
-  const {onClick} = useCopyToClipboard({text: rules});
+const SENTRY_INSTRUMENT_SKILL_URL = 'https://skills.sentry.dev/instrument';
+
+function CopyPromptButton({prompt}: {prompt: string}) {
+  const {copy} = useCopyToClipboard();
   return (
-    <Button size="xs" icon={<IconCopy />} onClick={onClick}>
-      {t('Copy Rules')}
+    <Button
+      size="xs"
+      icon={<IconCopy />}
+      onClick={() => copy(prompt, {successMessage: t('Prompt copied to clipboard')})}
+    >
+      {t('Copy Prompt')}
     </Button>
   );
 }
 
-export function getAIRulesForCodeEditorStep({rules}: {rules: string}) {
+export function getAISetupStep({sdkName}: {sdkName?: string}): OnboardingStep {
+  const target = sdkName ? `the Sentry ${sdkName} SDK` : 'Sentry';
+  const prompt = `Use curl to download, read and follow ${SENTRY_INSTRUMENT_SKILL_URL} to set up ${target}.`;
+
   return {
     collapsible: true,
-    title: t('AI Rules for Code Editors (optional)'),
-    description: tct(
-      'Sentry provides a set of rules you can use to help your LLM use Sentry correctly. Copy this file and add it to your projects rules configuration. When created as a rules file this should be placed alongside other editor specific rule files. For example, if you are using Cursor, place this file in the [code:.cursorrules] directory.',
+    title: t('AI-Assisted Setup (Optional)'),
+    trailingItems: <CopyPromptButton prompt={prompt} />,
+    content: [
       {
-        code: <code />,
-      }
-    ),
-    trailingItems: <CopyRulesButton rules={rules} />,
-    configurations: [
+        type: 'text',
+        text: t(
+          'If you want your AI coding assistant to help you set up Sentry, copy this prompt and paste it into your agent:'
+        ),
+      },
       {
-        code: [
+        type: 'code',
+        tabs: [
           {
-            label: 'Markdown',
-            value: 'md',
-            language: 'md',
-            filename: 'rules.md',
-            code: rules,
+            label: 'Prompt',
+            language: 'text',
+            code: prompt,
           },
         ],
       },
     ],
   };
+}
+
+function CopyDsnButton({
+  dsn,
+  onCopyDsn,
+}: {
+  dsn: ProjectKey['dsn'];
+  onCopyDsn?: () => void;
+}) {
+  const {copy} = useCopyToClipboard();
+
+  return (
+    <Button
+      size="xs"
+      icon={<IconCopyId />}
+      onClick={() =>
+        copy(dsn.public, {successMessage: t('DSN copied to clipboard')}).then(onCopyDsn)
+      }
+    >
+      {t('Copy DSN')}
+    </Button>
+  );
+}
+
+export function injectCopyDsnButtonIntoFirstConfigureStep({
+  configureSteps,
+  dsn,
+  onCopyDsn,
+}: {
+  configureSteps: OnboardingStep[];
+  dsn: ProjectKey['dsn'];
+  onCopyDsn?: () => void;
+}): OnboardingStep[] {
+  const [firstStep, ...otherSteps] = configureSteps;
+
+  if (!firstStep) {
+    return configureSteps;
+  }
+
+  const copyDsnButton = <CopyDsnButton dsn={dsn} onCopyDsn={onCopyDsn} />;
+
+  const firstStepWithDsnButton: OnboardingStep = {
+    ...firstStep,
+    trailingItems: firstStep.trailingItems ? (
+      <Fragment>
+        {copyDsnButton}
+        {firstStep.trailingItems}
+      </Fragment>
+    ) : (
+      copyDsnButton
+    ),
+  };
+
+  return [firstStepWithDsnButton, ...otherSteps];
 }

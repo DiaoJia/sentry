@@ -1,20 +1,20 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {Button} from '@sentry/scraps/button';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {
   ModalRenderProps,
   TeamAccessRequestModalOptions,
 } from 'sentry/actionCreators/modal';
 import type {Client} from 'sentry/api';
-import {Button} from 'sentry/components/core/button';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import withApi from 'sentry/utils/withApi';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {withApi} from 'sentry/utils/withApi';
 
 export interface CreateTeamAccessRequestModalProps
-  extends ModalRenderProps,
-    TeamAccessRequestModalOptions {
+  extends ModalRenderProps, TeamAccessRequestModalOptions {
   api: Client;
   memberId: string;
   orgId: string;
@@ -22,7 +22,7 @@ export interface CreateTeamAccessRequestModalProps
 }
 
 function CreateTeamAccessRequestModal(props: CreateTeamAccessRequestModalProps) {
-  const [createBusy, setCreateBusy] = useState<boolean>(false);
+  const [createBusy, setCreateBusy] = useState(false);
   const {api, memberId, orgId, teamId, closeModal, Body, Footer} = props;
 
   const handleClick = async () => {
@@ -30,7 +30,10 @@ function CreateTeamAccessRequestModal(props: CreateTeamAccessRequestModalProps) 
 
     try {
       await api.requestPromise(
-        `/organizations/${orgId}/members/${memberId}/teams/${teamId}/`,
+        getApiUrl(
+          '/organizations/$organizationIdOrSlug/members/$memberId/teams/$teamIdOrSlug/',
+          {path: {organizationIdOrSlug: orgId, memberId, teamIdOrSlug: teamId}}
+        ),
         {
           method: 'POST',
         }
@@ -54,7 +57,7 @@ function CreateTeamAccessRequestModal(props: CreateTeamAccessRequestModalProps) 
       <Footer>
         <ButtonGroup>
           <Button onClick={closeModal}>{t('Cancel')}</Button>
-          <Button priority="primary" onClick={handleClick} busy={createBusy} autoFocus>
+          <Button variant="primary" onClick={handleClick} busy={createBusy} autoFocus>
             {t('Continue')}
           </Button>
         </ButtonGroup>
@@ -66,7 +69,7 @@ function CreateTeamAccessRequestModal(props: CreateTeamAccessRequestModalProps) 
 const ButtonGroup = styled('div')`
   display: grid;
   grid-template-columns: max-content max-content;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
 export default withApi(CreateTeamAccessRequestModal);

@@ -85,14 +85,17 @@ class RpcSentryApp(RpcModel):
     uuid: str = ""
     events: list[str] = Field(default_factory=list)
     webhook_url: str | None = None
+    webhook_headers: list[str] = Field(repr=False, default_factory=list)
     is_alertable: bool = False
+    is_disabled: bool = False
     is_published: bool = False
     is_unpublished: bool = False
     is_internal: bool = True
     is_publish_request_inprogress: bool = False
     status: str = ""
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(repr=False, default_factory=dict)
     avatars: list[RpcSentryAppAvatar] = Field(default_factory=list)
+    creator_label: str | None = None
 
     def show_auth_info(self, access: Any) -> bool:
         encoded_scopes = set({"%s" % scope for scope in list(access.scopes)})
@@ -123,7 +126,7 @@ class RpcSentryAppInstallation(RpcModel):
     sentry_app: RpcSentryApp = Field(default_factory=lambda: RpcSentryApp())
     date_deleted: datetime.datetime | None = None
     uuid: str = ""
-    api_token: str | None = None
+    api_token: str | None = Field(repr=False, default=None)
 
 
 class RpcSentryAppComponent(RpcModel):
@@ -195,4 +198,10 @@ class SentryAppInstallationFilterArgs(TypedDict, total=False):
     uuids: list[str]
     status: int
     api_token_id: int
-    api_installation_token_id: str
+    api_installation_token_id: int
+
+
+class SentryAppUpdateArgs(TypedDict, total=False):
+    events: list[str]
+    name: str
+    # TODO add whatever else as needed

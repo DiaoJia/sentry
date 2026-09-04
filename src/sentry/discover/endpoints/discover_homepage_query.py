@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects, OrganizationEndpoint
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.permissions import SentryIsAuthenticated
@@ -14,6 +14,7 @@ from sentry.api.serializers import serialize
 from sentry.discover.endpoints.bases import DiscoverSavedQueryPermission
 from sentry.discover.endpoints.serializers import DiscoverSavedQuerySerializer
 from sentry.discover.models import DatasetSourcesTypes, DiscoverSavedQuery, DiscoverSavedQueryTypes
+from sentry.models.organization import Organization
 
 
 def get_homepage_query(organization, user):
@@ -22,14 +23,14 @@ def get_homepage_query(organization, user):
     )
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class DiscoverHomepageQueryEndpoint(OrganizationEndpoint):
     publish_status = {
         "DELETE": ApiPublishStatus.PRIVATE,
         "GET": ApiPublishStatus.PRIVATE,
         "PUT": ApiPublishStatus.PRIVATE,
     }
-    owner = ApiOwner.PERFORMANCE
+    owner = ApiOwner.EXPLORE
 
     permission_classes = (
         SentryIsAuthenticated,
@@ -37,11 +38,9 @@ class DiscoverHomepageQueryEndpoint(OrganizationEndpoint):
     )
 
     def has_feature(self, organization, request):
-        return features.has(
-            "organizations:discover", organization, actor=request.user
-        ) or features.has("organizations:discover-query", organization, actor=request.user)
+        return features.has("organizations:discover-query", organization, actor=request.user)
 
-    def get(self, request: Request, organization) -> Response:
+    def get(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return self.respond(status=status.HTTP_404_NOT_FOUND)
 
@@ -52,7 +51,7 @@ class DiscoverHomepageQueryEndpoint(OrganizationEndpoint):
 
         return Response(serialize(query), status=status.HTTP_200_OK)
 
-    def put(self, request: Request, organization) -> Response:
+    def put(self, request: Request, organization: Organization) -> Response:
         if not self.has_feature(organization, request):
             return self.respond(status=status.HTTP_404_NOT_FOUND)
 

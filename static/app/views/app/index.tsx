@@ -1,81 +1,102 @@
-import {lazy, Suspense, useCallback, useEffect, useMemo, useRef} from 'react';
+import {lazy, Suspense, useCallback, useEffect} from 'react';
+import {Outlet} from 'react-router-dom';
 import styled from '@emotion/styled';
+
+import {GlobalModal} from '@sentry/scraps/modal';
 
 import {
   displayDeployPreviewAlert,
   displayExperimentalSpaAlert,
 } from 'sentry/actionCreators/developmentAlerts';
 import {fetchGuides} from 'sentry/actionCreators/guides';
-import {openCommandPalette} from 'sentry/actionCreators/modal';
 import {fetchOrganizations} from 'sentry/actionCreators/organizations';
-import {initApiClientErrorHandling} from 'sentry/api';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import GlobalModal from 'sentry/components/globalModal';
-import {useGlobalModal} from 'sentry/components/globalModal/useGlobalModal';
-import Hook from 'sentry/components/hook';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 import Indicators from 'sentry/components/indicators';
-import {UserTimezoneProvider} from 'sentry/components/timezoneProvider';
-import {DEPLOY_PREVIEW_CONFIG, EXPERIMENTAL_SPA} from 'sentry/constants';
-import AlertStore from 'sentry/stores/alertStore';
-import ConfigStore from 'sentry/stores/configStore';
-import GuideStore from 'sentry/stores/guideStore';
-import HookStore from 'sentry/stores/hookStore';
-import OrganizationsStore from 'sentry/stores/organizationsStore';
+import {Override} from 'sentry/components/override';
+import {getOverride} from 'sentry/overrideRegistry';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {GuideStore} from 'sentry/stores/guideStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import {DemoToursProvider} from 'sentry/utils/demoMode/demoTours';
-import isValidOrgSlug from 'sentry/utils/isValidOrgSlug';
+import {isValidOrgSlug} from 'sentry/utils/isValidOrgSlug';
 import {onRenderCallback, Profiler} from 'sentry/utils/performanceForSentry';
 import {shouldPreloadData} from 'sentry/utils/shouldPreloadData';
-import useApi from 'sentry/utils/useApi';
-import {useColorscheme} from 'sentry/utils/useColorscheme';
-import {GlobalFeedbackForm} from 'sentry/utils/useFeedbackForm';
-import {useHotkeys} from 'sentry/utils/useHotkeys';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useApi} from 'sentry/utils/useApi';
+import {useAuthV2Rollout} from 'sentry/utils/useAuthV2Rollout';
 import {useLocation} from 'sentry/utils/useLocation';
+import {useParams} from 'sentry/utils/useParams';
 import {useUser} from 'sentry/utils/useUser';
-import type {InstallWizardProps} from 'sentry/views/admin/installWizard';
-import {AsyncSDKIntegrationContextProvider} from 'sentry/views/app/asyncSDKIntegrationProvider';
-import LastKnownRouteContextProvider from 'sentry/views/lastKnownRouteContextProvider';
-import {OrganizationContextProvider} from 'sentry/views/organizationContext';
-import RouteAnalyticsContextProvider from 'sentry/views/routeAnalyticsContextProvider';
+import {AppProviders} from 'sentry/views/app/appProviders';
+import {useGlobalAlerts} from 'sentry/views/app/globalAlerts';
 
-type Props = {
-  children: React.ReactNode;
-} & RouteComponentProps<{orgId?: string}>;
-
-const InstallWizard = lazy(
-  () => import('sentry/views/admin/installWizard')
-  // TODO(TS): DeprecatedAsyncComponent prop types are doing something weird
-) as unknown as React.ComponentType<InstallWizardProps>;
+const InstallWizard = lazy(() => import('sentry/views/admin/installWizard'));
 const NewsletterConsent = lazy(() => import('sentry/views/newsletterConsent'));
 const BeaconConsent = lazy(() => import('sentry/views/beaconConsent'));
 
 /**
+ * Runs the App's startup alert effects (deploy preview / SPA banners, server
+ * health checks, forwarded Django messages). Lives inside AppProviders so it
+ * can consume the GlobalAlertProvider context.
+ */
+function AppAlerts() {
+  const {addAlert} = useGlobalAlerts();
+  const api = useApi();
+  const config = useLegacyStore(ConfigStore);
+  const preloadData = shouldPreloadData(config);
+
+  useEffect(() => {
+    displayDeployPreviewAlert(addAlert);
+    displayExperimentalSpaAlert(addAlert);
+  }, [addAlert]);
+
+  useEffect(() => {
+    if (!preloadData || !config.isSelfHosted) {
+      return;
+    }
+    api
+      .requestPromise('/internal/health/')
+      .then(data => {
+        data?.problems?.forEach?.((problem: any) => {
+          const {id, message, url} = problem;
+          const variant = problem.severity === 'critical' ? 'danger' : 'warning';
+          addAlert({id, message, variant, url, opaque: true});
+        });
+      })
+      .catch(() => {
+        // TODO: do something?
+      });
+  }, [api, config.isSelfHosted, preloadData, addAlert]);
+
+  useEffect(() => {
+    if (!preloadData) {
+      return;
+    }
+    // Show system-level alerts that were forwarded by the initial client config request
+    config.messages.forEach(msg =>
+      addAlert({
+        message: msg.message,
+        variant:
+          // These are django message level tags that need to be mapped to our alert variant types.
+          // See client config in ./src/sentry/web/client_config.py
+          msg.level === 'error' ? 'danger' : msg.level === 'debug' ? 'muted' : msg.level,
+        neverExpire: true,
+      })
+    );
+  }, [config.messages, preloadData, addAlert]);
+
+  return null;
+}
+
+/**
  * App is the root level container for all uathenticated routes.
  */
-function App({children, params}: Props) {
-  useColorscheme();
-
+export function App() {
   const api = useApi();
   const user = useUser();
   const config = useLegacyStore(ConfigStore);
-  const {visible: isModalOpen} = useGlobalModal();
   const preloadData = shouldPreloadData(config);
-
-  // Command palette global-shortcut
-  const commandPaletteHotkeys = useMemo(() => {
-    if (isModalOpen) {
-      return [];
-    }
-    return [
-      {
-        match: ['command+shift+p', 'command+k', 'ctrl+shift+p', 'ctrl+k'],
-        callback: () => openCommandPalette(),
-      },
-    ];
-  }, [isModalOpen]);
-
-  useHotkeys(commandPaletteHotkeys);
+  useAuthV2Rollout();
 
   /**
    * Loads the users organization list into the OrganizationsStore
@@ -89,32 +110,8 @@ function App({children, params}: Props) {
     }
   }, [api]);
 
-  /**
-   * Creates Alerts for any internal health problems
-   */
-  const checkInternalHealth = useCallback(async () => {
-    // For saas deployments we have more robust ways of checking application health.
-    if (!config.isSelfHosted) {
-      return;
-    }
-    let data: any = null;
-
-    try {
-      data = await api.requestPromise('/internal/health/');
-    } catch {
-      // TODO: do something?
-    }
-
-    data?.problems?.forEach?.((problem: any) => {
-      const {id, message, url} = problem;
-      const type = problem.severity === 'critical' ? 'error' : 'warning';
-
-      AlertStore.addAlert({id, message, type, url, opaque: true});
-    });
-  }, [api, config.isSelfHosted]);
-
   const {sentryUrl} = ConfigStore.get('links');
-  const {orgId} = params;
+  const {orgId} = useParams<{orgId?: string}>();
   const isOrgSlugValid = orgId ? isValidOrgSlug(orgId) : true;
 
   useEffect(() => {
@@ -123,7 +120,7 @@ function App({children, params}: Props) {
     }
 
     if (!isOrgSlugValid) {
-      window.location.replace(sentryUrl);
+      testableWindowLocation.replace(sentryUrl);
       return;
     }
   }, [orgId, sentryUrl, isOrgSlugValid]);
@@ -136,38 +133,21 @@ function App({children, params}: Props) {
     // Skip loading organization-related data before the user is logged in,
     // because it triggers a 401 error in the UI.
     if (!preloadData) {
-      return undefined;
+      return;
     }
 
     loadOrganizations();
-    checkInternalHealth();
-
-    // Show system-level alerts
-    config.messages.forEach(msg =>
-      AlertStore.addAlert({message: msg.message, type: msg.level, neverExpire: true})
-    );
-
-    // The app is running in deploy preview mode
-    if (DEPLOY_PREVIEW_CONFIG) {
-      displayDeployPreviewAlert();
-    }
-
-    // The app is running in local SPA mode
-    if (!DEPLOY_PREVIEW_CONFIG && EXPERIMENTAL_SPA) {
-      displayExperimentalSpaAlert();
-    }
 
     // Set the user for analytics
     if (user) {
-      HookStore.get('analytics:init-user').map(cb => cb(user));
+      getOverride('analytics:init-user')?.(user);
     }
 
-    initApiClientErrorHandling();
     fetchGuides();
 
     // When the app is unloaded clear the organizationst list
     return () => OrganizationsStore.load([]);
-  }, [loadOrganizations, checkInternalHealth, config.messages, user, preloadData]);
+  }, [loadOrganizations, user, preloadData]);
 
   function clearUpgrade() {
     ConfigStore.set('needsUpgrade', false);
@@ -209,7 +189,7 @@ function App({children, params}: Props) {
     if (partnershipAgreementPrompt) {
       return (
         <Suspense fallback={null}>
-          <Hook
+          <Override
             name="component:partnership-agreement"
             partnerDisplayName={partnershipAgreementPrompt.partnerDisplayName}
             agreements={partnershipAgreementPrompt.agreements}
@@ -232,51 +212,23 @@ function App({children, params}: Props) {
       return null;
     }
 
-    return children;
+    return <Outlet />;
   }
-
-  const renderOrganizationContextProvider = useCallback(
-    (content: React.ReactNode) => {
-      // Skip loading organization-related data before the user is logged in,
-      // because it triggers a 401 error in the UI.
-      if (!preloadData) {
-        return content;
-      }
-      return <OrganizationContextProvider>{content}</OrganizationContextProvider>;
-    },
-    [preloadData]
-  );
-
-  // Used to restore focus to the container after closing the modal
-  const mainContainerRef = useRef<HTMLDivElement>(null);
-  const handleModalClose = useCallback(() => mainContainerRef.current?.focus?.(), []);
 
   return (
     <Profiler id="App" onRender={onRenderCallback}>
-      <UserTimezoneProvider>
-        <LastKnownRouteContextProvider>
-          <RouteAnalyticsContextProvider>
-            {renderOrganizationContextProvider(
-              <AsyncSDKIntegrationContextProvider>
-                <GlobalFeedbackForm>
-                  <MainContainer tabIndex={-1} ref={mainContainerRef}>
-                    <DemoToursProvider>
-                      <GlobalModal onClose={handleModalClose} />
-                      <Indicators className="indicators-container" />
-                      <ErrorBoundary>{renderBody()}</ErrorBoundary>
-                    </DemoToursProvider>
-                  </MainContainer>
-                </GlobalFeedbackForm>
-              </AsyncSDKIntegrationContextProvider>
-            )}
-          </RouteAnalyticsContextProvider>
-        </LastKnownRouteContextProvider>
-      </UserTimezoneProvider>
+      <AppProviders preloadData={preloadData}>
+        <MainContainer tabIndex={-1}>
+          <AppAlerts />
+          <GlobalModal />
+          <Indicators className="indicators-container" />
+          <Override name="component:replay-init" />
+          <ErrorBoundary>{renderBody()}</ErrorBoundary>
+        </MainContainer>
+      </AppProviders>
     </Profiler>
   );
 }
-
-export default App;
 
 const MainContainer = styled('div')`
   display: flex;

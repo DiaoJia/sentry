@@ -8,23 +8,24 @@ import time
 from os import environ, path
 from urllib.parse import urlparse
 
+import docker.errors
 import ephemeral_port_reserve
 import pytest
 import requests
 
 from sentry.runner.commands.devservices import get_docker_client
-from sentry.testutils.pytest.sentry import TEST_REDIS_DB
+from sentry.testutils.pytest import xdist
 
 _log = logging.getLogger(__name__)
 
 
 # This helps the Relay CI to specify the generated Docker build before it is published
-RELAY_TEST_IMAGE = environ.get(
-    "RELAY_TEST_IMAGE", "us-central1-docker.pkg.dev/sentryio/relay/relay:nightly"
-)
+RELAY_TEST_IMAGE = environ.get("RELAY_TEST_IMAGE", "ghcr.io/getsentry/relay:nightly")
 
 
-def _relay_server_container_name():
+def _relay_server_container_name() -> str:
+    if xdist._worker_id:
+        return f"sentry_test_relay_server_{xdist._worker_id}"
     return "sentry_test_relay_server"
 
 
@@ -38,14 +39,16 @@ def _remove_container_if_exists(docker_client, container_name):
     except Exception:
         pass  # container not found
     else:
-        try:
-            container.kill()
-        except Exception:
-            pass  # maybe the container is already stopped
-        try:
-            container.remove()
-        except Exception:
-            pass  # could not remove the container nothing to do about it
+        actions = [
+            lambda: container.stop(timeout=1),
+            lambda: container.kill(),
+            lambda: container.remove(),
+        ]
+        for action in actions:
+            try:
+                action()
+            except Exception:
+                pass
 
 
 @pytest.fixture(scope="module")
@@ -66,10 +69,10 @@ def relay_server_setup(live_server, tmpdir_factory):
     template_path = _get_template_dir()
     sources = ["config.yml", "credentials.json"]
 
-    relay_port = ephemeral_port_reserve.reserve(ip="127.0.0.1", port=33331)
+    relay_port = ephemeral_port_reserve.reserve(ip="127.0.0.1", port=0)
 
-    redis_db = TEST_REDIS_DB
-    use_old_devservices = environ.get("USE_OLD_DEVSERVICES", "0") == "1"
+    redis_db = xdist.get_redis_db()
+
     from sentry.relay import projectconfig_cache
     from sentry.relay.projectconfig_cache.redis import RedisProjectConfigCache
 
@@ -81,9 +84,11 @@ def relay_server_setup(live_server, tmpdir_factory):
     template_vars = {
         "SENTRY_HOST": f"http://host.docker.internal:{port}/",
         "RELAY_PORT": relay_port,
-        "KAFKA_HOST": "sentry_kafka" if use_old_devservices else "kafka",
-        "REDIS_HOST": "sentry_redis" if use_old_devservices else "redis",
+        "KAFKA_HOST": "kafka",
+        "REDIS_HOST": "redis",
         "REDIS_DB": redis_db,
+        "KAFKA_TOPIC_EVENTS": xdist.get_kafka_topic("ingest-events"),
+        "KAFKA_TOPIC_OUTCOMES": xdist.get_kafka_topic("outcomes"),
     }
 
     for source in sources:
@@ -107,7 +112,7 @@ def relay_server_setup(live_server, tmpdir_factory):
     options = {
         "image": RELAY_TEST_IMAGE,
         "ports": {"%s/tcp" % relay_port: relay_port},
-        "network": "sentry" if use_old_devservices else "devservices",
+        "network": "devservices",
         "detach": True,
         "name": container_name,
         "volumes": {config_path: {"bind": "/etc/relay"}},
@@ -129,32 +134,67 @@ def relay_server_setup(live_server, tmpdir_factory):
 
 @pytest.fixture(scope="function")
 def relay_server(relay_server_setup, settings):
+    # Imported lazily: this module is loaded as a pytest plugin before Django is set up,
+    # and override_options pulls in app code that requires configured settings.
+    from sentry.testutils.helpers.options import override_options
+
     adjust_settings_for_relay_tests(settings)
     options = relay_server_setup["options"]
-    with get_docker_client() as docker_client:
-        container_name = _relay_server_container_name()
-        _remove_container_if_exists(docker_client, container_name)
-        container = docker_client.containers.run(**options)
 
-    _log.info("Waiting for Relay container to start")
+    # `relay.endpoint-fetch-config.enabled` (default True since #114947) makes Relay's
+    # minidump/unreal endpoints resolve the project config synchronously before queueing.
+    # The test project's config is never warm in Relay, so that fetch times out and Relay
+    # rejects the upload with a 503 (ProjectUnavailable) -- the cause of the minidump test
+    # flakiness. These tests cover the ingestion pipeline, not the endpoint-fetch path,
+    # so turn it off.
+    # It is served to the test Relay via the upstream global config, hence the override
+    # must wrap Relay startup.
+    with override_options({"relay.endpoint-fetch-config.enabled": False}):
+        # Keep the docker client open through the readiness wait so the error paths
+        # below can still fetch `container.logs()` for diagnostics.
+        with get_docker_client() as docker_client:
+            container_name = _relay_server_container_name()
+            _remove_container_if_exists(docker_client, container_name)
+            # Docker may not release the host port binding immediately after
+            # container removal; retry to ride out the race window.
+            for attempt in range(5):
+                try:
+                    container = docker_client.containers.run(**options)
+                    break
+                except docker.errors.APIError as e:
+                    if "address already in use" in str(e) and attempt < 4:
+                        time.sleep(1 * 1.5**attempt)
+                        _remove_container_if_exists(docker_client, container_name)
+                        continue
+                    raise
 
-    url = relay_server_setup["url"]
+            _log.info("Waiting for Relay container to start")
 
-    for i in range(8):
-        try:
-            requests.get(url)
-            break
-        except Exception as ex:
-            if i == 7:
-                _log.exception(str(ex))
+            url = relay_server_setup["url"]
+
+            # Gate on Relay's readiness probe rather than a bare GET, which only proves the
+            # HTTP server is up. Readiness reports whether Relay can actually accept envelopes
+            # (authenticated with the upstream, spool capacity, memory); posting before then
+            # races startup and Relay rejects the request with a 503. This mirrors production,
+            # where load balancers route ingest traffic only to Relays passing this same probe.
+            readiness_url = f"{url}/api/relay/healthcheck/ready/"
+            for i in range(8):
+                try:
+                    if requests.get(readiness_url).status_code == 200:
+                        break
+                except Exception as ex:
+                    if i == 7:
+                        _log.exception(str(ex))
+                        raise ValueError(
+                            f"relay did not start in time (now: {datetime.datetime.now().isoformat()}) {url}:\n{container.logs().decode()}"
+                        ) from ex
+                time.sleep(0.1 * 2**i)
+            else:
                 raise ValueError(
-                    f"relay did not start in time {url}:\n{container.logs().decode()}"
-                ) from ex
-            time.sleep(0.1 * 2**i)
-    else:
-        raise ValueError("relay did not start in time")
+                    f"relay did not become ready in time (now: {datetime.datetime.now().isoformat()}) {readiness_url}:\n{container.logs().decode()}"
+                )
 
-    return {"url": relay_server_setup["url"]}
+        yield {"url": relay_server_setup["url"]}
 
 
 def adjust_settings_for_relay_tests(settings):

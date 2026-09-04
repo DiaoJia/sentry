@@ -6,13 +6,20 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry import analytics
+from sentry.analytics.events.api_token_deleted import ApiTokenDeleted
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.authentication import SessionNoAuthTokenAuthentication
 from sentry.api.base import Endpoint, control_silo_endpoint
 from sentry.api.endpoints.api_tokens import get_appropriate_user_id
 from sentry.api.exceptions import ResourceDoesNotExist
-from sentry.api.permissions import SentryIsAuthenticated
+from sentry.api.permissions import (
+    DisallowAgentToken,
+    DisallowImpersonatedTokenCreation,
+    SentryIsAuthenticated,
+)
 from sentry.api.serializers import serialize
+from sentry.api.utils import to_valid_int_id
 from sentry.models.apitoken import ApiToken
 
 ALLOWED_FIELDS = ["name", "tokenId"]
@@ -30,22 +37,31 @@ class ApiTokenDetailsEndpoint(Endpoint):
         "DELETE": ApiPublishStatus.PRIVATE,
     }
     owner = ApiOwner.SECURITY
-    permission_classes = (SentryIsAuthenticated,)
+    authentication_classes = (SessionNoAuthTokenAuthentication,)
+    permission_classes = (
+        SentryIsAuthenticated,
+        DisallowAgentToken,
+        DisallowImpersonatedTokenCreation,
+    )
 
-    @method_decorator(never_cache)
-    def get(self, request: Request, token_id: int) -> Response:
-
+    def convert_args(self, request: Request, token_id: str, *args, **kwargs):
+        validated_token_id = to_valid_int_id("token_id", token_id, raise_404=True)
         user_id = get_appropriate_user_id(request=request)
-
         try:
-            instance = ApiToken.objects.get(id=token_id, application__isnull=True, user_id=user_id)
+            kwargs["instance"] = ApiToken.objects.get(
+                id=validated_token_id, application__isnull=True, user_id=user_id
+            )
         except ApiToken.DoesNotExist:
             raise ResourceDoesNotExist(detail="Invalid token ID")
 
+        return (args, kwargs)
+
+    @method_decorator(never_cache)
+    def get(self, request: Request, instance: ApiToken) -> Response:
         return Response(serialize(instance, request.user, include_token=False))
 
     @method_decorator(never_cache)
-    def put(self, request: Request, token_id: int) -> Response:
+    def put(self, request: Request, instance: ApiToken) -> Response:
         keys = list(request.data.keys())
         if any(key not in ALLOWED_FIELDS for key in keys):
             return Response(
@@ -59,35 +75,19 @@ class ApiTokenDetailsEndpoint(Endpoint):
 
         result = serializer.validated_data
 
-        user_id = get_appropriate_user_id(request=request)
+        instance.name = result.get("name")
+        instance.save()
 
-        try:
-            token_to_rename = ApiToken.objects.get(
-                id=token_id, application__isnull=True, user_id=user_id
-            )
-        except ApiToken.DoesNotExist:
-            raise ResourceDoesNotExist(detail="Invalid token ID")
-
-        token_to_rename.name = result.get("name")
-        token_to_rename.save()
-
-        return Response(serialize(token_to_rename, request.user, include_token=False), status=200)
+        return Response(serialize(instance, request.user, include_token=False), status=200)
 
     @method_decorator(never_cache)
-    def delete(self, request: Request, token_id: int) -> Response:
-
+    def delete(self, request: Request, instance: ApiToken) -> Response:
         user_id = get_appropriate_user_id(request=request)
 
-        try:
-            token_to_delete = ApiToken.objects.get(
-                id=token_id, application__isnull=True, user_id=user_id
-            )
-        except ApiToken.DoesNotExist:
-            raise ResourceDoesNotExist(detail="Invalid token ID")
-
-        token_to_delete.delete()
+        instance.delete()
         analytics.record(
-            "api_token.deleted",
-            user_id=user_id,
+            ApiTokenDeleted(
+                user_id=user_id,
+            )
         )
         return Response(status=204)

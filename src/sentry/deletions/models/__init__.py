@@ -1,3 +1,4 @@
-from sentry.deletions.models.scheduleddeletion import RegionScheduledDeletion
+from sentry.deletions.models.scheduleddeletion import CellScheduledDeletion
+from sentry.deletions.models.watermark import CellDeletionWatermark, ControlDeletionWatermark
 
-__all__ = ("RegionScheduledDeletion",)
+__all__ = ("CellDeletionWatermark", "CellScheduledDeletion", "ControlDeletionWatermark")

@@ -2,12 +2,12 @@ import pick from 'lodash/pick';
 
 import {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import getDaysSinceDate from 'sentry/utils/getDaysSinceDate';
-import getOrganizationAge from 'sentry/utils/getOrganizationAge';
+import {getDaysSinceDate} from 'sentry/utils/getDaysSinceDate';
+import {getOrganizationAge} from 'sentry/utils/getOrganizationAge';
 
-import type {PromotionClaimed, Subscription} from 'getsentry/types';
+import type {Subscription} from 'getsentry/types';
 
-import {getProductTrial, getTrialDaysLeft} from './billing';
+import {getProductTrial, getTrialDaysLeft, isTrial} from './billing';
 
 // we encode sizes for bucketing using roygbiv coloring
 const SIZES = {
@@ -26,6 +26,8 @@ const SIZES = {
 const CUSTOM_BUCKET_FIELDS = {
   arr: getReservedTotalFromSubscription,
   accountCredit: getAccountCredit,
+  reservedTransactions: getReservedTransactions,
+  reservedErrors: getReservedErrors,
 };
 type CustomFields = keyof typeof CUSTOM_BUCKET_FIELDS;
 type Size = (typeof SIZES)[keyof typeof SIZES];
@@ -85,29 +87,20 @@ const BUCKET_MAP: BucketMap = {
 
 export function getPendoAccountFields(
   subscription: Subscription,
-  organization: Organization,
-  {
-    activePromotions,
-    completedPromotions,
-  }: {
-    activePromotions: PromotionClaimed[] | null;
-    completedPromotions: PromotionClaimed[] | null;
-  }
+  organization: Organization
 ) {
   // add basic fields as-is
   const baseAccountFields = {
     ...pick(subscription, [
       'isFree',
       'isManaged',
-      'isTrial',
       'isEnterpriseTrial',
-      'isPerformancePlanTrial',
       'isSuspended',
       'canTrial',
       'canSelfServe',
       'plan',
-      'planTier',
     ]),
+    isTrial: isTrial(subscription),
     ...pick(organization, ['isEarlyAdopter']),
   };
   // for fields with bucketing, we need to encode the value so
@@ -129,46 +122,15 @@ export function getPendoAccountFields(
     }
   }
 
-  const promoInfo: {
-    activePromotion: null | string;
-    completedPromotions: string;
-    daysSincePromotionClaimed: number;
-    freeEventCreditDaysLeft: number;
-    isLastCycleForFreeEvents: boolean;
-    promotionDaysLeft: number;
-  } = {
-    activePromotion: null,
-    promotionDaysLeft: -1,
-    completedPromotions: (completedPromotions || []).map(p => p.promotion.slug).join(','),
-    freeEventCreditDaysLeft: -1,
-    isLastCycleForFreeEvents: false,
-    daysSincePromotionClaimed: -1,
-  };
-  if (activePromotions && activePromotions.length > 0) {
-    const promo = activePromotions[0]!;
-    promoInfo.activePromotion = promo.promotion.slug;
-    promoInfo.daysSincePromotionClaimed = getDaysSinceDate(promo.dateClaimed);
-    if (promo.promotion.endDate) {
-      promoInfo.promotionDaysLeft = -1 * getDaysSinceDate(promo.promotion.endDate);
-    }
-  }
-
-  if (completedPromotions && completedPromotions.length > 0) {
-    const promo = completedPromotions[0]!;
-    promoInfo.freeEventCreditDaysLeft = promo.freeEventCreditDaysLeft;
-    promoInfo.isLastCycleForFreeEvents = promo.isLastCycleForFreeEvents;
-    promoInfo.daysSincePromotionClaimed = getDaysSinceDate(promo.dateClaimed);
-  }
-
   // TODO(data categories): BIL-971
   const perfTrial = getProductTrial(
     subscription.productTrials ?? null,
     DataCategory.TRANSACTIONS
   );
-  const perfTrialAvailable: boolean = perfTrial ? !perfTrial.isStarted : false;
-  const perfTrialStartDate: string = perfTrial?.startDate ?? '';
-  const perfTrialEndDate: string = perfTrial?.endDate ?? '';
-  const perfTrialActive: boolean = perfTrial
+  const perfTrialAvailable = perfTrial ? !perfTrial.isStarted : false;
+  const perfTrialStartDate = perfTrial?.startDate ?? '';
+  const perfTrialEndDate = perfTrial?.endDate ?? '';
+  const perfTrialActive = perfTrial
     ? perfTrial.isStarted && getDaysSinceDate(perfTrial.endDate ?? '') <= 0
     : false;
 
@@ -176,10 +138,10 @@ export function getPendoAccountFields(
     subscription.productTrials ?? null,
     DataCategory.REPLAYS
   );
-  const replayTrialAvailable: boolean = replayTrial ? !replayTrial.isStarted : false;
-  const replayTrialStartDate: string = replayTrial?.startDate ?? '';
-  const replayTrialEndDate: string = replayTrial?.endDate ?? '';
-  const replayTrialActive: boolean = replayTrial
+  const replayTrialAvailable = replayTrial ? !replayTrial.isStarted : false;
+  const replayTrialStartDate = replayTrial?.startDate ?? '';
+  const replayTrialEndDate = replayTrial?.endDate ?? '';
+  const replayTrialActive = replayTrial
     ? replayTrial.isStarted && getDaysSinceDate(replayTrial.endDate ?? '') <= 0
     : false;
 
@@ -187,12 +149,10 @@ export function getPendoAccountFields(
     subscription.productTrials ?? null,
     DataCategory.PROFILE_DURATION
   );
-  const profilesTrialAvailable: boolean = profilesTrial
-    ? !profilesTrial.isStarted
-    : false;
-  const profilesTrialStartDate: string = profilesTrial?.startDate ?? '';
-  const profilesTrialEndDate: string = profilesTrial?.endDate ?? '';
-  const profilesTrialActive: boolean = profilesTrial
+  const profilesTrialAvailable = profilesTrial ? !profilesTrial.isStarted : false;
+  const profilesTrialStartDate = profilesTrial?.startDate ?? '';
+  const profilesTrialEndDate = profilesTrial?.endDate ?? '';
+  const profilesTrialActive = profilesTrial
     ? profilesTrial.isStarted && getDaysSinceDate(profilesTrial.endDate ?? '') <= 0
     : false;
 
@@ -200,10 +160,10 @@ export function getPendoAccountFields(
     subscription.productTrials ?? null,
     DataCategory.SPANS
   );
-  const spansTrialAvailable: boolean = spansTrial ? !spansTrial.isStarted : false;
-  const spansTrialStartDate: string = spansTrial?.startDate ?? '';
-  const spansTrialEndDate: string = spansTrial?.endDate ?? '';
-  const spansTrialActive: boolean = spansTrial
+  const spansTrialAvailable = spansTrial ? !spansTrial.isStarted : false;
+  const spansTrialStartDate = spansTrial?.startDate ?? '';
+  const spansTrialEndDate = spansTrial?.endDate ?? '';
+  const spansTrialActive = spansTrial
     ? spansTrial.isStarted && getDaysSinceDate(spansTrial.endDate ?? '') <= 0
     : false;
 
@@ -232,7 +192,6 @@ export function getPendoAccountFields(
     spansTrialStartDate,
     spansTrialEndDate,
     spansTrialActive,
-    ...promoInfo,
   };
 }
 
@@ -251,6 +210,14 @@ function getBucketValue(value: number, buckets: BucketRecord): Size {
   return SIZES.XXXLARGE;
 }
 
+function getReservedErrors(subscription: Subscription) {
+  return subscription.categories.errors?.reserved ?? 0;
+}
+
+function getReservedTransactions(subscription: Subscription) {
+  return subscription.categories.transactions?.reserved ?? 0;
+}
+
 /**
  * Get the value in dollars of the current subscription as the input and divide by 100
  */
@@ -260,17 +227,17 @@ function getReservedTotalFromSubscription(subscription: Subscription) {
     planDetails.billingInterval === 'annual'
       ? planDetails.totalPrice / 12
       : planDetails.totalPrice;
-  return monthlyPrice / 100.0;
+  return monthlyPrice / 100;
 }
 
 function getAccountCredit(subscription: Subscription) {
   // invert to get credit and divide by 100 to get $ amount
-  return subscription.accountBalance / -100.0;
+  return subscription.accountBalance / -100;
 }
 
 function getTrialDaysLeftFromSub(subscription: Subscription) {
   // only check if trial is active
-  if (!subscription.isTrial) {
+  if (!isTrial(subscription)) {
     return null;
   }
   return getTrialDaysLeft(subscription);
@@ -278,5 +245,5 @@ function getTrialDaysLeftFromSub(subscription: Subscription) {
 
 // consider the org if they have at least 5m reserved transactions
 function getConsiderForDsUpsell(subscription: Subscription) {
-  return (subscription.reservedTransactions || 0) >= 5_000_000;
+  return (subscription.categories.transactions?.reserved ?? 0) >= 5_000_000;
 }

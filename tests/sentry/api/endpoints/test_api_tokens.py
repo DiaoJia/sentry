@@ -1,9 +1,12 @@
+from collections.abc import Generator
+
 from django.urls import reverse
 from pytest import fixture
 from rest_framework import status
 
 from sentry.models.apitoken import ApiToken
 from sentry.testutils.cases import APITestCase
+from sentry.testutils.helpers.impersonation import simulate_impersonation
 from sentry.testutils.helpers.options import override_options
 from sentry.testutils.silo import control_silo_test
 
@@ -15,7 +18,7 @@ class ApiTokensListTest(APITestCase):
         for _ in range(2):
             ApiToken.objects.create(user=self.user)
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.login_as(self.user)
 
         url = reverse("sentry-api-0-api-tokens")
@@ -24,7 +27,7 @@ class ApiTokensListTest(APITestCase):
         assert response.status_code == 200, response.content
         assert len(response.data) == 2
 
-    def test_never_cache(self):
+    def test_never_cache(self) -> None:
         self.login_as(self.user)
 
         url = reverse("sentry-api-0-api-tokens")
@@ -36,7 +39,7 @@ class ApiTokensListTest(APITestCase):
             == "max-age=0, no-cache, no-store, must-revalidate, private"
         )
 
-    def test_deny_token_access(self):
+    def test_deny_token_access(self) -> None:
         token = ApiToken.objects.create(user=self.user, scope_list=[])
 
         url = reverse("sentry-api-0-api-tokens")
@@ -46,13 +49,13 @@ class ApiTokensListTest(APITestCase):
 
 @control_silo_test
 class ApiTokensCreateTest(APITestCase):
-    def test_no_scopes(self):
+    def test_no_scopes(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(url)
         assert response.status_code == 400
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(url, data={"scopes": ["event:read"]})
@@ -62,7 +65,17 @@ class ApiTokensCreateTest(APITestCase):
         assert not token.refresh_token
         assert token.get_scopes() == ["event:read"]
 
-    def test_never_cache(self):
+    def test_token_only_scopes_are_stripped(self) -> None:
+        self.login_as(self.user)
+        url = reverse("sentry-api-0-api-tokens")
+        response = self.client.post(url, data={"scopes": ["org:ci"]})
+
+        assert response.status_code == 201
+        token = ApiToken.objects.get(user=self.user)
+        assert response.data["scopes"] == []
+        assert token.get_scopes() == []
+
+    def test_never_cache(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(url, data={"scopes": ["event:read"]})
@@ -72,7 +85,7 @@ class ApiTokensCreateTest(APITestCase):
             == "max-age=0, no-cache, no-store, must-revalidate, private"
         )
 
-    def test_invalid_choice(self):
+    def test_invalid_choice(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(
@@ -86,7 +99,7 @@ class ApiTokensCreateTest(APITestCase):
         assert response.status_code == 400
         assert not ApiToken.objects.filter(user=self.user).exists()
 
-    def test_with_name(self):
+    def test_with_name(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(
@@ -104,7 +117,7 @@ class ApiTokensCreateTest(APITestCase):
 
         assert response.data[0]["name"] == "testname1"
 
-    def test_without_name(self):
+    def test_without_name(self) -> None:
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
         response = self.client.post(
@@ -125,7 +138,7 @@ class ApiTokensCreateTest(APITestCase):
 
 @control_silo_test
 class ApiTokensDeleteTest(APITestCase):
-    def test_simple(self):
+    def test_simple(self) -> None:
         token = ApiToken.objects.create(user=self.user)
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
@@ -133,7 +146,7 @@ class ApiTokensDeleteTest(APITestCase):
         assert response.status_code == 204
         assert not ApiToken.objects.filter(id=token.id).exists()
 
-    def test_never_cache(self):
+    def test_never_cache(self) -> None:
         token = ApiToken.objects.create(user=self.user)
         self.login_as(self.user)
         url = reverse("sentry-api-0-api-tokens")
@@ -158,12 +171,12 @@ class ApiTokensDeleteTest(APITestCase):
 class ApiTokensSuperuserTest(APITestCase):
     url = reverse("sentry-api-0-api-tokens")
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.superuser = self.create_user(is_superuser=True)
         self.superuser_token = self.create_user_auth_token(self.superuser)
         self.user_token = ApiToken.objects.create(user=self.user)
 
-    def test_get_as_su(self):
+    def test_get_as_su(self) -> None:
         self.login_as(self.superuser, superuser=True)
 
         response = self.client.get(self.url, {"userId": self.user.id})
@@ -171,7 +184,7 @@ class ApiTokensSuperuserTest(APITestCase):
         assert len(response.data) == 1
         assert response.data[0]["id"] == str(self.user_token.id)
 
-    def test_get_as_su_implicit_userid(self):
+    def test_get_as_su_implicit_userid(self) -> None:
         self.login_as(self.superuser, superuser=True)
 
         response = self.client.get(self.url)
@@ -180,7 +193,7 @@ class ApiTokensSuperuserTest(APITestCase):
         assert response.data[0]["id"] != str(self.user_token.id)
         assert response.data[0]["id"] == str(self.superuser_token.id)
 
-    def test_get_as_user(self):
+    def test_get_as_user(self) -> None:
         self.login_as(self.superuser)
 
         # Ignores trying to fetch the user's token, since we're not an active superuser
@@ -189,7 +202,7 @@ class ApiTokensSuperuserTest(APITestCase):
         assert len(response.data) == 1
         assert response.data[0]["id"] == str(self.superuser_token.id)
 
-    def test_delete_as_su(self):
+    def test_delete_as_su(self) -> None:
         self.login_as(self.superuser, superuser=True)
 
         response = self.client.delete(
@@ -198,7 +211,7 @@ class ApiTokensSuperuserTest(APITestCase):
         assert response.status_code == status.HTTP_204_NO_CONTENT
         assert not ApiToken.objects.filter(id=self.user_token.id).exists()
 
-    def test_delete_as_su_implicit_userid(self):
+    def test_delete_as_su_implicit_userid(self) -> None:
         self.login_as(self.superuser, superuser=True)
 
         response = self.client.delete(self.url, {"tokenId": self.user_token.id})
@@ -212,7 +225,7 @@ class ApiTokensSuperuserTest(APITestCase):
         assert ApiToken.objects.filter(id=self.user_token.id).exists()
         assert not ApiToken.objects.filter(id=self.superuser_token.id).exists()
 
-    def test_delete_as_user(self):
+    def test_delete_as_user(self) -> None:
         self.login_as(self.superuser)
 
         # Fails trying to delete the user's token, since we're not an active superuser
@@ -229,16 +242,16 @@ class ApiTokensStaffTest(APITestCase):
     url = reverse("sentry-api-0-api-tokens")
 
     @fixture(autouse=True)
-    def _set_staff_option(self):
+    def _set_staff_option(self) -> Generator[None]:
         with override_options({"staff.ga-rollout": True}):
             yield
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.staff_user = self.create_user(is_staff=True)
         self.staff_token = self.create_user_auth_token(self.staff_user)
         self.user_token = ApiToken.objects.create(user=self.user)
 
-    def test_get_as_staff(self):
+    def test_get_as_staff(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.get(self.url, {"userId": self.user.id})
@@ -246,7 +259,7 @@ class ApiTokensStaffTest(APITestCase):
         assert len(response.data) == 1
         assert response.data[0]["id"] == str(self.user_token.id)
 
-    def test_get_as_staff_implicit_userid(self):
+    def test_get_as_staff_implicit_userid(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.get(self.url)
@@ -255,7 +268,7 @@ class ApiTokensStaffTest(APITestCase):
         assert response.data[0]["id"] != str(self.user_token.id)
         assert response.data[0]["id"] == str(self.staff_token.id)
 
-    def test_get_as_user(self):
+    def test_get_as_user(self) -> None:
         self.login_as(self.staff_user)
 
         # Ignores trying to fetch the user's token, since we're not an active superuser
@@ -264,13 +277,13 @@ class ApiTokensStaffTest(APITestCase):
         assert len(response.data) == 1
         assert response.data[0]["id"] == str(self.staff_token.id)
 
-    def test_get_as_invalid_user(self):
+    def test_get_as_invalid_user(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.get(self.url, {"userId": "abc"})
         assert response.status_code == status.HTTP_404_NOT_FOUND
 
-    def test_delete_as_staff(self):
+    def test_delete_as_staff(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.delete(
@@ -279,7 +292,7 @@ class ApiTokensStaffTest(APITestCase):
         assert response.status_code == status.HTTP_204_NO_CONTENT
         assert not ApiToken.objects.filter(id=self.user_token.id).exists()
 
-    def test_delete_as_staff_implicit_userid(self):
+    def test_delete_as_staff_implicit_userid(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.delete(self.url, {"tokenId": self.user_token.id})
@@ -293,7 +306,7 @@ class ApiTokensStaffTest(APITestCase):
         assert ApiToken.objects.filter(id=self.user_token.id).exists()
         assert not ApiToken.objects.filter(id=self.staff_token.id).exists()
 
-    def test_delete_as_user(self):
+    def test_delete_as_user(self) -> None:
         self.login_as(self.staff_user)
 
         # Fails trying to delete the user's token, since we're not an active superuser
@@ -304,10 +317,46 @@ class ApiTokensStaffTest(APITestCase):
         assert ApiToken.objects.filter(id=self.user_token.id).exists()
         assert ApiToken.objects.filter(id=self.staff_token.id).exists()
 
-    def test_delete_as_invalid_user(self):
+    def test_delete_as_invalid_user(self) -> None:
         self.login_as(self.staff_user, staff=True)
 
         response = self.client.delete(self.url, {"userId": "abc", "tokenId": self.user_token.id})
         assert response.status_code == status.HTTP_404_NOT_FOUND
         assert ApiToken.objects.filter(id=self.user_token.id).exists()
         assert ApiToken.objects.filter(id=self.staff_token.id).exists()
+
+
+@control_silo_test
+class ApiTokensImpersonationTest(APITestCase):
+    url = reverse("sentry-api-0-api-tokens")
+
+    def setUp(self) -> None:
+        self.impersonator = self.create_user(is_superuser=True)
+        self.target_user = self.create_user()
+
+    def test_impersonated_post_blocked(self) -> None:
+        self.login_as(self.target_user)
+        with simulate_impersonation(self.impersonator):
+            response = self.client.post(self.url, data={"scopes": ["event:read"]})
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert not ApiToken.objects.filter(user=self.target_user).exists()
+
+    def test_impersonated_delete_blocked(self) -> None:
+        token = ApiToken.objects.create(user=self.target_user)
+        self.login_as(self.target_user)
+        with simulate_impersonation(self.impersonator):
+            response = self.client.delete(self.url, data={"tokenId": token.id})
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert ApiToken.objects.filter(id=token.id).exists()
+
+    def test_impersonated_get_allowed(self) -> None:
+        ApiToken.objects.create(user=self.target_user)
+        self.login_as(self.target_user)
+        with simulate_impersonation(self.impersonator):
+            response = self.client.get(self.url)
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_non_impersonated_post_allowed(self) -> None:
+        self.login_as(self.target_user)
+        response = self.client.post(self.url, data={"scopes": ["event:read"]})
+        assert response.status_code == status.HTTP_201_CREATED

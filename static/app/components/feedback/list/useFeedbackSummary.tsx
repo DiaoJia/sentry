@@ -1,7 +1,8 @@
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 type FeedbackSummaryResponse = {
   numFeedbacksUsed: number;
@@ -9,9 +10,10 @@ type FeedbackSummaryResponse = {
   summary: string | null;
 };
 
-export default function useFeedbackSummary(): {
+export function useFeedbackSummary(): {
   isError: boolean;
   isPending: boolean;
+  numFeedbacksUsed: number;
   summary: string | null;
   tooFewFeedbacks: boolean;
 } {
@@ -23,7 +25,11 @@ export default function useFeedbackSummary(): {
 
   const {data, isPending, isError} = useApiQuery<FeedbackSummaryResponse>(
     [
-      `/organizations/${organization.slug}/feedback-summary/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/feedback-summary/', {
+        path: {
+          organizationIdOrSlug: organization.slug,
+        },
+      }),
       {
         query: {
           ...normalizedDateRange,
@@ -33,9 +39,7 @@ export default function useFeedbackSummary(): {
     ],
     {
       staleTime: 5000,
-      enabled:
-        Boolean(normalizedDateRange) &&
-        organization.features.includes('user-feedback-ai-summaries'),
+      enabled: Boolean(normalizedDateRange),
       retry: 1,
     }
   );
@@ -46,6 +50,7 @@ export default function useFeedbackSummary(): {
       isPending: true,
       isError: false,
       tooFewFeedbacks: false,
+      numFeedbacksUsed: 0,
     };
   }
 
@@ -55,6 +60,7 @@ export default function useFeedbackSummary(): {
       isPending: false,
       isError: true,
       tooFewFeedbacks: false,
+      numFeedbacksUsed: 0,
     };
   }
 
@@ -63,5 +69,6 @@ export default function useFeedbackSummary(): {
     isPending: false,
     isError: false,
     tooFewFeedbacks: data.numFeedbacksUsed === 0 && !data.success,
+    numFeedbacksUsed: data.numFeedbacksUsed,
   };
 }

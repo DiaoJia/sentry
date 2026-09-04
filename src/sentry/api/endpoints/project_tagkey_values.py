@@ -1,39 +1,80 @@
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry import tagstore
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.helpers.environments import get_environment_id
 from sentry.api.serializers import serialize
 from sentry.api.utils import get_date_range_from_params
+from sentry.apidocs.constants import RESPONSE_FORBIDDEN, RESPONSE_NOT_FOUND, RESPONSE_UNAUTHORIZED
+from sentry.apidocs.parameters import CursorQueryParam, GlobalParams
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.models.environment import Environment
+from sentry.ratelimits.config import RateLimitConfig
+from sentry.tagstore.types import TagValueSerializerResponse
+from sentry.types.ratelimit import RateLimit, RateLimitCategory
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Projects"])
+@cell_silo_endpoint
 class ProjectTagKeyValuesEndpoint(ProjectEndpoint):
     owner = ApiOwner.UNOWNED
     publish_status = {
-        "GET": ApiPublishStatus.UNKNOWN,
+        "GET": ApiPublishStatus.PRIVATE,
     }
 
-    def get(self, request: Request, project, key) -> Response:
+    enforce_rate_limit = True
+    rate_limits = RateLimitConfig(
+        limit_overrides={
+            "GET": {
+                RateLimitCategory.IP: RateLimit(limit=10, window=1, concurrent_limit=10),
+                RateLimitCategory.USER: RateLimit(limit=10, window=1, concurrent_limit=10),
+                RateLimitCategory.ORGANIZATION: RateLimit(limit=20, window=1, concurrent_limit=5),
+            }
+        }
+    )
+
+    @extend_schema(
+        operation_id="listProjectTagValues",
+        summary="List a Tag's Values",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            GlobalParams.PROJECT_ID_OR_SLUG,
+            OpenApiParameter(
+                name="key",
+                location="path",
+                required=True,
+                type=str,
+                description="The tag key to look up.",
+            ),
+            OpenApiParameter(
+                name="query",
+                location="query",
+                required=False,
+                type=str,
+                description='Perform a "contains" match on the tag values.',
+            ),
+            CursorQueryParam,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "ListTagValuesResponse", list[TagValueSerializerResponse]
+            ),
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def get(self, request: Request, project, key) -> Response[list[TagValueSerializerResponse]]:
         """
-        List a Tag's Values
-        ```````````````````
-
-        Return a list of values associated with this key.  The `query`
-        parameter can be used to to perform a "contains" match on
-        values.
-        When paginated can return at most 1000 values.
-
-        :pparam string organization_id_or_slug: the id or slug of the organization.
-        :pparam string project_id_or_slug: the id or slug of the project.
-        :pparam string key: the tag key to look up.
-        :auth: required
+        Return a list of values associated with this tag key. The `query` parameter
+        can be used to perform a "contains" match on values. Paginated, returning at
+        most 1000 values.
         """
         lookup_key = tagstore.backend.prefix_reserved_key(key)
         tenant_ids = {"organization_id": project.organization_id}

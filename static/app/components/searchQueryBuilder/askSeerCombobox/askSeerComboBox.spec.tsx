@@ -1,0 +1,612 @@
+import {useEffect, useState} from 'react';
+import {destroyAnnouncer} from '@react-aria/live-announcer';
+import {mutationOptions} from '@tanstack/react-query';
+
+import {initializeOrg} from 'sentry-test/initializeOrg';
+import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
+import {getEmotionRules} from 'sentry-test/utils';
+
+import type {FeedbackIntegration} from 'sentry/components/feedbackButton/useFeedbackSDKIntegration';
+import {SearchQueryBuilder} from 'sentry/components/searchQueryBuilder';
+import {AskSeerComboBox} from 'sentry/components/searchQueryBuilder/askSeerCombobox/askSeerComboBox';
+import {
+  SearchQueryBuilderProvider,
+  useSearchQueryBuilderAI,
+} from 'sentry/components/searchQueryBuilder/context';
+import * as analytics from 'sentry/utils/analytics';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {GlobalFeedbackForm} from 'sentry/utils/useFeedbackForm';
+import {
+  AsyncSDKIntegrationContextProvider,
+  useAsyncSDKIntegrationStore,
+} from 'sentry/views/app/asyncSDKIntegrationProvider';
+
+const defaultProps = {
+  enableAISearch: true,
+  filterKeys: {},
+  getTagValues: () => Promise.resolve([]),
+  initialQuery: 'test',
+  searchSource: 'test',
+};
+
+const askSeerMutationOptions = mutationOptions({
+  mutationFn: async (_value: string) => {
+    return fetchMutation<{
+      queries: Array<{query: string}>;
+      status: string;
+      unsupported_reason: string | null;
+    }>({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      data: {},
+    });
+  },
+});
+
+const {organization} = initializeOrg({
+  organization: {features: ['gen-ai-features'], hideAiFeatures: false},
+});
+
+const feedbackIntegration = {
+  createForm: jest.fn(),
+} as unknown as FeedbackIntegration;
+
+function FeedbackProvider({children}: {children: React.ReactNode}) {
+  return (
+    <AsyncSDKIntegrationContextProvider>
+      <InstallFeedbackIntegration />
+      <GlobalFeedbackForm>{children}</GlobalFeedbackForm>
+    </AsyncSDKIntegrationContextProvider>
+  );
+}
+
+function InstallFeedbackIntegration() {
+  const {setState} = useAsyncSDKIntegrationStore();
+
+  useEffect(() => {
+    setState({Feedback: feedbackIntegration});
+  }, [setState]);
+
+  return null;
+}
+
+describe('AskSeerComboBox', () => {
+  beforeEach(() => {
+    // Combobox announcements will pollute the test output if we don't clear them
+    destroyAnnouncer();
+
+    MockApiClient.clearMockResponses();
+
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/recent-searches/',
+      method: 'POST',
+    });
+
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/setup/',
+      method: 'POST',
+    });
+
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: {status: 'ok', queries: [{query: 'span.duration:>30s'}]},
+    });
+  });
+
+  it('renders the search input', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery="test"
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveValue('test ');
+  });
+
+  it('applies a class name to the combobox wrapper', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          className="search-grid-item"
+          initialQuery="test"
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    expect(input.closest('.search-grid-item')).toBeInTheDocument();
+  });
+
+  it('sets the passed initial query as the input value', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery="test"
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    expect(input).toHaveValue('test ');
+  });
+
+  it('defaults popover to be open', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery="test"
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const header = await screen.findByText(/Describe what you're looking for./);
+    expect(header).toBeInTheDocument();
+  });
+
+  it('shows a processing status while Seer is thinking', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: new Promise(() => {}),
+    });
+
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    expect(await screen.findByText('Let me think about that...')).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {name: 'Seer is processing your query'})
+    ).toBeInTheDocument();
+  });
+
+  it('only shows the footer after results are displayed', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization, additionalWrapper: FeedbackProvider}
+    );
+
+    expect(
+      await screen.findByText(/Describe what you're looking for./)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {name: 'Generate again'})
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('How did we do?')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: 'Give Feedback'})).not.toBeInTheDocument();
+
+    const input = screen.getByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    const regenerateButton = await screen.findByRole('button', {
+      name: 'Generate again',
+    });
+    expect(regenerateButton).toBeEnabled();
+    expect(screen.getByText('How did we do?')).toBeInTheDocument();
+
+    await userEvent.clear(input);
+
+    expect(regenerateButton).toBeEnabled();
+  });
+
+  it('regenerates results when feedback is unavailable', async () => {
+    const trackAnalyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
+    const queryRequest = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: {status: 'ok', queries: [{query: 'span.duration:>30s'}]},
+    });
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+    await userEvent.clear(input);
+    await userEvent.click(await screen.findByRole('button', {name: 'Generate again'}));
+
+    expect(screen.queryByRole('button', {name: 'Give Feedback'})).not.toBeInTheDocument();
+    await waitFor(() => expect(queryRequest).toHaveBeenCalledTimes(2));
+    expect(trackAnalyticsSpy).toHaveBeenCalledWith('ai_query.regenerated', {
+      organization,
+      area: '',
+      natural_language_query: 'test',
+    });
+  });
+
+  it('closes seer search when close button is clicked', async () => {
+    function TestComponent() {
+      const {displayAskSeer, setDisplayAskSeer} = useSearchQueryBuilderAI();
+      return displayAskSeer ? (
+        <AskSeerComboBox
+          initialQuery="test"
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      ) : (
+        <div>
+          <p>Not Seer Search</p>
+          <button onClick={() => setDisplayAskSeer(true)}>Open Seer Search</button>
+        </div>
+      );
+    }
+
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <TestComponent />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const openSeerSearchButton = await screen.findByText('Open Seer Search');
+    await userEvent.click(openSeerSearchButton);
+
+    const closeButton = await screen.findByRole('button', {
+      name: 'Close Seer Search',
+    });
+    await userEvent.click(closeButton);
+
+    const notSeerSearch = await screen.findByText('Not Seer Search');
+    expect(notSeerSearch).toBeInTheDocument();
+  });
+
+  it('displays results after user searches', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    const filter = await screen.findByText('Filter');
+    expect(filter).toBeInTheDocument();
+    expect(
+      screen.queryByText('Do any of these look right to you?')
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Time Range')).not.toBeInTheDocument();
+  });
+
+  it('shows a success status after a Seer search completes', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    expect(await screen.findByText('Filter')).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {name: 'Seer processed your query'})
+    ).toBeInTheDocument();
+  });
+
+  it('shows a warning status when Seer returns an unsupported reason', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: {
+        status: 'ok',
+        queries: [],
+        unsupported_reason: 'This query type is not supported yet',
+      },
+    });
+
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    expect(
+      await screen.findByText('This query type is not supported yet')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {name: 'Seer does not support this query'})
+    ).toBeInTheDocument();
+  });
+
+  it('middle-ellipsizes long query tokens', async () => {
+    const longValue = '/api/0/organizations/{organization_id_or_slug}/events/';
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: {status: 'ok', queries: [{query: `message:${longValue}`}]},
+    });
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    expect(
+      await screen.findByText('/api/0…{organization_id_or_slug}/events/')
+    ).toBeInTheDocument();
+    expect(screen.queryByText(longValue)).not.toBeInTheDocument();
+  });
+
+  it('sizes parameter chips to their content', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      body: {
+        status: 'ok',
+        queries: [
+          {
+            query: 'span.duration:>30s',
+            groupBys: ['span.name', 'browser.name'],
+          },
+        ],
+      },
+    });
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    const groupBy = await screen.findByText('span.name');
+    expect(getEmotionRules(groupBy).join(' ')).toContain('width: fit-content');
+  });
+
+  it('does not show the legacy feedback option', async () => {
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    expect(await screen.findByText('Filter')).toBeInTheDocument();
+    expect(
+      screen.queryByText('Do any of these look right to you?')
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', {name: 'None of these'})).not.toBeInTheDocument();
+  });
+
+  it('applies the query to the route query params when selected via keyboard', async () => {
+    const applySeerSearchQuery = jest.fn();
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={applySeerSearchQuery}
+        />
+      </SearchQueryBuilderProvider>,
+      {
+        organization,
+        initialRouterConfig: {location: {pathname: '/foo/'}},
+      }
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+
+    await waitFor(() =>
+      expect(applySeerSearchQuery).toHaveBeenCalledWith({
+        key: '0-span.duration:>30s',
+        query: 'span.duration:>30s',
+      })
+    );
+    expect(input).not.toHaveFocus();
+  });
+
+  it('does not autofocus the query builder after applying a selected query', async () => {
+    function TestComponent() {
+      const [query, setQuery] = useState('');
+      const {displayAskSeer, setDisplayAskSeer} = useSearchQueryBuilderAI();
+
+      useEffect(() => {
+        setDisplayAskSeer(true);
+      }, [setDisplayAskSeer]);
+
+      if (displayAskSeer) {
+        return (
+          <AskSeerComboBox
+            initialQuery={query}
+            askSeerMutationOptions={askSeerMutationOptions}
+            applySeerSearchQuery={item => setQuery(item.query ?? '')}
+          />
+        );
+      }
+
+      return <SearchQueryBuilder {...defaultProps} autoFocus initialQuery={query} />;
+    }
+
+    render(
+      <SearchQueryBuilderProvider {...defaultProps} initialQuery="">
+        <TestComponent />
+      </SearchQueryBuilderProvider>,
+      {organization}
+    );
+
+    const askSeerInput = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(askSeerInput, 'test{Enter}');
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+
+    const queryBuilderInputs = await screen.findAllByRole('combobox', {
+      name: 'Add a search term',
+    });
+    expect(queryBuilderInputs).not.toContain(document.activeElement);
+    expect(screen.getByRole('grid')).not.toHaveFocus();
+  });
+
+  it('renders the error actions and retries a failed Seer search', async () => {
+    const queryRequest = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/trace-explorer-ai/query/',
+      method: 'POST',
+      statusCode: 500,
+    });
+    render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization, additionalWrapper: FeedbackProvider}
+    );
+
+    const input = await screen.findByRole('combobox', {
+      name: 'Ask Seer with Natural Language',
+    });
+    await userEvent.type(input, 'test{Enter}');
+
+    const errorMessage = await screen.findByText(
+      'An error occurred while fetching Seer queries'
+    );
+    expect(errorMessage).toBeInTheDocument();
+    expect(screen.getByRole('img', {name: 'Error'})).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Give Feedback'})).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {name: 'Seer could not process your query'})
+    ).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole('button', {name: 'Try again'}));
+
+    await waitFor(() => expect(queryRequest).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not render if the organization does not have the gen-ai-features feature', () => {
+    const {container} = render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('does not render if the organization has the hideAiFeatures feature', () => {
+    const {container} = render(
+      <SearchQueryBuilderProvider {...defaultProps}>
+        <AskSeerComboBox
+          initialQuery=""
+          askSeerMutationOptions={askSeerMutationOptions}
+          applySeerSearchQuery={() => {}}
+        />
+      </SearchQueryBuilderProvider>,
+      {organization: {...organization, hideAiFeatures: true}}
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});

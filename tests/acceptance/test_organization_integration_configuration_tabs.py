@@ -6,7 +6,7 @@ from sentry.testutils.silo import no_silo_test
 
 @no_silo_test
 class OrganizationIntegrationConfigurationTabs(AcceptanceTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.login_as(self.user)
         self.provider = "github"
@@ -31,14 +31,14 @@ class OrganizationIntegrationConfigurationTabs(AcceptanceTestCase):
             url="https://github.com/getsentry/sentry",
         )
 
-    def load_page(self, slug, configuration_tab=False):
+    def load_page(self, slug: str, configuration_tab: bool = False) -> None:
         url = f"/settings/{self.organization.slug}/integrations/{slug}/"
         if configuration_tab:
             url += "?tab=configurations"
         self.browser.get(url)
         self.browser.wait_until_not('[data-test-id="loading-indicator"]')
 
-    def test_external_user_mappings(self):
+    def test_external_user_mappings(self) -> None:
         # create `auth_user` records to differentiate `user_id` and `organization_member_id`
         self.create_sentry_app()
         self.user2 = self.create_user("user2@example.com")
@@ -75,15 +75,15 @@ class OrganizationIntegrationConfigurationTabs(AcceptanceTestCase):
             # Add Mapping Modal
             externalName = self.browser.find_element(by=By.NAME, value="externalName")
             externalName.send_keys("@user2")
-            self.browser.click("#userId:first-child div")
-            self.browser.click('[id="react-select-2-option-1"]')
+            self.browser.click('input[id$="sentryId"]')
+            self.browser.click('[id$="-option-1"]')
 
             # List View
             self.browser.click('[aria-label="Save Changes"]')
             self.browser.wait_until_not('[aria-label="Save Changes"]')
             self.browser.wait_until_not('[data-test-id="loading-indicator"]')
 
-    def test_external_team_mappings(self):
+    def test_external_team_mappings(self) -> None:
         with self.feature("organizations:integrations-codeowners"):
             self.browser.get(
                 f"/settings/{self.organization.slug}/integrations/{self.provider}/{self.integration.id}/"
@@ -101,8 +101,8 @@ class OrganizationIntegrationConfigurationTabs(AcceptanceTestCase):
             # Add Mapping Modal
             externalName = self.browser.find_element(by=By.NAME, value="externalName")
             externalName.send_keys("@getsentry/ecosystem")
-            self.browser.click("#teamId:first-child div")
-            self.browser.click('[id="react-select-2-option-0"]')
+            self.browser.click('input[id$="sentryId"]')
+            self.browser.click('[id$="-option-0"]')
 
             # List View
             self.browser.click('[aria-label="Save Changes"]')

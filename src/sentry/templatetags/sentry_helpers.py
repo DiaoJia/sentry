@@ -9,6 +9,7 @@ from urllib.parse import quote, urlencode
 from django import template
 from django.template.defaultfilters import stringfilter
 from django.utils import timezone as django_timezone
+from django.utils.safestring import mark_safe
 from django.utils.translation import gettext as _
 from packaging.version import parse as parse_version
 
@@ -107,16 +108,60 @@ def org_url(organization, path, query=None, fragment=None) -> str:
     return organization.absolute_url(path, query=query, fragment=fragment)
 
 
-@register.simple_tag
-def loading_message():
-    options = [
-        "Please wait while we load an obnoxious amount of JavaScript.",
-        "Escaping node_modules gravity well.",
-        "Parallelizing webpack builders.",
-        "Awaiting solution to the halting problem.",
-        "Collapsing wavefunctions.",
-    ]
-    return random.choice(options)
+LOADING_MESSAGES = [
+    "Loading a <scraps-bleep>$#!%</scraps-bleep>-ton of JavaScript&hellip;",
+    "Escaping <code>node_modules</code> gravity well&hellip;",
+    "Parallelizing webpack builders&hellip;",
+    "Awaiting solution to the halting problem&hellip;",
+    "Collapsing wavefunctions&hellip;",
+    "Reticulating splines&hellip;",
+    "Making it make sense&hellip;",
+    "Deploying swarm of autonomous agents&hellip;",
+    "Installing <code>left-pad</code>&hellip;",
+]
+
+PRIDE_LOADING_MESSAGES = [
+    "Exceptions belong in code; You belong here.",
+    "You&rsquo;re valid. Your code, however&hellip;",
+    "Making space for everyone&hellip;",
+    "Waving some flags while you wait&hellip;",
+]
+
+
+def _get_organization_from_context(context):
+    org_context = context.get("org_context")
+    if org_context is not None:
+        return getattr(org_context, "organization", None)
+    return None
+
+
+def _is_themed_loader(context) -> bool:
+    organization = _get_organization_from_context(context)
+    if organization is None:
+        return False
+    from sentry import features
+
+    return features.has("organizations:sentry-pride-logo-footer", organization)
+
+
+@register.simple_tag(takes_context=True)
+def loading_message(context):
+    options = list(LOADING_MESSAGES)
+    if _is_themed_loader(context):
+        options.extend(PRIDE_LOADING_MESSAGES)
+    return mark_safe(random.choice(options))
+
+
+@register.simple_tag(takes_context=True)
+def loader(context):
+    from django.template.loader import render_to_string
+
+    template_name = (
+        "sentry/partial/loader-pride.html"
+        if _is_themed_loader(context)
+        else "sentry/partial/loader.html"
+    )
+    return mark_safe(render_to_string(template_name, context.flatten()))
 
 
 @register.simple_tag
@@ -170,6 +215,36 @@ def small_count(v, precision=1):
                 return "%d%s" % (o, y)
             return (f"%.{precision}f%s") % (v / float(x), y)
     return v
+
+
+@register.filter
+def format_duration_ms(v):
+    """Format a duration in milliseconds to a human-readable string."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "0ms"
+    if v < 1:
+        return "0ms"
+    if v < 1000:
+        return f"{v:.0f}ms"
+    seconds = v / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f}min"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}hr"
+    days = hours / 24
+    if days < 30.44:
+        return f"{days:.1f}d"
+    months = days / 30.44
+    if days < 365.25:
+        return f"{months:.1f}mo"
+    years = days / 365.25
+    return f"{years:.1f}yr"
 
 
 @register.filter
@@ -250,6 +325,14 @@ def date(dt, arg=None):
     return date(dt, arg)
 
 
+@register.filter
+def day_initial(dt):
+    """Returns the single-letter day-of-week initial (M, T, W, T, F, S, S)."""
+    if isinstance(dt, datetime) and not django_timezone.is_aware(dt):
+        dt = dt.replace(tzinfo=timezone.utc)
+    return "MTWTFSS"[dt.weekday()]
+
+
 @register.simple_tag
 def percent(value, total, format=None):
     if not (value and total):
@@ -309,8 +392,6 @@ def sanitize_periods(value):
     Primarily used in email templates when a field may contain a domain name to prevent
     email clients from creating a clickable link to the domain.
     """
-    word_joiner = "\u2060"
+    from sentry.utils.email.sanitize import sanitize_outbound_name
 
-    # Adding the Unicode character before every period
-    output_string = value.replace(".", word_joiner + ".")
-    return output_string
+    return sanitize_outbound_name(value)

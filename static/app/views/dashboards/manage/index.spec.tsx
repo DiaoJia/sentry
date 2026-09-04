@@ -1,41 +1,42 @@
 import {DashboardListItemFixture} from 'sentry-fixture/dashboard';
+import {LocationFixture} from 'sentry-fixture/locationFixture';
 import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
-import {RouteComponentPropsFixture} from 'sentry-fixture/routeComponentPropsFixture';
 
 import {act, render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {selectEvent} from 'sentry-test/selectEvent';
 
-import ProjectsStore from 'sentry/stores/projectsStore';
-import localStorage from 'sentry/utils/localStorage';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import ManageDashboards, {LAYOUT_KEY} from 'sentry/views/dashboards/manage';
+import ManageDashboards from 'sentry/views/dashboards/manage';
 import {getPaginationPageLink} from 'sentry/views/organizationStats/utils';
 
-jest.mock('sentry/utils/localStorage');
-
 const FEATURES = [
-  'global-views',
   'dashboards-basic',
   'dashboards-edit',
   'discover-query',
+  'dashboards-prebuilt-insights-dashboards',
 ];
 
 jest.mock('sentry/utils/useNavigate', () => ({
   useNavigate: jest.fn(),
 }));
 
-const mockUseNavigate = jest.mocked(useNavigate);
+jest.mock('sentry/utils/useLocation');
 
-describe('Dashboards > Detail', function () {
+const mockUseNavigate = jest.mocked(useNavigate);
+const mockUseLocation = jest.mocked(useLocation);
+
+describe('Dashboards > Detail', () => {
   const mockUnauthorizedOrg = OrganizationFixture({
-    features: ['global-views', 'dashboards-basic', 'discover-query'],
+    features: ['dashboards-basic', 'discover-query'],
   });
 
   const mockAuthorizedOrg = OrganizationFixture({
     features: FEATURES,
   });
-  beforeEach(function () {
+  beforeEach(() => {
     act(() => ProjectsStore.loadInitialData([ProjectFixture()]));
 
     MockApiClient.addMockResponse({
@@ -50,45 +51,48 @@ describe('Dashboards > Detail', function () {
       url: '/organizations/org-slug/dashboards/?sort=name&per_page=9',
       body: [],
     });
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/dashboards/starred/',
+      body: [],
+    });
+
+    mockUseLocation.mockReturnValue(LocationFixture());
   });
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders', async function () {
+  it('renders', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/',
       body: [DashboardListItemFixture({title: 'Test Dashboard'})],
     });
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockAuthorizedOrg,
     });
 
-    expect(await screen.findByText('Dashboards')).toBeInTheDocument();
+    expect(await screen.findByText('All Dashboards')).toBeInTheDocument();
 
     expect(await screen.findByText('Test Dashboard')).toBeInTheDocument();
 
     expect(screen.queryAllByTestId('loading-placeholder')).toHaveLength(0);
   });
 
-  it('shows error message when receiving error', async function () {
+  it('shows error message when receiving error', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/',
       statusCode: 400,
     });
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockAuthorizedOrg,
     });
 
     expect(await screen.findByText('Oops! Something went wrong')).toBeInTheDocument();
   });
 
-  it('denies access on missing feature', async function () {
+  it('denies access on missing feature', async () => {
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockUnauthorizedOrg,
     });
 
@@ -97,11 +101,10 @@ describe('Dashboards > Detail', function () {
     ).toBeInTheDocument();
   });
 
-  it('denies access on no projects', async function () {
+  it('denies access on no projects', async () => {
     act(() => ProjectsStore.loadInitialData([]));
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockAuthorizedOrg,
     });
 
@@ -110,31 +113,45 @@ describe('Dashboards > Detail', function () {
     ).toBeInTheDocument();
   });
 
-  it('creates new dashboard', async function () {
+  it('does not fetch dashboards when there are no projects', async () => {
+    act(() => ProjectsStore.loadInitialData([]));
+
+    const dashboardsRequest = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/dashboards/',
+      body: [],
+    });
+
+    render(<ManageDashboards />, {
+      organization: mockAuthorizedOrg,
+    });
+
+    expect(
+      await screen.findByText('You need at least one project to use this view')
+    ).toBeInTheDocument();
+
+    expect(dashboardsRequest).not.toHaveBeenCalled();
+  });
+
+  it('creates new dashboard', async () => {
     const org = OrganizationFixture({features: FEATURES});
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: org,
     });
 
     await userEvent.click(await screen.findByTestId('dashboard-create'));
 
-    expect(mockNavigate).toHaveBeenCalledWith({
-      pathname: '/organizations/org-slug/dashboards/new/',
-      query: {},
-    });
+    expect(mockNavigate).toHaveBeenCalledWith('/organizations/org-slug/dashboards/new/');
   });
 
-  it('can sort', async function () {
+  it('can sort', async () => {
     const org = OrganizationFixture({features: FEATURES});
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: org,
     });
 
@@ -148,13 +165,36 @@ describe('Dashboards > Detail', function () {
     );
   });
 
-  it('can search', async function () {
+  it('defaults to recently viewed sort with dashboards-user-last-visited', async () => {
+    const org = OrganizationFixture({
+      features: [...FEATURES, 'dashboards-user-last-visited'],
+    });
+    mockUseNavigate.mockReturnValue(jest.fn());
+
+    const request = MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/dashboards/',
+      body: [DashboardListItemFixture({title: 'Test Dashboard'})],
+    });
+
+    render(<ManageDashboards />, {
+      organization: org,
+    });
+
+    expect(await screen.findByText('Test Dashboard')).toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith(
+      '/organizations/org-slug/dashboards/',
+      expect.objectContaining({
+        query: expect.objectContaining({sort: 'recentlyViewed'}),
+      })
+    );
+  });
+
+  it('can search', async () => {
     const org = OrganizationFixture({features: FEATURES});
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: org,
     });
 
@@ -167,7 +207,7 @@ describe('Dashboards > Detail', function () {
     );
   });
 
-  it('uses pagination correctly', async function () {
+  it('uses pagination correctly', async () => {
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
@@ -178,7 +218,6 @@ describe('Dashboards > Detail', function () {
     });
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockAuthorizedOrg,
     });
 
@@ -194,7 +233,7 @@ describe('Dashboards > Detail', function () {
     );
   });
 
-  it('disables pagination correctly', async function () {
+  it('disables pagination correctly', async () => {
     const mockNavigate = jest.fn();
     mockUseNavigate.mockReturnValue(mockNavigate);
 
@@ -205,7 +244,6 @@ describe('Dashboards > Detail', function () {
     });
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
       organization: mockAuthorizedOrg,
     });
 
@@ -215,7 +253,7 @@ describe('Dashboards > Detail', function () {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it('toggles between grid and list view', async function () {
+  it('renders the table view', async () => {
     MockApiClient.addMockResponse({
       url: '/organizations/org-slug/dashboards/',
       body: [DashboardListItemFixture({title: 'Test Dashboard 1'})],
@@ -223,23 +261,9 @@ describe('Dashboards > Detail', function () {
     });
 
     render(<ManageDashboards />, {
-      ...RouteComponentPropsFixture(),
-      organization: {
-        ...mockAuthorizedOrg,
-        features: [...FEATURES, 'dashboards-table-view'],
-      },
+      organization: mockAuthorizedOrg,
     });
 
-    expect(await screen.findByTestId('list')).toBeInTheDocument();
-    await userEvent.click(await screen.findByTestId('list'));
-
-    expect(localStorage.setItem).toHaveBeenCalledWith(LAYOUT_KEY, '"list"');
     expect(await screen.findByTestId('grid-editable')).toBeInTheDocument();
-
-    expect(await screen.findByTestId('grid')).toBeInTheDocument();
-    await userEvent.click(await screen.findByTestId('grid'));
-
-    expect(localStorage.setItem).toHaveBeenCalledWith(LAYOUT_KEY, '"grid"');
-    expect(await screen.findByTestId('dashboard-grid')).toBeInTheDocument();
   });
 });

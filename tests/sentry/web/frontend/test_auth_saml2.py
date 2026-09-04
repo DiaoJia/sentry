@@ -56,7 +56,7 @@ class AuthSAML2Test(AuthProviderTestCase):
     provider = DummySAML2Provider
     provider_name = "saml2_dummy"
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.user = self.create_user("rick@onehundredyears.com")
         self.organization = self.create_organization(owner=self.user, name="saml2-org")
         self.auth_provider_inst = AuthProvider.objects.create(
@@ -74,7 +74,7 @@ class AuthSAML2Test(AuthProviderTestCase):
 
         super().setUp()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         # restore url-prefix config
         settings.SENTRY_OPTIONS.update({"system.url-prefix": self.url_prefix})
 
@@ -92,7 +92,7 @@ class AuthSAML2Test(AuthProviderTestCase):
     def setup_path(self):
         return reverse("sentry-organization-auth-provider-settings", args=["saml2-org"])
 
-    def test_redirects_to_idp(self):
+    def test_redirects_to_idp(self) -> None:
         resp = self.client.post(self.login_path, {"init": True})
 
         assert resp.status_code == 302
@@ -116,7 +116,7 @@ class AuthSAML2Test(AuthProviderTestCase):
                 self.acs_path, {"SAMLResponse": saml_response}, follow=follow, **kwargs
             )
 
-    def test_auth_sp_initiated(self):
+    def test_auth_sp_initiated(self) -> None:
         # Start auth process from SP side
         self.client.post(self.login_path, {"init": True})
         auth = self.accept_auth()
@@ -124,7 +124,7 @@ class AuthSAML2Test(AuthProviderTestCase):
         assert auth.status_code == 200
         assert auth.context["existing_user"] == self.user
 
-    def test_auth_sp_initiated_login(self):
+    def test_auth_sp_initiated_login(self) -> None:
         # setup an existing identity so we can complete login
         AuthIdentity.objects.create(
             user_id=self.user.id, auth_provider=self.auth_provider_inst, ident="1234"
@@ -134,12 +134,21 @@ class AuthSAML2Test(AuthProviderTestCase):
         resp = self.accept_auth(follow=True)
 
         assert resp.status_code == 200
-        assert resp.redirect_chain == [
-            ("/auth/login/", 302),
-            ("/organizations/saml2-org/issues/", 302),
-        ]
+        assert resp.redirect_chain == [("/organizations/saml2-org/issues/", 302)]
 
-    def test_auth_sp_initiated_customer_domain(self):
+    def test_auth_sp_initiated_login_with_react_auth_skips_login_page(self) -> None:
+        AuthIdentity.objects.create(
+            user_id=self.user.id, auth_provider=self.auth_provider_inst, ident="1234"
+        )
+        self.client.cookies["sentry_react_auth"] = "1"
+        self.client.post(self.login_path, {"init": True})
+
+        response = self.accept_auth(follow=True)
+
+        assert response.status_code == 200
+        assert response.redirect_chain == [("/organizations/saml2-org/issues/", 302)]
+
+    def test_auth_sp_initiated_customer_domain(self) -> None:
         # setup an existing identity so we can complete login
         AuthIdentity.objects.create(
             user_id=self.user.id, auth_provider=self.auth_provider_inst, ident="1234"
@@ -149,13 +158,10 @@ class AuthSAML2Test(AuthProviderTestCase):
         resp = self.accept_auth(follow=True)
 
         assert resp.status_code == 200
-        assert resp.redirect_chain == [
-            ("http://saml2-org.testserver/auth/login/", 302),
-            ("http://saml2-org.testserver/issues/", 302),
-        ]
+        assert resp.redirect_chain == [("http://saml2-org.testserver/issues/", 302)]
 
     @with_feature("system:multi-region")
-    def test_auth_sp_initiated_login_customer_domain_feature(self):
+    def test_auth_sp_initiated_login_customer_domain_feature(self) -> None:
         # setup an existing identity so we can complete login
         AuthIdentity.objects.create(
             user_id=self.user.id, auth_provider=self.auth_provider_inst, ident="1234"
@@ -165,18 +171,15 @@ class AuthSAML2Test(AuthProviderTestCase):
         resp = self.accept_auth(follow=True)
 
         assert resp.status_code == 200
-        assert resp.redirect_chain == [
-            ("http://saml2-org.testserver/auth/login/", 302),
-            ("http://saml2-org.testserver/issues/", 302),
-        ]
+        assert resp.redirect_chain == [("http://saml2-org.testserver/issues/", 302)]
 
-    def test_auth_idp_initiated(self):
+    def test_auth_idp_initiated(self) -> None:
         auth = self.accept_auth()
 
         assert auth.status_code == 200
         assert auth.context["existing_user"] == self.user
 
-    def test_auth_idp_initiated_invalid_flow_from_session(self):
+    def test_auth_idp_initiated_invalid_flow_from_session(self) -> None:
         original_is_valid = AuthHelperSessionStore.is_valid
 
         def side_effect(self):
@@ -194,7 +197,7 @@ class AuthSAML2Test(AuthProviderTestCase):
         assert auth.status_code == 200
         assert auth.context["existing_user"] == self.user
 
-    def test_auth_sp_initiated_invalid_step_index_from_session(self):
+    def test_auth_sp_initiated_invalid_step_index_from_session(self) -> None:
         from sentry.auth.helper import AuthHelper
 
         # Start auth process from SP side
@@ -219,10 +222,10 @@ class AuthSAML2Test(AuthProviderTestCase):
             assert response["Location"] == "/auth/login/saml2-org/"
 
     @mock.patch("sentry.auth.helper.logger")
-    def test_auth_setup(self, auth_log):
+    def test_auth_setup(self, auth_log: mock.MagicMock) -> None:
         # enable require 2FA and enroll user
         TotpInterface().enroll(self.user)
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             self.organization.update(flags=models.F("flags").bitor(Organization.flags.require_2fa))
         assert self.organization.flags.require_2fa.is_set
 
@@ -247,7 +250,7 @@ class AuthSAML2Test(AuthProviderTestCase):
         assert messages[1].startswith("SSO has been configured for your organization")
 
         # require 2FA disabled when saml is enabled
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             org = Organization.objects.get(id=self.organization.id)
             assert not org.flags.require_2fa
 
@@ -260,7 +263,7 @@ class AuthSAML2Test(AuthProviderTestCase):
             "Require 2fa disabled during sso setup", extra={"organization_id": self.organization.id}
         )
 
-    def test_auth_idp_initiated_no_provider(self):
+    def test_auth_idp_initiated_no_provider(self) -> None:
         self.auth_provider_inst.delete()
         auth = self.accept_auth(follow=True)
 
@@ -270,14 +273,14 @@ class AuthSAML2Test(AuthProviderTestCase):
         assert len(messages) == 1
         assert messages[0] == "The organization does not exist or does not have SAML SSO enabled."
 
-    def test_saml_metadata(self):
+    def test_saml_metadata(self) -> None:
         path = reverse("sentry-auth-organization-saml-metadata", args=["saml2-org"])
         resp = self.client.get(path)
 
         assert resp.status_code == 200
         assert resp.get("content-type") == "text/xml"
 
-    def test_logout_request(self):
+    def test_logout_request(self) -> None:
         saml_request = self.load_fixture("saml2_slo_request.xml")
         saml_request = base64.b64encode(saml_request)
 
@@ -298,13 +301,139 @@ class AuthSAML2Test(AuthProviderTestCase):
         updated = type(self.user).objects.get(pk=self.user.id)
         assert updated.session_nonce != self.user.session_nonce
 
-    def test_verify_email(self, follow=False, **kwargs):
+    def test_verify_email(self, follow=False, **kwargs) -> None:
         assert AuthIdentity.objects.filter(user_id=self.user.id).count() == 0
 
         response = self.accept_auth()
         assert response.status_code == 200
 
-        response = self.client.post(self.acs_path, {"op": "confirm"})
+        sso_path = reverse("sentry-auth-sso")
+        response = self.client.post(sso_path, {"op": "confirm"})
 
         # expect no linking before verification
         assert AuthIdentity.objects.filter(user_id=self.user.id).count() == 0
+
+    def test_relay_state_contains_provider_key(self) -> None:
+        """Test that SAML RelayState contains the provider key for mismatch detection."""
+        resp = self.client.post(self.login_path, {"init": True})
+
+        assert resp.status_code == 302
+        redirect = urlparse(resp.get("Location", ""))
+        query = parse_qs(redirect.query)
+
+        # RelayState should contain the provider key
+        assert "RelayState" in query
+        relay_state = query["RelayState"][0]
+        assert relay_state == f"provider_key:{self.provider_name}"
+
+    def _saml_response_for_email(self, email: str) -> str:
+        xml = self.load_fixture("saml2_auth_response.xml").decode("utf-8")
+        xml = xml.replace("rick@onehundredyears.com", email)
+        return base64.b64encode(xml.encode("utf-8")).decode("utf-8")
+
+    def test_sp_initiated_new_user_can_complete_confirmation(self) -> None:
+        """op from Sentry's own confirmation form (no SAMLResponse) must survive
+        so first-time SSO signup can complete via /auth/sso/."""
+        saml_response = self._saml_response_for_email("newperson@example.com")
+        is_valid = "onelogin.saml2.response.OneLogin_Saml2_Response.is_valid"
+
+        self.client.post(self.login_path, {"init": True})
+        with mock.patch(is_valid, return_value=True):
+            resp = self.client.post(self.acs_path, {"SAMLResponse": saml_response})
+        assert resp.status_code == 200
+
+        sso_path = reverse("sentry-auth-sso")
+        self.client.post(sso_path, {"op": "newuser"})
+
+        assert AuthIdentity.objects.filter(auth_provider=self.auth_provider_inst).exists()
+
+    def test_sp_initiated_existing_user_can_login_and_confirm(self) -> None:
+        """An unauthenticated user can log in and confirm identity linking
+        via /auth/sso/ — op=login and op=confirm must work."""
+        sso_path = reverse("sentry-auth-sso")
+
+        # Start SP-initiated auth and complete SAML round-trip
+        self.client.post(self.login_path, {"init": True})
+        resp = self.accept_auth()
+        assert resp.status_code == 200
+
+        # Login step — authenticate as the existing user
+        resp = self.client.post(
+            sso_path,
+            {
+                "op": "login",
+                "username": self.user.username,
+                "password": "admin",
+            },
+        )
+
+        # Confirm step — link identity to this user
+        resp = self.client.post(sso_path, {"op": "confirm"}, follow=True)
+        assert AuthIdentity.objects.filter(
+            auth_provider=self.auth_provider_inst, user_id=self.user.id
+        ).exists()
+
+    def test_acs_pipeline_step_strips_op_from_post(self) -> None:
+        """When SAMLResponse and op are both in the POST body, op should be
+        stripped — the ACS endpoint only processes SAMLResponse payloads."""
+        saml_response = self.load_fixture("saml2_auth_response.xml")
+        saml_response = base64.b64encode(saml_response).decode("utf-8")
+
+        is_valid = "onelogin.saml2.response.OneLogin_Saml2_Response.is_valid"
+
+        # Start SP-initiated auth
+        self.client.post(self.login_path, {"init": True})
+
+        # POST SAMLResponse with op=confirm included in the same request
+        with mock.patch(is_valid, return_value=True):
+            resp = self.client.post(self.acs_path, {"SAMLResponse": saml_response, "op": "confirm"})
+
+        # Should show confirmation page, not auto-link
+        assert resp.status_code == 200
+        assert AuthIdentity.objects.filter(user_id=self.user.id).count() == 0
+
+    def test_confirmation_page_includes_sso_url_in_context(self) -> None:
+        """Confirmation page must include confirmation_url pointing to /auth/sso/."""
+        self.client.post(self.login_path, {"init": True})
+        resp = self.accept_auth()
+        assert resp.status_code == 200
+        assert resp.context["confirmation_url"] == reverse("sentry-auth-sso")
+
+    def test_acs_strips_op_without_saml_response(self) -> None:
+        """POST to the ACS endpoint must have op stripped."""
+        # Start SP-initiated auth and complete SAML round-trip to establish pipeline
+        self.client.post(self.login_path, {"init": True})
+        self.accept_auth()
+
+        # POSTing only op=confirm to the ACS endpoint should be stripped
+        resp = self.client.post(self.acs_path, {"op": "confirm"})
+        assert resp.status_code == 200
+        assert AuthIdentity.objects.filter(user_id=self.user.id).count() == 0
+
+    def test_idp_initiated_new_user_confirms_via_sso_endpoint(self) -> None:
+        """IdP-initiated flow: confirmation form should POST to /auth/sso/
+        and successfully complete identity linking."""
+        saml_response = self._saml_response_for_email("idp-newuser@example.com")
+        is_valid = "onelogin.saml2.response.OneLogin_Saml2_Response.is_valid"
+
+        # IdP-initiated: no prior login_path POST, SAMLResponse goes directly to ACS
+        with mock.patch(is_valid, return_value=True):
+            resp = self.client.post(self.acs_path, {"SAMLResponse": saml_response})
+        assert resp.status_code == 200
+        assert resp.context["confirmation_url"] == reverse("sentry-auth-sso")
+
+        # Confirm via /auth/sso/
+        sso_path = reverse("sentry-auth-sso")
+        self.client.post(sso_path, {"op": "newuser"})
+
+        assert AuthIdentity.objects.filter(auth_provider=self.auth_provider_inst).exists()
+
+    def test_idp_initiated_without_relay_state_continues(self) -> None:
+        """Test that IdP-initiated SAML without RelayState continues normally (backward compat)."""
+        # IdP-initiated auth doesn't have RelayState from our side
+        # This should still work - the provider_key will be None and the check will be skipped
+        auth = self.accept_auth()
+
+        # Should continue to identity confirmation
+        assert auth.status_code == 200
+        assert auth.context["existing_user"] == self.user

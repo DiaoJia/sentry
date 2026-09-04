@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import types
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -9,14 +8,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict, Union
 
 from sentry_protos.snuba.v1.endpoint_time_series_pb2 import TimeSeriesRequest
+from sentry_protos.snuba.v1.trace_item_attribute_pb2 import (
+    ExtrapolationMode as ProtoExtrapolationMode,
+)
 from snuba_sdk import Column, Condition, Entity, Join, Op, Request
 
-from sentry import features, options
+from sentry import features
+from sentry.api.helpers.error_upsampling import are_any_projects_error_upsampled
 from sentry.constants import CRASH_RATE_ALERT_AGGREGATE_ALIAS
 from sentry.exceptions import InvalidQuerySubscription, UnsupportedQuerySubscription
 from sentry.models.environment import Environment
 from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.search.eap.trace_metrics.config import TraceMetricsSearchResolverConfig
 from sentry.search.eap.types import SearchResolverConfig
 from sentry.search.events.builder.base import BaseQueryBuilder
 from sentry.search.events.builder.discover import DiscoverQueryBuilder
@@ -24,12 +28,15 @@ from sentry.search.events.builder.metrics import AlertMetricsQueryBuilder
 from sentry.search.events.types import ParamsType, QueryBuilderConfig, SnubaParams
 from sentry.sentry_metrics.use_case_id_registry import UseCaseID
 from sentry.sentry_metrics.utils import resolve, resolve_tag_key, resolve_tag_values
-from sentry.snuba import ourlogs, rpc_dataset_common, spans_rpc
 from sentry.snuba.dataset import Dataset, EntityKey
 from sentry.snuba.metrics.extraction import MetricSpecType
 from sentry.snuba.metrics.naming_layer.mri import SessionMRI
-from sentry.snuba.models import SnubaQuery, SnubaQueryEventType
+from sentry.snuba.models import ExtrapolationMode, SnubaQuery, SnubaQueryEventType
+from sentry.snuba.ourlogs import OurLogs
 from sentry.snuba.referrer import Referrer
+from sentry.snuba.rpc_dataset_common import RPCBase
+from sentry.snuba.spans_rpc import Spans
+from sentry.snuba.trace_metrics import TraceMetrics
 from sentry.utils import metrics
 
 # TODO: If we want to support security events here we'll need a way to
@@ -44,9 +51,6 @@ ENTITY_TIME_COLUMNS: Mapping[EntityKey, str] = {
     EntityKey.Sessions: "started",
     EntityKey.Transactions: "finish_ts",
     EntityKey.GenericMetricsCounters: "timestamp",
-    EntityKey.GenericMetricsDistributions: "timestamp",
-    EntityKey.GenericMetricsSets: "timestamp",
-    EntityKey.GenericMetricsGauges: "timestamp",
     EntityKey.MetricsCounters: "timestamp",
     EntityKey.MetricsSets: "timestamp",
     EntityKey.EAPItemsSpan: "timestamp",
@@ -63,6 +67,14 @@ ALERT_BLOCKED_FIELDS = {
     "timestamp",
     "timestamp.to_hour",
     "timestamp.to_day",
+}
+
+# Mapping from model ExtrapolationMode to proto ExtrapolationMode
+MODEL_TO_PROTO_EXTRAPOLATION_MODE = {
+    ExtrapolationMode.UNKNOWN: ProtoExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+    ExtrapolationMode.NONE: ProtoExtrapolationMode.EXTRAPOLATION_MODE_NONE,
+    ExtrapolationMode.CLIENT_AND_SERVER_WEIGHTED: ProtoExtrapolationMode.EXTRAPOLATION_MODE_SAMPLE_WEIGHTED,
+    ExtrapolationMode.SERVER_WEIGHTED: ProtoExtrapolationMode.EXTRAPOLATION_MODE_SERVER_ONLY,
 }
 
 
@@ -104,6 +116,7 @@ def apply_dataset_query_conditions(
 
 class _EntitySpecificParams(TypedDict, total=False):
     org_id: int
+    extrapolation_mode: ExtrapolationMode | None
     event_types: list[SnubaQueryEventType.EventType] | None
 
 
@@ -122,7 +135,10 @@ class BaseEntitySubscription(ABC, _EntitySubscription):
     """
 
     def __init__(
-        self, aggregate: str, time_window: int, extra_fields: _EntitySpecificParams | None = None
+        self,
+        aggregate: str,
+        time_window: int,
+        extra_fields: _EntitySpecificParams | None = None,
     ):
         pass
 
@@ -164,7 +180,10 @@ class BaseEntitySubscription(ABC, _EntitySubscription):
 
 class BaseEventsAndTransactionEntitySubscription(BaseEntitySubscription, ABC):
     def __init__(
-        self, aggregate: str, time_window: int, extra_fields: _EntitySpecificParams | None = None
+        self,
+        aggregate: str,
+        time_window: int,
+        extra_fields: _EntitySpecificParams | None = None,
     ):
         super().__init__(aggregate, time_window, extra_fields)
         self.aggregate = aggregate
@@ -199,10 +218,20 @@ class BaseEventsAndTransactionEntitySubscription(BaseEntitySubscription, ABC):
             query_builder_cls = ErrorsQueryBuilder
             parser_config_overrides.update(PARSER_CONFIG_OVERRIDES)
 
+        # Conditionally upsample error counts for allowlisted projects
+        selected_aggregate = self.aggregate
+        if (
+            self.dataset == Dataset.Events
+            and isinstance(selected_aggregate, str)
+            and selected_aggregate.strip().lower() == "count()"
+            and are_any_projects_error_upsampled(project_ids)
+        ):
+            selected_aggregate = "upsampled_count()"
+
         return query_builder_cls(
             dataset=Dataset(self.dataset.value),
             query=query,
-            selected_columns=[self.aggregate],
+            selected_columns=[selected_aggregate],
             params=params,
             offset=None,
             limit=None,
@@ -238,15 +267,20 @@ class PerformanceSpansEAPRpcEntitySubscription(BaseEntitySubscription):
     dataset = Dataset.EventsAnalyticsPlatform
 
     def __init__(
-        self, aggregate: str, time_window: int, extra_fields: _EntitySpecificParams | None = None
+        self,
+        aggregate: str,
+        time_window: int,
+        extra_fields: _EntitySpecificParams | None = None,
     ):
         super().__init__(aggregate, time_window, extra_fields)
         self.aggregate = aggregate
         self.event_types = None
         self.time_window = time_window
+        self.extrapolation_mode = None
         if extra_fields:
             self.org_id = extra_fields.get("org_id")
             self.event_types = extra_fields.get("event_types")
+            self.extrapolation_mode = extra_fields.get("extrapolation_mode")
 
     def build_rpc_request(
         self,
@@ -261,16 +295,22 @@ class PerformanceSpansEAPRpcEntitySubscription(BaseEntitySubscription):
             params = {}
 
         params["project_id"] = project_ids
+        is_trace_metric = (
+            self.event_types
+            and self.event_types[0] == SnubaQueryEventType.EventType.TRACE_ITEM_METRIC
+        )
 
         query = apply_dataset_query_conditions(self.query_type, query, self.event_types)
         if environment:
             params["environment"] = environment.name
 
-        dataset_module: types.ModuleType
+        dataset_module: type[RPCBase]
         if self.event_types and self.event_types[0] == SnubaQueryEventType.EventType.TRACE_ITEM_LOG:
-            dataset_module = ourlogs
+            dataset_module = OurLogs
+        elif is_trace_metric:
+            dataset_module = TraceMetrics
         else:
-            dataset_module = spans_rpc
+            dataset_module = Spans
         now = datetime.now(tz=timezone.utc)
         snuba_params = SnubaParams(
             environments=[environment],
@@ -280,11 +320,34 @@ class PerformanceSpansEAPRpcEntitySubscription(BaseEntitySubscription):
             end=now,
             granularity_secs=self.time_window,
         )
+
+        # Convert model ExtrapolationMode to proto ExtrapolationMode
+        proto_extrapolation_mode = None
+        if self.extrapolation_mode is not None:
+            model_mode = ExtrapolationMode(self.extrapolation_mode)
+            proto_extrapolation_mode = MODEL_TO_PROTO_EXTRAPOLATION_MODE.get(model_mode)
+
+        if is_trace_metric:
+            search_config: SearchResolverConfig = TraceMetricsSearchResolverConfig(
+                metric=None,
+                auto_fields=False,
+                use_aggregate_conditions=True,
+                disable_aggregate_extrapolation=False,
+                extrapolation_mode=proto_extrapolation_mode,
+                stable_timestamp_quantization=False,
+            )
+        else:
+            search_config = SearchResolverConfig(
+                stable_timestamp_quantization=False,
+                extrapolation_mode=proto_extrapolation_mode,
+            )
+
         search_resolver = dataset_module.get_resolver(
-            snuba_params, SearchResolverConfig(stable_timestamp_quantization=False)
+            snuba_params,
+            search_config,
         )
 
-        rpc_request, _, _ = rpc_dataset_common.get_timeseries_query(
+        rpc_request, _, _ = dataset_module.get_timeseries_query(
             search_resolver=search_resolver,
             params=snuba_params,
             query_string=query,
@@ -307,18 +370,19 @@ class PerformanceSpansEAPRpcEntitySubscription(BaseEntitySubscription):
 
 class BaseMetricsEntitySubscription(BaseEntitySubscription, ABC):
     def __init__(
-        self, aggregate: str, time_window: int, extra_fields: _EntitySpecificParams | None = None
+        self,
+        aggregate: str,
+        time_window: int,
+        extra_fields: _EntitySpecificParams | None = None,
     ):
         super().__init__(aggregate, time_window, extra_fields)
         self.aggregate = aggregate
         if not extra_fields or "org_id" not in extra_fields:
             raise InvalidQuerySubscription(
-                "org_id is a required param when "
-                "building snuba filter for a metrics subscription"
+                "org_id is a required param when building snuba filter for a metrics subscription"
             )
         self.org_id = extra_fields["org_id"]
         self.time_window = time_window
-        self.use_metrics_layer = False
 
         self.on_demand_metrics_enabled = features.has(
             "organizations:on-demand-metrics-extraction",
@@ -350,15 +414,9 @@ class BaseMetricsEntitySubscription(BaseEntitySubscription, ABC):
             return UseCaseID.SESSIONS
 
     def resolve_tag_key_if_needed(self, string: str) -> str:
-        if self.use_metrics_layer:
-            return string
-
         return resolve_tag_key(self._get_use_case_id(), self.org_id, string)
 
     def resolve_tag_values_if_needed(self, strings: Sequence[str]) -> Sequence[str | int]:
-        if self.use_metrics_layer:
-            return strings
-
         return resolve_tag_values(self._get_use_case_id(), self.org_id, strings)
 
     def build_query_builder(
@@ -369,7 +427,6 @@ class BaseMetricsEntitySubscription(BaseEntitySubscription, ABC):
         params: ParamsType | None = None,
         skip_field_validation_for_entity_subscription_deletion: bool = False,
     ) -> BaseQueryBuilder:
-
         if params is None:
             params = {}
 
@@ -389,11 +446,9 @@ class BaseMetricsEntitySubscription(BaseEntitySubscription, ABC):
             time_range_window=self.time_window,
             config=QueryBuilderConfig(
                 skip_time_conditions=True,
-                use_metrics_layer=self.use_metrics_layer,
                 on_demand_metrics_enabled=self.on_demand_metrics_enabled,
                 on_demand_metrics_type=MetricSpecType.SIMPLE_QUERY,
                 skip_field_validation_for_entity_subscription_deletion=skip_field_validation_for_entity_subscription_deletion,
-                insights_metrics_override_metric_layer=True,
             ),
         )
 
@@ -479,17 +534,13 @@ class BaseCrashRateMetricsEntitySubscription(BaseMetricsEntitySubscription):
         return aggregated_results
 
     def get_snql_extra_conditions(self) -> list[Condition]:
-        # If we don't use the metrics layer we need to filter by metric here. The metrics layer does this automatically.
-        if not self.use_metrics_layer:
-            return [
-                Condition(
-                    Column("metric_id"),
-                    Op.EQ,
-                    resolve(UseCaseID.SESSIONS, self.org_id, self.metric_key.value),
-                )
-            ]
-
-        return []
+        return [
+            Condition(
+                Column("metric_id"),
+                Op.EQ,
+                resolve(UseCaseID.SESSIONS, self.org_id, self.metric_key.value),
+            )
+        ]
 
 
 class MetricsCountersEntitySubscription(BaseCrashRateMetricsEntitySubscription):
@@ -618,6 +669,7 @@ def get_entity_subscription_from_snuba_query(
         extra_fields={
             "org_id": organization_id,
             "event_types": snuba_query.event_types,
+            "extrapolation_mode": ExtrapolationMode(snuba_query.extrapolation_mode),
         },
     )
 
@@ -630,10 +682,7 @@ def get_entity_key_from_snuba_query(
 ) -> EntityKey:
     query_dataset = Dataset(snuba_query.dataset)
     if query_dataset == Dataset.EventsAnalyticsPlatform:
-        use_eap_items = options.get("alerts.spans.use-eap-items")
-        if use_eap_items:
-            return EntityKey.EAPItems
-        return EntityKey.EAPItemsSpan
+        return EntityKey.EAPItems
     entity_subscription = get_entity_subscription_from_snuba_query(
         snuba_query,
         organization_id,

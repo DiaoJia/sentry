@@ -9,8 +9,9 @@ from tempfile import TemporaryDirectory
 from typing import IO, ClassVar, Self
 from urllib.parse import urlunsplit
 
-import sentry_sdk
 from django.db import models, router
+from django.db.models.functions import Now
+from django.utils import timezone
 
 from sentry.backup.scopes import RelocationScope
 from sentry.db.models import (
@@ -18,7 +19,7 @@ from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.db.models.manager.base import BaseManager
@@ -28,6 +29,7 @@ from sentry.models.release import Release
 from sentry.utils import json
 from sentry.utils.db import atomic_transaction
 from sentry.utils.hashlib import sha1_text
+from sentry.utils.tracing import trace
 from sentry.utils.urls import urlsplit_best_effort
 from sentry.utils.zip import safe_extract_zip
 
@@ -54,7 +56,7 @@ class PublicReleaseFileManager(models.Manager["ReleaseFile"]):
         return super().get_queryset().select_related("file").filter(file__type="release.file")
 
 
-@region_silo_model
+@cell_silo_model
 class ReleaseFile(Model):
     r"""
     A ReleaseFile is an association between a Release and a File.
@@ -73,6 +75,8 @@ class ReleaseFile(Model):
     ident = models.CharField(max_length=40)
     name = models.TextField()
     dist_id = BoundedBigIntegerField(null=True, db_index=True)
+
+    date_accessed = models.DateTimeField(default=timezone.now, db_default=Now())
 
     #: For classic file uploads, this field is 1.
     #: For release archives, this field is 0.
@@ -111,6 +115,7 @@ class ReleaseFile(Model):
                     0
                 ]
             kwargs["ident"] = self.ident = type(self).get_ident(kwargs["name"], dist_name)
+            kwargs["date_accessed"] = timezone.now()
         return super().update(*args, **kwargs)
 
     @classmethod
@@ -331,7 +336,7 @@ class _ArtifactIndexGuard:
         )
 
 
-@sentry_sdk.tracing.trace
+@trace
 def read_artifact_index(release: Release, dist: Distribution | None, **filter_args) -> dict | None:
     """Get index data"""
     guard = _ArtifactIndexGuard(release, dist, **filter_args)
@@ -343,7 +348,7 @@ def _compute_sha1(archive: ReleaseArchive, url: str) -> str:
     return sha1(data).hexdigest()
 
 
-@sentry_sdk.tracing.trace
+@trace
 def update_artifact_index(
     release: Release,
     dist: Distribution | None,
@@ -388,7 +393,7 @@ def update_artifact_index(
     return releasefile
 
 
-@sentry_sdk.tracing.trace
+@trace
 def delete_from_artifact_index(release: Release, dist: Distribution | None, url: str) -> bool:
     """Delete the file with the given url from the manifest.
 

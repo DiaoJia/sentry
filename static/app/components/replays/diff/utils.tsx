@@ -1,11 +1,11 @@
 import type {ReactNode} from 'react';
 import styled from '@emotion/styled';
 
-import {Flex} from 'sentry/components/core/layout';
-import QuestionTooltip from 'sentry/components/questionTooltip';
-import ReplayTooltipTime from 'sentry/components/replays/replayTooltipTime';
+import {InfoTip} from '@sentry/scraps/info';
+import {Flex} from '@sentry/scraps/layout';
+
+import {ReplayTooltipTime} from 'sentry/components/replays/replayTooltipTime';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 interface BeforeAfterProps {
   offset: number;
@@ -23,7 +23,7 @@ function ReplayDiffTooltip({
   startTimestampMs: number;
 }) {
   return (
-    <QuestionTooltip
+    <InfoTip
       size="xs"
       title={
         <LeftAligned>
@@ -42,7 +42,7 @@ function ReplayDiffTooltip({
 
 export function Before({children, offset, startTimestampMs}: BeforeAfterProps) {
   return (
-    <Flex gap={space(0.5)} align="center">
+    <Flex gap="xs" align="center">
       {t('Server')}
       <ReplayDiffTooltip offset={offset} startTimestampMs={startTimestampMs}>
         {t('The server-rendered page')}
@@ -54,7 +54,7 @@ export function Before({children, offset, startTimestampMs}: BeforeAfterProps) {
 
 export function After({children, offset, startTimestampMs}: BeforeAfterProps) {
   return (
-    <Flex gap={space(0.5)} align="center">
+    <Flex gap="xs" align="center">
       {t('Client')}
       <ReplayDiffTooltip offset={offset} startTimestampMs={startTimestampMs}>
         {t('After React re-rendered the page, and reported a hydration error')}
@@ -67,6 +67,6 @@ export function After({children, offset, startTimestampMs}: BeforeAfterProps) {
 const LeftAligned = styled('div')`
   text-align: left;
   display: flex;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   flex-direction: column;
 `;

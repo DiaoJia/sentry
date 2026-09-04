@@ -1,32 +1,33 @@
 import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 
-import {removeSentryApp} from 'sentry/actionCreators/sentryApps';
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import ExternalLink from 'sentry/components/links/externalLink';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {Flex} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+
+import {removeSentryApp, sentryAppsApiOptions} from 'sentry/actionCreators/sentryApps';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {SentryApp} from 'sentry/types/integrations';
 import {
   platformEventLinkMap,
   PlatformEvents,
 } from 'sentry/utils/analytics/integrations/platformAnalyticsEvents';
 import {trackIntegrationAnalytics} from 'sentry/utils/integrationUtil';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import SentryApplicationRow from 'sentry/views/settings/organizationDeveloperSettings/sentryApplicationRow';
-import CreateIntegrationButton from 'sentry/views/settings/organizationIntegrations/createIntegrationButton';
-import ExampleIntegrationButton from 'sentry/views/settings/organizationIntegrations/exampleIntegrationButton';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {SentryApplicationRow} from 'sentry/views/settings/organizationDeveloperSettings/sentryApplicationRow';
+import {CreateIntegrationButton} from 'sentry/views/settings/organizationIntegrations/createIntegrationButton';
+import {ExampleIntegrationButton} from 'sentry/views/settings/organizationIntegrations/exampleIntegrationButton';
 
 type Tab = 'public' | 'internal';
 
@@ -54,9 +55,7 @@ function OrganizationDeveloperSettings() {
     isPending,
     isError,
     refetch,
-  } = useApiQuery<SentryApp[]>([`/organizations/${organization.slug}/sentry-apps/`], {
-    staleTime: 0,
-  });
+  } = useQuery(sentryAppsApiOptions({orgSlug: organization.slug}));
 
   if (isPending) {
     return <LoadingIndicator />;
@@ -140,12 +139,19 @@ function OrganizationDeveloperSettings() {
     }
   };
 
+  const inlineActions = (
+    <Flex gap="md">
+      <ExampleIntegrationButton analyticsView={analyticsView} size="md" />
+      <CreateIntegrationButton analyticsView={analyticsView} size="md" />
+    </Flex>
+  );
+
   return (
     <div>
       <SentryDocumentTitle title={t('Custom Integrations')} orgSlug={organization.slug} />
       <SettingsPageHeader
         title={t('Custom Integrations')}
-        body={
+        subtitle={
           <Fragment>
             {t(
               'Create integrations that interact with Sentry using the REST API and webhooks. '
@@ -166,24 +172,18 @@ function OrganizationDeveloperSettings() {
             })}
           </Fragment>
         }
-        action={
-          <ActionContainer>
-            <ExampleIntegrationButton
-              analyticsView={analyticsView}
-              style={{marginRight: space(1)}}
-            />
-            <CreateIntegrationButton analyticsView={analyticsView} />
-          </ActionContainer>
-        }
       />
       <TabsContainer>
-        <Tabs value={tab} onChange={setTab}>
-          <TabList>
-            {Object.entries(TAB_LABELS).map(([key, label]) => (
-              <TabList.Item key={key}>{label}</TabList.Item>
-            ))}
-          </TabList>
-        </Tabs>
+        <Flex align="center" justify="between" gap="md">
+          <Tabs value={tab} onChange={setTab}>
+            <TabList>
+              {Object.entries(TAB_LABELS).map(([key, label]) => (
+                <TabList.Item key={key}>{label}</TabList.Item>
+              ))}
+            </TabList>
+          </Tabs>
+          {inlineActions}
+        </Flex>
       </TabsContainer>
       {renderTabContent()}
     </div>
@@ -191,11 +191,7 @@ function OrganizationDeveloperSettings() {
 }
 
 const TabsContainer = styled('div')`
-  margin-bottom: ${space(2)};
-`;
-
-const ActionContainer = styled('div')`
-  display: flex;
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 export default OrganizationDeveloperSettings;

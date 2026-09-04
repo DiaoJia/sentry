@@ -2,50 +2,81 @@ import {useMemo} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {InfoText} from '@sentry/scraps/info';
+import {Container as ScrapsContainer} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import type {MenuItemProps} from 'sentry/components/dropdownMenu';
 import ProjectBadge from 'sentry/components/idBadge/projectBadge';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import TimeSince from 'sentry/components/timeSince';
-import {space} from 'sentry/styles/space';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {TimeSince} from 'sentry/components/timeSince';
+import {t, tct} from 'sentry/locale';
 import type {Project} from 'sentry/types/project';
+import {defined} from 'sentry/utils/defined';
 import type {TableDataRow} from 'sentry/utils/discover/discoverQuery';
 import type {EventData, MetaType} from 'sentry/utils/discover/eventView';
-import EventView from 'sentry/utils/discover/eventView';
-import {getFieldRenderer, nullableValue} from 'sentry/utils/discover/fieldRenderers';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {
+  getFieldRenderer,
+  nullableValue,
+  renderUrlCellValue,
+} from 'sentry/utils/discover/fieldRenderers';
 import {Container} from 'sentry/utils/discover/styles';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
 import {getShortEventId} from 'sentry/utils/events';
-import {generateProfileFlamechartRouteWithQuery} from 'sentry/utils/profiling/routes';
-import {isUrl} from 'sentry/utils/string/isUrl';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjects from 'sentry/utils/useProjects';
-import CellAction, {updateQuery} from 'sentry/views/discover/table/cellAction';
-import type {TableColumn} from 'sentry/views/discover/table/types';
-import {ALLOWED_CELL_ACTIONS} from 'sentry/views/explore/components/table';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 import {
-  useExploreQuery,
-  useSetExploreQuery,
-} from 'sentry/views/explore/contexts/pageParamsContext';
+  type Actions,
+  CellAction,
+  updateQuery,
+} from 'sentry/views/discover/table/cellAction';
+import type {TableColumn} from 'sentry/views/discover/table/types';
+import {ALLOWED_CELL_ACTIONS} from 'sentry/views/explore/components/cellActions';
 import {
   useReadQueriesFromLocation,
   useUpdateQueryAtIndex,
 } from 'sentry/views/explore/multiQueryMode/locationUtils';
+import {
+  useQueryParamsQuery,
+  useSetQueryParamsQuery,
+} from 'sentry/views/explore/queryParams/context';
+import {
+  getSimilarEventsUrl,
+  isPartialSpanOrTraceData,
+} from 'sentry/views/explore/tables/tracesTable/utils';
+import {SpanFields} from 'sentry/views/insights/types';
 import {TraceViewSources} from 'sentry/views/performance/newTraceDetails/traceHeader/breadcrumbs';
 import {getTraceDetailsUrl} from 'sentry/views/performance/traceDetails/utils';
 
 interface FieldProps {
-  column: TableColumn<keyof TableDataRow>;
   data: EventData;
   meta: MetaType;
+  allowActions?: Actions[];
+  column?: TableColumn<keyof TableDataRow>;
+  disableTraceLinks?: boolean;
+  extraMenuItems?: MenuItemProps[];
   unit?: string;
+  usePortalOnDropdown?: boolean;
 }
 
-export function FieldRenderer({data, meta, unit, column}: FieldProps) {
-  const userQuery = useExploreQuery();
-  const setUserQuery = useSetExploreQuery();
+export function FieldRenderer({
+  data,
+  meta,
+  unit,
+  column,
+  allowActions,
+  disableTraceLinks,
+  extraMenuItems,
+  usePortalOnDropdown,
+}: FieldProps) {
+  const userQuery = useQueryParamsQuery();
+  const setUserQuery = useSetQueryParamsQuery();
 
   return (
     <BaseExploreFieldRenderer
@@ -53,8 +84,12 @@ export function FieldRenderer({data, meta, unit, column}: FieldProps) {
       meta={meta}
       unit={unit}
       column={column}
+      allowActions={allowActions}
+      disableTraceLinks={disableTraceLinks}
+      extraMenuItems={extraMenuItems}
       userQuery={userQuery}
       setUserQuery={setUserQuery}
+      usePortalOnDropdown={usePortalOnDropdown}
     />
   );
 }
@@ -69,6 +104,7 @@ export function MultiQueryFieldRenderer({
   unit,
   column,
   index,
+  extraMenuItems,
 }: MultiQueryFieldProps) {
   const queries = useReadQueriesFromLocation();
   const userQuery = queries[index]?.query ?? '';
@@ -80,6 +116,7 @@ export function MultiQueryFieldRenderer({
       meta={meta}
       unit={unit}
       column={column}
+      extraMenuItems={extraMenuItems}
       userQuery={userQuery}
       setUserQuery={(query: string) => updateQuerySearch({query})}
     />
@@ -96,77 +133,175 @@ function BaseExploreFieldRenderer({
   meta,
   unit,
   column,
+  allowActions,
+  disableTraceLinks,
+  extraMenuItems,
   userQuery,
   setUserQuery,
+  usePortalOnDropdown,
 }: BaseFieldProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const organization = useOrganization();
   const theme = useTheme();
+  const {selection} = usePageFilters();
   const dateSelection = EventView.fromLocation(location).normalizeDateSelection(location);
   const query = new MutableSearch(userQuery);
-  const field = column.name;
   const {projects} = useProjects();
   const projectsMap = useMemo(() => {
-    return projects.reduce(
-      (acc, project) => {
-        acc[project.slug] = project;
-        return acc;
-      },
-      {} as Record<string, Project>
-    );
+    return projects.reduce<Record<string, Project>>((acc, project) => {
+      acc[project.slug] = project;
+      return acc;
+    }, {});
   }, [projects]);
+
+  const project = projectsMap[data.project];
+
+  if (!defined(column)) {
+    return nullableValue(null);
+  }
+
+  const field = String(column.key);
 
   const renderer = getExploreFieldRenderer(field, meta, projectsMap);
 
   let rendered = renderer(data, {
     location,
+    navigate,
     organization,
     theme,
     unit,
+    projects,
   });
 
   if (field === 'timestamp') {
     const date = new Date(data.timestamp);
-    rendered = <StyledTimeSince unitStyle="extraShort" date={date} tooltipShowSeconds />;
+    rendered = <StyledTimeSince unitStyle="short" date={date} tooltipShowSeconds />;
   }
 
-  if (field === 'trace') {
-    const target = getTraceDetailsUrl({
-      traceSlug: data.trace,
-      timestamp: data.timestamp,
-      organization,
-      dateSelection,
-      location,
-      source: TraceViewSources.TRACES,
-    });
+  if (field === 'trace' && !disableTraceLinks) {
+    if (isPartialSpanOrTraceData(data.timestamp)) {
+      const queryString = new MutableSearch('');
 
-    rendered = <Link to={target}>{rendered}</Link>;
+      if (data?.['span.name']) {
+        queryString.addFilterValue('span.name', data['span.name']);
+      }
+
+      if (data?.['span.description']) {
+        queryString.addFilterValue('span.description', data['span.description']);
+      }
+      rendered = (
+        <ScrapsContainer maxWidth="fit-content">
+          <InfoText
+            title={
+              <Text>
+                {tct(
+                  'Trace is older than 30 days. [similarTraces] in the past 24 hours.',
+                  {
+                    similarTraces: (
+                      <Link
+                        to={getSimilarEventsUrl({
+                          queryString: queryString.formatString(),
+                          table: 'trace',
+                          organization,
+                          projectIds: defined(project?.id)
+                            ? [parseInt(project.id, 10)]
+                            : selection.projects,
+                          selection,
+                        })}
+                      >
+                        {t('View similar traces')}
+                      </Link>
+                    ),
+                  }
+                )}
+              </Text>
+            }
+            variant="muted"
+          >
+            {rendered}
+          </InfoText>
+        </ScrapsContainer>
+      );
+    } else {
+      const target = getTraceDetailsUrl({
+        traceSlug: data.trace,
+        timestamp: data.timestamp,
+        organization,
+        dateSelection,
+        location,
+        source: TraceViewSources.TRACES,
+      });
+
+      rendered = <Link to={target}>{rendered}</Link>;
+    }
   }
 
-  if (['id', 'span_id', 'transaction.id'].includes(field)) {
+  if (!disableTraceLinks && ['id', 'span_id', 'transaction.id'].includes(field)) {
     const spanId = field === 'transaction.id' ? undefined : (data.span_id ?? data.id);
-    const target = generateLinkToEventInTraceView({
-      projectSlug: data.project,
-      traceSlug: data.trace,
-      timestamp: data.timestamp,
-      targetId: data['transaction.span_id'],
-      eventId: undefined,
-      organization,
-      location,
-      spanId,
-      source: TraceViewSources.TRACES,
-    });
 
-    rendered = <Link to={target}>{rendered}</Link>;
+    if (isPartialSpanOrTraceData(data.timestamp)) {
+      const queryString = new MutableSearch('');
+
+      if (field === 'transaction.id') {
+        queryString.addFilterValue('is_transaction', 'true');
+      }
+
+      if (data?.['span.name']) {
+        queryString.addFilterValue('span.name', data['span.name']);
+      }
+
+      if (data?.['span.description']) {
+        queryString.addFilterValue('span.description', data['span.description']);
+      }
+
+      rendered = (
+        <ScrapsContainer maxWidth="fit-content">
+          <InfoText
+            title={
+              <Text>
+                {tct('Span is older than 30 days. [similarSpans] in the past 24 hours.', {
+                  similarSpans: (
+                    <Link
+                      to={getSimilarEventsUrl({
+                        queryString: queryString.formatString(),
+                        organization,
+                        projectIds: defined(project?.id)
+                          ? [parseInt(project.id, 10)]
+                          : selection.projects,
+                        selection,
+                      })}
+                    >
+                      {t('View similar spans')}
+                    </Link>
+                  ),
+                })}
+              </Text>
+            }
+            variant="muted"
+          >
+            {rendered}
+          </InfoText>
+        </ScrapsContainer>
+      );
+    } else {
+      const target = generateLinkToEventInTraceView({
+        traceSlug: data.trace,
+        timestamp: data.timestamp,
+        targetId: data['transaction.span_id'],
+        eventId: undefined,
+        organization,
+        location,
+        spanId,
+        source: TraceViewSources.TRACES,
+      });
+
+      rendered = <Link to={target}>{rendered}</Link>;
+    }
   }
 
-  if (field === 'profile.id') {
-    const target = generateProfileFlamechartRouteWithQuery({
-      organization,
-      projectSlug: data.project,
-      profileId: data['profile.id'],
-    });
-    rendered = <Link to={target}>{rendered}</Link>;
+  if (field === 'id') {
+    return rendered;
   }
 
   return (
@@ -177,7 +312,9 @@ function BaseExploreFieldRenderer({
         updateQuery(query, actions, column, value);
         setUserQuery(query.formatString());
       }}
-      allowActions={ALLOWED_CELL_ACTIONS}
+      allowActions={allowActions ?? ALLOWED_CELL_ACTIONS}
+      extraMenuItems={extraMenuItems}
+      usePortalOnDropdown={usePortalOnDropdown}
     >
       {rendered}
     </CellAction>
@@ -192,8 +329,8 @@ function getExploreFieldRenderer(
   if (field === 'id' || field === 'span_id') {
     return eventIdRenderFunc(field);
   }
-  if (field === 'span.description') {
-    return spanDescriptionRenderFunc(projects);
+  if (field === SpanFields.NAME) {
+    return spanDescriptionRenderFunc(SpanFields.NAME, projects);
   }
   return getFieldRenderer(field, meta, false);
 }
@@ -210,11 +347,11 @@ function eventIdRenderFunc(field: string) {
   return renderer;
 }
 
-function spanDescriptionRenderFunc(projects: Record<string, Project>) {
+function spanDescriptionRenderFunc(field: string, projects: Record<string, Project>) {
   function renderer(data: EventData) {
     const project = projects[data.project];
 
-    const value = data['span.description'];
+    const value = data[field];
 
     return (
       <span>
@@ -231,15 +368,10 @@ function spanDescriptionRenderFunc(projects: Record<string, Project>) {
                 avatarSize={16}
                 avatarProps={{hasTooltip: true, tooltip: project.slug}}
                 hideName
+                disableLink
               />
             )}
-            <WrappingText>
-              {isUrl(value) ? (
-                <ExternalLink href={value}>{value}</ExternalLink>
-              ) : (
-                nullableValue(value)
-              )}
-            </WrappingText>
+            <WrappingText>{renderUrlCellValue(value)}</WrappingText>
           </Description>
         </Tooltip>
       </span>
@@ -253,14 +385,20 @@ const StyledTimeSince = styled(TimeSince)`
 `;
 
 const Description = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
 const WrappingText = styled('div')`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   width: auto;
 `;

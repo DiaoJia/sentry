@@ -1,4 +1,4 @@
-import type Fuse from 'fuse.js';
+import type {RangeTuple} from 'fuse.js/basic';
 import {mat3, vec2} from 'gl-matrix';
 
 import {
@@ -6,22 +6,17 @@ import {
   computeHighlightedBounds,
   createProgram,
   createShader,
-  ELLIPSIS,
   getCenterScaleMatrixFromConfigPosition,
   getContext,
   lowerBound,
   makeProjectionMatrix,
   upperBound,
 } from 'sentry/utils/profiling/gl/utils';
-import {
-  findRangeBinarySearch,
-  Rect,
-  trimTextCenter,
-} from 'sentry/utils/profiling/speedscope';
+import {findRangeBinarySearch, Rect} from 'sentry/utils/profiling/speedscope';
 
 describe('makeProjectionMatrix', () => {
   it('should return a projection matrix', () => {
-    // prettier-ignore
+    // oxfmt-ignore
     expect(makeProjectionMatrix(1024, 768)).toEqual(
       mat3.fromValues(2 / 1024, 0, 0, -0, -2 / 768, -0, -1, 1, 1)
     );
@@ -56,7 +51,7 @@ describe('upperBound', () => {
     [[-3, -2, -1], -2, 1],
     [[1, 2, 3], 10, 3],
     [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5, 4],
-  ])(`inserts %p`, (args, target, insert) => {
+  ])('inserts %p', (args, target, insert) => {
     expect(
       upperBound(
         target,
@@ -66,7 +61,9 @@ describe('upperBound', () => {
   });
 
   it('finds the upper bound frame outside of view', () => {
-    const frames = new Array(10).fill(1).map((_, i) => ({start: i, end: i + 1}));
+    const frames = Array.from({length: 10})
+      .fill(1)
+      .map((_, i) => ({start: i, end: i + 1}));
     const view = new Rect(4, 0, 2, 0);
 
     expect(upperBound(view.right, frames)).toBe(6);
@@ -82,7 +79,7 @@ describe('lowerBound', () => {
     [[-3, -2, -1], -1, 1],
     [[1, 2, 3], 10, 3],
     [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5, 3],
-  ])(`inserts %p`, (args, target, insert) => {
+  ])('inserts %p', (args, target, insert) => {
     expect(
       lowerBound(
         target,
@@ -92,7 +89,9 @@ describe('lowerBound', () => {
   });
 
   it('finds the lower bound frame outside of view', () => {
-    const frames = new Array(10).fill(1).map((_, i) => ({start: i, end: i + 1}));
+    const frames = Array.from({length: 10})
+      .fill(1)
+      .map((_, i) => ({start: i, end: i + 1}));
     const view = new Rect(4, 0, 2, 0);
 
     expect(lowerBound(view.left, frames)).toBe(3);
@@ -176,7 +175,7 @@ describe('createShader', () => {
   it('successfully compiles', () => {
     const shader: WebGLShader = {};
     const type = 0;
-    const shaderSource = `vec4(1.0, 0.0, 0.0, 1.0)`;
+    const shaderSource = 'vec4(1.0, 0.0, 0.0, 1.0)';
 
     const ctx: Partial<WebGLRenderingContext> = {
       createShader: jest.fn().mockImplementation(() => shader),
@@ -197,7 +196,7 @@ describe('createShader', () => {
   it('deletes shader if compilation fails', () => {
     const shader: WebGLShader = {};
     const type = 0;
-    const shaderSource = `vec4(1.0, 0.0, 0.0, 1.0)`;
+    const shaderSource = 'vec4(1.0, 0.0, 0.0, 1.0)';
 
     const ctx: Partial<WebGLRenderingContext> = {
       createShader: jest.fn().mockImplementation(() => shader),
@@ -217,8 +216,8 @@ describe('createShader', () => {
 
 describe('Rect', () => {
   it('initializes an empty rect as 0 width and height rect at 0,0 origin', () => {
-    expect(Rect.Empty()).toEqual(new Rect(0, 0, 0, 0));
-    expect(Rect.Empty().isEmpty()).toBe(true);
+    expect(Rect.empty()).toEqual(new Rect(0, 0, 0, 0));
+    expect(Rect.empty().isEmpty()).toBe(true);
   });
 
   it('clones rect', () => {
@@ -320,7 +319,7 @@ describe('Rect', () => {
 
   describe('transforms', () => {
     it('transformRect', () => {
-      // prettier-ignore
+      // oxfmt-ignore
       // Scale (10,20),translate by (3, 4)
       const matrix = mat3.fromValues(10, 0, 0, 0, 20, 0, 3, 4, 0);
       expect(new Rect(1, 1, 1, 1).transformRect(matrix)).toEqual(
@@ -364,7 +363,7 @@ describe('Rect', () => {
 
 describe('findRangeBinarySearch', () => {
   it('finds in single iteration', () => {
-    const text = new Array(10)
+    const text = Array.from({length: 10})
       .fill(0)
       .map((_, i) => String.fromCharCode(i + 97))
       .join('');
@@ -374,10 +373,9 @@ describe('findRangeBinarySearch', () => {
     });
 
     const target = 2;
-    const precision = 1;
 
     // First iteration will halve 1+3, next iteration will compare 2-1 <= 1 and return [1,2]
-    const [low, high] = findRangeBinarySearch({low: 1, high: 3}, fn, target, precision);
+    const [low, high] = findRangeBinarySearch({low: 1, high: 3}, fn, target);
 
     expect([low, high]).toEqual([1, 2]);
     expect(fn).toHaveBeenCalledTimes(1);
@@ -385,7 +383,7 @@ describe('findRangeBinarySearch', () => {
   });
 
   it('finds closest range', () => {
-    const text = new Array(10)
+    const text = Array.from({length: 10})
       .fill(0)
       .map((_, i) => String.fromCharCode(i + 97))
       .join('');
@@ -395,40 +393,12 @@ describe('findRangeBinarySearch', () => {
     });
 
     const target = 4;
-    const precision = 1;
 
-    const [low, high] = findRangeBinarySearch({low: 0, high: 10}, fn, target, precision);
+    const [low, high] = findRangeBinarySearch({low: 0, high: 10}, fn, target);
 
     expect([low, high]).toEqual([3.75, 4.375]);
     expect(fn).toHaveBeenCalledTimes(4);
     expect(text.substring(0, low)).toBe('abc');
-  });
-});
-
-describe('trimTextCenter', () => {
-  it('trims nothing if low > length', () => {
-    expect(trimTextCenter('abc', 4)).toMatchObject({
-      end: 0,
-      length: 0,
-      start: 0,
-      text: 'abc',
-    });
-  });
-  it('trims center perfectly', () => {
-    expect(trimTextCenter('abcdef', 5.5)).toMatchObject({
-      end: 4,
-      length: 2,
-      start: 2,
-      text: `ab${ELLIPSIS}ef`,
-    });
-  });
-  it('favors prefix length', () => {
-    expect(trimTextCenter('abcdef', 5)).toMatchObject({
-      end: 5,
-      length: 3,
-      start: 2,
-      text: `ab${ELLIPSIS}f`,
-    });
   });
 });
 
@@ -525,8 +495,8 @@ describe('computeHighlightedBounds', () => {
     },
   ];
 
-  it.each(testTable)(`$name`, ({args, expected}) => {
-    const value = computeHighlightedBounds(args.bounds as Fuse.RangeTuple, args.trim);
+  it.each(testTable)('$name', ({args, expected}) => {
+    const value = computeHighlightedBounds(args.bounds as RangeTuple, args.trim);
     expect(value).toEqual(expected);
   });
 });
@@ -611,8 +581,8 @@ describe('computeConfigViewWithStrategy', () => {
     ).toBe(true);
   });
 
-  describe('getCenterScaleMatrixFromConfigPosition', function () {
-    it('returns a matrix that represents scaling on both x and y axes', function () {
+  describe('getCenterScaleMatrixFromConfigPosition', () => {
+    it('returns a matrix that represents scaling on both x and y axes', () => {
       const actual = getCenterScaleMatrixFromConfigPosition(
         vec2.fromValues(2, 2),
         vec2.fromValues(0, 0)
@@ -620,19 +590,19 @@ describe('computeConfigViewWithStrategy', () => {
 
       // Scales by 2 along the x and y axis
       expect(actual).toEqual(
-        // prettier-ignore
+        // oxfmt-ignore
         mat3.fromValues(2, 0, 0, 0, 2, 0, 0, 0, 1)
       );
     });
 
-    it('returns a matrix that scales and translates back so the scaling appears to zoom into the point', function () {
+    it('returns a matrix that scales and translates back so the scaling appears to zoom into the point', () => {
       const actual = getCenterScaleMatrixFromConfigPosition(
         vec2.fromValues(2, 2),
         vec2.fromValues(5, 5)
       );
 
       expect(actual).toEqual(
-        // prettier-ignore
+        // oxfmt-ignore
         mat3.fromValues(2, 0, 0, 0, 2, 0, -5, -5, 1)
       );
     });

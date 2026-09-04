@@ -1,11 +1,12 @@
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {openModal} from 'sentry/actionCreators/modal';
+import {useModal} from '@sentry/scraps/modal';
+
 import {SavedEntityTable} from 'sentry/components/savedEntityTable';
 import {t} from 'sentry/locale';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useUser} from 'sentry/utils/useUser';
 import {CreateIssueViewModal} from 'sentry/views/issueList/issueViews/createIssueViewModal';
 import {RenameIssueViewModal} from 'sentry/views/issueList/issueViews/renameIssueViewModal';
@@ -14,10 +15,10 @@ import {
   confirmDeleteIssueView,
 } from 'sentry/views/issueList/issueViews/utils';
 import {
-  type GroupSearchView,
   GroupSearchViewCreatedBy,
+  type GroupSearchView,
 } from 'sentry/views/issueList/types';
-import {useHasIssueViews} from 'sentry/views/nav/secondary/sections/issues/issueViews/useHasIssueViews';
+import {useHasIssueViews} from 'sentry/views/navigation/secondary/sections/issues/issueViews/useHasIssueViews';
 
 type IssueViewsTableProps = {
   handleDeleteView: (view: GroupSearchView) => void;
@@ -40,6 +41,8 @@ export function IssueViewsTable({
   type,
   hideCreatedBy = false,
 }: IssueViewsTableProps) {
+  const {openModal} = useModal();
+
   const organization = useOrganization();
   const user = useUser();
   const hasIssueViews = useHasIssueViews();
@@ -51,7 +54,7 @@ export function IssueViewsTable({
       header={
         <SavedEntityTable.Header>
           <SavedEntityTable.HeaderCell data-column="star" />
-          <SavedEntityTable.HeaderCell data-column="name">
+          <SavedEntityTable.HeaderCell data-column="name" divider={false}>
             {t('Name')}
           </SavedEntityTable.HeaderCell>
           <SavedEntityTable.HeaderCell data-column="project">
@@ -74,7 +77,7 @@ export function IssueViewsTable({
           <SavedEntityTable.HeaderCell data-column="created">
             {t('Created')}
           </SavedEntityTable.HeaderCell>
-          <SavedEntityTable.HeaderCell data-column="stars" noBorder>
+          <SavedEntityTable.HeaderCell data-column="stars">
             {t('Stars')}
           </SavedEntityTable.HeaderCell>
           <SavedEntityTable.HeaderCell data-column="actions" />
@@ -210,7 +213,7 @@ const SavedEntityTableWithColumns = styled(SavedEntityTable)<{hideCreatedBy?: bo
   grid-template-areas: 'star name project envs query creator last-visited created stars actions';
   grid-template-columns:
     40px 20% minmax(auto, 120px) minmax(auto, 120px) minmax(0, 1fr)
-    auto auto auto auto 48px;
+    auto auto auto minmax(80px, max-content) 48px;
 
   ${p =>
     p.hideCreatedBy &&
@@ -218,38 +221,38 @@ const SavedEntityTableWithColumns = styled(SavedEntityTable)<{hideCreatedBy?: bo
       grid-template-areas: 'star name project envs query last-visited created stars actions';
       grid-template-columns:
         40px 20% minmax(auto, 120px) minmax(auto, 120px) minmax(0, 1fr)
-        auto auto 48px;
+        auto auto minmax(80px, max-content) 48px;
     `}
 
-  @container (max-width: ${p => p.theme.breakpoints.medium}) {
+  @container (max-width: ${p => p.theme.container['3xl']}) {
     grid-template-areas: 'star name project query creator actions';
     grid-template-columns: 40px 20% minmax(auto, 120px) minmax(0, 1fr) auto 48px;
 
     ${p =>
       p.hideCreatedBy &&
       css`
-        grid-template-areas: 'star name project query creator actions';
+        grid-template-areas: 'star name project query actions';
         grid-template-columns: 40px 20% minmax(auto, 120px) minmax(0, 1fr) 48px;
       `}
 
-    div[data-column='envs'],
-    div[data-column='last-visited'],
-    div[data-column='created'],
-    div[data-column='stars'] {
+    [data-column='envs'],
+    [data-column='last-visited'],
+    [data-column='created'],
+    [data-column='stars'] {
       display: none;
     }
   }
 
-  @container (max-width: ${p => p.theme.breakpoints.small}) {
+  @container (max-width: ${p => p.theme.container.xl}) {
     grid-template-areas: 'star name query actions';
     grid-template-columns: 40px 30% minmax(0, 1fr) 48px;
 
-    div[data-column='envs'],
-    div[data-column='last-visited'],
-    div[data-column='created'],
-    div[data-column='stars'],
-    div[data-column='creator'],
-    div[data-column='project'] {
+    [data-column='envs'],
+    [data-column='last-visited'],
+    [data-column='created'],
+    [data-column='stars'],
+    [data-column='creator'],
+    [data-column='project'] {
       display: none;
     }
   }

@@ -1,31 +1,39 @@
-import {useCallback} from 'react';
+import {useQueryClient, useMutation} from '@tanstack/react-query';
 
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {
+  starredSavedQueriesApiOptions,
   type SavedQuery,
-  useInvalidateSavedQueries,
 } from 'sentry/views/explore/hooks/useGetSavedQueries';
 
 export function useReorderStarredSavedQueries() {
   const organization = useOrganization();
-  const api = useApi();
-  const invalidateSavedQueries = useInvalidateSavedQueries();
-  const reorderStarredSavedQueries = useCallback(
-    async (queries: SavedQuery[]) => {
-      await api.requestPromise(
-        `/organizations/${organization.slug}/explore/saved/starred/order/`,
-        {
-          method: 'PUT',
-          data: {
-            query_ids: queries.map(query => query.id),
-          },
-        }
-      );
-      invalidateSavedQueries();
-    },
-    [api, organization.slug, invalidateSavedQueries]
-  );
+  const queryClient = useQueryClient();
+  const {queryKey} = starredSavedQueriesApiOptions(organization);
 
-  return reorderStarredSavedQueries;
+  const {mutate} = useMutation({
+    mutationFn: (queries: SavedQuery[]) =>
+      fetchMutation({
+        url: getApiUrl(
+          '/organizations/$organizationIdOrSlug/explore/saved/starred/order/',
+          {path: {organizationIdOrSlug: organization.slug}}
+        ),
+        method: 'PUT',
+        data: {
+          query_ids: queries.map(query => query.id),
+        },
+      }),
+    onMutate: (queries: SavedQuery[]) => {
+      queryClient.setQueryData(queryKey, prevData =>
+        prevData ? {...prevData, json: queries} : prevData
+      );
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({queryKey});
+    },
+  });
+
+  return mutate;
 }

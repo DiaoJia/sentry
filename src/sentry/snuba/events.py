@@ -63,6 +63,14 @@ class Columns(Enum):
         issue_platform_name="occurrence_id",
         alias="occurrence_id",
     )
+    OCCURRENCE_TYPE_ID = Column(
+        group_name=None,
+        event_name=None,
+        transaction_name=None,
+        discover_name=None,
+        issue_platform_name="occurrence_type_id",
+        alias="occurrence_type_id",
+    )
     PROJECT_ID = Column(
         group_name="events.project_id",
         event_name="project_id",
@@ -149,6 +157,14 @@ class Columns(Enum):
         discover_name="title",
         issue_platform_name="search_title",
         alias="title",
+    )
+    SUBTITLE = Column(
+        group_name=None,
+        event_name=None,
+        transaction_name=None,
+        discover_name=None,
+        issue_platform_name="subtitle",
+        alias="subtitle",
     )
     TYPE = Column(
         group_name="events.type",
@@ -764,14 +780,26 @@ class Columns(Enum):
         alias="profile.id",
     )
 
-    # For continuous profiles
+    # For continuous profiles. Promoted to a real column on transactions; errors and
+    # issue platform events read it from the contexts map instead.
     PROFILER_ID = Column(
         group_name=None,
-        event_name=None,
+        event_name="contexts[profile.profiler_id]",
         transaction_name="profiler_id",
         discover_name="profiler_id",
-        issue_platform_name=None,  # TODO: This doesn't exist yet
+        issue_platform_name="contexts[profile.profiler_id]",
         alias="profiler.id",
+    )
+    # Identity-mapped so the raw contexts expression above can be used directly as a
+    # snuba condition column (e.g. from `_profiler_id_filter_converter`) without being
+    # mistaken for an unregistered tag.
+    PROFILER_ID_CONTEXT = Column(
+        group_name=None,
+        event_name="contexts[profile.profiler_id]",
+        transaction_name=None,
+        discover_name="contexts[profile.profiler_id]",
+        issue_platform_name="contexts[profile.profiler_id]",
+        alias="contexts[profile.profiler_id]",
     )
     THREAD_ID = Column(
         group_name=None,
@@ -860,6 +888,15 @@ class Columns(Enum):
         event_name="timestamp_ms",
         transaction_name=None,
         discover_name="timestamp_ms",
-        issue_platform_name=None,
+        issue_platform_name="timestamp_ms",
         alias="timestamp_ms",
+    )
+
+    GROUP_FIRST_SEEN = Column(
+        group_name="events.group_first_seen",
+        event_name="group_first_seen",
+        transaction_name=None,
+        discover_name=None,
+        issue_platform_name="group_first_seen",
+        alias="group_first_seen",
     )

@@ -10,6 +10,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.db import DataError, connections, router
 from django.utils import timezone as django_timezone
 
+from sentry.exceptions import InvalidSearchQuery
 from sentry.models.environment import Environment
 from sentry.models.group import STATUS_QUERY_CHOICES, Group
 from sentry.models.organizationmember import OrganizationMember
@@ -25,13 +26,19 @@ from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.serial import serialize_rpc_user
 from sentry.users.services.user.service import user_service
 from sentry.utils.eventuser import KEYWORD_MAP, EventUser
+from sentry.utils.validators import (
+    INVALID_ID_DETAILS,
+    INVALID_SPAN_ID,
+)
+from sentry.utils.validators import is_event_id_or_list as _is_event_id_or_list
+from sentry.utils.validators import is_span_id_or_list as _is_span_id_or_list
 
 
 class InvalidQuery(Exception):
     pass
 
 
-def get_user_tag(projects: Sequence[Project], key: str, value: str) -> str:
+def get_user_tag(projects: Sequence[Project], key: str, value: str) -> str | None:
     # TODO(dcramer): do something with case of multiple matches
     try:
         euser = EventUser.for_projects(projects, {key: [value]}, result_limit=1)[0]
@@ -217,7 +224,7 @@ def parse_iso_timestamp(value: str) -> datetime:
 
     # Values with no timezone info will default to UTC
     if not date.tzinfo:
-        date.replace(tzinfo=timezone.utc)
+        date = date.replace(tzinfo=timezone.utc)
 
     # Convert to UTC
     return datetime.fromtimestamp(date.timestamp(), tz=timezone.utc)
@@ -310,6 +317,8 @@ def parse_team_value(projects: Sequence[Project], value: Sequence[str]) -> Team:
 
 
 def get_teams_for_users(projects: Sequence[Project], users: Sequence[User]) -> list[Team]:
+    if not projects:
+        return []
     user_ids = [u.id for u in users if u is not None]
     teams = Team.objects.filter(
         id__in=OrganizationMemberTeam.objects.filter(
@@ -435,45 +444,57 @@ def _run_latest_release_query(
     if not project_ids:
         return []
 
-    env_join = ""
-    env_where = ""
+    extra_join_conditions = ""
     extra_conditions = ""
     if environments:
-        env_join = "INNER JOIN sentry_releaseprojectenvironment srpe on srpe.release_id = sr.id"
-        env_where = "AND srpe.environment_id in %s AND srpe.project_id in %s"
-        adopted_table_alias = "srpe"
+        extra_join_conditions = "AND jt.environment_id IN %s"
+        join_table = "sentry_releaseprojectenvironment"
     else:
-        adopted_table_alias = "srp"
+        join_table = "sentry_release_project"
 
     if adopted:
-        extra_conditions += f" AND {adopted_table_alias}.adopted IS NOT NULL AND {adopted_table_alias}.unadopted IS NULL "
+        extra_conditions += " AND jt.adopted IS NOT NULL AND jt.unadopted IS NULL "
 
     rank_order_by, query_type_conditions = _get_release_query_type_sql(query_type, True)
     extra_conditions += query_type_conditions
 
+    # XXX: This query can be very inefficient for projects with a large (100k+)
+    # number of releases. To work around this, we only check 1000 releases
+    # ordered by highest release id, which is generally correlated with
+    # most recent releases for a project. This isn't guaranteed to be correct,
+    # since `date_released` could end up out of order, or we might be using semver.
+    # However, this should be close enough the majority of the time. If a project has
+    # > 400 newer releases that were more recently associated with the "true" most recent
+    # release then likely something is off.
+    # We might be able to remove this kind of hackery once we add retention to the release
+    # and related tables.
     query = f"""
         SELECT DISTINCT version
         FROM (
             SELECT sr.version, rank() OVER (
-                PARTITION BY srp.project_id
+                PARTITION BY jt.project_id
                 ORDER BY {rank_order_by}
             ) AS rank
             FROM "sentry_release" sr
-            INNER JOIN "sentry_release_project" srp ON sr.id = srp.release_id
-            {env_join}
+            INNER JOIN (
+                SELECT release_id, project_id, adopted, unadopted
+                FROM {join_table} jt
+                WHERE jt.project_id IN %s
+                {extra_join_conditions}
+                ORDER BY release_id desc
+                LIMIT 1000
+            ) jt on sr.id = jt.release_id
             WHERE sr.organization_id = %s
             AND sr.status = {ReleaseStatus.OPEN}
-            AND srp.project_id IN %s
             {extra_conditions}
-            {env_where}
         ) sr
         WHERE rank = 1
     """
     cursor = connections[router.db_for_read(Release, replica=True)].cursor()
-    query_args: list[int | tuple[int, ...]] = [organization_id, tuple(project_ids)]
+    query_args: list[int | tuple[int, ...]] = [tuple(project_ids)]
     if environments:
         query_args.append(tuple(e.id for e in environments))
-        query_args.append(tuple(project_ids))
+    query_args.append(organization_id)
     cursor.execute(query, query_args)
     return [row[0] for row in cursor.fetchall()]
 
@@ -819,7 +840,7 @@ def convert_user_tag_to_query(key: str, value: str) -> str | None:
     Converts a user tag to a query string that can be used to search for that
     user. Returns None if not a user tag.
     """
-    if key == "user" and ":" in value:
+    if key == "user" and value is not None and ":" in value:
         sub_key, value = value.split(":", 1)
         if KEYWORD_MAP.get_key(sub_key, None):
             return 'user.{}:"{}"'.format(sub_key, value.replace('"', '\\"'))
@@ -851,3 +872,17 @@ def validate_snuba_array_parameter(parameter: Sequence[str]) -> bool:
     # 10000 loops, best of 5: 42.6 usec per loop
     converted_length = sum(len(item) for item in parameter) + (4 * len(parameter))
     return converted_length <= MAX_PARAMETERS_IN_ARRAY
+
+
+def validate_span_id(value: str | list[str]) -> bool:
+    result = _is_span_id_or_list(value)
+    if not result:
+        raise InvalidSearchQuery(INVALID_SPAN_ID.format(value))
+    return True
+
+
+def validate_event_id(value: str | list[str]) -> bool:
+    result = _is_event_id_or_list(value)
+    if not result:
+        raise InvalidSearchQuery(INVALID_ID_DETAILS.format(value))
+    return True

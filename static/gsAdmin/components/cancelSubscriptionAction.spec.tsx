@@ -4,10 +4,10 @@ import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
 import {renderGlobalModal, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
 import {openAdminConfirmModal} from 'admin/components/adminConfirmationModal';
-import CancelSubscriptionAction from 'admin/components/cancelSubscriptionAction';
+import {CancelSubscriptionAction} from 'admin/components/cancelSubscriptionAction';
 
-describe('Cancel Subscription', function () {
-  it('cancels immediately', async function () {
+describe('Cancel Subscription', () => {
+  it('cancels immediately', async () => {
     const onConfirm = jest.fn();
     const organization = OrganizationFixture();
     const subscription = SubscriptionFixture({organization});
@@ -30,7 +30,7 @@ describe('Cancel Subscription', function () {
     });
   });
 
-  it('shows contract period if set', function () {
+  it('shows contract period if set', () => {
     const organization = OrganizationFixture();
     const subscription = SubscriptionFixture({
       organization,
@@ -38,8 +38,7 @@ describe('Cancel Subscription', function () {
       isFree: false,
       canCancel: true,
       canSelfServe: true,
-      billingPeriodEnd: '2022-09-08',
-      contractPeriodEnd: '2023-09-08',
+      billingPeriodEnd: '2023-09-08',
     });
     openAdminConfirmModal({
       renderModalSpecificContent: deps => (

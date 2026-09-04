@@ -1,15 +1,16 @@
 import styled from '@emotion/styled';
 import omit from 'lodash/omit';
 
-import type {Item} from 'sentry/components/dropdownAutoComplete/types';
-import type SelectorItems from 'sentry/components/timeRangeSelector/selectorItems';
+import {Flex} from '@sentry/scraps/layout';
+
+import type {SelectorItems} from 'sentry/components/timeRangeSelector/selectorItems';
+import type {TimeRangeItem} from 'sentry/components/timeRangeSelector/types';
 import {DEFAULT_RELATIVE_PERIODS, MAX_PICKABLE_DAYS} from 'sentry/constants';
 import {IconBusiness} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 import UpsellProvider from 'getsentry/components/upsellProvider';
-import withSubscription from 'getsentry/components/withSubscription';
+import {withSubscription} from 'getsentry/components/withSubscription';
 import type {Subscription} from 'getsentry/types';
 
 const PREMIUM_PERIODS = ['90d'];
@@ -37,7 +38,7 @@ function DisabledSelectorItems({
   const relativePeriods = relativePeriodsProp ?? DEFAULT_RELATIVE_PERIODS;
 
   const hasPremiumPeriods = PREMIUM_PERIODS.some(period =>
-    relativePeriods.hasOwnProperty(period)
+    Object.hasOwn(relativePeriods, period)
   );
   const shouldOmitPremiumPeriods = !hasFeature && hasPremiumPeriods;
   const omittedRelativePeriods = shouldOmitPremiumPeriods
@@ -45,31 +46,28 @@ function DisabledSelectorItems({
     : relativePeriods;
   const omittedRelativeArr = Object.entries(omittedRelativePeriods);
 
-  const items = (onClick: () => void, canTrial: boolean): Item[] => [
+  const items = (onSelect: () => void, canTrial: boolean): TimeRangeItem[] => [
     ...(shouldShowRelative
-      ? omittedRelativeArr.map(([value, itemLabel], index) => ({
-          index,
+      ? omittedRelativeArr.map(([value, itemLabel]) => ({
           value,
-          searchKey: typeof itemLabel === 'string' ? itemLabel : String(value),
+          textValue: typeof itemLabel === 'string' ? itemLabel : String(value),
           label: <SelectorItemLabel>{itemLabel}</SelectorItemLabel>,
-          'data-test-id': value,
         }))
       : []),
     ...(shouldOmitPremiumPeriods
       ? [
           {
-            index: omittedRelativeArr.length,
             value: '90d-trial',
-            searchKey:
+            textValue:
               typeof relativePeriods['90d'] === 'string'
                 ? relativePeriods['90d']
                 : '90d-trial',
             label: (
               <SelectorItemLabel>
-                <UpsellLabelWrap>
+                <Flex align="center">
                   {relativePeriods['90d']}
-                  <StyledIconBusiness gradient data-test-id="power-icon" />
-                </UpsellLabelWrap>
+                  <StyledIconBusiness data-test-id="power-icon" />
+                </Flex>
 
                 <UpsellMessage>
                   {canTrial
@@ -78,19 +76,16 @@ function DisabledSelectorItems({
                 </UpsellMessage>
               </SelectorItemLabel>
             ),
-            'data-test-id': '90d',
-            onClick,
+            onSelect,
           },
         ]
       : []),
     ...(shouldShowAbsolute
       ? [
           {
-            index: omittedRelativeArr.length + 1,
             value: 'absolute',
-            searchKey: 'absolute',
+            textValue: 'absolute',
             label: <SelectorItemLabel>{t('Absolute date')}</SelectorItemLabel>,
-            'data-test-id': 'absolute',
           },
         ]
       : []),
@@ -110,26 +105,21 @@ function DisabledSelectorItems({
 }
 
 const SelectorItemLabel = styled('div')`
-  margin-left: ${space(0.5)};
-  margin-top: ${space(0.25)};
-  margin-bottom: ${space(0.25)};
-`;
-
-const UpsellLabelWrap = styled('div')`
-  display: flex;
-  align-items: center;
+  margin-left: ${p => p.theme.space.xs};
+  margin-top: ${p => p.theme.space['2xs']};
+  margin-bottom: ${p => p.theme.space['2xs']};
 `;
 
 const UpsellMessage = styled('p')`
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
   margin-bottom: 0;
 `;
 
 const StyledIconBusiness = styled(IconBusiness)`
   display: grid;
   align-items: center;
-  margin-left: ${space(0.5)};
+  margin-left: ${p => p.theme.space.xs};
 `;
 
 export default withSubscription(DisabledSelectorItems, {noLoader: true});

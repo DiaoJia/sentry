@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 from uuid import uuid1
 
+import pytest
 from django.db.utils import IntegrityError
 from django.utils import timezone
 
@@ -18,12 +19,13 @@ from sentry.models.artifactbundle import (
 from sentry.models.debugfile import ProguardArtifactRelease, ProjectDebugFile
 from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.objectstore import UsecaseId, get_session
 from sentry.testutils.cases import TestCase
+from sentry.testutils.skips import requires_objectstore
 
 
 class SyncArtifactBundlesTest(TestCase):
-
-    def setUp(self):
+    def setUp(self) -> None:
         self.source_org = self.create_organization(slug="source_org")
         self.target_org = self.create_organization(slug="target_org")
         self.unrelated_org = self.create_organization(slug="unrelated_org")
@@ -41,7 +43,7 @@ class SyncArtifactBundlesTest(TestCase):
         organization: Organization,
         project: Project,
         date_uploaded: datetime | None = None,
-    ):
+    ) -> tuple[ArtifactBundle, ProjectArtifactBundle, ReleaseArtifactBundle]:
         date_uploaded = date_uploaded or timezone.now()
         artifact_bundle = self.create_artifact_bundle(org=organization, date_uploaded=date_uploaded)
         project_artifact_bundle = ProjectArtifactBundle.objects.create(
@@ -64,7 +66,7 @@ class SyncArtifactBundlesTest(TestCase):
         organization: Organization,
         project: Project,
         date_added: datetime | None = None,
-    ):
+    ) -> ProguardArtifactRelease:
         date_added = date_added or timezone.now()
         proguard_artifact_release = ProguardArtifactRelease.objects.create(
             organization_id=organization.id,
@@ -76,11 +78,10 @@ class SyncArtifactBundlesTest(TestCase):
         )
         return proguard_artifact_release
 
-    def last_three_days(self):
+    def last_three_days(self) -> datetime:
         return timezone.now() - timedelta(days=3)
 
-    def test_sync_artifact_bundles_no_bundles(self):
-
+    def test_sync_artifact_bundles_no_bundles(self) -> None:
         _sync_artifact_bundles(
             source_org=self.source_org,
             target_org=self.target_org,
@@ -89,7 +90,7 @@ class SyncArtifactBundlesTest(TestCase):
 
         assert not ArtifactBundle.objects.all().exists()
 
-    def test_sync_artifact_bundles_with_differences(self):
+    def test_sync_artifact_bundles_with_differences(self) -> None:
         (source_artifact_bundle, _, __) = self.set_up_artifact_bundle(
             self.source_org, self.source_proj_foo
         )
@@ -106,7 +107,7 @@ class SyncArtifactBundlesTest(TestCase):
 
         assert target_artifact_bundles.bundle_id == source_artifact_bundle.bundle_id
 
-    def test_sync_artifact_bundles_does_not_touch_other_orgs(self):
+    def test_sync_artifact_bundles_does_not_touch_other_orgs(self) -> None:
         self.set_up_artifact_bundle(self.source_org, self.source_proj_foo)
         self.set_up_artifact_bundle(self.unrelated_org, self.unrelated_proj_foo)
 
@@ -122,7 +123,7 @@ class SyncArtifactBundlesTest(TestCase):
 
         assert unrelated_artifact_bundles.count() == 1
 
-    def test_sync_artifact_bundles_with_old_uploads(self):
+    def test_sync_artifact_bundles_with_old_uploads(self) -> None:
         self.set_up_artifact_bundle(
             self.source_org, self.source_proj_foo, date_uploaded=timezone.now() - timedelta(days=2)
         )
@@ -137,7 +138,7 @@ class SyncArtifactBundlesTest(TestCase):
 
         assert not ArtifactBundle.objects.filter(organization_id=self.target_org.id).exists()
 
-    def test_sync_artifact_bundles_only_once(self):
+    def test_sync_artifact_bundles_only_once(self) -> None:
         (source_artifact_bundle, _, __) = self.set_up_artifact_bundle(
             self.source_org, self.source_proj_foo
         )
@@ -163,7 +164,7 @@ class SyncArtifactBundlesTest(TestCase):
         assert target_artifact_bundles.count() == 1
         assert target_artifact_bundles[0].bundle_id == source_artifact_bundle.bundle_id
 
-    def test_sync_artifact_bundles_with_empty_org_does_not_fail(self):
+    def test_sync_artifact_bundles_with_empty_org_does_not_fail(self) -> None:
         self.set_up_artifact_bundle(self.source_org, self.source_proj_foo)
 
         _sync_artifact_bundles(
@@ -172,7 +173,7 @@ class SyncArtifactBundlesTest(TestCase):
             cutoff_date=self.last_three_days(),
         )
 
-    def test_sync_project_artifact_bundles(self):
+    def test_sync_project_artifact_bundles(self) -> None:
         self.set_up_artifact_bundle(self.source_org, self.source_proj_foo)
 
         _sync_artifact_bundles(
@@ -189,7 +190,7 @@ class SyncArtifactBundlesTest(TestCase):
         assert target_project_artifact_bundle.project_id == self.target_proj_foo.id
         assert target_project_artifact_bundle.organization_id == self.target_org.id
 
-    def test_sync_release_artifact_bundles(self):
+    def test_sync_release_artifact_bundles(self) -> None:
         (_, __, source_release_bundle) = self.set_up_artifact_bundle(
             self.source_org, self.source_proj_foo
         )
@@ -209,7 +210,7 @@ class SyncArtifactBundlesTest(TestCase):
         assert target_release_bundle.organization_id == self.target_org.id
 
     @mock.patch("sentry.demo_mode.tasks._sync_release_artifact_bundle", side_effect=IntegrityError)
-    def test_sync_artifact_bundles_rolls_back_on_error(self, _):
+    def test_sync_artifact_bundles_rolls_back_on_error(self, _: mock.MagicMock) -> None:
         self.set_up_artifact_bundle(self.source_org, self.source_proj_foo)
 
         _sync_artifact_bundles(
@@ -222,7 +223,7 @@ class SyncArtifactBundlesTest(TestCase):
         assert not ProjectArtifactBundle.objects.filter(organization_id=self.target_org.id).exists()
         assert not ReleaseArtifactBundle.objects.filter(organization_id=self.target_org.id).exists()
 
-    def test_sync_project_debug_files(self):
+    def test_sync_project_debug_files(self) -> None:
         source_project_debug_file = self.create_dif_file(self.source_proj_foo)
 
         assert not ProjectDebugFile.objects.filter(
@@ -245,7 +246,90 @@ class SyncArtifactBundlesTest(TestCase):
         assert target_project_debug_file.code_id == source_project_debug_file.code_id
         assert target_project_debug_file.cpu_name == source_project_debug_file.cpu_name
 
-    def test_sync_project_debug_files_with_old_uploads(self):
+    @requires_objectstore
+    def test_sync_objectstore_project_debug_files(self) -> None:
+        content = b"objectstore-backed-debug-file"
+        content_type = "application/x-mach-binary"
+        date_created = timezone.now()
+        source_storage_path = get_session(UsecaseId.DEBUG_FILES, self.source_proj_foo).put(
+            content, compress="none", content_type=content_type
+        )
+        source_project_debug_file = ProjectDebugFile.objects.create(
+            project_id=self.source_proj_foo.id,
+            file=None,
+            storage_path=source_storage_path,
+            content_type=content_type,
+            file_size=len(content),
+            date_created=date_created,
+            checksum="a" * 40,
+            object_name="test.dSYM",
+            cpu_name="x86_64",
+            debug_id="67e9247c-814e-392b-a027-dbde6748fcbf",
+            code_id="code-id",
+            data={"features": ["debug"]},
+        )
+
+        _sync_project_debug_files(
+            source_org=self.source_org,
+            target_org=self.target_org,
+            cutoff_date=self.last_three_days(),
+        )
+
+        target_project_debug_file = ProjectDebugFile.objects.get(
+            project_id=self.target_proj_foo.id,
+            debug_id=source_project_debug_file.debug_id,
+        )
+
+        assert target_project_debug_file.file_id is None
+        assert target_project_debug_file.storage_path is not None
+        assert target_project_debug_file.storage_path != source_project_debug_file.storage_path
+        assert target_project_debug_file.content_type == content_type
+        assert target_project_debug_file.file_size == len(content)
+        assert target_project_debug_file.date_created == date_created
+        assert target_project_debug_file.get_file().read() == content
+        target_metadata = get_session(UsecaseId.DEBUG_FILES, self.target_proj_foo).head(
+            target_project_debug_file.storage_path
+        )
+        assert target_metadata is not None
+        assert target_metadata.compression == "zstd"
+
+        target_project_debug_file.delete()
+        source_project_debug_file.refresh_from_db()
+        assert source_project_debug_file.get_file().read() == content
+
+        with pytest.raises(ProjectDebugFile.DoesNotExist):
+            target_project_debug_file.refresh_from_db()
+
+    @requires_objectstore
+    def test_sync_dual_written_project_debug_files(self) -> None:
+        source_project_debug_file = self.create_dif_file(self.source_proj_foo)
+        source_storage_path = get_session(UsecaseId.DEBUG_FILES, self.source_proj_foo).put(
+            b"objectstore-backed-debug-file", compress="none"
+        )
+        source_project_debug_file.update(
+            storage_path=source_storage_path,
+            content_type=source_project_debug_file.file.headers["Content-Type"],
+            file_size=source_project_debug_file.file.size,
+            date_created=source_project_debug_file.file.timestamp,
+        )
+        source_project_debug_file.refresh_from_db()
+
+        _sync_project_debug_files(
+            source_org=self.source_org,
+            target_org=self.target_org,
+            cutoff_date=self.last_three_days(),
+        )
+
+        target_project_debug_file = ProjectDebugFile.objects.get(
+            project_id=self.target_proj_foo.id,
+            debug_id=source_project_debug_file.debug_id,
+        )
+
+        assert target_project_debug_file.file_id == source_project_debug_file.file_id
+        assert target_project_debug_file.storage_path is not None
+        assert target_project_debug_file.storage_path != source_storage_path
+
+    def test_sync_project_debug_files_with_old_uploads(self) -> None:
         source_project_debug_file = self.create_dif_file(
             self.source_proj_foo,
             date_accessed=timezone.now() - timedelta(days=2),
@@ -267,7 +351,7 @@ class SyncArtifactBundlesTest(TestCase):
             debug_id=source_project_debug_file.debug_id,
         ).exists()
 
-    def test_sync_project_debug_files_with_empty_org_does_not_fail(self):
+    def test_sync_project_debug_files_with_empty_org_does_not_fail(self) -> None:
         self.create_dif_file(self.source_proj_foo)
 
         _sync_project_debug_files(
@@ -276,7 +360,7 @@ class SyncArtifactBundlesTest(TestCase):
             cutoff_date=self.last_three_days(),
         )
 
-    def test_sync_proguard_artifact_releases(self):
+    def test_sync_proguard_artifact_releases(self) -> None:
         source_proguard_artifact_release = self.set_up_proguard_artifact_release(
             self.source_org,
             self.source_proj_foo,
@@ -308,7 +392,7 @@ class SyncArtifactBundlesTest(TestCase):
         )
         assert target_proguard_artifact_release.project_id == self.target_proj_foo.id
 
-    def test_sync_proguard_artifact_releases_with_old_uploads(self):
+    def test_sync_proguard_artifact_releases_with_old_uploads(self) -> None:
         source_proguard_artifact_release = self.set_up_proguard_artifact_release(
             self.source_org,
             self.source_proj_foo,
@@ -331,7 +415,7 @@ class SyncArtifactBundlesTest(TestCase):
             proguard_uuid=source_proguard_artifact_release.proguard_uuid,
         ).exists()
 
-    def test_sync_proguard_artifact_releases_with_empty_org_does_not_fail(self):
+    def test_sync_proguard_artifact_releases_with_empty_org_does_not_fail(self) -> None:
         self.set_up_proguard_artifact_release(self.source_org, self.source_proj_foo)
 
         _sync_proguard_artifact_releases(

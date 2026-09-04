@@ -8,17 +8,15 @@ interface LoadingIndicatorProps {
    * @deprecated Use `size` instead.
    */
   mini?: boolean;
-  overlay?: boolean;
   relative?: boolean;
   size?: number;
   style?: React.CSSProperties;
 }
 
-function LoadingIndicator(props: LoadingIndicatorProps) {
+export function LoadingIndicator(props: LoadingIndicatorProps) {
   return (
     <div
       className={classNames('loading', props.className, {
-        overlay: props.overlay,
         mini: props.mini,
       })}
       style={props.style}
@@ -53,5 +51,3 @@ function getLoadingIndicatorBorderWidth(size: number | undefined): number | unde
 
   return 2 + ((size - 24) / 40) * (6 - 2);
 }
-
-export default LoadingIndicator;

@@ -32,11 +32,6 @@ export function UserDetailsFixture(params: Partial<User> = {}): User {
       avatarType: 'gravatar',
       theme: 'light',
       prefersIssueDetailsStreamlinedUI: false,
-      prefersNextjsInsightsOverview: false,
-      prefersAgentsInsightsModule: false,
-      prefersStackedNavigation: false,
-      prefersChonkUI: false,
-      quickStartDisplay: {},
     },
     avatar: {avatarUuid: null, avatarType: 'letter_avatar'},
     lastLogin: '2018-01-25T19:57:46.973Z',
@@ -45,6 +40,7 @@ export function UserDetailsFixture(params: Partial<User> = {}): User {
     canReset2fa: false,
     flags: {newsletter_consent_prompt: false},
     hasPasswordAuth: false,
+    isSuspended: false,
     ...params,
   };
 }

@@ -22,7 +22,7 @@ from sentry.shared_integrations.response.base import BaseApiResponse
 
 class ApiClientTest(TestCase):
     @responses.activate
-    def test_get(self):
+    def test_get(self) -> None:
         responses.add(responses.GET, "http://example.com", json={})
 
         resp = ApiClient().get("http://example.com")
@@ -30,7 +30,7 @@ class ApiClientTest(TestCase):
         assert resp.status_code == 200
 
     @responses.activate
-    def test_post(self):
+    def test_post(self) -> None:
         responses.add(responses.POST, "http://example.com", json={})
 
         resp = ApiClient().post("http://example.com")
@@ -38,7 +38,7 @@ class ApiClientTest(TestCase):
         assert resp.status_code == 200
 
     @responses.activate
-    def test_delete(self):
+    def test_delete(self) -> None:
         responses.add(responses.DELETE, "http://example.com", json={})
 
         resp = ApiClient().delete("http://example.com")
@@ -46,7 +46,7 @@ class ApiClientTest(TestCase):
         assert resp.status_code == 200
 
     @responses.activate
-    def test_put(self):
+    def test_put(self) -> None:
         responses.add(responses.PUT, "http://example.com", json={})
 
         resp = ApiClient().put("http://example.com")
@@ -54,7 +54,7 @@ class ApiClientTest(TestCase):
         assert resp.status_code == 200
 
     @responses.activate
-    def test_patch(self):
+    def test_patch(self) -> None:
         responses.add(responses.PATCH, "http://example.com", json={})
 
         resp = ApiClient().patch("http://example.com")
@@ -63,7 +63,7 @@ class ApiClientTest(TestCase):
 
     @mock.patch("sentry.shared_integrations.client.base.cache")
     @responses.activate
-    def test_cache_mocked(self, cache):
+    def test_cache_mocked(self, cache: mock.MagicMock) -> None:
         cache.get.return_value = None
         responses.add(responses.GET, "http://example.com", json={"key": "value1"})
         resp = ApiClient().get_cached("http://example.com")
@@ -74,7 +74,7 @@ class ApiClientTest(TestCase):
         cache.set.assert_called_with(key, {"key": "value1"}, 900)
 
     @responses.activate
-    def test_get_cached_basic(self):
+    def test_get_cached_basic(self) -> None:
         responses.add(responses.GET, "http://example.com", json={"key": "value1"})
 
         resp = ApiClient().get_cached("http://example.com")
@@ -93,7 +93,7 @@ class ApiClientTest(TestCase):
         assert len(responses.calls) == 2
 
     @responses.activate
-    def test_get_cached_query_param(self):
+    def test_get_cached_query_param(self) -> None:
         responses.add(responses.GET, "http://example.com?param=val", json={})
         responses.add(responses.GET, "http://example.com?param=different", json={})
 
@@ -107,7 +107,7 @@ class ApiClientTest(TestCase):
         assert len(responses.calls) == 2
 
     @responses.activate
-    def test_head_cached_query_param(self):
+    def test_head_cached_query_param(self) -> None:
         responses.add(responses.HEAD, "http://example.com?param=val", json={})
         responses.add(responses.HEAD, "http://example.com?param=different", json={})
 
@@ -121,7 +121,7 @@ class ApiClientTest(TestCase):
         assert len(responses.calls) == 2
 
     @responses.activate
-    def test_get_and_head_cached(self):
+    def test_get_and_head_cached(self) -> None:
         # Same URL, different HTTP method
         url = "http://example.com"
         responses.add(
@@ -156,7 +156,7 @@ class ApiClientTest(TestCase):
         assert len(responses.calls) == 2
 
     @responses.activate
-    def test_default_redirect_behaviour(self):
+    def test_default_redirect_behaviour(self) -> None:
         destination_url = "http://example.com/destination"
         destination_status = 202
         destination_headers = {"Location": destination_url}
@@ -194,7 +194,7 @@ class ApiClientTest(TestCase):
         assert isinstance(resp, BaseApiResponse)
         assert resp.status_code == destination_status
 
-    def test_connection_error_handling(self):
+    def test_connection_error_handling(self) -> None:
         """
         Test handling of `ConnectionError`s raised by the `requests` library. (It's worth specifying
         because we also handle built-in `ConnectionError`s (specifically, `ConnectionResetError`s`).)
@@ -212,7 +212,7 @@ class ApiClientTest(TestCase):
                     client.get("http://example.com")
                     assert track_response_data_spy.call_args.args[0] == "connection_error"
 
-    def test_timeout_handling(self):
+    def test_timeout_handling(self) -> None:
         """Test handling of `Timeout` errors"""
         client = ApiClient()
 
@@ -227,7 +227,7 @@ class ApiClientTest(TestCase):
                     client.get("http://example.com")
                     assert track_response_data_spy.call_args.args[0] == "timeout"
 
-    def test_http_error_handling_with_response(self):
+    def test_http_error_handling_with_response(self) -> None:
         """
         Test handling of `HTTPError`s raised by the `requests` library. (It's worth specifying
         because we also handle `HTTPError`s (specifically, `InvalidChunkLength` errors) from `urllib3`.)
@@ -247,7 +247,7 @@ class ApiClientTest(TestCase):
                     client.get("http://example.com")
                     assert track_response_data_spy.call_args.args[0] == 500
 
-    def test_http_error_handling_without_response(self):
+    def test_http_error_handling_without_response(self) -> None:
         """
         Test handling of `HTTPError`s raised by the `requests` library. (It's worth specifying
         because we also handle `HTTPError`s (specifically, `InvalidChunkLength` errors) from `urllib3`.)
@@ -265,7 +265,7 @@ class ApiClientTest(TestCase):
                     client.get("http://example.com")
                     assert track_response_data_spy.call_args.args[0] == "unknown"
 
-    def test_chained_connection_reset_error_handling(self):
+    def test_chained_connection_reset_error_handling(self) -> None:
         """Test handling of errors caused by `ConnectionResetError` errors"""
         client = ApiClient()
 
@@ -286,7 +286,7 @@ class ApiClientTest(TestCase):
                     client.get("http://example.com")
                     assert track_response_data_spy.call_args.args[0] == "connection_reset_error"
 
-    def test_chained_invalid_chunk_length_error_handling(self):
+    def test_chained_invalid_chunk_length_error_handling(self) -> None:
         """Test handling of errors caused by `InvalidChunkLength` errors"""
         client = ApiClient()
         mock_error_response = HTTPResponse()
@@ -312,7 +312,7 @@ class ApiClientTest(TestCase):
                     )
 
     @responses.activate
-    def test_verify_ssl_handling(self):
+    def test_verify_ssl_handling(self) -> None:
         """
         Test handling of `verify_ssl` parameter when setting REQUESTS_CA_BUNDLE.
         """
@@ -337,7 +337,125 @@ class ApiClientTest(TestCase):
                 )
 
     @responses.activate
-    def test_parameters_passed_correctly(self):
+    def test_track_response_data_logs_github_request_id(self) -> None:
+        responses.add(
+            responses.GET,
+            "http://example.com",
+            json={},
+            headers={"X-GitHub-Request-Id": "abc-123"},
+        )
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            mock_logger.info.assert_called_once()
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert extra["github_request_id"] == "abc-123"
+
+    @responses.activate
+    def test_track_response_data_logs_organization_id_from_logging_context(self) -> None:
+        responses.add(responses.GET, "http://example.com", json={})
+
+        client = ApiClient(logging_context={"organization_id": 123})
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert extra["organization_id"] == "123"
+
+    @responses.activate
+    def test_track_response_data_logs_organization_id_from_org_id_logging_context(self) -> None:
+        responses.add(responses.GET, "http://example.com", json={})
+
+        client = ApiClient(logging_context={"org_id": 456})
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert extra["organization_id"] == "456"
+
+    @responses.activate
+    def test_track_response_data_logs_rate_limit_remaining(self) -> None:
+        responses.add(
+            responses.GET,
+            "http://example.com",
+            json={},
+            headers={"X-RateLimit-Remaining": "42"},
+        )
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert extra["rate_limit_remaining"] == "42"
+
+    @responses.activate
+    def test_track_response_data_logs_retry_after(self) -> None:
+        responses.add(
+            responses.GET,
+            "http://example.com",
+            json={},
+            status=429,
+            headers={"Retry-After": "60"},
+        )
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            with pytest.raises(ApiError):
+                client.get("http://example.com")
+            extra = mock_logger.warning.call_args.kwargs["extra"]
+            assert extra["retry_after"] == "60"
+
+    @responses.activate
+    def test_track_response_data_logs_all_response_headers(self) -> None:
+        responses.add(
+            responses.GET,
+            "http://example.com",
+            json={},
+            headers={
+                "X-GitHub-Request-Id": "req-456",
+                "X-RateLimit-Remaining": "10",
+                "Retry-After": "30",
+            },
+        )
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert extra["github_request_id"] == "req-456"
+            assert extra["rate_limit_remaining"] == "10"
+            assert extra["retry_after"] == "30"
+
+    @responses.activate
+    def test_track_response_data_omits_missing_headers(self) -> None:
+        responses.add(responses.GET, "http://example.com", json={})
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            client.get("http://example.com")
+            extra = mock_logger.info.call_args.kwargs["extra"]
+            assert "github_request_id" not in extra
+            assert "rate_limit_remaining" not in extra
+            assert "retry_after" not in extra
+
+    @responses.activate
+    def test_track_response_data_logs_headers_on_error_response(self) -> None:
+        responses.add(
+            responses.GET,
+            "http://example.com",
+            json={},
+            status=403,
+            headers={"X-GitHub-Request-Id": "err-789"},
+        )
+
+        client = ApiClient()
+        with mock.patch.object(client, "logger") as mock_logger:
+            with pytest.raises(ApiError):
+                client.get("http://example.com")
+            extra = mock_logger.warning.call_args.kwargs["extra"]
+            assert extra["github_request_id"] == "err-789"
+
+    @responses.activate
+    def test_parameters_passed_correctly(self) -> None:
         responses.add(responses.GET, "https://example.com", json={})
         client = ApiClient(verify_ssl=False)
         with mock.patch(

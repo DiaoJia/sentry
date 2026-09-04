@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import responses
 from requests import HTTPError
@@ -30,7 +30,7 @@ from sentry.utils.sentry_apps import SentryAppWebhookRequestsBuffer
 
 @control_silo_test
 class TestSentryAppAlertRuleActionRequester(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.user = self.create_user(name="foo")
@@ -60,9 +60,28 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
         self.success_message = "Created alert!"
 
     @responses.activate
-    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_successful_request(self, mock_record):
+    def test_sends_custom_headers(self) -> None:
+        self.install.sentry_app.update(webhook_headers=["Authorization: Bearer secret-token"])
 
+        responses.add(
+            method=responses.POST,
+            url="https://example.com/sentry/alert-rule",
+            status=200,
+        )
+
+        result = SentryAppAlertRuleActionRequester(
+            install=self.install,
+            uri="/sentry/alert-rule",
+            fields=self.fields,
+        ).run()
+
+        assert result["success"]
+        request = responses.calls[0].request
+        assert request.headers["Authorization"] == "Bearer secret-token"
+
+    @responses.activate
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_makes_successful_request(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -109,7 +128,7 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_successful_request_with_message(self, mock_record):
+    def test_makes_successful_request_with_message(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -138,7 +157,7 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_successful_request_with_malformed_message(self, mock_record):
+    def test_makes_successful_request_with_malformed_message(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -166,8 +185,7 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_failed_request(self, mock_record):
-
+    def test_makes_failed_request(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -232,7 +250,7 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_failed_request_with_message(self, mock_record):
+    def test_makes_failed_request_with_message(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -271,7 +289,7 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
     @responses.activate
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_failed_request_with_malformed_message(self, mock_record):
+    def test_makes_failed_request_with_malformed_message(self, mock_record: MagicMock) -> None:
         responses.add(
             method=responses.POST,
             url="https://example.com/sentry/alert-rule",
@@ -311,7 +329,9 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
     @responses.activate
     @patch("sentry.sentry_apps.external_requests.utils.safe_urlopen")
     @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
-    def test_makes_failed_request_with_sentry_error(self, mock_record, mock_urlopen):
+    def test_makes_failed_request_with_sentry_error(
+        self, mock_record: MagicMock, mock_urlopen: MagicMock
+    ) -> None:
         mock_urlopen.side_effect = Exception()
         responses.add(
             method=responses.POST,
@@ -347,4 +367,39 @@ class TestSentryAppAlertRuleActionRequester(TestCase):
 
         assert_many_failure_metrics(
             mock_record=mock_record, messages_or_errors=[Exception(), Exception()]
+        )
+
+    @responses.activate
+    @patch("sentry.sentry_apps.external_requests.utils.safe_urlopen")
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
+    def test_makes_failed_request_with_missing_url(
+        self, mock_record: MagicMock, mock_urlopen: MagicMock
+    ) -> None:
+        mock_urlopen.side_effect = Exception()
+        self.sentry_app.webhook_url = ""
+        self.sentry_app.save()
+
+        result = SentryAppAlertRuleActionRequester(
+            install=self.install,
+            uri="/sentry/alert-rule",
+            fields=self.fields,
+        ).run()
+
+        assert not result["success"]
+        assert result["message"] == "Sentry app webhook_url is not configured"
+        assert result["error_type"] == SentryAppErrorType.INTEGRATOR
+        assert result["webhook_context"] == {
+            "error_type": FAILURE_REASON_BASE.format(
+                SentryAppExternalRequestFailureReason.MISSING_URL
+            ),
+            "uri": "/sentry/alert-rule",
+            "installation_uuid": self.install.uuid,
+            "sentry_app_slug": self.sentry_app.slug,
+        }
+
+        assert_count_of_metric(
+            mock_record=mock_record, outcome=EventLifecycleOutcome.STARTED, outcome_count=1
+        )
+        assert_count_of_metric(
+            mock_record=mock_record, outcome=EventLifecycleOutcome.HALTED, outcome_count=1
         )

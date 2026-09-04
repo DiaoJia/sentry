@@ -1,30 +1,27 @@
 import type React from 'react';
-import {Fragment, type ReactNode, useCallback, useMemo, useState} from 'react';
+import {Fragment, useCallback, useMemo, useState, type ReactNode} from 'react';
+import {useMatches} from 'react-router-dom';
 import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
-import type {Location, LocationDescriptor, LocationDescriptorObject} from 'history';
+import type {Location, LocationDescriptor} from 'history';
 import groupBy from 'lodash/groupBy';
 
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import type {GridColumn} from 'sentry/components/gridEditable';
-import GridEditable, {COL_WIDTH_UNDEFINED} from 'sentry/components/gridEditable';
-import SortLink from 'sentry/components/gridEditable/sortLink';
-import Link from 'sentry/components/links/link';
-import Pagination from 'sentry/components/pagination';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {LinkButton} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {GridEditable} from 'sentry/components/tables/gridEditable';
 import {IconProfiling} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {IssueAttachment} from 'sentry/types/group';
-import type {RouteContextInterface} from 'sentry/types/legacyReactRouter';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import toArray from 'sentry/utils/array/toArray';
-import {browserHistory} from 'sentry/utils/browserHistory';
+import {toArray} from 'sentry/utils/array/toArray';
 import type {TableData, TableDataRow} from 'sentry/utils/discover/discoverQuery';
-import DiscoverQuery from 'sentry/utils/discover/discoverQuery';
-import type EventView from 'sentry/utils/discover/eventView';
-import {isFieldSortable} from 'sentry/utils/discover/eventView';
+import {DiscoverQuery} from 'sentry/utils/discover/discoverQuery';
+import type {EventView} from 'sentry/utils/discover/eventView';
 import {getFieldRenderer} from 'sentry/utils/discover/fieldRenderers';
 import {
   fieldAlignment,
@@ -32,18 +29,18 @@ import {
   isSpanOperationBreakdownField,
   SPAN_OP_RELATIVE_BREAKDOWN_FIELD,
 } from 'sentry/utils/discover/fields';
+import {getEventViewColumnSort} from 'sentry/utils/discover/getEventViewColumnSort';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
-import ViewReplayLink from 'sentry/utils/discover/viewReplayLink';
+import {ViewReplayLink} from 'sentry/utils/discover/viewReplayLink';
 import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
-import parseLinkHeader from 'sentry/utils/parseLinkHeader';
+import {parseLinkHeader} from 'sentry/utils/parseLinkHeader';
 import {VisuallyCompleteWithData} from 'sentry/utils/performanceForSentry';
-import useApi from 'sentry/utils/useApi';
-import CellAction, {Actions, updateQuery} from 'sentry/views/discover/table/cellAction';
+import {useApi} from 'sentry/utils/useApi';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {Actions, CellAction, updateQuery} from 'sentry/views/discover/table/cellAction';
 import type {TableColumn} from 'sentry/views/discover/table/types';
-import type {DomainViewFilters} from 'sentry/views/insights/pages/useFilters';
 import {COLUMN_TITLES} from 'sentry/views/performance/data';
 import {TraceViewSources} from 'sentry/views/performance/newTraceDetails/traceHeader/breadcrumbs';
-import Tab from 'sentry/views/performance/transactionSummary/tabs';
 import {
   generateProfileLink,
   generateReplayLink,
@@ -52,7 +49,7 @@ import {
 } from 'sentry/views/performance/transactionSummary/utils';
 
 import type {TitleProps} from './operationSort';
-import OperationSort from './operationSort';
+import {OperationSort} from './operationSort';
 
 function shouldRenderColumn(containsSpanOpsBreakdown: boolean, col: string): boolean {
   if (containsSpanOpsBreakdown && isSpanOperationBreakdownField(col)) {
@@ -79,7 +76,7 @@ function OperationTitle({onClick}: TitleProps) {
         size="xs"
         position="top"
         title={t(
-          `Span durations are summed over the course of an entire transaction. Any overlapping spans are only counted once.`
+          'Span durations are summed over the course of an entire transaction. Any overlapping spans are only counted once.'
         )}
       />
     </div>
@@ -90,18 +87,14 @@ type Props = {
   eventView: EventView;
   location: Location;
   organization: Organization;
-  routes: RouteContextInterface['routes'];
   setError: (msg: string | undefined) => void;
   theme: Theme;
   transactionName: string;
   applyEnvironmentFilter?: boolean;
   columnTitles?: string[];
   customColumns?: Array<'attachments' | 'minidump'>;
-  domainViewFilters?: DomainViewFilters;
   excludedTags?: string[];
   hidePagination?: boolean;
-  isEventLoading?: boolean;
-  isRegressionIssue?: boolean;
   issueId?: string;
   projectSlug?: string;
   referrer?: string;
@@ -113,34 +106,38 @@ type Props = {
   }) => ReactNode;
 };
 
-function EventsTable({
+const UNSORTABLE_FIELDS = new Set([
+  'id',
+  'trace',
+  'replayId',
+  SPAN_OP_RELATIVE_BREAKDOWN_FIELD,
+]);
+
+export function EventsTable({
   eventView,
   location,
   organization,
-  routes,
   setError,
   theme,
   transactionName,
   applyEnvironmentFilter,
   columnTitles: initialColumnTitles,
   customColumns,
-  domainViewFilters,
   excludedTags,
   hidePagination,
-  isEventLoading,
-  isRegressionIssue,
   issueId,
   projectSlug,
   referrer,
   renderTableHeader,
 }: Props) {
+  const matches = useMatches();
+  const navigate = useNavigate();
   const api = useApi({persistInFlight: true});
-  const [widths, setWidths] = useState<number[]>([]);
   const [lastFetchedCursor, setLastFetchedCursor] = useState('');
   const [attachments, setAttachments] = useState<IssueAttachment[]>([]);
   const [hasMinidumps, setHasMinidumps] = useState(false);
 
-  const replayLinkGenerator = useMemo(() => generateReplayLink(routes), [routes]);
+  const replayLinkGenerator = useMemo(() => generateReplayLink(matches), [matches]);
 
   const handleCellAction = useCallback(
     (column: TableColumn<keyof TableDataRow>) => {
@@ -171,7 +168,7 @@ function EventsTable({
             newEnvs = newEnvs.filter(env => env !== value);
           }
 
-          browserHistory.push({
+          navigate({
             pathname: location.pathname,
             query: {
               ...location.query,
@@ -182,7 +179,7 @@ function EventsTable({
           return;
         }
 
-        browserHistory.push({
+        navigate({
           pathname: location.pathname,
           query: {
             ...location.query,
@@ -192,7 +189,7 @@ function EventsTable({
         });
       };
     },
-    [organization, eventView, excludedTags, applyEnvironmentFilter, location]
+    [organization, eventView, excludedTags, applyEnvironmentFilter, location, navigate]
   );
 
   const renderBodyCell = useCallback(
@@ -201,7 +198,7 @@ function EventsTable({
       column: TableColumn<keyof TableDataRow>,
       dataRow: TableDataRow
     ): React.ReactNode => {
-      if (!tableData || !tableData.meta) {
+      if (!tableData?.meta) {
         return dataRow[column.key];
       }
       const tableMeta = tableData.meta;
@@ -210,6 +207,7 @@ function EventsTable({
       const rendered = fieldRenderer(dataRow, {
         organization,
         location,
+        navigate,
         eventView,
         theme,
         projectSlug,
@@ -220,6 +218,8 @@ function EventsTable({
         Actions.EXCLUDE,
         Actions.SHOW_GREATER_THAN,
         Actions.SHOW_LESS_THAN,
+        Actions.OPEN_EXTERNAL_LINK,
+        Actions.OPEN_INTERNAL_LINK,
       ];
 
       if (['attachments', 'minidump'].includes(field)) {
@@ -230,33 +230,22 @@ function EventsTable({
 
       if (field === 'id' || field === 'trace') {
         const isIssue = !!issueId;
-        let target: LocationDescriptor = {};
-        const locationWithTab = {
-          ...location,
-          query: {...location.query, tab: Tab.EVENTS},
-        };
-        if (isIssue && !isRegressionIssue && field === 'id') {
-          target.pathname = `/organizations/${organization.slug}/issues/${issueId}/events/${dataRow.id}/`;
-        } else {
-          if (field === 'id') {
-            target = generateLinkToEventInTraceView({
-              traceSlug: dataRow.trace?.toString()!,
-              projectSlug: dataRow['project.name']?.toString()!,
-              eventId: dataRow.id,
-              timestamp: dataRow.timestamp!,
-              location: locationWithTab,
-              organization,
-              transactionName,
-              source: TraceViewSources.PERFORMANCE_TRANSACTION_SUMMARY,
-              view: domainViewFilters?.view,
-            });
-          } else {
-            target = generateTraceLink(transactionName, domainViewFilters?.view)(
-              organization,
-              dataRow,
-              locationWithTab
-            );
-          }
+        let target: LocationDescriptor | null = null;
+        if (isIssue && field === 'id') {
+          target = {
+            pathname: `/organizations/${organization.slug}/issues/${issueId}/events/${dataRow.id}/`,
+          };
+        } else if (field === 'id') {
+          target = generateLinkToEventInTraceView({
+            traceSlug: dataRow.trace?.toString()!,
+            eventId: dataRow.id,
+            timestamp: dataRow.timestamp!,
+            location,
+            organization,
+            source: TraceViewSources.PERFORMANCE_TRANSACTION_SUMMARY,
+          });
+        } else if (dataRow.trace) {
+          target = generateTraceLink(transactionName)(organization, dataRow, location);
         }
 
         return (
@@ -266,13 +255,13 @@ function EventsTable({
             handleCellAction={cellActionHandler}
             allowActions={allowActions}
           >
-            <Link to={target}>{rendered}</Link>
+            {target ? <Link to={target}>{rendered}</Link> : rendered}
           </CellAction>
         );
       }
 
       if (field === 'replayId') {
-        const target: LocationDescriptor | null = dataRow.replayId
+        const target = dataRow.replayId
           ? replayLinkGenerator(organization, dataRow, undefined)
           : null;
 
@@ -296,6 +285,8 @@ function EventsTable({
 
       if (field === 'profile.id') {
         const target = generateProfileLink()(organization, dataRow, undefined);
+        const isEmptyTarget =
+          typeof target === 'object' && target !== null && isEmptyObject(target);
         const transactionMeetsProfilingRequirements =
           typeof dataRow['transaction.duration'] === 'number' &&
           dataRow['transaction.duration'] > 20;
@@ -316,7 +307,7 @@ function EventsTable({
             >
               <div>
                 <LinkButton
-                  disabled={!target || isEmptyObject(target)}
+                  disabled={!target || isEmptyTarget}
                   to={target || {}}
                   size="xs"
                 >
@@ -367,13 +358,12 @@ function EventsTable({
     [
       organization,
       location,
+      navigate,
       eventView,
       theme,
       projectSlug,
       transactionName,
       issueId,
-      isRegressionIssue,
-      domainViewFilters,
       replayLinkGenerator,
       handleCellAction,
     ]
@@ -400,41 +390,32 @@ function EventsTable({
     [organization]
   );
 
+  const getColumnSort = useCallback(
+    (tableMeta: TableData['meta'], column: TableColumn<keyof TableDataRow>) => {
+      const field = {field: column.name, width: column.width};
+      const currentSort = eventView.sortForField(field, tableMeta);
+
+      return getEventViewColumnSort({
+        align: fieldAlignment(column.name, column.type, tableMeta),
+        canSort: !UNSORTABLE_FIELDS.has(column.name),
+        eventView,
+        field,
+        location,
+        meta: tableMeta,
+        onSort: () => onSortClick(currentSort?.kind, currentSort?.field),
+      });
+    },
+    [eventView, location, onSortClick]
+  );
+
   const renderHeadCell = useCallback(
     (
       tableMeta: TableData['meta'],
       column: TableColumn<keyof TableDataRow>,
       title: React.ReactNode
     ): React.ReactNode => {
-      const align = fieldAlignment(column.name, column.type, tableMeta);
-      const field = {field: column.name, width: column.width};
-
-      function generateSortLink(): LocationDescriptorObject | undefined {
-        if (!tableMeta) {
-          return undefined;
-        }
-
-        const nextEventView = eventView.sortOnField(field, tableMeta);
-        const queryStringObject = nextEventView.generateQueryStringObject();
-
-        return {
-          ...location,
-          query: {...location.query, sort: queryStringObject.sort},
-        };
-      }
-      const currentSort = eventView.sortForField(field, tableMeta);
-      const canSort =
-        field.field !== 'id' &&
-        field.field !== 'trace' &&
-        field.field !== 'replayId' &&
-        field.field !== SPAN_OP_RELATIVE_BREAKDOWN_FIELD &&
-        isFieldSortable(field, tableMeta);
-
-      const currentSortKind = currentSort ? currentSort.kind : undefined;
-      const currentSortField = currentSort ? currentSort.field : undefined;
-
-      if (field.field === SPAN_OP_RELATIVE_BREAKDOWN_FIELD) {
-        title = (
+      if (column.name === SPAN_OP_RELATIVE_BREAKDOWN_FIELD) {
+        return (
           <OperationSort
             title={OperationTitle}
             eventView={eventView}
@@ -444,19 +425,9 @@ function EventsTable({
         );
       }
 
-      const sortLink = (
-        <SortLink
-          align={align}
-          title={title || field.field}
-          direction={currentSortKind}
-          canSort={canSort}
-          generateSortLink={generateSortLink}
-          onClick={() => onSortClick(currentSortKind, currentSortField)}
-        />
-      );
-      return sortLink;
+      return title || column.name;
     },
-    [eventView, location, onSortClick]
+    [eventView, location]
   );
 
   const renderHeadCellWithMeta = useCallback(
@@ -466,19 +437,6 @@ function EventsTable({
         renderHeadCell(tableMeta, column, columnTitles[index]);
     },
     [renderHeadCell, initialColumnTitles]
-  );
-
-  const handleResizeColumn = useCallback(
-    (columnIndex: number, nextColumn: GridColumn) => {
-      setWidths(prevWidths => {
-        const newWidths = [...prevWidths];
-        newWidths[columnIndex] = nextColumn.width
-          ? Number(nextColumn.width)
-          : COL_WIDTH_UNDEFINED;
-        return newWidths;
-      });
-    },
-    []
   );
 
   const joinCustomData = useCallback(
@@ -499,14 +457,14 @@ function EventsTable({
       const eventIds = tableData.data.map(value => value.id);
       const fetchOnlyMinidumps = !customColumns?.includes('attachments');
 
-      const queries: string = [
+      const queries = [
         'per_page=50',
         ...(fetchOnlyMinidumps ? ['types=event.minidump'] : []),
         ...eventIds.map(eventId => `event_id=${eventId}`),
       ].join('&');
 
       const res: IssueAttachment[] = await api.requestPromise(
-        `/api/0/issues/${issueId}/attachments/?${queries}`
+        `/api/0/organizations/${organization.slug}/issues/${issueId}/attachments/?${queries}`
       );
 
       let newHasMinidumps = false;
@@ -521,7 +479,7 @@ function EventsTable({
       setAttachments(res);
       setHasMinidumps(newHasMinidumps);
     },
-    [api, customColumns, issueId]
+    [api, customColumns, issueId, organization.slug]
   );
 
   const totalEventsView = eventView.clone();
@@ -538,13 +496,7 @@ function EventsTable({
     .getColumns()
     .filter((col: TableColumn<string | number>) =>
       shouldRenderColumn(containsSpanOpsBreakdown, col.name)
-    )
-    .map((col: TableColumn<string | number>, i: number) => {
-      if (typeof widths[i] === 'number') {
-        return {...col, width: widths[i]};
-      }
-      return col;
-    });
+    );
 
   if (customColumns?.includes('attachments') && attachments.length) {
     columnOrder.push({
@@ -573,7 +525,7 @@ function EventsTable({
         orgSlug={organization.slug}
         location={location}
         setError={error => setError(error?.message)}
-        referrer="api.performance.transaction-summary"
+        referrer="api.insights.transaction-summary"
         cursor="0:0:0"
       >
         {({isLoading: isTotalEventsLoading, tableData: table}) => {
@@ -585,14 +537,14 @@ function EventsTable({
               orgSlug={organization.slug}
               location={location}
               setError={error => setError(error?.message)}
-              referrer={referrer || 'api.performance.transaction-events'}
+              referrer={referrer || 'api.insights.transaction-events'}
             >
               {({pageLinks, isLoading: isDiscoverQueryLoading, tableData}) => {
                 tableData ??= {data: []};
                 const pageEventsCount = tableData?.data?.length ?? 0;
                 const parsedPageLinks = parseLinkHeader(pageLinks);
                 const cursor = parsedPageLinks?.next?.cursor;
-                const shouldFetchAttachments: boolean =
+                const shouldFetchAttachments =
                   organization.features.includes('event-attachments') &&
                   !!issueId &&
                   !!cursor &&
@@ -627,14 +579,12 @@ function EventsTable({
                         isLoading={
                           isTotalEventsLoading ||
                           isDiscoverQueryLoading ||
-                          shouldFetchAttachments ||
-                          isEventLoading
+                          shouldFetchAttachments
                         }
                         data={tableData?.data ?? []}
                         columnOrder={columnOrder}
-                        columnSortBy={eventView.getSorts()}
                         grid={{
-                          onResizeColumn: handleResizeColumn,
+                          getColumnSort: column => getColumnSort(tableData?.meta, column),
                           renderHeadCell: renderHeadCellWithMeta(tableData?.meta) as any,
                           renderBodyCell: renderBodyCellWithData(tableData) as any,
                         }}
@@ -663,5 +613,3 @@ const StyledIconQuestion = styled(QuestionTooltip)`
   top: 1px;
   left: 4px;
 `;
-
-export default EventsTable;

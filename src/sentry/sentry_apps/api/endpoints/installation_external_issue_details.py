@@ -1,35 +1,77 @@
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry import deletions
+from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import control_silo_endpoint
+from sentry.apidocs.constants import (
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NO_CONTENT,
+    RESPONSE_NOT_FOUND,
+    RESPONSE_UNAUTHORIZED,
+)
+from sentry.apidocs.parameters import SentryAppParams
 from sentry.sentry_apps.api.bases.sentryapps import (
     SentryAppInstallationExternalIssueBaseEndpoint as ExternalIssueBaseEndpoint,
 )
-from sentry.sentry_apps.models.platformexternalissue import PlatformExternalIssue
+from sentry.sentry_apps.services.cell import sentry_app_cell_service
 from sentry.sentry_apps.utils.errors import SentryAppError
+from sentry.users.services.user.serial import serialize_generic_user
+
+_EXTERNAL_ISSUE_ID_PARAM = OpenApiParameter(
+    name="external_issue_id",
+    location="path",
+    required=True,
+    type=int,
+    description="The ID of the external issue link to remove.",
+)
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Integration"])
+@control_silo_endpoint
 class SentryAppInstallationExternalIssueDetailsEndpoint(ExternalIssueBaseEndpoint):
+    owner = ApiOwner.INTEGRATION_PLATFORM
     publish_status = {
-        "DELETE": ApiPublishStatus.UNKNOWN,
+        "DELETE": ApiPublishStatus.PRIVATE,
     }
 
+    @extend_schema(
+        operation_id="deleteSentryAppInstallationExternalIssue",
+        summary="Delete an External Issue",
+        parameters=[SentryAppParams.INSTALLATION_UUID, _EXTERNAL_ISSUE_ID_PARAM],
+        responses={
+            204: RESPONSE_NO_CONTENT,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
     def delete(self, request: Request, installation, external_issue_id) -> Response:
+        """
+        Remove the link between a Sentry issue and an external resource created through a
+        custom integration (Sentry App) installation.
+        """
         try:
-            platform_external_issue = PlatformExternalIssue.objects.get(
-                id=external_issue_id,
-                project__organization_id=installation.organization_id,
-                service_type=installation.sentry_app.slug,
-            )
-        except PlatformExternalIssue.DoesNotExist:
+            external_issue_id = int(external_issue_id)
+        except (ValueError, TypeError):
             raise SentryAppError(
-                message="Could not find the corresponding external issue from given external_issue_id",
-                status_code=404,
+                message="Invalid external_issue_id format. Expected numeric value.",
+                status_code=400,
             )
 
-        deletions.exec_sync(platform_external_issue)
+        rpc_user = serialize_generic_user(request.user)
+        if rpc_user is None:
+            return Response({"detail": "Authentication credentials were not provided."}, status=401)
+
+        result = sentry_app_cell_service.delete_external_issue(
+            organization_id=installation.organization_id,
+            installation=installation,
+            external_issue_id=external_issue_id,
+            user=rpc_user,
+        )
+
+        if result.error:
+            return self.respond_rpc_sentry_app_error(result.error)
 
         return Response(status=204)

@@ -1,17 +1,17 @@
 import {Fragment, useCallback, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
+import {Flex} from '@sentry/scraps/layout';
+
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
 import {Node} from 'sentry/components/events/viewHierarchy/node';
 import {Wireframe} from 'sentry/components/events/viewHierarchy/wireframe';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {defined} from 'sentry/utils/defined';
 import type {UseVirtualizedTreeProps} from 'sentry/utils/profiling/hooks/useVirtualizedTree/useVirtualizedTree';
 import {useVirtualizedTree} from 'sentry/utils/profiling/hooks/useVirtualizedTree/useVirtualizedTree';
 import type {VirtualizedTreeRenderedRow} from 'sentry/utils/profiling/hooks/useVirtualizedTree/virtualizedTreeUtils';
-import useOrganization from 'sentry/utils/useOrganization';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 import {DetailsPanel} from './detailsPanel';
 import {RenderingSystem} from './renderingSystem';
@@ -77,7 +77,8 @@ export type ViewHierarchyWindow = {
 
 export type ViewHierarchyData = {
   rendering_system: string;
-  windows: ViewHierarchyWindow[];
+  positioning?: 'absolute' | 'relative';
+  windows?: ViewHierarchyWindow[];
 };
 
 export type ViewHierarchyNodeField = 'type' | 'name';
@@ -86,7 +87,7 @@ type ViewHierarchyProps = {
   emptyMessage: string;
   nodeField: ViewHierarchyNodeField;
   showWireframe: boolean;
-  viewHierarchy: ViewHierarchyData;
+  viewHierarchy: ViewHierarchyData | null;
   platform?: string;
 };
 
@@ -98,17 +99,14 @@ function ViewHierarchy({
   nodeField,
 }: ViewHierarchyProps) {
   const organization = useOrganization();
-  const hasStreamlinedUI = useHasStreamlinedUI();
   const [scrollContainerRef, setScrollContainerRef] = useState<HTMLDivElement | null>(
     null
   );
-  const [selectedNode, setSelectedNode] = useState<ViewHierarchyWindow | undefined>(
-    viewHierarchy.windows[0]
-  );
+  const [selectedNode, setSelectedNode] = useState(viewHierarchy?.windows?.[0]);
   const [userHasSelected, setUserHasSelected] = useState(false);
   const hierarchy = useMemo(() => {
-    return viewHierarchy.windows;
-  }, [viewHierarchy.windows]);
+    return viewHierarchy?.windows ?? [];
+  }, [viewHierarchy?.windows]);
 
   const renderRow: UseVirtualizedTreeProps<ViewHierarchyWindow>['renderRow'] = (
     r,
@@ -207,8 +205,8 @@ function ViewHierarchy({
 
   const viewHierarchyContent = (
     <Fragment>
-      <RenderingSystem platform={platform} system={viewHierarchy.rendering_system} />
-      <Content>
+      <RenderingSystem platform={platform} system={viewHierarchy?.rendering_system} />
+      <Flex gap="md" height="700px">
         <Left hasRight={showWireframe}>
           <TreeContainer>
             <div ref={hoveredGhostRowRef} />
@@ -235,45 +233,35 @@ function ViewHierarchy({
               selectedNode={userHasSelected ? selectedNode : undefined}
               onNodeSelect={onWireframeNodeSelect}
               platform={platform}
+              positioning={viewHierarchy?.positioning}
             />
           </Right>
         )}
-      </Content>
+      </Flex>
     </Fragment>
   );
 
-  return hasStreamlinedUI ? (
-    <Container>{viewHierarchyContent}</Container>
-  ) : (
-    viewHierarchyContent
-  );
+  return <Container>{viewHierarchyContent}</Container>;
 }
 
 export {ViewHierarchy};
 
 const Container = styled('div')`
   position: relative;
-  margin-left: ${space(2)};
-`;
-
-const Content = styled('div')`
-  display: flex;
-  flex-direction: row;
-  gap: ${space(1)};
-  height: 700px;
+  margin-left: ${p => p.theme.space.xl};
 `;
 
 const Left = styled('div')<{hasRight?: boolean}>`
   width: ${p => (p.hasRight ? '40%' : '100%')};
   display: flex;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   flex-direction: column;
 `;
 
 const Right = styled('div')`
   width: 60%;
-  border: 1px solid ${p => p.theme.gray100};
-  border-radius: ${p => p.theme.borderRadius};
+  border: 1px solid ${p => p.theme.colors.gray100};
+  border-radius: ${p => p.theme.radius.md};
   overflow: hidden;
 `;
 
@@ -281,21 +269,21 @@ const TreeContainer = styled('div')`
   position: relative;
   height: 70%;
   overflow: hidden;
-  background-color: ${p => p.theme.background};
-  border: 1px solid ${p => p.theme.gray100};
-  border-radius: ${p => p.theme.borderRadius};
+  background-color: ${p => p.theme.tokens.background.primary};
+  border: 1px solid ${p => p.theme.colors.gray100};
+  border-radius: ${p => p.theme.radius.md};
   border-top-left-radius: 0;
 `;
 
 const DetailsContainer = styled('div')`
   max-height: 30%;
-  border: 1px solid ${p => p.theme.gray100};
-  border-radius: ${p => p.theme.borderRadius};
+  border: 1px solid ${p => p.theme.colors.gray100};
+  border-radius: ${p => p.theme.radius.md};
   overflow: auto;
 `;
 
 const ScrollContainer = styled('div')`
-  padding: 0 ${space(1.5)} ${space(1.5)} ${space(1.5)};
+  padding: 0 ${p => p.theme.space.lg} ${p => p.theme.space.lg} ${p => p.theme.space.lg};
 `;
 
 const RenderedItemsContainer = styled('div')`
@@ -314,18 +302,18 @@ const TreeItem = styled('div')`
 
 // Draw a 1px wide gray marker every 15px
 const DepthMarker = styled('div')<{depth: number}>`
-  padding-left: calc(${space(2)} * ${p => p.depth});
+  padding-left: calc(${p => p.theme.space.xl} * ${p => p.depth});
 
   background-image: repeating-linear-gradient(
     90deg,
-    ${p => p.theme.gray200} 5px,
-    ${p => p.theme.gray200} 6px,
+    ${p => p.theme.colors.gray200} 5px,
+    ${p => p.theme.colors.gray200} 6px,
     transparent 6px,
     transparent 21px
   );
 `;
 
 const EmptyStateContainer = styled('div')`
-  border: 1px solid ${p => p.theme.gray100};
-  border-radius: ${p => p.theme.borderRadius};
+  border: 1px solid ${p => p.theme.colors.gray100};
+  border-radius: ${p => p.theme.radius.md};
 `;

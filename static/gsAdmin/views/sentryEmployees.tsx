@@ -1,19 +1,19 @@
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import UserBadge from 'sentry/components/idBadge/userBadge';
-import Link from 'sentry/components/links/link';
-import Truncate from 'sentry/components/truncate';
+import {Button} from '@sentry/scraps/button';
+import {Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+
+import {UserBadge} from 'sentry/components/idBadge/userBadge';
+import {Truncate} from 'sentry/components/truncate';
 import {IconEdit} from 'sentry/icons';
-import ConfigStore from 'sentry/stores/configStore';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
+import {ConfigStore} from 'sentry/stores/configStore';
 
-import PageHeader from 'admin/components/pageHeader';
-import ResultGrid from 'admin/components/resultGrid';
-import UserPermissionsModal from 'admin/components/users/userPermissionsModal';
+import {PageHeader} from 'admin/components/pageHeader';
+import {ResultGrid} from 'admin/components/resultGrid';
+import {UserPermissionsModal} from 'admin/components/users/userPermissionsModal';
 
-type Props = RouteComponentProps<unknown, unknown>;
+export function SentryEmployees() {
+  const {openModal} = useModal();
 
-function SentryEmployees(props: Props) {
   const gridColumns = [
     <th key="user">User</th>,
     <th key="email" style={{width: 100, textAlign: 'center'}}>
@@ -197,10 +197,7 @@ function SentryEmployees(props: Props) {
         }}
         sortOptions={[['name', 'Name']]}
         defaultSort="user"
-        {...props}
       />
     </div>
   );
 }
-
-export default SentryEmployees;

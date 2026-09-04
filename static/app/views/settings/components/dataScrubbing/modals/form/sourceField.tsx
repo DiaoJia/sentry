@@ -1,11 +1,12 @@
-import {Component, createRef, Fragment} from 'react';
+import {Component, Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import TextField from 'sentry/components/forms/fields/textField';
-import TextOverflow from 'sentry/components/textOverflow';
+import {Input} from '@sentry/scraps/input';
+import {Text} from '@sentry/scraps/text';
+
+import {TextOverflow} from 'sentry/components/textOverflow';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import {defined} from 'sentry/utils';
+import {defined} from 'sentry/utils/defined';
 import type {SourceSuggestion} from 'sentry/views/settings/components/dataScrubbing/types';
 import {SourceSuggestionType} from 'sentry/views/settings/components/dataScrubbing/types';
 import {
@@ -13,38 +14,44 @@ import {
   unarySuggestions,
 } from 'sentry/views/settings/components/dataScrubbing/utils';
 
-import SourceSuggestionExamples from './sourceSuggestionExamples';
+import {SourceSuggestionExamples} from './sourceSuggestionExamples';
 
-const defaultHelp = t(
-  'Where to look. In the simplest case this can be an attribute name.'
-);
+// The suggestion list is capped when rendered, so keyboard navigation and
+// scrolling must stay within this many items to match what's in the DOM.
+const MAX_RENDERED_SUGGESTIONS = 50;
+
+type FieldProps = {
+  'aria-describedby': string;
+  'aria-invalid': boolean;
+  disabled: boolean;
+  id: string;
+  name: string;
+  onBlur: () => void;
+};
 
 type Props = {
+  fieldProps: FieldProps;
   isRegExMatchesSelected: boolean;
   onChange: (value: string) => void;
   suggestions: SourceSuggestion[];
   value: string;
-  error?: string;
-  onBlur?: (value: string, event: React.FocusEvent<HTMLInputElement>) => void;
 };
 
 type State = {
   activeSuggestion: number;
   fieldValues: Array<SourceSuggestion | SourceSuggestion[]>;
   help: string;
-  hideCaret: boolean;
   showSuggestions: boolean;
   suggestions: SourceSuggestion[];
 };
 
-class SourceField extends Component<Props, State> {
+export class SourceField extends Component<Props, State> {
   state: State = {
     suggestions: [],
     fieldValues: [],
     activeSuggestion: 0,
     showSuggestions: false,
-    hideCaret: false,
-    help: defaultHelp,
+    help: '',
   };
 
   componentDidMount() {
@@ -65,9 +72,6 @@ class SourceField extends Component<Props, State> {
       this.checkPossiblyRegExMatchExpression(this.props.value);
     }
   }
-
-  selectorField = createRef<HTMLDivElement>();
-  suggestionList = createRef<HTMLUListElement>();
 
   getAllSuggestions() {
     return [...this.getValueSuggestions(), ...unarySuggestions, ...binarySuggestions];
@@ -220,22 +224,6 @@ class SourceField extends Component<Props, State> {
     });
   }
 
-  scrollToSuggestion() {
-    const {activeSuggestion, hideCaret} = this.state;
-
-    this.suggestionList?.current?.children[activeSuggestion]!.scrollIntoView({
-      behavior: 'smooth',
-      block: 'nearest',
-      inline: 'start',
-    });
-
-    if (!hideCaret) {
-      this.setState({
-        hideCaret: true,
-      });
-    }
-  }
-
   changeParentValue() {
     const {onChange} = this.props;
     const {fieldValues} = this.state;
@@ -301,7 +289,7 @@ class SourceField extends Component<Props, State> {
     if (help) {
       if (!isMaybeRegExp) {
         this.setState({
-          help: defaultHelp,
+          help: '',
         });
       }
       return;
@@ -326,7 +314,6 @@ class SourceField extends Component<Props, State> {
   handleClickOutside = () => {
     this.setState({
       showSuggestions: false,
-      hideCaret: false,
     });
   };
 
@@ -337,17 +324,14 @@ class SourceField extends Component<Props, State> {
         fieldValues,
         activeSuggestion: 0,
         showSuggestions: false,
-        hideCaret: false,
       },
       this.changeParentValue
     );
   };
 
-  handleKeyDown = (_value: string, event: React.KeyboardEvent<HTMLInputElement>) => {
-    event.persist();
-
+  handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     const {key} = event;
-    const {activeSuggestion, suggestions} = this.state;
+    const {activeSuggestion, suggestions, showSuggestions} = this.state;
 
     if (key === 'Backspace' || key === ' ') {
       this.toggleSuggestions(true);
@@ -355,7 +339,10 @@ class SourceField extends Component<Props, State> {
     }
 
     if (key === 'Enter') {
-      this.handleClickSuggestionItem(suggestions[activeSuggestion]!);
+      if (showSuggestions && suggestions.length > 0) {
+        event.preventDefault();
+        this.handleClickSuggestionItem(suggestions[activeSuggestion]!);
+      }
       return;
     }
 
@@ -363,19 +350,17 @@ class SourceField extends Component<Props, State> {
       if (activeSuggestion === 0) {
         return;
       }
-      this.setState({activeSuggestion: activeSuggestion - 1}, () => {
-        this.scrollToSuggestion();
-      });
+      this.setState({activeSuggestion: activeSuggestion - 1});
       return;
     }
 
     if (key === 'ArrowDown') {
-      if (activeSuggestion === suggestions.length - 1) {
+      const lastRenderedIndex =
+        Math.min(suggestions.length, MAX_RENDERED_SUGGESTIONS) - 1;
+      if (activeSuggestion >= lastRenderedIndex) {
         return;
       }
-      this.setState({activeSuggestion: activeSuggestion + 1}, () => {
-        this.scrollToSuggestion();
-      });
+      this.setState({activeSuggestion: activeSuggestion + 1});
       return;
     }
   };
@@ -384,41 +369,48 @@ class SourceField extends Component<Props, State> {
     this.toggleSuggestions(true);
   };
 
+  scrollActiveSuggestionIntoView = (node: HTMLLIElement | null) => {
+    node?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'start',
+    });
+  };
+
   render() {
-    const {error, value, onBlur} = this.props;
-    const {showSuggestions, suggestions, activeSuggestion, hideCaret, help} = this.state;
+    const {value, fieldProps} = this.props;
+    const {showSuggestions, suggestions, activeSuggestion, help} = this.state;
 
     return (
-      <Wrapper ref={this.selectorField} hideCaret={hideCaret}>
-        <StyledTextField
+      <Wrapper>
+        <StyledInput
+          {...fieldProps}
           data-test-id="source-field"
-          label={t('Source')}
-          name="source"
+          aria-label={t('Source')}
           placeholder={t('Enter a custom attribute, variable or header name')}
-          onChange={this.handleChange}
+          onChange={e => this.handleChange(e.target.value)}
           autoComplete="off"
           value={value}
-          error={error}
-          help={help}
           onKeyDown={this.handleKeyDown}
-          onBlur={onBlur}
+          onBlur={fieldProps.onBlur}
           onFocus={this.handleFocus}
-          inline={false}
-          flexibleControlStateSize
-          stacked
-          required
-          showHelpInTooltip
         />
+        {help && (
+          <Text size="sm" variant="muted">
+            {help}
+          </Text>
+        )}
         {showSuggestions && suggestions.length > 0 && (
           <Fragment>
-            <Suggestions
-              ref={this.suggestionList}
-              error={error}
-              data-test-id="source-suggestions"
-            >
-              {suggestions.slice(0, 50).map((suggestion, index) => (
+            <Suggestions data-test-id="source-suggestions">
+              {suggestions.slice(0, MAX_RENDERED_SUGGESTIONS).map((suggestion, index) => (
                 <Suggestion
                   key={suggestion.value}
+                  ref={
+                    index === activeSuggestion
+                      ? this.scrollActiveSuggestionIntoView
+                      : undefined
+                  }
                   onClick={event => {
                     event.preventDefault();
                     this.handleClickSuggestionItem(suggestion);
@@ -449,32 +441,29 @@ class SourceField extends Component<Props, State> {
   }
 }
 
-export default SourceField;
-
-const Wrapper = styled('div')<{hideCaret?: boolean}>`
+const Wrapper = styled('div')`
   position: relative;
   width: 100%;
-  ${p => p.hideCaret && `caret-color: transparent;`}
 `;
 
-const StyledTextField = styled(TextField)`
+const StyledInput = styled(Input)`
   z-index: 1002;
   :focus {
     outline: none;
   }
 `;
 
-const Suggestions = styled('ul')<{error?: string}>`
+const Suggestions = styled('ul')`
   position: absolute;
-  width: ${p => (p.error ? 'calc(100% - 34px)' : '100%')};
+  width: 100%;
   padding-left: 0;
   list-style: none;
   margin-bottom: 0;
   box-shadow: 0 2px 0 rgba(37, 11, 54, 0.04);
-  border: 1px solid ${p => p.theme.border};
-  border-radius: 0 0 ${space(0.5)} ${space(0.5)};
-  background: ${p => p.theme.background};
-  top: 63px;
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  border-radius: 0 0 ${p => p.theme.space.xs} ${p => p.theme.space.xs};
+  background: ${p => p.theme.tokens.background.primary};
+  top: 40px;
   left: 0;
   z-index: 1002;
   overflow: hidden;
@@ -485,22 +474,25 @@ const Suggestions = styled('ul')<{error?: string}>`
 const Suggestion = styled('li')<{active: boolean}>`
   display: grid;
   grid-template-columns: auto 1fr max-content;
-  gap: ${space(1)};
-  border-bottom: 1px solid ${p => p.theme.border};
-  padding: ${space(1)} ${space(2)};
-  font-size: ${p => p.theme.fontSize.md};
+  gap: ${p => p.theme.space.md};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
+  font-size: ${p => p.theme.font.size.md};
   cursor: pointer;
-  background: ${p => (p.active ? p.theme.backgroundSecondary : p.theme.background)};
+  background: ${p =>
+    p.active ? p.theme.tokens.background.secondary : p.theme.tokens.background.primary};
   :hover {
-    background: ${p =>
-      p.active ? p.theme.backgroundSecondary : p.theme.backgroundSecondary};
+    background: ${p => p.theme.tokens.interactive.transparent.neutral.background.hover};
+  }
+  :active {
+    background: ${p => p.theme.tokens.interactive.transparent.neutral.background.active};
   }
 `;
 
 const SuggestionDescription = styled('div')`
   display: flex;
   overflow: hidden;
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   line-height: 1.2;
 `;
 

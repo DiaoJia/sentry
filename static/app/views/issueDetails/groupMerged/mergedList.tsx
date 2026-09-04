@@ -1,49 +1,53 @@
-import {Fragment} from 'react';
+import styled from '@emotion/styled';
 
-import EmptyStateWarning from 'sentry/components/emptyStateWarning';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
+import {Pagination} from '@sentry/scraps/pagination';
+
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
 import {t} from 'sentry/locale';
-import type {Fingerprint} from 'sentry/stores/groupingStore';
 import type {Group} from 'sentry/types/group';
-import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {useLocation} from 'sentry/utils/useLocation';
 
-import MergedItem from './mergedItem';
+import {MergedItem} from './mergedItem';
 import {MergedToolbar} from './mergedToolbar';
+import {
+  type FingerprintWithLatestEvent,
+  type GroupMergedState,
+  useMergedCursor,
+} from './useGroupMerged';
 
 type Props = {
+  enableFingerprintCompare: boolean;
+  fingerprints: FingerprintWithLatestEvent[];
   groupId: Group['id'];
-  /**
-   * From GroupingStore.onToggleCollapseFingerprints
-   */
   onToggleCollapse: () => void;
-  /**
-   * From GroupMergedView -> handleUnmerge
-   */
   onUnmerge: () => void;
-  organization: Organization;
   project: Project;
-  fingerprints?: Fingerprint[];
+  state: GroupMergedState;
+  toggleCollapsed: (fingerprintId: string) => void;
+  toggleSelected: (fingerprintId: string, eventId: string) => void;
+  unmergeDisabled: boolean;
   pageLinks?: string;
 };
 
-function MergedList({
-  fingerprints = [],
+export function MergedList({
+  fingerprints,
   pageLinks,
   onToggleCollapse,
   onUnmerge,
-  organization,
   groupId,
   project,
+  enableFingerprintCompare,
+  state,
+  toggleCollapsed,
+  toggleSelected,
+  unmergeDisabled,
 }: Props) {
-  const fingerprintsWithLatestEvent = fingerprints.filter(
-    ({latestEvent}) => !!latestEvent
-  );
-  const hasResults = fingerprintsWithLatestEvent.length > 0;
-  const location = useLocation();
+  const [, setCursor] = useMergedCursor();
+  const hasResults = fingerprints.length > 0;
+  const canSelect = fingerprints.length > 1;
+
   if (!hasResults) {
     return (
       <Panel>
@@ -55,30 +59,38 @@ function MergedList({
   }
 
   return (
-    <Fragment>
-      <Panel>
+    <div>
+      <MergedPanel>
         <MergedToolbar
+          enableFingerprintCompare={enableFingerprintCompare}
+          fingerprints={fingerprints}
           onToggleCollapse={onToggleCollapse}
           onUnmerge={onUnmerge}
-          orgId={organization.slug}
           project={project}
           groupId={groupId}
-          location={location}
+          state={state}
+          unmergeDisabled={unmergeDisabled}
         />
 
         <PanelBody>
-          {fingerprintsWithLatestEvent.map(fingerprint => (
+          {fingerprints.map(fingerprint => (
             <MergedItem
               key={fingerprint.id}
+              canSelect={canSelect}
               fingerprint={fingerprint}
-              totalFingerprint={fingerprintsWithLatestEvent.length}
+              state={state}
+              toggleCollapsed={toggleCollapsed}
+              toggleSelected={toggleSelected}
             />
           ))}
         </PanelBody>
-      </Panel>
-      {pageLinks && <Pagination pageLinks={pageLinks} />}
-    </Fragment>
+      </MergedPanel>
+      <Pagination pageLinks={pageLinks} onCursor={cursor => setCursor(cursor ?? null)} />
+    </div>
   );
 }
 
-export default MergedList;
+const MergedPanel = styled(Panel)`
+  margin-bottom: 0;
+  overflow: hidden;
+`;

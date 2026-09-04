@@ -18,8 +18,11 @@ from sentry.issues.auto_source_code_config.code_mapping import (
     find_roots,
     get_sorted_code_mapping_configs,
 )
-from sentry.issues.auto_source_code_config.errors import UnexpectedPathException
-from sentry.issues.auto_source_code_config.frame_info import FrameInfo
+from sentry.issues.auto_source_code_config.errors import (
+    UnexpectedPathException,
+    UnsupportedFrameInfo,
+)
+from sentry.issues.auto_source_code_config.frame_info import create_frame_info
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
 from sentry.testutils.silo import assume_test_silo_mode
@@ -55,6 +58,11 @@ class TestRepoFiles(TestCase):
         source_code_files = filter_source_code_files([".env", "README"])
         assert source_code_files == []
 
+    def test_filter_javascript_module_extensions(self) -> None:
+        files = ["src/module.cjs", "src/module.mts", "src/module.cts"]
+
+        assert filter_source_code_files([*files, "src/module.unsupported"]) == files
+
     def test_should_not_include(self) -> None:
         for file in [
             "static/app/views/organizationRoot.spec.jsx",
@@ -83,22 +91,22 @@ def test_buckets_logic() -> None:
     helper = CodeMappingTreesHelper({})
     buckets = helper._stacktrace_buckets(frames)
     assert buckets == {
-        "/cronscripts/": [FrameInfo({"filename": "/cronscripts/monitoringsync.php"})],
-        "./app": [FrameInfo({"filename": "./app/utils/handleXhrErrorResponse.tsx"})],
-        "app:": [FrameInfo({"filename": "app://foo.js"})],
-        "getsentry": [FrameInfo({"filename": "getsentry/billing/tax/manager.py"})],
+        "/cronscripts/": [create_frame_info({"filename": "/cronscripts/monitoringsync.php"})],
+        "./app": [create_frame_info({"filename": "./app/utils/handleXhrErrorResponse.tsx"})],
+        "app:": [create_frame_info({"filename": "app://foo.js"})],
+        "getsentry": [create_frame_info({"filename": "getsentry/billing/tax/manager.py"})],
     }
 
 
 class TestDerivedCodeMappings(TestCase):
     @pytest.fixture(autouse=True)
-    def inject_fixtures(self, caplog: Any) -> None:
+    def inject_fixtures(self, caplog: pytest.LogCaptureFixture) -> None:
         self._caplog = caplog
 
     def setUp(self) -> None:
         super().setUp()
-        self.foo_repo = RepoAndBranch("Test-Organization/foo", "master")
-        self.bar_repo = RepoAndBranch("Test-Organization/bar", "main")
+        self.foo_repo = RepoAndBranch("Test-Organization/foo", "master", "1")
+        self.bar_repo = RepoAndBranch("Test-Organization/bar", "main", "2")
         self.code_mapping_helper = CodeMappingTreesHelper(
             {
                 self.foo_repo.name: RepoTree(self.foo_repo, files=SENTRY_FILES),
@@ -120,7 +128,7 @@ class TestDerivedCodeMappings(TestCase):
         # We create a new tree helper in order to improve the understability of this test
         cmh = CodeMappingTreesHelper({self.foo_repo.name: repo_tree})
         cm = cmh._generate_code_mapping_from_tree(
-            repo_tree=repo_tree, frame_filename=FrameInfo({"filename": "raven/base.py"})
+            repo_tree=repo_tree, frame_filename=create_frame_info({"filename": "raven/base.py"})
         )
         # We should not derive a code mapping since the package name does not match
         assert cm == []
@@ -146,7 +154,7 @@ class TestDerivedCodeMappings(TestCase):
         code_mappings = self.code_mapping_helper.generate_code_mappings(frames)
         assert code_mappings == [
             CodeMapping(
-                repo=RepoAndBranch(name="Test-Organization/foo", branch="master"),
+                repo=RepoAndBranch(name="Test-Organization/foo", branch="master", external_id="1"),
                 stacktrace_root="sentry/",
                 source_path="src/sentry/",
             )
@@ -202,7 +210,7 @@ class TestDerivedCodeMappings(TestCase):
         logger.warning.assert_called_with("More than one repo matched %s", "sentry/web/urls.py")
 
     def test_get_file_and_repo_matches_single(self) -> None:
-        frame_filename = FrameInfo({"filename": "sentry_plugins/slack/client.py"})
+        frame_filename = create_frame_info({"filename": "sentry_plugins/slack/client.py"})
         matches = self.code_mapping_helper.get_file_and_repo_matches(frame_filename)
         expected_matches = [
             {
@@ -216,7 +224,7 @@ class TestDerivedCodeMappings(TestCase):
         assert matches == expected_matches
 
     def test_get_file_and_repo_matches_multiple(self) -> None:
-        frame_filename = FrameInfo({"filename": "sentry/web/urls.py"})
+        frame_filename = create_frame_info({"filename": "sentry/web/urls.py"})
         matches = self.code_mapping_helper.get_file_and_repo_matches(frame_filename)
         expected_matches = [
             {
@@ -236,51 +244,177 @@ class TestDerivedCodeMappings(TestCase):
         ]
         assert matches == expected_matches
 
+    def test_generate_code_mappings_same_repo_multiple_java_source_roots(self) -> None:
+        repo_tree = RepoTree(
+            self.foo_repo,
+            files=[
+                "sentry-graphql/src/main/java/io/sentry/graphql/GraphQLFetcher.java",
+                "sentry-graphql-core/src/main/java/io/sentry/graphql/GraphQLFetcher.java",
+            ],
+        )
+        helper = CodeMappingTreesHelper({self.foo_repo.name: repo_tree})
+
+        code_mappings = helper.generate_code_mappings(
+            [{"module": "io.sentry.graphql.GraphQLFetcher", "abs_path": "GraphQLFetcher.java"}],
+            platform="java",
+        )
+
+        assert sorted(code_mappings) == sorted(
+            [
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/graphql/",
+                    source_path="sentry-graphql/src/main/java/io/sentry/graphql/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/graphql/",
+                    source_path="sentry-graphql-core/src/main/java/io/sentry/graphql/",
+                ),
+            ]
+        )
+
+    def test_generate_code_mappings_realistic_java_monorepo_layout(self) -> None:
+        repo_tree = RepoTree(
+            self.foo_repo,
+            files=[
+                "sentry-opentelemetry/sentry-opentelemetry-agent/src/main/java/io/sentry/opentelemetry/agent/AgentMain.java",
+                "sentry-opentelemetry/sentry-opentelemetry-agentcustomization/src/main/java/io/sentry/opentelemetry/AgentCustomizer.java",
+                "sentry-opentelemetry/sentry-opentelemetry-agentless/src/main/java/io/sentry/opentelemetry/agent/AgentlessMain.java",
+                "sentry-opentelemetry/sentry-opentelemetry-agentless-spring/src/main/java/io/sentry/opentelemetry/agent/AgentlessSpringMain.java",
+                "sentry-opentelemetry/sentry-opentelemetry-bootstrap/src/main/java/io/sentry/opentelemetry/BootstrapMain.java",
+                "sentry-opentelemetry/sentry-opentelemetry-core/src/main/java/io/sentry/opentelemetry/CoreMain.java",
+                "sentry-opentelemetry/sentry-opentelemetry-otlp/src/main/java/io/sentry/opentelemetry/otlp/OtlpMain.java",
+            ],
+        )
+        helper = CodeMappingTreesHelper({self.foo_repo.name: repo_tree})
+
+        code_mappings = helper.generate_code_mappings(
+            [
+                {"module": "io.sentry.opentelemetry.agent.AgentMain", "abs_path": "AgentMain.java"},
+                {
+                    "module": "io.sentry.opentelemetry.AgentCustomizer",
+                    "abs_path": "AgentCustomizer.java",
+                },
+                {
+                    "module": "io.sentry.opentelemetry.agent.AgentlessMain",
+                    "abs_path": "AgentlessMain.java",
+                },
+                {
+                    "module": "io.sentry.opentelemetry.agent.AgentlessSpringMain",
+                    "abs_path": "AgentlessSpringMain.java",
+                },
+                {
+                    "module": "io.sentry.opentelemetry.BootstrapMain",
+                    "abs_path": "BootstrapMain.java",
+                },
+                {"module": "io.sentry.opentelemetry.CoreMain", "abs_path": "CoreMain.java"},
+                {"module": "io.sentry.opentelemetry.otlp.OtlpMain", "abs_path": "OtlpMain.java"},
+            ],
+            platform="java",
+        )
+
+        assert sorted(code_mappings) == sorted(
+            [
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/agent/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-agent/src/main/java/io/sentry/opentelemetry/agent/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-agentcustomization/src/main/java/io/sentry/opentelemetry/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/agent/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-agentless/src/main/java/io/sentry/opentelemetry/agent/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/agent/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-agentless-spring/src/main/java/io/sentry/opentelemetry/agent/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-bootstrap/src/main/java/io/sentry/opentelemetry/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-core/src/main/java/io/sentry/opentelemetry/",
+                ),
+                CodeMapping(
+                    repo=self.foo_repo,
+                    stacktrace_root="io/sentry/opentelemetry/otlp/",
+                    source_path="sentry-opentelemetry/sentry-opentelemetry-otlp/src/main/java/io/sentry/opentelemetry/otlp/",
+                ),
+            ]
+        )
+
+    def test_multiple_matches_with_java_source_markers_do_not_enable_path_based_frames(
+        self,
+    ) -> None:
+        repo_tree = RepoTree(
+            self.foo_repo,
+            files=[
+                "module-a/src/main/java/foo/bar.py",
+                "module-b/src/main/java/foo/bar.py",
+            ],
+        )
+        helper = CodeMappingTreesHelper({self.foo_repo.name: repo_tree})
+
+        code_mappings = helper.generate_code_mappings([{"filename": "foo/bar.py"}])
+
+        assert code_mappings == []
+
     def test_find_roots_starts_with_period_slash(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "./app/foo.tsx"}), "static/app/foo.tsx"
+            create_frame_info({"filename": "./app/foo.tsx"}), "static/app/foo.tsx"
         )
         assert stacktrace_root == "./"
         assert source_path == "static/"
 
     def test_find_roots_starts_with_period_slash_no_containing_directory(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "./app/foo.tsx"}), "app/foo.tsx"
+            create_frame_info({"filename": "./app/foo.tsx"}), "app/foo.tsx"
         )
         assert stacktrace_root == "./"
         assert source_path == ""
 
     def test_find_roots_not_matching(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "sentry/foo.py"}), "src/sentry/foo.py"
+            create_frame_info({"filename": "sentry/foo.py"}), "src/sentry/foo.py"
         )
         assert stacktrace_root == "sentry/"
         assert source_path == "src/sentry/"
 
     def test_find_roots_equal(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "source/foo.py"}), "source/foo.py"
+            create_frame_info({"filename": "source/foo.py"}), "source/foo.py"
         )
         assert stacktrace_root == ""
         assert source_path == ""
 
     def test_find_roots_starts_with_period_slash_two_levels(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "./app/foo.tsx"}), "app/foo/app/foo.tsx"
+            create_frame_info({"filename": "./app/foo.tsx"}), "app/foo/app/foo.tsx"
         )
         assert stacktrace_root == "./"
         assert source_path == "app/foo/"
 
     def test_find_roots_starts_with_app(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "app:///utils/foo.tsx"}), "utils/foo.tsx"
+            create_frame_info({"filename": "app:///utils/foo.tsx"}), "utils/foo.tsx"
         )
         assert stacktrace_root == "app:///"
         assert source_path == ""
 
     def test_find_roots_starts_with_multiple_dot_dot_slash(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "../../../../../../packages/foo.tsx"}),
+            create_frame_info({"filename": "../../../../../../packages/foo.tsx"}),
             "packages/foo.tsx",
         )
         assert stacktrace_root == "../../../../../../"
@@ -288,25 +422,155 @@ class TestDerivedCodeMappings(TestCase):
 
     def test_find_roots_starts_with_app_dot_dot_slash(self) -> None:
         stacktrace_root, source_path = find_roots(
-            FrameInfo({"filename": "app:///../services/foo.tsx"}),
+            create_frame_info({"filename": "app:///../services/foo.tsx"}),
             "services/foo.tsx",
         )
         assert stacktrace_root == "app:///../"
         assert source_path == ""
 
     def test_find_roots_bad_stack_path(self) -> None:
-        with pytest.raises(UnexpectedPathException):
-            find_roots(
-                FrameInfo({"filename": "https://yrurlsinyourstackpath.com/"}),
-                "sentry/something.py",
-            )
+        with pytest.raises(UnsupportedFrameInfo):
+            create_frame_info({"filename": "https://yrurlsinyourstackpath.com/"})
 
     def test_find_roots_bad_source_path(self) -> None:
         with pytest.raises(UnexpectedPathException):
             find_roots(
-                FrameInfo({"filename": "sentry/random.py"}),
+                create_frame_info({"filename": "sentry/random.py"}),
                 "nothing/something.js",
             )
+
+    def test_find_roots_empty_source_path(self) -> None:
+        with pytest.raises(UnexpectedPathException):
+            find_roots(
+                create_frame_info({"filename": "sentry/foo.py"}),
+                "",
+            )
+
+    def test_find_roots_windows_path_with_spaces(self) -> None:
+        stacktrace_root, source_path = find_roots(
+            create_frame_info({"filename": "C:\\Program Files\\MyApp\\src\\file.py"}), "src/file.py"
+        )
+        assert stacktrace_root == "C:\\Program Files\\MyApp\\"
+        assert source_path == ""
+
+    def test_find_roots_windows_path_with_spaces_nested(self) -> None:
+        stacktrace_root, source_path = find_roots(
+            create_frame_info(
+                {"filename": "C:\\Program Files\\My Company\\My App\\src\\main\\file.py"}
+            ),
+            "src/main/file.py",
+        )
+        assert stacktrace_root == "C:\\Program Files\\My Company\\My App\\"
+        assert source_path == ""
+
+    def test_find_roots_windows_path_with_spaces_source_match(self) -> None:
+        stacktrace_root, source_path = find_roots(
+            create_frame_info({"filename": "C:\\Program Files\\MyApp\\src\\components\\file.py"}),
+            "frontend/src/components/file.py",
+        )
+        assert stacktrace_root == "C:\\Program Files\\MyApp\\"
+        assert source_path == "frontend/"
+
+
+class TestFindRootsJavaSourceRootMarkers(TestCase):
+    """Tests for find_roots detecting Gradle-style Java/Kotlin source roots."""
+
+    def test_find_roots_java_source_root(self) -> None:
+        frame = create_frame_info(
+            {"module": "io.sentry.android.core.SentryAndroid", "abs_path": "SentryAndroid.java"},
+            "java",
+        )
+        stack_root, source_root = find_roots(
+            frame,
+            "sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+            [
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryFrameMetrics.java",
+            ],
+        )
+        assert stack_root == "io/sentry/android/core/"
+        assert source_root == "sentry-android-core/src/main/java/io/sentry/android/core/"
+
+    def test_find_roots_java_deep_module(self) -> None:
+        frame = create_frame_info(
+            {
+                "module": "io.sentry.spring.boot.jakarta.SentryAutoConfiguration",
+                "abs_path": "SentryAutoConfiguration.java",
+            },
+            "java",
+        )
+        stack_root, source_root = find_roots(
+            frame,
+            "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryAutoConfiguration.java",
+            [
+                "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryAutoConfiguration.java",
+                "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryWebFilter.java",
+            ],
+        )
+        assert stack_root == "io/sentry/spring/boot/jakarta/"
+        assert (
+            source_root == "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/"
+        )
+
+    def test_find_roots_kotlin_source_root(self) -> None:
+        frame = create_frame_info(
+            {"module": "io.sentry.test.TestHelper", "abs_path": "TestHelper.kt"},
+            "java",
+        )
+        stack_root, source_root = find_roots(
+            frame,
+            "sentry-test-support/src/main/kotlin/io/sentry/test/TestHelper.kt",
+            [
+                "sentry-test-support/src/main/kotlin/io/sentry/TestLogger.kt",
+                "sentry-test-support/src/main/kotlin/io/sentry/test/TestHelper.kt",
+            ],
+        )
+        assert stack_root == "io/sentry/"
+        assert source_root == "sentry-test-support/src/main/kotlin/io/sentry/"
+
+    def test_find_roots_no_marker_falls_back(self) -> None:
+        frame = create_frame_info(
+            {"module": "io.sentry.android.core.SentryAndroid", "abs_path": "SentryAndroid.java"},
+            "java",
+        )
+        stack_root, source_root = find_roots(
+            frame,
+            "src/io/sentry/android/core/SentryAndroid.java",
+        )
+        # Falls back to frame_filename.stack_root which is "io/sentry/android/core/"
+        assert stack_root == "io/sentry/android/core/"
+        assert source_root == "src/io/sentry/android/core/"
+
+    def test_find_roots_non_java_source_root_marker_uses_generic_fallback(self) -> None:
+        frame = create_frame_info({"filename": "foo/bar.py"})
+        stack_root, source_root = find_roots(
+            frame,
+            "pkg/src/main/java/foo/bar.py",
+            ["pkg/src/main/java/foo/bar.py"],
+        )
+        assert stack_root == "foo/"
+        assert source_root == "pkg/src/main/java/foo/"
+
+    def test_find_roots_java_generates_correct_code_mapping(self) -> None:
+        frame = create_frame_info(
+            {
+                "module": "io.sentry.spring.boot.jakarta.SentryAutoConfiguration",
+                "abs_path": "SentryAutoConfiguration.java",
+            },
+            "java",
+        )
+        stack_root, source_root = find_roots(
+            frame,
+            "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryAutoConfiguration.java",
+            [
+                "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryAutoConfiguration.java",
+                "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryWebFilter.java",
+            ],
+        )
+        assert (
+            frame.raw_path.replace(stack_root, source_root, 1)
+            == "sentry-spring-boot-jakarta/src/main/java/io/sentry/spring/boot/jakarta/SentryAutoConfiguration.java"
+        )
 
 
 class TestConvertStacktraceFramePathToSourcePath(TestCase):

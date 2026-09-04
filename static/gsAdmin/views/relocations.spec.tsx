@@ -1,12 +1,14 @@
-import {initializeOrg} from 'sentry-test/initializeOrg';
+// import {initializeOrg} from 'sentry-test/initializeOrg';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import Relocations from 'admin/views/relocations';
+import {ConfigStore} from 'sentry/stores/configStore';
+
+import {Relocations} from 'admin/views/relocations';
 
 jest.mock('sentry/actionCreators/indicator');
 
-describe('Relocations', function () {
-  beforeEach(function () {
+describe('Relocations', () => {
+  beforeEach(() => {
     MockApiClient.addMockResponse({
       url: '/relocations/',
       method: 'GET',
@@ -132,11 +134,11 @@ describe('Relocations', function () {
         },
       ],
     });
+    ConfigStore.set('cells', [{name: 'us', locality_url: 'https://us.sentry.io'}]);
   });
 
-  it('renders', async function () {
-    const {routerProps} = initializeOrg();
-    render(<Relocations {...routerProps} />);
+  it('renders', async () => {
+    render(<Relocations />);
 
     expect(await screen.findByRole('heading', {name: 'Relocations'})).toBeInTheDocument();
 

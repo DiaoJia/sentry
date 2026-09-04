@@ -1,25 +1,34 @@
-import {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react';
 import {useTheme} from '@emotion/react';
 import {Replayer, ReplayerEvents} from '@sentry-internal/rrweb';
 import type {Mirror} from '@sentry-internal/rrweb-snapshot';
+import * as Sentry from '@sentry/react';
 
-import useReplayHighlighting from 'sentry/components/replays/useReplayHighlighting';
+import {useReplayHighlighting} from 'sentry/components/replays/useReplayHighlighting';
 import {VideoReplayerWithInteractions} from 'sentry/components/replays/videoReplayerWithInteractions';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import clamp from 'sentry/utils/number/clamp';
-import type useInitialOffsetMs from 'sentry/utils/replays/hooks/useInitialTimeOffsetMs';
-import useTouchEventsCheck from 'sentry/utils/replays/playback/hooks/useTouchEventsCheck';
+import {clamp} from 'sentry/utils/number/clamp';
+import type {useInitialTimeOffsetMs} from 'sentry/utils/replays/hooks/useInitialTimeOffsetMs';
+import {useTouchEventsCheck} from 'sentry/utils/replays/playback/hooks/useTouchEventsCheck';
 import {useReplayPrefs} from 'sentry/utils/replays/playback/providers/replayPreferencesContext';
 import {ReplayCurrentTimeContextProvider} from 'sentry/utils/replays/playback/providers/useCurrentHoverTime';
-import type ReplayReader from 'sentry/utils/replays/replayReader';
+import type {ReplayReader} from 'sentry/utils/replays/replayReader';
 import type {Dimensions} from 'sentry/utils/replays/types';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePrevious from 'sentry/utils/usePrevious';
-import useProjectFromId from 'sentry/utils/useProjectFromId';
-import useRAF from 'sentry/utils/useRAF';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {usePrevious} from 'sentry/utils/usePrevious';
+import {useProjectFromId} from 'sentry/utils/useProjectFromId';
+import {useRAF} from 'sentry/utils/useRAF';
 import {useUser} from 'sentry/utils/useUser';
 
-import {CanvasReplayerPlugin} from './canvasReplayerPlugin';
+import {canvasReplayerPlugin} from './canvasReplayerPlugin';
 
 type RootElem = null | HTMLDivElement;
 
@@ -30,6 +39,7 @@ type HighlightCallbacks = ReturnType<typeof useReplayHighlighting>;
 // Instead only expose methods that wrap `Replayer` and manage state.
 interface ReplayPlayerContextProps extends HighlightCallbacks {
   /**
+   * DEPRECATED - use `useAnalyticsArea` instead.
    * The context in which the replay is being viewed.
    */
   analyticsContext: string;
@@ -91,7 +101,6 @@ interface ReplayPlayerContextProps extends HighlightCallbacks {
   /**
    * The core replay data
    */
-  replay: ReplayReader | null;
 
   /**
    * Restart the replay
@@ -99,7 +108,7 @@ interface ReplayPlayerContextProps extends HighlightCallbacks {
   restart: () => void;
 
   /**
-   * Jump the video to a specific time
+   * Jump the video to a specific time. Input is in ms.
    */
   setCurrentTime: (time: number) => void;
 
@@ -133,7 +142,6 @@ const ReplayPlayerContext = createContext<ReplayPlayerContextProps>({
   isPlaying: false,
   isVideoReplay: false,
   removeHighlight: () => {},
-  replay: null,
   restart: () => {},
   setCurrentTime: () => {},
   setRoot: () => {},
@@ -143,6 +151,7 @@ const ReplayPlayerContext = createContext<ReplayPlayerContextProps>({
 
 type Props = {
   /**
+   * DEPRECATED - use `useAnalyticsArea` instead.
    * The context in which the replay is being viewed.
    * Attached to certain analytics events.
    */
@@ -165,12 +174,7 @@ type Props = {
   /**
    * Time, in seconds, when the video should start
    */
-  initialTimeOffsetMs?: ReturnType<typeof useInitialOffsetMs>;
-
-  /**
-   * Override return fields for testing
-   */
-  value?: Partial<ReplayPlayerContextProps>;
+  initialTimeOffsetMs?: ReturnType<typeof useInitialTimeOffsetMs>;
 };
 
 function useCurrentTime(callback: () => number) {
@@ -186,7 +190,6 @@ export function Provider({
   isFetching,
   replay,
   autoStart,
-  value = {},
 }: Props) {
   const user = useUser();
   const organization = useOrganization();
@@ -203,9 +206,9 @@ export function Provider({
   // Note we have to check this outside of hooks, see `usePrevious` comments
   const hasNewEvents = events !== oldEvents;
   const replayerRef = useRef<Replayer | null>(null);
-  const [dimensions, setDimensions] = useState<Dimensions>({height: 0, width: 0});
+  const [dimensions, setDimensions] = useState({height: 0, width: 0});
   const [isPlaying, setIsPlaying] = useState(false);
-  const [finishedAtMS, setFinishedAtMS] = useState<number>(-1);
+  const [finishedAtMS, setFinishedAtMS] = useState(-1);
 
   const [fastForwardSpeed, setFFSpeed] = useState(0);
   const [buffer, setBufferTime] = useState({target: -1, previous: -1});
@@ -336,7 +339,7 @@ export function Provider({
           return;
         }
 
-        if (replayerRef.current.iframe.contentDocument?.body.childElementCount === 0) {
+        if (replayerRef.current.iframe.contentDocument?.body?.childElementCount === 0) {
           // If this is true, then no need to clear old iframe as nothing was rendered
           return;
         }
@@ -355,9 +358,9 @@ export function Provider({
           duration: 0.75 * 1000,
           lineCap: 'round',
           lineWidth: 2,
-          strokeStyle: theme.purple200,
+          strokeStyle: theme.tokens.border.accent.moderate,
         },
-        plugins: [CanvasReplayerPlugin(events)],
+        plugins: [canvasReplayerPlugin(events)],
         skipInactive: initialPrefsRef.current.isSkippingInactive,
         speed: initialPrefsRef.current.playbackSpeed,
       });
@@ -388,7 +391,7 @@ export function Provider({
       hasNewEvents,
       isFetching,
       setReplayFinished,
-      theme.purple200,
+      theme.tokens.border.accent.moderate,
     ]
   );
 
@@ -477,8 +480,34 @@ export function Provider({
     }
   }, [getCurrentPlayerTime, isPlaying, prefs.playbackSpeed]);
 
+  const replayId = replay?.getReplay().id;
+  const projectId = replay?.getReplay().project_id;
+
+  const onLoadAllEvents = useEffectEvent(() => {
+    const attributes = {
+      projectId: String(projectId),
+      replayId,
+    };
+
+    Sentry.metrics.distribution('replay.eventCount', events?.length ?? 0, {
+      attributes,
+    });
+
+    Sentry.metrics.distribution('replay.videoEventCount', videoEvents?.length ?? 0, {
+      attributes,
+    });
+  });
+
+  useEffect(() => {
+    if (isFetching || !replayId) {
+      return;
+    }
+
+    onLoadAllEvents();
+  }, [replayId, isFetching]);
+
   const togglePlayPause = useCallback(
-    (play: boolean) => {
+    (play: boolean, {seek = true} = {}) => {
       const replayer = replayerRef.current;
       if (!replayer) {
         return;
@@ -486,8 +515,10 @@ export function Provider({
 
       if (play) {
         replayer.play(getCurrentPlayerTime());
-      } else {
+      } else if (seek) {
         replayer.pause(getCurrentPlayerTime());
+      } else {
+        replayer.pause();
       }
       setIsPlaying(play);
 
@@ -510,7 +541,10 @@ export function Provider({
 
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible' && replayerRef.current) {
-        togglePlayPause(false);
+        togglePlayPause(false, {seek: isVideoReplay});
+        // Pausing without a seek skips rrweb's `backToNormal()`, so `SkipEnd`
+        // never fires to clear this
+        setFFSpeed(0);
       }
     };
 
@@ -519,7 +553,7 @@ export function Provider({
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [togglePlayPause, isPlaying]);
+  }, [togglePlayPause, isPlaying, isVideoReplay]);
 
   // Initialize replayer for Video Replays
   useEffect(() => {
@@ -618,12 +652,10 @@ export function Provider({
           isFinished,
           isPlaying,
           removeHighlight,
-          replay,
           restart,
           setCurrentTime,
           togglePlayPause,
           getMirror: () => replayerRef.current?.getMirror() ?? null,
-          ...value,
         }}
       >
         {children}

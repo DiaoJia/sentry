@@ -8,42 +8,60 @@ from sentry.issues.auto_source_code_config.errors import (
     NeedsExtension,
     UnsupportedFrameInfo,
 )
-from sentry.issues.auto_source_code_config.frame_info import FrameInfo
+from sentry.issues.auto_source_code_config.frame_info import create_frame_info
 
 UNSUPPORTED_FRAME_FILENAMES = [
+    # HTTP/HTTPS URLs
+    "https://s1.sentry-cdn.com/_static/dist/sentry/entrypoints/app.js",
+    "http://example.com/script.js",
+    "HTTP://EXAMPLE.COM/SCRIPT.JS",
     "async https://s1.sentry-cdn.com/_static/dist/sentry/entrypoints/app.js",
+    "webpack:///https://cdn.example.com/bundle.js",
+    # Special frame types
     "<anonymous>",
     "<frozen importlib._bootstrap>",
     "[native code]",
-    "O$t",
-    "async https://s1.sentry-cdn.com/_static/dist/sentry/entrypoints/app.js",
-    "README",  # top level file
-    # XXX: Top level files will need to be supported
-    "/gtm.js",  # Rejected because it's a top level file and not because it has a backslash
-    "ssl.py",
-    "initialization.dart",
-    "backburner.js",
+]
+
+# Files with "http" substring that should be ACCEPTED
+LEGITIMATE_HTTP_FILENAMES = [
+    "src/httpclient/request.py",
+    "/usr/local/httpd/config.py",
+    "lib/http_utils.js",
+    "services/httpserver/main.go",
+    "lib/https_client.rb",
+    "network/http2/stream.go",
 ]
 
 NO_EXTENSION_FRAME_FILENAMES = [
-    "/foo/bar/baz",  # no extension
+    "/foo/bar/baz",
+    "README",
+    "O$t",
 ]
 
 
 class TestFrameInfo:
     def test_frame_filename_repr(self) -> None:
         path = "getsentry/billing/tax/manager.py"
-        assert FrameInfo({"filename": path}).__repr__() == f"FrameInfo: {path}"
+        frame_info = create_frame_info({"filename": path})
+        expected = f"FrameInfo: {path} stack_root: {frame_info.stack_root}"
+        assert frame_info.__repr__() == expected
 
     @pytest.mark.parametrize("filepath", UNSUPPORTED_FRAME_FILENAMES)
     def test_raises_unsupported(self, filepath: str) -> None:
         with pytest.raises(UnsupportedFrameInfo):
-            FrameInfo({"filename": filepath})
+            create_frame_info({"filename": filepath})
+
+    @pytest.mark.parametrize("filepath", LEGITIMATE_HTTP_FILENAMES)
+    def test_legitimate_http_filenames_accepted(self, filepath: str) -> None:
+        # These files contain "http" but should NOT be rejected
+        frame_info = create_frame_info({"filename": filepath})
+        assert frame_info.raw_path == filepath
 
     def test_raises_no_extension(self) -> None:
         for filepath in NO_EXTENSION_FRAME_FILENAMES:
             with pytest.raises(NeedsExtension):
-                FrameInfo({"filename": filepath})
+                create_frame_info({"filename": filepath})
 
     @pytest.mark.parametrize(
         "frame, expected_exception",
@@ -64,7 +82,7 @@ class TestFrameInfo:
         self, frame: dict[str, Any], expected_exception: type[Exception]
     ) -> None:
         with pytest.raises(expected_exception):
-            FrameInfo(frame, "java")
+            create_frame_info(frame, "java")
 
     @pytest.mark.parametrize(
         "frame, expected_stack_root, expected_normalized_path",
@@ -93,14 +111,63 @@ class TestFrameInfo:
                 "foo/bar/Baz",  # The path does not use the abs_path
                 id="invalid_abs_path_dollar_sign",
             ),
+            pytest.param(
+                {"module": "foo.Baz", "abs_path": "foo"},
+                "foo/",  # Single-depth stack root
+                "foo/Baz",
+                id="granularity_1",
+            ),
         ],
     )
     def test_java_valid_frames(
         self, frame: dict[str, Any], expected_stack_root: str, expected_normalized_path: str
     ) -> None:
-        frame_info = FrameInfo(frame, "java")
+        frame_info = create_frame_info(frame, "java")
         assert frame_info.stack_root == expected_stack_root
         assert frame_info.normalized_path == expected_normalized_path
+
+    def test_java_platform_resolves_source_roots(self) -> None:
+        frame_info = create_frame_info(
+            {"module": "io.sentry.android.core.SentryAndroid", "abs_path": "SentryAndroid.java"},
+            "java",
+        )
+
+        assert frame_info.has_source_roots_override(
+            "sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+            [
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryFrameMetrics.java",
+            ],
+        )
+
+        assert frame_info.resolve_source_roots(
+            source_path="sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+            source_prefix="sentry-android-core/src/main/java/",
+            repo_files=[
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryAndroid.java",
+                "sentry-android-core/src/main/java/io/sentry/android/core/SentryFrameMetrics.java",
+            ],
+        ) == (
+            "io/sentry/android/core/",
+            "sentry-android-core/src/main/java/io/sentry/android/core/",
+        )
+
+    def test_non_java_platform_resolves_source_roots_with_generic_fallback(self) -> None:
+        frame_info = create_frame_info({"filename": "foo/bar.py"}, "python")
+
+        assert not frame_info.has_source_roots_override(
+            "pkg/src/main/java/foo/bar.py",
+            ["pkg/src/main/java/foo/bar.py"],
+        )
+
+        assert frame_info.resolve_source_roots(
+            source_path="pkg/src/main/java/foo/bar.py",
+            source_prefix="pkg/src/main/java/",
+            repo_files=["pkg/src/main/java/foo/bar.py"],
+        ) == (
+            "foo/",
+            "pkg/src/main/java/foo/",
+        )
 
     @pytest.mark.parametrize(
         "frame_filename, stack_root, normalized_path",
@@ -135,6 +202,11 @@ class TestFrameInfo:
     def test_straight_path_prefix(
         self, frame_filename: str, stack_root: str, normalized_path: str
     ) -> None:
-        frame_info = FrameInfo({"filename": frame_filename})
+        frame_info = create_frame_info({"filename": frame_filename})
         assert frame_info.normalized_path == normalized_path
         assert frame_info.stack_root == stack_root
+
+    def test_unsupported_platform_returns_path_based_frame_info(self) -> None:
+        frame_info = create_frame_info({"filename": "Sources/App/AppDelegate.swift"}, "cocoa")
+        assert frame_info.normalized_path == "Sources/App/AppDelegate.swift"
+        assert frame_info.stack_root == "Sources"

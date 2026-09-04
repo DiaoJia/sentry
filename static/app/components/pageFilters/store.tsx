@@ -1,0 +1,243 @@
+import {createStore} from 'reflux';
+
+import type {PageFilterAdjustments} from 'sentry/components/pageFilters/adjustments';
+import {getDefaultPageFilterSelection} from 'sentry/components/pageFilters/constants';
+import type {StrictStoreDefinition} from 'sentry/stores/types';
+import type {PageFilters, PinnedPageFilter, PageFilterDatetime} from 'sentry/types/core';
+import {valueIsEqual} from 'sentry/utils/object/valueIsEqual';
+
+function datetimeHasSameValue(a: PageFilterDatetime, b: PageFilterDatetime): boolean {
+  if (Object.keys(a).length !== Object.keys(b).length) {
+    return false;
+  }
+
+  for (const key in a) {
+    // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+    if (a[key] instanceof Date && b[key] instanceof Date) {
+      // This will fail on invalid dates as NaN !== NaN,
+      // but thats fine since we don't want invalid dates to be equal
+      // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+      if (a[key].getTime() === b[key].getTime()) {
+        continue;
+      }
+      return false;
+    }
+
+    // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+    if (a[key] === null && b[key] === null) {
+      continue;
+    }
+
+    // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+    if (a[key] !== b[key]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Drops adjustments for filters the user has since changed themselves.
+ */
+function clearAdjustments(
+  adjustments: PageFilterAdjustments,
+  filters: Array<keyof PageFilterAdjustments>
+): PageFilterAdjustments {
+  if (!filters.some(filter => adjustments[filter])) {
+    return adjustments;
+  }
+
+  const cleared = {...adjustments};
+  for (const filter of filters) {
+    delete cleared[filter];
+  }
+
+  return cleared;
+}
+
+export interface PageFiltersState {
+  /**
+   * Adjustments made to the requested selection during initialization, so pages
+   * can explain why the selection isn't what the user asked for.
+   */
+  adjustments: PageFilterAdjustments;
+  /**
+   * Are page filters ready?
+   */
+  isReady: boolean;
+  /**
+   * The set of page filters which are currently pinned
+   */
+  pinnedFilters: Set<PinnedPageFilter>;
+  /**
+   * The current page filter selection
+   */
+  selection: PageFilters;
+  /**
+   * Whether to save changes to local storage. This setting should be page-specific:
+   * most pages should have it on (default) and some, like Dashboard Details, need it
+   * off.
+   */
+  shouldPersist: boolean;
+}
+
+interface PageFiltersStoreDefinition extends StrictStoreDefinition<PageFiltersState> {
+  /**
+   * Call this *after* the update that caused the adjustment, since updating a
+   * filter clears its adjustments.
+   */
+  addAdjustment<F extends keyof PageFilterAdjustments>(
+    filter: F,
+    adjustment: NonNullable<PageFilterAdjustments[F]>
+  ): void;
+  onInitializeUrlState(
+    newSelection: PageFilters,
+    persist?: boolean,
+    adjustments?: PageFilterAdjustments
+  ): void;
+  onReset(): void;
+  pin(filter: PinnedPageFilter, pin: boolean): void;
+  reset(selection?: PageFilters): void;
+  updateDateTime(datetime: PageFilterDatetime): void;
+  updateEnvironments(environments: string[] | null): void;
+  updatePersistence(shouldPersist: boolean): void;
+  updateProjects(projects: PageFilters['projects'], environments: null | string[]): void;
+}
+
+const storeConfig: PageFiltersStoreDefinition = {
+  state: {
+    isReady: false,
+    selection: getDefaultPageFilterSelection(),
+    pinnedFilters: new Set(),
+    shouldPersist: true,
+    adjustments: {},
+  },
+
+  init() {
+    // XXX: Do not use `this.listenTo` in this store. We avoid usage of reflux
+    // listeners due to their leaky nature in tests.
+
+    this.reset(this.state.selection);
+  },
+
+  reset(selection) {
+    this.state = {
+      ...this.state,
+      isReady: false,
+      selection: selection || getDefaultPageFilterSelection(),
+      pinnedFilters: new Set(),
+      adjustments: {},
+    };
+  },
+
+  /**
+   * Initializes the page filters store data
+   */
+  onInitializeUrlState(newSelection, persist = true, adjustments = {}) {
+    this.state = {
+      ...this.state,
+      isReady: true,
+      selection: newSelection,
+      pinnedFilters: new Set<PinnedPageFilter>(['projects', 'environments', 'datetime']),
+      shouldPersist: persist,
+      adjustments,
+    };
+    this.trigger(this.getState());
+  },
+
+  getState() {
+    return this.state;
+  },
+
+  onReset() {
+    this.reset();
+    this.trigger(this.getState());
+  },
+
+  updatePersistence(shouldPersist: boolean) {
+    this.state = {...this.state, shouldPersist};
+    this.trigger(this.getState());
+  },
+
+  addAdjustment(filter, adjustment) {
+    if (valueIsEqual(this.state.adjustments[filter], adjustment, true)) {
+      return;
+    }
+
+    this.state = {
+      ...this.state,
+      adjustments: {...this.state.adjustments, [filter]: adjustment},
+    };
+    this.trigger(this.getState());
+  },
+
+  updateProjects(projects = [], environments = null) {
+    if (valueIsEqual(this.state.selection.projects, projects)) {
+      return;
+    }
+
+    const selection = {
+      ...this.state.selection,
+      projects,
+      environments:
+        environments === null ? this.state.selection.environments : environments,
+    };
+    this.state = {
+      ...this.state,
+      selection,
+      adjustments: clearAdjustments(
+        this.state.adjustments,
+        environments === null ? ['projects'] : ['projects', 'environments']
+      ),
+    };
+    this.trigger(this.getState());
+  },
+
+  updateDateTime(newDateTime) {
+    if (datetimeHasSameValue(this.state.selection.datetime, newDateTime)) {
+      return;
+    }
+
+    this.state = {
+      ...this.state,
+      selection: {
+        ...this.state.selection,
+        datetime: newDateTime,
+      },
+      adjustments: clearAdjustments(this.state.adjustments, ['datetime']),
+    };
+    this.trigger(this.getState());
+  },
+
+  updateEnvironments(environments) {
+    if (valueIsEqual(this.state.selection.environments, environments)) {
+      return;
+    }
+
+    this.state = {
+      ...this.state,
+      selection: {
+        ...this.state.selection,
+        environments: environments ?? [],
+      },
+      adjustments: clearAdjustments(this.state.adjustments, ['environments']),
+    };
+
+    this.trigger(this.getState());
+  },
+
+  pin(filter, pin) {
+    const newPinnedFilters = new Set(this.state.pinnedFilters);
+    if (pin) {
+      newPinnedFilters.add(filter);
+    } else {
+      newPinnedFilters.delete(filter);
+    }
+
+    this.state = {...this.state, pinnedFilters: newPinnedFilters};
+    this.trigger(this.getState());
+  },
+};
+
+export const PageFiltersStore = createStore(storeConfig);

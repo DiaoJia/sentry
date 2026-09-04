@@ -13,11 +13,10 @@ type GroupPreviewTooltipProps = {
   issueCategory?: IssueCategory;
   issueType?: IssueType;
   project?: Project;
-  projectId?: string;
   query?: string;
 };
 
-function GroupPreviewTooltip({
+export function GroupPreviewTooltip({
   children,
   groupId,
   groupingCurrentLevel,
@@ -66,5 +65,3 @@ function GroupPreviewTooltip({
     </StackTracePreview>
   );
 }
-
-export default GroupPreviewTooltip;

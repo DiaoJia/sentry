@@ -4,8 +4,9 @@ import styled from '@emotion/styled';
 // @ts-expect-error TS(7016): Could not find a declaration file for module 'zxcv... Remove this comment to see the full error message
 import zxcvbn from 'zxcvbn';
 
+import {Container} from '@sentry/scraps/layout';
+
 import {tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 
 /**
  * The maximum score that zxcvbn reports
@@ -17,14 +18,6 @@ type Props = {
    * The password value.
    */
   value: string;
-  /**
-   * The color to make the progress bar for each strength level. 5 levels.
-   */
-  colors?: [string, string, string, string, string];
-  /**
-   * A set of labels to display for each password strength level. 5 levels.
-   */
-  labels?: [string, string, string, string, string];
 };
 
 /**
@@ -33,20 +26,14 @@ type Props = {
  */
 export function PasswordStrength(props: Props) {
   const theme = useTheme();
-  const colors = props.colors ?? [
-    theme.red300,
-    theme.red300,
-    theme.yellow300,
-    theme.green300,
-    theme.green300,
+  const colors = [
+    theme.colors.red400,
+    theme.colors.red400,
+    theme.colors.yellow400,
+    theme.colors.green400,
+    theme.colors.green400,
   ];
-  const labels = props.labels ?? [
-    'Very Weak',
-    'Very Weak',
-    'Weak',
-    'Strong',
-    'Very Strong',
-  ];
+  const labels = ['Very Weak', 'Very Weak', 'Weak', 'Strong', 'Very Strong'];
 
   if (props.value === '') {
     return null;
@@ -73,7 +60,7 @@ export function PasswordStrength(props: Props) {
         aria-valuemin={0}
         aria-valuemax={100}
       >
-        <StrengthProgressBar css={styles} />
+        <Container height="100%" css={styles} />
       </StrengthProgress>
       <StrengthLabel>
         {tct('Strength: [textScore]', {
@@ -85,22 +72,18 @@ export function PasswordStrength(props: Props) {
 }
 
 const StrengthProgress = styled('div')`
-  background: ${p => p.theme.gray200};
+  background: ${p => p.theme.colors.gray200};
   height: 8px;
   border-radius: 2px;
   overflow: hidden;
 `;
 
-const StrengthProgressBar = styled('div')`
-  height: 100%;
-`;
-
 const StrengthLabel = styled('div')`
   font-size: 0.8em;
-  margin-top: ${space(0.25)};
-  color: ${p => p.theme.gray400};
+  margin-top: ${p => p.theme.space['2xs']};
+  color: ${p => p.theme.colors.gray500};
 `;
 
 const ScoreText = styled('strong')`
-  color: ${p => p.theme.black};
+  color: ${p => p.theme.colors.black};
 `;

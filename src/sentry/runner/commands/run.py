@@ -5,18 +5,18 @@ import os
 import random
 import signal
 import time
-from multiprocessing import cpu_count
 from typing import Any
 
 import click
-from django.utils import autoreload
+import taskbroker_client.constants as taskworker_constants
 
-import sentry.taskworker.constants as taskworker_constants
+from sentry import options as sentry_options
 from sentry.bgtasks.api import managed_bgtasks
 from sentry.runner.decorators import configuration, log_options
 from sentry.utils.kafka import run_processor_with_signals
 
 DEFAULT_BLOCK_SIZE = int(32 * 1e6)
+logger = logging.getLogger("sentry.runner.commands.run")
 
 
 def _address_validate(
@@ -32,42 +32,6 @@ def _address_validate(
         host = value
         port = None
     return host, port
-
-
-class QueueSetType(click.ParamType):
-    name = "text"
-
-    def convert(self, value: str | None, param: object, ctx: object) -> frozenset[str] | None:
-        if value is None:
-            return None
-        # Providing a compatibility with splitting
-        # the `events` queue until multiple queues
-        # without the need to explicitly add them.
-        queues = set()
-        for queue in value.split(","):
-            if queue == "events":
-                queues.add("events.preprocess_event")
-                queues.add("events.process_event")
-                queues.add("events.save_event")
-
-                from sentry.runner.initializer import show_big_error
-
-                show_big_error(
-                    [
-                        "DEPRECATED",
-                        "`events` queue no longer exists.",
-                        "Switch to using:",
-                        "- events.preprocess_event",
-                        "- events.process_event",
-                        "- events.save_event",
-                    ]
-                )
-            else:
-                queues.add(queue)
-        return frozenset(queues)
-
-
-QueueSet = QueueSetType()
 
 
 @click.group()
@@ -127,118 +91,6 @@ def web(
         SentryHTTPServer(host=bind[0], port=bind[1], workers=workers).run()
 
 
-def run_worker(**options: Any) -> None:
-    """
-    This is the inner function to actually start worker.
-    """
-    from django.conf import settings
-
-    if settings.CELERY_ALWAYS_EAGER:
-        raise click.ClickException(
-            "Disable CELERY_ALWAYS_EAGER in your settings file to spawn workers."
-        )
-
-    # These options are no longer used, but keeping around
-    # for backwards compatibility
-    for o in "without_gossip", "without_mingle", "without_heartbeat":
-        options.pop(o, None)
-
-    from sentry.celery import app
-
-    # NOTE: without_mingle breaks everything,
-    # we can't get rid of this. Intentionally kept
-    # here as a warning. Jobs will not process.
-    without_mingle = os.getenv("SENTRY_WORKER_FORCE_WITHOUT_MINGLE", "false").lower() == "true"
-
-    with managed_bgtasks(role="worker"):
-        worker = app.Worker(
-            without_mingle=without_mingle,
-            without_gossip=True,
-            without_heartbeat=True,
-            pool_cls="processes",
-            **options,
-        )
-        worker.start()
-        raise SystemExit(worker.exitcode)
-
-
-@run.command()
-@click.option(
-    "--hostname",
-    "-n",
-    help=(
-        "Set custom hostname, e.g. 'w1.%h'. Expands: %h" "(hostname), %n (name) and %d, (domain)."
-    ),
-)
-@click.option(
-    "--queues",
-    "-Q",
-    type=QueueSet,
-    help=(
-        "List of queues to enable for this worker, separated by "
-        "comma. By default all configured queues are enabled. "
-        "Example: -Q video,image"
-    ),
-)
-@click.option("--exclude-queues", "-X", type=QueueSet)
-@click.option(
-    "--concurrency",
-    "-c",
-    default=cpu_count(),
-    help=(
-        "Number of child processes processing the queue. The "
-        "default is the number of CPUs available on your "
-        "system."
-    ),
-)
-@click.option(
-    "--logfile", "-f", help=("Path to log file. If no logfile is specified, stderr is used.")
-)
-@click.option("--quiet", "-q", is_flag=True, default=False)
-@click.option("--no-color", is_flag=True, default=False)
-@click.option("--autoreload", is_flag=True, default=False, help="Enable autoreloading.")
-@click.option("--without-gossip", is_flag=True, default=False)
-@click.option("--without-mingle", is_flag=True, default=False)
-@click.option("--without-heartbeat", is_flag=True, default=False)
-@click.option("--max-tasks-per-child", default=10000)
-@click.option("--ignore-unknown-queues", is_flag=True, default=False)
-@log_options()
-@configuration
-def worker(ignore_unknown_queues: bool, **options: Any) -> None:
-    """Run background worker instance and autoreload if necessary."""
-
-    from sentry.celery import app
-
-    known_queues = frozenset(c_queue.name for c_queue in app.conf.CELERY_QUEUES)
-
-    if options["queues"] is not None:
-        if not options["queues"].issubset(known_queues):
-            unknown_queues = options["queues"] - known_queues
-            message = "Following queues are not found: %s" % ",".join(sorted(unknown_queues))
-            if ignore_unknown_queues:
-                options["queues"] -= unknown_queues
-                click.echo(message)
-            else:
-                raise click.ClickException(message)
-
-    if options["exclude_queues"] is not None:
-        if not options["exclude_queues"].issubset(known_queues):
-            unknown_queues = options["exclude_queues"] - known_queues
-            message = "Following queues cannot be excluded as they don't exist: %s" % ",".join(
-                sorted(unknown_queues)
-            )
-            if ignore_unknown_queues:
-                options["exclude_queues"] -= unknown_queues
-                click.echo(message)
-            else:
-                raise click.ClickException(message)
-
-    if options["autoreload"]:
-        autoreload.run_with_reloader(run_worker, **options)
-    else:
-        run_worker(**options)
-
-
 @run.command()
 @click.option(
     "--redis-cluster",
@@ -254,23 +106,25 @@ def taskworker_scheduler(redis_cluster: str, **options: Any) -> None:
     All tasks defined in settings.TASKWORKER_SCHEDULES will be scheduled as required.
     """
     from django.conf import settings
+    from taskbroker_client.scheduler import RunStorage, ScheduleRunner
 
-    from sentry import options as featureflags
-    from sentry.taskworker.registry import taskregistry
-    from sentry.taskworker.scheduler.runner import RunStorage, ScheduleRunner
+    from sentry.taskworker.runtime import app
     from sentry.utils.redis import redis_clusters
 
-    for module in settings.TASKWORKER_IMPORTS:
-        __import__(module)
-
-    run_storage = RunStorage(redis_clusters.get(redis_cluster))
+    app.load_modules()
+    run_storage = RunStorage(metrics=app.metrics, redis=redis_clusters.get(redis_cluster))
 
     with managed_bgtasks(role="taskworker-scheduler"):
-        runner = ScheduleRunner(taskregistry, run_storage)
-        enabled_schedules = set(featureflags.get("taskworker.scheduler.rollout", []))
+        runner = ScheduleRunner(app, run_storage)
         for key, schedule_data in settings.TASKWORKER_SCHEDULES.items():
-            if key in enabled_schedules:
-                runner.add(key, schedule_data)
+            runner.add(key, schedule_data)
+
+        logger.info(
+            "taskworker.scheduler.schedule_data",
+            extra={
+                "schedule_keys": list(settings.TASKWORKER_SCHEDULES.keys()),
+            },
+        )
 
         runner.log_startup()
         while True:
@@ -280,20 +134,39 @@ def taskworker_scheduler(redis_cluster: str, **options: Any) -> None:
 
 @run.command()
 @click.option(
+    "--push-mode", help="Whether to run in PUSH or PULL mode.", default=False, is_flag=True
+)
+@click.option(
+    "--batch-push-mode", help="Whether to run in BATCH PUSH mode.", default=False, is_flag=True
+)
+@click.option(
     "--rpc-host",
-    help="The hostname for the taskworker-rpc. When using num-brokers the hostname will be appended with `-{i}` to connect to individual brokers.",
+    help="The hostname and port for the taskbroker gRPC server. When using num-brokers the hostname will be appended with `-{i}` to connect to individual brokers.",
     default="127.0.0.1:50051",
+)
+@click.option(
+    "--worker-rpc-port",
+    help="Port for the taskworker gRPC server to listen on when it is running in push mode.",
+    default=50052,
+    type=int,
 )
 @click.option(
     "--num-brokers", help="Number of brokers available to connect to", default=None, type=int
 )
-@click.option("--autoreload", is_flag=True, default=False, help="Enable autoreloading.")
+@click.option(
+    "--rpc-host-list",
+    help="Provide a comma separated list of broker RPC host:ports. Use when your broker host names are not compatible with `rpc-host`",
+    default=None,
+)
 @click.option(
     "--max-child-task-count",
     help="Number of tasks child processes execute before being restart",
     default=taskworker_constants.DEFAULT_CHILD_TASK_COUNT,
 )
 @click.option("--concurrency", help="Number of child processes to create.", default=1)
+@click.option(
+    "--min-concurrency", help="Minimum number of children that should always be active.", default=0
+)
 @click.option(
     "--namespace", help="The dedicated task namespace that this worker processes", default=None
 )
@@ -317,6 +190,39 @@ def taskworker_scheduler(redis_cluster: str, **options: Any) -> None:
     help="The name of the processing pool being used",
     default="unknown",
 )
+@click.option(
+    "--pod-name",
+    help="The name of the pod running this worker",
+    default="unknown",
+)
+@click.option(
+    "--health-check-file-path",
+    help="Full path of the health check file if health check is to be enabled",
+)
+@click.option(
+    "--health-check-sec-per-touch",
+    help="The number of seconds before touching the health check file",
+    default=taskworker_constants.DEFAULT_WORKER_HEALTH_CHECK_SEC_PER_TOUCH,
+)
+@click.option(
+    "--push-timeout-sec",
+    help="The timeout in seconds for the worker to wait to push a task into the child queue",
+    default=5.0,
+    type=float,
+)
+@click.option(
+    "--future-checking-frequency",
+    help="How long the future checking thread in each worker child sleeps between iterations"
+    "to take pressure off the GIL",
+    default=0.1,
+    type=float,
+)
+@click.option(
+    "--prometheus-port",
+    help="Expose worker occupancy on this port for Prometheus scraping. Unset = disabled.",
+    default=None,
+    type=int,
+)
 @log_options()
 @configuration
 def taskworker(**options: Any) -> None:
@@ -324,42 +230,81 @@ def taskworker(**options: Any) -> None:
     Run a taskworker worker
     """
     os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
-    if options["autoreload"]:
-        autoreload.run_with_reloader(run_taskworker, **options)
-    else:
-        run_taskworker(**options)
+    # TODO(mark) restore autoreload
+    run_taskworker(**options)
 
 
 def run_taskworker(
+    push_mode: bool,
+    batch_push_mode: bool,
+    worker_rpc_port: int,
     rpc_host: str,
     num_brokers: int | None,
+    rpc_host_list: str | None,
     max_child_task_count: int,
     namespace: str | None,
     concurrency: int,
+    min_concurrency: int,
     child_tasks_queue_maxsize: int,
     result_queue_maxsize: int,
     rebalance_after: int,
     processing_pool_name: str,
+    pod_name: str,
+    health_check_file_path: str | None,
+    health_check_sec_per_touch: float,
+    push_timeout_sec: float,
+    future_checking_frequency: float,
+    prometheus_port: int | None,
     **options: Any,
 ) -> None:
     """
     taskworker factory that can be reloaded
     """
-    from sentry.taskworker.worker import TaskWorker
+    from taskbroker_client.worker import PushTaskWorker, TaskWorker
+    from taskbroker_client.worker.client import make_broker_hosts
 
+    skip_awaiting_futures = sentry_options.get("taskworker.skip.awaiting.futures")
     with managed_bgtasks(role="taskworker"):
-        worker = TaskWorker(
-            rpc_host=rpc_host,
-            num_brokers=num_brokers,
-            max_child_task_count=max_child_task_count,
-            namespace=namespace,
-            concurrency=concurrency,
-            child_tasks_queue_maxsize=child_tasks_queue_maxsize,
-            result_queue_maxsize=result_queue_maxsize,
-            rebalance_after=rebalance_after,
-            processing_pool_name=processing_pool_name,
-            **options,
-        )
+        if push_mode or batch_push_mode:
+            worker: PushTaskWorker | TaskWorker = PushTaskWorker(
+                app_module="sentry.taskworker.bootstrap:app",
+                broker_service=rpc_host,
+                max_child_task_count=max_child_task_count,
+                namespace=namespace,
+                concurrency=concurrency,
+                min_concurrency=min_concurrency,
+                child_tasks_queue_maxsize=child_tasks_queue_maxsize,
+                result_queue_maxsize=result_queue_maxsize,
+                rebalance_after=rebalance_after,
+                processing_pool_name=processing_pool_name,
+                pod_name=pod_name,
+                health_check_file_path=health_check_file_path,
+                health_check_sec_per_touch=health_check_sec_per_touch,
+                grpc_port=worker_rpc_port,
+                push_task_timeout=push_timeout_sec,
+                skip_awaiting_futures=skip_awaiting_futures,
+                future_checking_frequency=future_checking_frequency,
+                prometheus_port=prometheus_port,
+            )
+        else:
+            worker = TaskWorker(
+                app_module="sentry.taskworker.bootstrap:app",
+                broker_hosts=make_broker_hosts(
+                    host_prefix=rpc_host, num_brokers=num_brokers, host_list=rpc_host_list
+                ),
+                max_child_task_count=max_child_task_count,
+                namespace=namespace,
+                concurrency=concurrency,
+                min_concurrency=min_concurrency,
+                child_tasks_queue_maxsize=child_tasks_queue_maxsize,
+                result_queue_maxsize=result_queue_maxsize,
+                rebalance_after=rebalance_after,
+                processing_pool_name=processing_pool_name,
+                health_check_file_path=health_check_file_path,
+                health_check_sec_per_touch=health_check_sec_per_touch,
+                skip_awaiting_futures=skip_awaiting_futures,
+                future_checking_frequency=future_checking_frequency,
+            )
         exitcode = worker.start()
         raise SystemExit(exitcode)
 
@@ -373,6 +318,18 @@ def run_taskworker(
     help="Number of messages to send to the kafka topic",
     default=1,
     show_default=True,
+)
+@click.option(
+    "--infinite",
+    is_flag=True,
+    default=False,
+    help="Send tasks indefinitely",
+)
+@click.option(
+    "--infinite-delay-ms",
+    type=int,
+    help="The delay in milliseconds between each task",
+    default=0,
 )
 @click.option(
     "--kwargs",
@@ -409,6 +366,12 @@ def run_taskworker(
     default=None,
 )
 @click.option(
+    "--application",
+    type=str,
+    help="Override the application field on generated task activations",
+    default=None,
+)
+@click.option(
     "--extra-arg-bytes",
     type=int,
     help="Generater random args of specified size in bytes",
@@ -419,24 +382,36 @@ def taskbroker_send_tasks(
     args: str,
     kwargs: str,
     repeat: int,
+    infinite: bool,
+    infinite_delay_ms: int,
     bootstrap_servers: str,
     kafka_topic: str,
     namespace: str,
+    application: str | None,
     extra_arg_bytes: int | None,
 ) -> None:
-    from sentry import options
+    from taskbroker_client.canary import CANARY_TASK_NAME
+    from taskbroker_client.constants import INTERNAL_NAMESPACE
+
     from sentry.conf.server import KAFKA_CLUSTERS
+    from sentry.taskworker.adapters import set_route_overrides
+    from sentry.taskworker.runtime import app
     from sentry.utils.imports import import_string
 
-    KAFKA_CLUSTERS["default"]["common"]["bootstrap.servers"] = bootstrap_servers
-    if kafka_topic and namespace:
-        options.set("taskworker.route.overrides", {namespace: kafka_topic})
+    if bootstrap_servers:
+        KAFKA_CLUSTERS["default"]["common"]["bootstrap.servers"] = bootstrap_servers
 
-    try:
-        func = import_string(task_function_path)
-    except Exception as e:
-        click.echo(f"Error: {e}")
-        raise click.Abort()
+    if kafka_topic and namespace:
+        set_route_overrides({namespace: kafka_topic})
+
+    if task_function_path == CANARY_TASK_NAME and namespace == INTERNAL_NAMESPACE:
+        func = app.get_task(namespace, task_function_path)
+    else:
+        try:
+            func = import_string(task_function_path)
+        except Exception as e:
+            click.echo(f"Error: {e}")
+            raise click.Abort()
 
     task_args = [] if not args else eval(args)
     task_kwargs = {} if not kwargs else eval(kwargs)
@@ -447,64 +422,34 @@ def taskbroker_send_tasks(
         )
         task_args.append(extra_padding_arg)
 
-    checkmarks = {int(repeat * (i / 10)) for i in range(1, 10)}
-    for i in range(repeat):
-        func.delay(*task_args, **task_kwargs)
-        if i in checkmarks:
-            click.echo(message=f"{int((i / repeat) * 100)}% complete")
+    if application is not None:
+        func.namespace.application = application
 
-    click.echo(message=f"Successfully sent {repeat} messages.")
+    if not infinite:
+        checkmarks = {int(repeat * (i / 10)) for i in range(1, 10)}
+        for i in range(repeat):
+            func.delay(*task_args, **task_kwargs)
+            if i in checkmarks:
+                click.echo(message=f"{int((i / repeat) * 100)}% complete")
 
+        click.echo(message=f"Successfully sent {repeat} messages.")
+    else:
+        sent = 0.0
+        start_time = time.time()
+        while True:
+            func.delay(*task_args, **task_kwargs)
+            sent += 1.0
+            interval = time.time() - start_time
+            if sent % 1000 == 0 and interval > 10:
+                throughput = sent / interval
+                click.echo(
+                    message=f"Sent {sent} messages in {interval} seconds. Throughput: {throughput} messages/second."
+                )
+                start_time = time.time()
+                sent = 0.0
 
-@run.command()
-@click.option(
-    "--pidfile",
-    help=(
-        "Optional file used to store the process pid. The "
-        "program will not start if this file already exists and "
-        "the pid is still alive."
-    ),
-)
-@click.option(
-    "--logfile", "-f", help=("Path to log file. If no logfile is specified, stderr is used.")
-)
-@click.option("--quiet", "-q", is_flag=True, default=False)
-@click.option("--no-color", is_flag=True, default=False)
-@click.option("--autoreload", is_flag=True, default=False, help="Enable autoreloading.")
-@click.option("--without-gossip", is_flag=True, default=False)
-@click.option("--without-mingle", is_flag=True, default=False)
-@click.option("--without-heartbeat", is_flag=True, default=False)
-@log_options()
-@configuration
-def cron(**options: Any) -> None:
-    "Run periodic task dispatcher."
-    from django.conf import settings
-
-    from sentry import options as featureflags
-
-    if settings.CELERY_ALWAYS_EAGER:
-        raise click.ClickException(
-            "Disable CELERY_ALWAYS_EAGER in your settings file to spawn workers."
-        )
-
-    from sentry.celery import app
-
-    old_schedule = app.conf.CELERYBEAT_SCHEDULE
-    new_schedule = {}
-    task_schedules = set(featureflags.get("taskworker.scheduler.rollout", []))
-    for key, schedule_data in old_schedule.items():
-        if key not in task_schedules:
-            new_schedule[key] = schedule_data
-
-    app.conf.update(CELERYBEAT_SCHEDULE=new_schedule)
-
-    with managed_bgtasks(role="cron"):
-        app.Beat(
-            # without_gossip=True,
-            # without_mingle=True,
-            # without_heartbeat=True,
-            **options
-        ).run()
+            if infinite_delay_ms > 0:
+                time.sleep(infinite_delay_ms / 1000.0)
 
 
 @run.command("consumer")
@@ -519,7 +464,9 @@ def cron(**options: Any) -> None:
     help="Which physical topic to use for this consumer. This can be a topic name that is not specified in settings. The logical topic is still hardcoded in sentry.consumers.",
 )
 @click.option(
-    "--cluster", type=str, help="Which cluster definition from settings to use for this consumer."
+    "--kafka-slice-id",
+    type=int,
+    help="Which sliced kafka topic to use. This only applies if the target topic is configured in SLICED_KAFKA_TOPICS.",
 )
 @click.option(
     "--consumer-group",
@@ -595,12 +542,26 @@ def cron(**options: Any) -> None:
     default=None,
     help="Quantized rebalancing means that during deploys, rebalancing is triggered across all pods within a consumer group at the same time. The value is used by the pods to align their group join/leave activity to some multiple of the delay",
 )
+@click.option(
+    "--profile-consumer-join",
+    is_flag=True,
+    default=False,
+    help="Adds a ProcessingStrategy to the start of a consumer that records a transaction of the consumer's join() method.",
+)
+@click.option(
+    "--arroyo-arg",
+    "arroyo_args",
+    multiple=True,
+    help="Override StreamProcessor arguments. Format: --arroyo-arg='key:value'. Example: --arroyo-arg='join_timeout:60'",
+)
 @configuration
 def basic_consumer(
     consumer_name: str,
     consumer_args: tuple[str, ...],
     topic: str | None,
+    kafka_slice_id: int | None,
     quantized_rebalance_delay_secs: int | None,
+    arroyo_args: tuple[str, ...],
     **options: Any,
 ) -> None:
     """
@@ -608,9 +569,9 @@ def basic_consumer(
 
     Example:
 
-        sentry run consumer ingest-profiles --consumer-group ingest-profiles
+        sentry run consumer ingest-occurrences --consumer-group ingest-occurrences
 
-    runs the ingest-profiles consumer with the consumer group ingest-profiles.
+    runs the ingest-occurrences consumer with the consumer group ingest-occurrences.
 
     Consumers are defined in 'sentry.consumers'. Each consumer can take
     additional CLI options. Those can be passed after '--':
@@ -623,19 +584,45 @@ def basic_consumer(
     """
     from sentry.consumers import get_stream_processor
     from sentry.metrics.middleware import add_global_tags
+    from sentry.options import get
 
     log_level = options.pop("log_level", None)
     if log_level is not None:
         logging.getLogger("arroyo").setLevel(log_level.upper())
 
-    add_global_tags(kafka_topic=topic, consumer_group=options["group_id"])
-    processor = get_stream_processor(consumer_name, consumer_args, topic=topic, **options)
+    add_global_tags(
+        all_threads=True,
+        set_sentry_tags=True,
+        tags={
+            "kafka_topic": topic,
+            "consumer_group": options["group_id"],
+            "kafka_slice_id": kafka_slice_id,
+        },
+    )
+
+    processor = get_stream_processor(
+        consumer_name,
+        consumer_args,
+        topic=topic,
+        kafka_slice_id=kafka_slice_id,
+        add_global_tags=True,
+        arroyo_args=arroyo_args,
+        **options,
+    )
 
     # for backwards compat: should eventually be removed
     if not quantized_rebalance_delay_secs and consumer_name == "ingest-generic-metrics":
         quantized_rebalance_delay_secs = options.get("sentry-metrics.synchronized-rebalance-delay")
 
-    run_processor_with_signals(processor, quantized_rebalance_delay_secs)
+    dump_stacktrace_on_shutdown = consumer_name in get("consumer.dump_stacktrace_on_shutdown", [])
+    verbose_multiprocessing_logs = consumer_name in get("consumer.verbose_multiprocessing_logs", [])
+
+    run_processor_with_signals(
+        processor,
+        quantized_rebalance_delay_secs,
+        dump_stacktrace_on_shutdown,
+        verbose_multiprocessing_logs,
+    )
 
 
 @run.command("dev-consumer")
@@ -657,7 +644,6 @@ def dev_consumer(consumer_names: tuple[str, ...]) -> None:
             consumer_name,
             [],
             topic=None,
-            cluster=None,
             group_id="sentry-consumer",
             auto_offset_reset="latest",
             strict_offset_reset=False,
@@ -669,6 +655,7 @@ def dev_consumer(consumer_names: tuple[str, ...]) -> None:
             stale_threshold_sec=None,
             healthcheck_file_path=None,
             enforce_schema=True,
+            profile_consumer_join=False,
         )
         for consumer_name in consumer_names
     ]

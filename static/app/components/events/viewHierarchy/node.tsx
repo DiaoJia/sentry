@@ -11,10 +11,9 @@ type NodeProps = {
   onExpandClick: () => void;
   collapsible?: boolean;
   isFocused?: boolean;
-  isSelected?: boolean;
 };
 
-function Node({
+export function Node({
   label,
   id,
   isExpanded,
@@ -33,9 +32,9 @@ function Node({
         collapsible={collapsible}
       >
         {isExpanded ? (
-          <IconSubtract legacySize="9px" color="white" />
+          <StyledIconSubtract legacySize="9px" />
         ) : (
-          <IconAdd legacySize="9px" color="white" />
+          <StyledIconAdd legacySize="9px" />
         )}
       </IconWrapper>
       <NodeTitle id={`${id}-title`} focused={isFocused}>
@@ -45,7 +44,12 @@ function Node({
   );
 }
 
-export {Node};
+const StyledIconSubtract = styled(IconSubtract)`
+  color: ${p => p.theme.colors.white};
+`;
+const StyledIconAdd = styled(IconAdd)`
+  color: ${p => p.theme.colors.white};
+`;
 
 const NodeContents = styled('div')`
   padding-left: 0;
@@ -58,7 +62,7 @@ const NodeTitle = styled('span')<{focused?: boolean}>`
   ${({focused, theme}) =>
     focused &&
     css`
-      color: ${theme.white};
+      color: ${theme.colors.white};
     `}
 `;
 
@@ -74,17 +78,17 @@ const IconWrapper = styled('button')<{collapsible: boolean; isExpanded: boolean}
   ${p =>
     p.isExpanded
       ? css`
-          background: ${p.theme.gray300};
-          border: 1px solid ${p.theme.gray300};
+          background: ${p.theme.colors.gray400};
+          border: 1px solid ${p.theme.colors.gray400};
           &:hover {
-            background: ${p.theme.gray400};
+            background: ${p.theme.colors.gray500};
           }
         `
       : css`
-          background: ${p.theme.blue300};
-          border: 1px solid ${p.theme.blue300};
+          background: ${p.theme.tokens.background.accent.vibrant};
+          border: 1px solid ${p.theme.tokens.border.accent.vibrant};
           &:hover {
-            background: ${p.theme.blue200};
+            background: ${p.theme.tokens.background.transparent.accent.muted};
           }
         `}
 `;

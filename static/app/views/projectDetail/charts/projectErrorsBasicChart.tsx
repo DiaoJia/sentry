@@ -1,26 +1,28 @@
 import {Fragment, useEffect, useMemo} from 'react';
 import {useSearchParams} from 'react-router-dom';
+import {useQuery} from '@tanstack/react-query';
 import type {BarSeriesOption} from 'echarts';
 
-import BaseChart from 'sentry/components/charts/baseChart';
-import LoadingPanel from 'sentry/components/charts/loadingPanel';
+import {BaseChart} from 'sentry/components/charts/baseChart';
+import {LoadingPanel} from 'sentry/components/charts/loadingPanel';
 import {HeaderTitleLegend} from 'sentry/components/charts/styles';
-import LoadingError from 'sentry/components/loadingError';
+import {LoadingError} from 'sentry/components/loadingError';
 import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
 import {t} from 'sentry/locale';
-import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useOrganization from 'sentry/utils/useOrganization';
+import type {Project, ProjectStats} from 'sentry/types/project';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {defined} from 'sentry/utils/defined';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
 export const ERRORS_BASIC_CHART_PERIODS = ['1h', '24h', '7d', '14d', '30d'];
+type ProjectErrorsResponse = Project & {stats?: ProjectStats};
 
 type Props = {
   onTotalValuesChange: (value: number | null) => void;
   projectId?: string;
 };
 
-function ProjectErrorsBasicChart({projectId, onTotalValuesChange}: Props) {
+export function ProjectErrorsBasicChart({projectId, onTotalValuesChange}: Props) {
   const organization = useOrganization();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -34,21 +36,20 @@ function ProjectErrorsBasicChart({projectId, onTotalValuesChange}: Props) {
     isLoading,
     isError,
     isSuccess,
-  } = useApiQuery<Project[]>(
-    [
-      `/organizations/${organization.slug}/projects/`,
+  } = useQuery({
+    ...apiOptions.as<ProjectErrorsResponse[]>()(
+      '/organizations/$organizationIdOrSlug/projects/',
       {
+        path: {organizationIdOrSlug: organization.slug},
         query: {
           statsPeriod,
           query: `id:${projectId}`,
         },
-      },
-    ],
-    {
-      staleTime: 0,
-      enabled: defined(projectId),
-    }
-  );
+        staleTime: 0,
+      }
+    ),
+    enabled: defined(projectId),
+  });
   const stats = useMemo(() => {
     return projects?.[0]?.stats ?? [];
   }, [projects]);
@@ -95,11 +96,12 @@ function ProjectErrorsBasicChart({projectId, onTotalValuesChange}: Props) {
         series={series}
         isGroupedByDate
         showTimeInTooltip
-        colors={theme => [theme.purple300, theme.purple200]}
+        colors={theme => [
+          theme.tokens.dataviz.semantic.accent,
+          theme.tokens.dataviz.semantic.neutral,
+        ]}
         grid={{left: '10px', right: '10px', top: '40px', bottom: '0px'}}
       />
     </Fragment>
   );
 }
-
-export default ProjectErrorsBasicChart;

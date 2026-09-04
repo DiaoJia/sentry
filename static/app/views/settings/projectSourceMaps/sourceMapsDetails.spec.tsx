@@ -14,8 +14,8 @@ import {
 } from 'sentry-test/reactTestingLibrary';
 import {textWithMarkupMatcher} from 'sentry-test/utils';
 
-import ConfigStore from 'sentry/stores/configStore';
-import OrganizationStore from 'sentry/stores/organizationStore';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
 import {SourceMapsDetails} from 'sentry/views/settings/projectSourceMaps/sourceMapsDetails';
 
 function renderReleaseBundlesMockRequests({
@@ -77,17 +77,22 @@ function renderDebugIdBundlesMockRequests({
     method: 'DELETE',
   });
 
+  MockApiClient.addMockResponse({
+    url: `/organizations/${orgSlug}/releases/`,
+    body: [],
+  });
+
   return {artifactBundlesFiles, artifactBundlesDeletion};
 }
 
-describe('SourceMapsDetails', function () {
-  beforeEach(function () {
+describe('SourceMapsDetails', () => {
+  beforeEach(() => {
     OrganizationStore.init();
   });
 
-  describe('Release Bundles', function () {
-    it('renders default state', async function () {
-      const {organization, project, routerProps} = initializeOrg({
+  describe('Release Bundles', () => {
+    it('renders default state', async () => {
+      const {organization, project} = initializeOrg({
         organization: OrganizationFixture({
           access: ['org:superuser'],
         }),
@@ -109,22 +114,12 @@ describe('SourceMapsDetails', function () {
       });
 
       render(
-        <SourceMapsDetails
-          {...routerProps}
-          project={project}
-          params={{
-            orgId: organization.slug,
-            projectId: project.slug,
-            bundleId: 'bea7335dfaebc0ca6e65a057',
-          }}
-        />,
+        <SourceMapsDetails project={project} bundleId="bea7335dfaebc0ca6e65a057" />,
         {
           organization,
         }
       );
 
-      // Title
-      expect(screen.getByRole('heading')).toHaveTextContent('Release Bundle');
       // Subtitle
       expect(screen.getByText('bea7335dfaebc0ca6e65a057')).toBeInTheDocument();
 
@@ -147,8 +142,8 @@ describe('SourceMapsDetails', function () {
       );
     });
 
-    it('renders empty state', async function () {
-      const {organization, routerProps, project} = initializeOrg({
+    it('renders empty state', async () => {
+      const {organization, project} = initializeOrg({
         router: {
           location: {
             query: {},
@@ -164,15 +159,7 @@ describe('SourceMapsDetails', function () {
       });
 
       render(
-        <SourceMapsDetails
-          {...routerProps}
-          project={project}
-          params={{
-            orgId: organization.slug,
-            projectId: project.slug,
-            bundleId: 'bea7335dfaebc0ca6e65a057',
-          }}
-        />,
+        <SourceMapsDetails project={project} bundleId="bea7335dfaebc0ca6e65a057" />,
         {
           organization,
         }
@@ -184,9 +171,9 @@ describe('SourceMapsDetails', function () {
     });
   });
 
-  describe('Artifact Bundles', function () {
-    it('renders default state', async function () {
-      const {organization, project, routerProps} = initializeOrg({
+  describe('Artifact Bundles', () => {
+    it('renders default state', async () => {
+      const {organization, project} = initializeOrg({
         organization: OrganizationFixture({
           access: ['org:superuser', 'project:releases'],
         }),
@@ -212,22 +199,12 @@ describe('SourceMapsDetails', function () {
 
       render(
         <SourceMapsDetails
-          {...routerProps}
           project={project}
-          params={{
-            orgId: organization.slug,
-            projectId: project.slug,
-            bundleId: '7227e105-744e-4066-8c69-3e5e344723fc',
-          }}
+          bundleId="7227e105-744e-4066-8c69-3e5e344723fc"
         />,
         {
           organization,
         }
-      );
-
-      // Title
-      expect(screen.getByRole('heading')).toHaveTextContent(
-        '7227e105-744e-4066-8c69-3e5e344723fc'
       );
 
       // Details
@@ -237,15 +214,16 @@ describe('SourceMapsDetails', function () {
       // Release information
       expect(await screen.findByText('Associated Releases')).toBeInTheDocument();
       expect(
-        await screen.findByText(textWithMarkupMatcher('v2.0 (Dist: none)'))
+        await screen.findByText(textWithMarkupMatcher('v2.0(Dist: none)'))
       ).toBeInTheDocument();
       expect(
         await screen.findByText(
           textWithMarkupMatcher(
-            'frontend@2e318148eac9298ec04a662ae32b4b093b027f0a (Dist: android, iOS)'
+            'frontend@2e318148eac9298ec04a662ae32b4b093b027f0a(Dist: android, iOS)'
           )
         )
       ).toBeInTheDocument();
+
       // Date Uploaded
       expect(await screen.findByText('Date Uploaded')).toBeInTheDocument();
       expect(await screen.findByText('Mar 8, 2023 9:53 AM UTC')).toBeInTheDocument();
@@ -288,8 +266,8 @@ describe('SourceMapsDetails', function () {
       });
     });
 
-    it('renders empty state', async function () {
-      const {organization, project, routerProps} = initializeOrg({
+    it('renders empty state', async () => {
+      const {organization, project} = initializeOrg({
         router: {
           location: {
             pathname: `/settings/${initializeOrg().organization.slug}/projects/${
@@ -309,13 +287,8 @@ describe('SourceMapsDetails', function () {
 
       render(
         <SourceMapsDetails
-          {...routerProps}
           project={project}
-          params={{
-            orgId: organization.slug,
-            projectId: project.slug,
-            bundleId: '7227e105-744e-4066-8c69-3e5e344723fc',
-          }}
+          bundleId="7227e105-744e-4066-8c69-3e5e344723fc"
         />,
         {
           organization,

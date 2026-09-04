@@ -1,48 +1,27 @@
 import styled from '@emotion/styled';
 
-import {Button} from 'sentry/components/core/button';
-import {Checkbox} from 'sentry/components/core/checkbox';
-import decodeMailbox from 'sentry/components/feedback/decodeMailbox';
-import FeedbackListBulkSelection from 'sentry/components/feedback/list/feedbackListBulkSelection';
-import MailboxPicker from 'sentry/components/feedback/list/mailboxPicker';
-import useFeedbackCache from 'sentry/components/feedback/useFeedbackCache';
-import useFeedbackHasNewItems from 'sentry/components/feedback/useFeedbackHasNewItems';
-import useFeedbackQueryKeys from 'sentry/components/feedback/useFeedbackQueryKeys';
+import {Button} from '@sentry/scraps/button';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {Flex} from '@sentry/scraps/layout';
+
+import {FeedbackListBulkSelection} from 'sentry/components/feedback/list/feedbackListBulkSelection';
+import {MailboxPicker} from 'sentry/components/feedback/list/mailboxPicker';
+import {useFeedbackApiOptions} from 'sentry/components/feedback/useFeedbackApiOptions';
+import {useFeedbackCache} from 'sentry/components/feedback/useFeedbackCache';
+import {useFeedbackHasNewItems} from 'sentry/components/feedback/useFeedbackHasNewItems';
+import {useMailbox} from 'sentry/components/feedback/useMailbox';
 import {IconRefresh} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type useListItemCheckboxState from 'sentry/utils/list/useListItemCheckboxState';
-import useLocationQuery from 'sentry/utils/url/useLocationQuery';
-import useUrlParams from 'sentry/utils/useUrlParams';
+import {ListItemSelectedState} from 'sentry/utils/list/listItemSelectedState';
+import {useListItemCheckboxContext} from 'sentry/utils/list/useListItemCheckboxState';
 
-interface Props
-  extends Pick<
-    ReturnType<typeof useListItemCheckboxState>,
-    | 'countSelected'
-    | 'deselectAll'
-    | 'isAllSelected'
-    | 'isAnySelected'
-    | 'selectAll'
-    | 'selectedIds'
-  > {}
+export function FeedbackListHeader() {
+  const {countSelected, deselectAll, isAllSelected, selectAll, selectedIds} =
+    useListItemCheckboxContext();
+  const [mailbox, setMailbox] = useMailbox();
 
-export default function FeedbackListHeader({
-  countSelected,
-  deselectAll,
-  isAllSelected,
-  isAnySelected,
-  selectAll,
-  selectedIds,
-}: Props) {
-  const {mailbox} = useLocationQuery({
-    fields: {
-      mailbox: decodeMailbox,
-    },
-  });
-  const {setParamValue: setMailbox} = useUrlParams('mailbox');
-
-  const {listPrefetchQueryKey, resetListHeadTime} = useFeedbackQueryKeys();
-  const hasNewItems = useFeedbackHasNewItems({listPrefetchQueryKey});
+  const {listPrefetchApiOptions, resetListHeadTime} = useFeedbackApiOptions();
+  const hasNewItems = useFeedbackHasNewItems({listPrefetchApiOptions});
   const {invalidateListCache} = useFeedbackCache();
 
   return (
@@ -58,21 +37,22 @@ export default function FeedbackListHeader({
             }
           }}
         />
-        {isAnySelected ? (
+        <ListItemSelectedState selected="none">
+          <MailboxPicker value={mailbox} onChange={setMailbox} />
+        </ListItemSelectedState>
+        <ListItemSelectedState selected="indeterminate-or-all">
           <FeedbackListBulkSelection
             mailbox={mailbox}
             countSelected={countSelected}
             selectedIds={selectedIds}
             deselectAll={deselectAll}
           />
-        ) : (
-          <MailboxPicker value={mailbox} onChange={setMailbox} />
-        )}
+        </ListItemSelectedState>
       </HeaderPanelItem>
       {hasNewItems ? (
-        <RefreshContainer>
+        <Flex justify="center" align="center" flexGrow={1} padding="xs">
           <Button
-            priority="primary"
+            variant="primary"
             size="xs"
             icon={<IconRefresh />}
             onClick={() => {
@@ -85,7 +65,7 @@ export default function FeedbackListHeader({
           >
             {t('Load new feedback')}
           </Button>
-        </RefreshContainer>
+        </Flex>
       ) : null}
     </HeaderPanel>
   );
@@ -96,17 +76,11 @@ const HeaderPanel = styled('div')`
 `;
 
 const HeaderPanelItem = styled('div')`
-  padding: ${space(1)} ${space(1.5)} ${space(1)} 18px;
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.lg} ${p => p.theme.space.md}
+    ${p => p.theme.space.xl};
   display: flex;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
-  border-bottom: 1px solid ${p => p.theme.innerBorder};
-`;
-
-const RefreshContainer = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-grow: 1;
-  padding: ${space(0.5)};
+  border: 1px solid transparent;
+  border-bottom-color: ${p => p.theme.tokens.border.secondary};
 `;

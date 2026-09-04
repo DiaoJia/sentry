@@ -3,20 +3,14 @@ import {ASAP} from 'downsample/methods/ASAP';
 import type {Location} from 'history';
 import moment from 'moment-timezone';
 
-import {getInterval} from 'sentry/components/charts/utils';
-import {wrapQueryInWildcards} from 'sentry/components/performance/searchBar';
 import type {Series, SeriesDataUnit} from 'sentry/types/echarts';
 import type {Project} from 'sentry/types/project';
-import type {AggregationKeyWithAlias, Field, Sort} from 'sentry/utils/discover/fields';
-import {generateFieldAsString} from 'sentry/utils/discover/fields';
 import {decodeScalar} from 'sentry/utils/queryString';
-import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import type {
   NormalizedTrendsTransaction,
   TrendFunction,
   TrendParameter,
   TrendsTransaction,
-  TrendView,
 } from 'sentry/views/performance/trends/types';
 import {
   TrendChangeType,
@@ -29,9 +23,7 @@ import {
   ProjectPerformanceType,
 } from 'sentry/views/performance/utils';
 
-export const DEFAULT_MAX_DURATION = '15min';
-
-export const TRENDS_FUNCTIONS: TrendFunction[] = [
+const TRENDS_FUNCTIONS: TrendFunction[] = [
   {
     label: 'p99',
     field: TrendFunctionField.P99,
@@ -64,7 +56,7 @@ export const TRENDS_FUNCTIONS: TrendFunction[] = [
   },
 ];
 
-export const TRENDS_PARAMETERS: TrendParameter[] = [
+const TRENDS_PARAMETERS: TrendParameter[] = [
   {
     label: TrendParameterLabel.DURATION,
     column: TrendParameterColumn.DURATION,
@@ -106,22 +98,22 @@ export const TRENDS_PARAMETERS: TrendParameter[] = [
 export function makeTrendToColorMapping(theme: Theme) {
   return {
     [TrendChangeType.IMPROVED]: {
-      lighter: theme.green200,
-      default: theme.green300,
+      lighter: theme.colors.green200,
+      default: theme.colors.green400,
     },
     [TrendChangeType.REGRESSION]: {
-      lighter: theme.red200,
-      default: theme.red300,
+      lighter: theme.colors.red200,
+      default: theme.colors.red400,
     },
     neutral: {
-      lighter: theme.yellow200,
-      default: theme.yellow300,
+      lighter: theme.colors.yellow200,
+      default: theme.colors.yellow400,
     },
     // TODO remove this once backend starts sending
     // TrendChangeType.IMPROVED as change type
     improvement: {
-      lighter: theme.green200,
-      default: theme.green300,
+      lighter: theme.colors.green200,
+      default: theme.colors.green400,
     },
   };
 }
@@ -130,8 +122,6 @@ const trendUnselectedSeries = {
   [TrendChangeType.IMPROVED]: 'improvedUnselectedSeries',
   [TrendChangeType.REGRESSION]: 'regressionUnselectedSeries',
 };
-
-const TOKEN_KEYS_SUPPORTED_IN_METRICS_TRENDS = ['transaction', 'tpm()'];
 
 export function getCurrentTrendFunction(
   location: Location,
@@ -191,21 +181,6 @@ export function performanceTypeToTrendParameterLabel(
   }
 }
 
-function generateTrendFunctionAsString(
-  trendFunction: TrendFunctionField,
-  trendParameter: string
-): string {
-  return generateFieldAsString({
-    kind: 'function',
-    function: [
-      trendFunction as AggregationKeyWithAlias,
-      trendParameter,
-      undefined,
-      undefined,
-    ],
-  });
-}
-
 export function transformDeltaSpread(from: number, to: number) {
   const fromSeconds = from / 1000;
   const toSeconds = to / 1000;
@@ -213,75 +188,6 @@ export function transformDeltaSpread(from: number, to: number) {
   const showDigits = from > 1000 || to > 1000 || from < 10 || to < 10; // Show digits consistently if either has them
 
   return {fromSeconds, toSeconds, showDigits};
-}
-
-export function modifyTrendView(
-  trendView: TrendView,
-  location: Location,
-  trendsType: TrendChangeType,
-  projects: Project[],
-  canUseMetricsTrends = false
-) {
-  const trendFunction = getCurrentTrendFunction(location);
-  const trendParameter = getCurrentTrendParameter(location, projects, trendView.project);
-
-  const fields = ['transaction', 'project'].map(field => ({
-    field,
-  })) as Field[];
-
-  const trendSort = {
-    field: 'trend_percentage()',
-    kind: 'asc',
-  } as Sort;
-
-  trendView.trendType = trendsType;
-  if (trendsType === TrendChangeType.REGRESSION) {
-    trendSort.kind = 'desc';
-  }
-
-  if (trendFunction && trendParameter) {
-    trendView.trendFunction = generateTrendFunctionAsString(
-      trendFunction.field,
-      trendParameter.column
-    );
-  }
-
-  if (canUseMetricsTrends) {
-    const query = new MutableSearch(trendView.query);
-    if (query.freeText.length > 0) {
-      const parsedFreeText = query.freeText.join(' ');
-
-      // the query here is a user entered condition, no need to escape it
-      query.setFilterValues('transaction', [wrapQueryInWildcards(parsedFreeText)], false);
-      query.freeText = [];
-    }
-    query.tokens = query.tokens.filter(
-      token => token.key && TOKEN_KEYS_SUPPORTED_IN_METRICS_TRENDS.includes(token.key)
-    );
-    trendView.query = query.formatString();
-  } else {
-    trendView.query = getLimitTransactionItems(trendView.query);
-  }
-
-  trendView.interval = getQueryInterval(location, trendView);
-
-  trendView.sorts = [trendSort];
-  trendView.fields = fields;
-}
-
-function getQueryInterval(location: Location, eventView: TrendView) {
-  const intervalFromQueryParam = decodeScalar(location?.query?.interval);
-  const {start, end, statsPeriod} = eventView;
-
-  const datetimeSelection = {
-    start: start || null,
-    end: end || null,
-    period: statsPeriod,
-  };
-
-  const intervalFromSmoothing = getInterval(datetimeSelection, 'medium');
-
-  return intervalFromQueryParam || intervalFromSmoothing;
 }
 
 /**
@@ -297,7 +203,7 @@ export function normalizeTrends(
       ...row,
       received_at,
       transaction: row.transaction,
-    } as NormalizedTrendsTransaction;
+    };
   });
 }
 
@@ -306,29 +212,8 @@ export function getUnselectedSeries(trendChangeType: TrendChangeType) {
   return trendUnselectedSeries[trendChangeType];
 }
 
-/**
- * This function applies defaults for trend and count percentage, and adds the confidence limit to the query
- */
-function getLimitTransactionItems(query: string) {
-  const limitQuery = new MutableSearch(query);
-  if (!limitQuery.hasFilter('count_percentage()')) {
-    limitQuery.addFilterValues('count_percentage()', ['>0.25', '<4']);
-  }
-  if (!limitQuery.hasFilter('trend_percentage()')) {
-    limitQuery.addFilterValues('trend_percentage()', ['>0%']);
-  }
-  if (!limitQuery.hasFilter('confidence()')) {
-    limitQuery.addFilterValues('confidence()', ['>6']);
-  }
-  return limitQuery.formatString();
-}
-
 const smoothTrend = (data: Array<[number, number]>, resolution = 100) => {
   return ASAP(data, resolution);
-};
-
-export const replaceSeriesName = (seriesName: string) => {
-  return ['p50', 'p75'].find(aggregate => seriesName.includes(aggregate));
 };
 
 export function transformEventStatsSmoothed(data?: Series[], seriesName?: string) {

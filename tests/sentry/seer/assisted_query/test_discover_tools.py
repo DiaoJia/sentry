@@ -1,0 +1,506 @@
+from sentry.seer.assisted_query.discover_tools import (
+    _ALWAYS_RETURN_EVENT_FIELDS,
+    _SPECIAL_FIELD_VALUE_TYPES,
+    get_event_filter_key_values,
+    get_event_filter_keys,
+)
+from sentry.seer.sentry_data_models import (
+    EventFilterKeysResponse,
+    EventFilterKeyValuesResponse,
+)
+from sentry.testutils.cases import APITestCase, SnubaTestCase
+from sentry.testutils.helpers.datetime import before_now
+
+
+class TestGetEventFilterKeys(APITestCase, SnubaTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.min_ago = before_now(minutes=1)
+
+    def test_get_event_filter_keys_with_feature_flags(self) -> None:
+        """Test that get_event_filter_keys returns tags, feature flags, and static fields"""
+        # Create an error event with custom tags
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"fruit": "apple", "color": "red"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        # Create an event with feature flags
+        self.store_event(
+            data={
+                "contexts": {
+                    "flags": {
+                        "values": [
+                            {"flag": "feature_a", "result": True},
+                            {"flag": "feature_b", "result": False},
+                        ]
+                    }
+                },
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        result = get_event_filter_keys(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            include_feature_flags=True,
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeysResponse)
+        result_d = result.dict()
+
+        # Check tags
+        for k in ["fruit", "color"]:
+            assert k in result_d
+            assert result_d[k]["type"] == "tag"
+
+        # Check feature flags
+        for k in ["feature_a", "feature_b"]:
+            assert k in result_d
+            assert result_d[k]["type"] == "feature_flag"
+
+        # Check always-return fields
+        for k in _ALWAYS_RETURN_EVENT_FIELDS:
+            assert k in result_d
+            expected_type = _SPECIAL_FIELD_VALUE_TYPES.get(k, "tag")
+            assert result_d[k]["type"] == expected_type
+
+    def test_get_event_filter_keys_exclude_feature_flags(self) -> None:
+        """Test that get_event_filter_keys excludes feature flags when include_feature_flags is False"""
+        # Create an error event with custom tags
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"fruit": "apple", "color": "red"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        # Create an event with feature flags
+        self.store_event(
+            data={
+                "contexts": {
+                    "flags": {
+                        "values": [
+                            {"flag": "feature_a", "result": True},
+                            {"flag": "feature_b", "result": False},
+                        ]
+                    }
+                },
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        result = get_event_filter_keys(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            include_feature_flags=False,
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeysResponse)
+        result_d = result.dict()
+
+        # Check tags
+        for k in ["fruit", "color"]:
+            assert k in result_d
+            assert result_d[k]["type"] == "tag"
+
+        # Check feature flags not present
+        for k in ["feature_a", "feature_b"]:
+            assert k not in result_d
+
+        # Check always-return fields
+        for k in _ALWAYS_RETURN_EVENT_FIELDS:
+            assert k in result_d
+            expected_type = _SPECIAL_FIELD_VALUE_TYPES.get(k, "tag")
+            assert result_d[k]["type"] == expected_type
+
+    def test_get_event_filter_keys_multiple_projects(self) -> None:
+        """Test with multiple projects"""
+        project2 = self.create_project(organization=self.organization)
+
+        # Create events in both projects
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"project1_tag": "value1"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "tags": {"project2_tag": "value2"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=project2.id,
+        )
+
+        # Empty projects should be treated as a query for all projects.
+        for pids in [[self.project.id, project2.id], [], None]:
+            result = get_event_filter_keys(
+                org_id=self.organization.id,
+                project_ids=pids,
+                stats_period="7d",
+            )
+
+            assert isinstance(result, EventFilterKeysResponse)
+            result_d = result.dict()
+            assert "project1_tag" in result_d
+            assert "project2_tag" in result_d
+
+
+class TestGetEventFilterKeyValues(APITestCase, SnubaTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.min_ago = before_now(minutes=1)
+
+    def test_get_event_filter_key_values_tag_key(self) -> None:
+        """Test getting values for a tag key"""
+        # Create events with the same tag key but different values
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"environment": "production"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "tags": {"environment": "staging"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "c" * 32,
+                "tags": {"environment": "production"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="environment",
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        items = result.dict()
+        assert len(items) > 0
+
+        # Check structure of returned values
+        for item in items:
+            assert "value" in item
+            assert "count" in item
+            assert "lastSeen" in item
+            assert "firstSeen" in item
+
+        # Check that we have our environment values
+        values = {item["value"] for item in items}
+        assert "production" in values
+        assert "staging" in values
+
+        # Check counts
+        value_counts = {item["value"]: item["count"] for item in items}
+        assert value_counts["production"] == 2
+        assert value_counts["staging"] == 1
+
+    def test_get_event_filter_key_values_feature_flag(self) -> None:
+        """Test getting values for a feature flag"""
+        # Create events with feature flags
+        self.store_event(
+            data={
+                "contexts": {
+                    "flags": {
+                        "values": [
+                            {"flag": "organizations:test-feature", "result": True},
+                        ]
+                    }
+                },
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "contexts": {
+                    "flags": {
+                        "values": [
+                            {"flag": "organizations:test-feature", "result": False},
+                        ]
+                    }
+                },
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="organizations:test-feature",
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        items = result.dict()
+        assert len(items) == 2
+
+        for item in items:
+            assert "value" in item
+            assert "count" in item
+            assert "lastSeen" in item
+            assert "firstSeen" in item
+            assert item["count"] == 1
+
+        values = {item["value"] for item in items}
+        assert "true" in values
+        assert "false" in values
+
+    def test_get_event_filter_key_values_has_key(self) -> None:
+        """Test that 'has' key returns all available tag keys"""
+        # Create event with custom tag
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"custom_tag": "value", "custom2": "value2"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="has",
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        items = result.dict()
+        assert len(items) > 0
+        values = {item["value"] for item in items}
+        assert "custom_tag" in values
+        assert "custom2" in values
+
+    def test_get_event_filter_key_values_aggregate_function_returns_empty(self) -> None:
+        """Test that aggregate functions return empty list"""
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="count()",
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        assert result.dict() == []
+
+    def test_get_event_filter_key_values_with_substring_filter(self) -> None:
+        """Test substring filtering of filter key values"""
+        # Create events with different environment values
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"environment": "production"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "tags": {"environment": "production-eu"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "c" * 32,
+                "tags": {"environment": "staging"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "d" * 32,
+                "tags": {"environment": "development"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        # Filter for "prod" substring - should only return production values
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="environment",
+            substring="prod",
+            stats_period="7d",
+        )
+
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        items = result.dict()
+        assert len(items) > 0
+
+        # Should only contain values with "prod" in them
+        values = {item["value"] for item in items}
+        assert "production" in values
+        assert "production-eu" in values
+        assert "staging" not in values
+        assert "development" not in values
+
+    def test_get_event_filter_key_values_nonexistent_tag(self) -> None:
+        """Test that nonexistent filter key returns empty list"""
+        result = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="nonexistent_tag_key_12345",
+            stats_period="7d",
+        )
+        # Should return empty list, not None
+        assert isinstance(result, EventFilterKeyValuesResponse)
+        assert result.dict() == []
+
+    def test_get_event_filter_key_values_multiple_projects(self) -> None:
+        """Test getting filter key values across multiple projects"""
+        project2 = self.create_project(organization=self.organization)
+
+        # Create events in both projects with same tag key
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"region": "us-east"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+        self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "tags": {"region": "us-west"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=project2.id,
+        )
+
+        # Empty projects should be treated as a query for all projects.
+        for pids in [[self.project.id, project2.id], [], None]:
+            result = get_event_filter_key_values(
+                org_id=self.organization.id,
+                project_ids=pids,
+                filter_key="region",
+                stats_period="7d",
+            )
+
+            assert isinstance(result, EventFilterKeyValuesResponse)
+            items = result.dict()
+            assert len(items) > 0
+
+            # Should have values from both projects
+            values = {item["value"] for item in items}
+            assert "us-east" in values
+            assert "us-west" in values
+
+    def test_get_event_filter_key_values_different_stats_periods(self) -> None:
+        """Test that different stats periods affect results"""
+        # Create an event 2 days ago
+        two_days_ago = before_now(days=2)
+        self.store_event(
+            data={
+                "event_id": "a" * 32,
+                "tags": {"test_tag": "old_value"},
+                "timestamp": two_days_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        # Create a recent event
+        self.store_event(
+            data={
+                "event_id": "b" * 32,
+                "tags": {"test_tag": "new_value"},
+                "timestamp": self.min_ago.isoformat(),
+            },
+            project_id=self.project.id,
+        )
+
+        # Query with 1 day period - should only get recent
+        result_1d = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="test_tag",
+            stats_period="24h",
+        )
+
+        # Query with 7 day period - should get both
+        result_7d = get_event_filter_key_values(
+            org_id=self.organization.id,
+            project_ids=[self.project.id],
+            filter_key="test_tag",
+            stats_period="7d",
+        )
+
+        assert isinstance(result_1d, EventFilterKeyValuesResponse)
+        assert isinstance(result_7d, EventFilterKeyValuesResponse)
+
+        values_1d = {item["value"] for item in result_1d.dict()}
+        values_7d = {item["value"] for item in result_7d.dict()}
+
+        # Recent value should be in both
+        assert "new_value" in values_1d
+        assert "new_value" in values_7d
+
+        # Old value should only be in 7d results
+        assert "old_value" not in values_1d
+        assert "old_value" in values_7d
+
+
+class TestEventFilterWireIdentity:
+    """The seer-side codegen consumes `model.dict()` as the wire shape, so a
+    drifting Pydantic serialization breaks downstream callers silently. These
+    tests pin the JSON-byte-equivalence between the pre-typed dict and the
+    typed model for every documented return path."""
+
+    def test_event_filter_keys_response_is_bare_map(self) -> None:
+        from sentry.seer.sentry_data_models import EventFilterKeyEntry
+
+        src = {
+            "fruit": {"type": "tag"},
+            "feature_a": {"type": "feature_flag"},
+            "timestamp": {"type": "datetime"},
+        }
+        m = EventFilterKeysResponse(__root__={k: EventFilterKeyEntry(**v) for k, v in src.items()})
+        assert m.dict() == src
+
+    def test_event_filter_key_values_filtered_shape(self) -> None:
+        from typing import Any
+
+        from sentry.seer.sentry_data_models import EventFilterKeyValue
+
+        # discover_tools.py filters the upstream TagValueSerializerResponse to
+        # these four keys; missing keys (e.g. built-in "has") stay missing.
+        src: list[dict[str, Any]] = [
+            {"value": "prod", "count": 5, "lastSeen": "2024-01", "firstSeen": "2023-01"},
+            {"value": "staging"},
+        ]
+        m = EventFilterKeyValuesResponse(__root__=[EventFilterKeyValue(**d) for d in src])
+        assert m.dict() == src

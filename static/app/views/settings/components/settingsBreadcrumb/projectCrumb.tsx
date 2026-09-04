@@ -1,27 +1,28 @@
 import styled from '@emotion/styled';
 
-import IdBadge from 'sentry/components/idBadge';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import {space} from 'sentry/styles/space';
-import recreateRoute from 'sentry/utils/recreateRoute';
-import replaceRouterParams from 'sentry/utils/replaceRouterParams';
+import {ProjectAvatar} from '@sentry/scraps/avatar';
+
+import {IdBadge} from 'sentry/components/idBadge';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {recreateRoute} from 'sentry/utils/recreateRoute';
+import {replaceRouterParams} from 'sentry/utils/replaceRouterParams';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
-import useProjects from 'sentry/utils/useProjects';
+import {useProjects} from 'sentry/utils/useProjects';
 import type {SettingsBreadcrumbProps} from 'sentry/views/settings/components/settingsBreadcrumb/types';
 
-import BreadcrumbDropdown from './breadcrumbDropdown';
-import findFirstRouteWithoutRouteParam from './findFirstRouteWithoutRouteParam';
-import MenuItem from './menuItem';
+import {BreadcrumbDropdown} from './breadcrumbDropdown';
+import {findFirstRouteWithoutRouteParam} from './findFirstRouteWithoutRouteParam';
 import {CrumbLink} from '.';
 
-function ProjectCrumb({routes, route, ...props}: SettingsBreadcrumbProps) {
+export function ProjectCrumb({routes, route, isLast}: SettingsBreadcrumbProps) {
   const navigate = useNavigate();
-  const {projects} = useProjects();
+  const {projects, onSearch} = useProjects();
   const organization = useOrganization();
   const params = useParams();
-  const handleSelect = (item: {value: string}) => {
+  const handleSelect = (projectSlug: string) => {
     // We have to make exceptions for routes like "Project Alerts Rule Edit" or "Client Key Details"
     // Since these models are project specific, we need to traverse up a route when switching projects
     //
@@ -37,7 +38,7 @@ function ProjectCrumb({routes, route, ...props}: SettingsBreadcrumbProps) {
     }
 
     navigate(
-      recreateRoute(returnTo, {routes, params: {...params, projectId: item.value}})
+      recreateRoute(returnTo, {routes, params: {...params, projectId: projectSlug}})
     );
   };
 
@@ -63,27 +64,23 @@ function ProjectCrumb({routes, route, ...props}: SettingsBreadcrumbProps) {
           )}
         </ProjectName>
       }
-      onSelect={handleSelect}
-      items={projects.map((project, index) => ({
-        index,
+      value={activeProject?.slug ?? ''}
+      onCrumbSelect={handleSelect}
+      onOpenChange={open => {
+        if (open) {
+          trackAnalytics('breadcrumbs.menu.opened', {organization: null});
+        }
+      }}
+      search={{onChange: onSearch}}
+      options={projects.map(project => ({
         value: project.slug,
-        label: (
-          <MenuItem>
-            <IdBadge
-              project={project}
-              avatarProps={{consistentWidth: true}}
-              avatarSize={18}
-              disableLink
-            />
-          </MenuItem>
-        ),
+        leadingItems: <ProjectAvatar project={project} size={20} />,
+        label: project.slug,
       }))}
-      {...props}
+      showDivider={!isLast}
     />
   );
 }
-
-export default ProjectCrumb;
 
 // Set height of crumb because of spinner
 const SPINNER_SIZE = '24px';
@@ -94,6 +91,6 @@ const ProjectName = styled('div')`
   .loading {
     width: ${SPINNER_SIZE};
     height: ${SPINNER_SIZE};
-    margin: 0 ${space(0.25)} 0 0;
+    margin: 0 ${p => p.theme.space['2xs']} 0 0;
   }
 `;

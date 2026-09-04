@@ -2,15 +2,15 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {BillingConfigFixture} from 'getsentry-test/fixtures/billingConfig';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
+import {PlanTier} from 'getsentry-test/planTier';
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
 import PageUpsellOverlay from 'getsentry/components/features/pageUpsellOverlay';
-import SubscriptionStore from 'getsentry/stores/subscriptionStore';
-import {PlanTier} from 'getsentry/types';
+import {SubscriptionStore} from 'getsentry/stores/subscriptionStore';
 
-describe('PageUpsellOverlay', function () {
+describe('PageUpsellOverlay', () => {
   let wrapper: any;
-  afterEach(function () {
+  afterEach(() => {
     if (wrapper) {
       wrapper.unmount();
     }
@@ -19,11 +19,11 @@ describe('PageUpsellOverlay', function () {
 
   const org = OrganizationFixture({access: ['org:billing']});
   MockApiClient.addMockResponse({
-    url: `/customers/${org.slug}/billing-config/?tier=am2`,
+    url: `/customers/${org.slug}/billing-config/?tier=upsell`,
     body: BillingConfigFixture(PlanTier.AM2),
   });
 
-  it('renders customSecondaryCTA', function () {
+  it('renders customSecondaryCTA', () => {
     const subscription = SubscriptionFixture({
       organization: org,
       canSelfServe: true,
@@ -41,13 +41,14 @@ describe('PageUpsellOverlay', function () {
         description=""
         requiredPlan=""
         source=""
-      />
+      />,
+      {organization: org}
     );
     expect(screen.queryByText('Learn More')).not.toBeInTheDocument();
     expect(screen.getByText('My Text')).toBeInTheDocument();
     expect(screen.getByText('Upgrade Plan')).toBeInTheDocument();
   });
-  it('renders learn more', function () {
+  it('renders learn more', () => {
     const subscription = SubscriptionFixture({
       organization: org,
       canSelfServe: true,
@@ -64,12 +65,13 @@ describe('PageUpsellOverlay', function () {
         description=""
         requiredPlan=""
         source=""
-      />
+      />,
+      {organization: org}
     );
     expect(screen.getByText('Learn More')).toBeInTheDocument();
     expect(screen.getByText('Upgrade Plan')).toBeInTheDocument();
   });
-  it('does not render CTA for non-self serve', function () {
+  it('does not render CTA for non-self serve', () => {
     const subscription = SubscriptionFixture({
       organization: org,
       canSelfServe: false,
@@ -86,7 +88,8 @@ describe('PageUpsellOverlay', function () {
         description=""
         requiredPlan=""
         source=""
-      />
+      />,
+      {organization: org}
     );
     expect(screen.getByText('Learn More')).toBeInTheDocument();
     expect(screen.queryByText('Upgrade Plan')).not.toBeInTheDocument();

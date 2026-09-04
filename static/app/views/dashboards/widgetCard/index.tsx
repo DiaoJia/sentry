@@ -1,50 +1,79 @@
-import {useContext, useEffect, useRef, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import type {LegendComponentOption} from 'echarts';
-import type {Location} from 'history';
+import omit from 'lodash/omit';
+import qs from 'query-string';
 
+import {openWidgetViewerModal} from 'sentry/actionCreators/modal';
 import type {Client} from 'sentry/api';
 import {DateTime} from 'sentry/components/dateTime';
-import ErrorBoundary from 'sentry/components/errorBoundary';
-import {isWidgetViewerPath} from 'sentry/components/modals/widgetViewerModal/utils';
-import PanelAlert from 'sentry/components/panels/panelAlert';
-import Placeholder from 'sentry/components/placeholder';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {
+  isWidgetViewerPath,
+  WidgetViewerQueryField,
+} from 'sentry/components/modals/widgetViewerModal/utils';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {PanelAlert} from 'sentry/components/panels/panelAlert';
+import {parseQueryBuilderValue} from 'sentry/components/searchQueryBuilder/utils';
+import {Token} from 'sentry/components/searchSyntax/parser';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {getOverride} from 'sentry/overrideRegistry';
 import type {PageFilters} from 'sentry/types/core';
 import type {Series} from 'sentry/types/echarts';
-import type {WithRouterProps} from 'sentry/types/legacyReactRouter';
-import type {Confidence, Organization} from 'sentry/types/organization';
+import type {Confidence} from 'sentry/types/organization';
+import {CAN_MARK} from 'sentry/utils/analytics';
 import type {TableDataWithTitle} from 'sentry/utils/discover/discoverQuery';
-import type {AggregationOutputType} from 'sentry/utils/discover/fields';
+import type {AggregationOutputType, DataUnit, Sort} from 'sentry/utils/discover/fields';
 import {statsPeriodToDays} from 'sentry/utils/duration/statsPeriodToDays';
+import {getFieldDefinition} from 'sentry/utils/fields';
 import {hasOnDemandMetricWidgetFeature} from 'sentry/utils/onDemandMetrics/features';
 import {useExtractionStatus} from 'sentry/utils/performance/contexts/metricsEnhancedPerformanceDataContext';
 import {VisuallyCompleteWithData} from 'sentry/utils/performanceForSentry';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {copyToClipboard} from 'sentry/utils/useCopyToClipboard';
+import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
-import usePageFilters from 'sentry/utils/usePageFilters';
-import withApi from 'sentry/utils/withApi';
-import withOrganization from 'sentry/utils/withOrganization';
-import withPageFilters from 'sentry/utils/withPageFilters';
-// eslint-disable-next-line no-restricted-imports
-import withSentryRouter from 'sentry/utils/withSentryRouter';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {withApi} from 'sentry/utils/withApi';
+import {withPageFilters} from 'sentry/utils/withPageFilters';
 import {DASHBOARD_CHART_GROUP} from 'sentry/views/dashboards/dashboard';
-import {useDiscoverSplitAlert} from 'sentry/views/dashboards/discoverSplitAlert';
-import type {DashboardFilters, Widget} from 'sentry/views/dashboards/types';
+import type {DashboardFilters, Widget as TWidget} from 'sentry/views/dashboards/types';
 import {
+  DashboardFilterKeys,
   DisplayType,
   OnDemandExtractionState,
   WidgetType,
 } from 'sentry/views/dashboards/types';
-import {DEFAULT_RESULTS_LIMIT} from 'sentry/views/dashboards/widgetBuilder/utils';
+import {getWidgetConfigError} from 'sentry/views/dashboards/utils/getWidgetConfigError';
+import {widgetCanUseTimeSeriesVisualization} from 'sentry/views/dashboards/utils/widgetCanUseTimeSeriesVisualization';
 import {WidgetCardChartContainer} from 'sentry/views/dashboards/widgetCard/widgetCardChartContainer';
-import type WidgetLegendSelectionState from 'sentry/views/dashboards/widgetLegendSelectionState';
-import {WidgetViewerContext} from 'sentry/views/dashboards/widgetViewer/widgetViewerContext';
+import type {WidgetLegendSelectionState} from 'sentry/views/dashboards/widgetLegendSelectionState';
+import type {
+  LegendSelection,
+  TabularColumn,
+} from 'sentry/views/dashboards/widgets/common/types';
+import {Widget} from 'sentry/views/dashboards/widgets/widget/widget';
+import {useLLMContext} from 'sentry/views/seerExplorer/contexts/llmContext';
+import {registerLLMContext} from 'sentry/views/seerExplorer/contexts/registerLLMContext';
 
-import {useDashboardsMEPContext} from './dashboardsMEPContext';
-import {getMenuOptions, useIndexedEventsWarning} from './widgetCardContextMenu';
+import {VisualizationWidget} from './visualizationWidget';
+import {
+  getMenuOptions,
+  useDiscoverSplitWarning,
+  useDroppedColumnsWarning,
+  useTransactionsDeprecationWarning,
+} from './widgetCardContextMenu';
 import {WidgetFrame} from './widgetFrame';
+import {readableConditions} from './widgetLLMContext';
+
+export type OnDataFetchedParams = {
+  tableResults?: TableDataWithTitle[];
+  timeseriesResultsTypes?: Record<string, AggregationOutputType>;
+  timeseriesResultsUnits?: Record<string, DataUnit>;
+};
+
+const DAYS_TO_MS = 24 * 60 * 60 * 1000;
 
 const SESSION_DURATION_INGESTION_STOP_DATE = new Date('2023-01-12');
 
@@ -56,74 +85,100 @@ const SESSION_DURATION_ALERT_TEXT = tct(
 );
 
 export const SESSION_DURATION_ALERT = (
-  <PanelAlert type="warning">{SESSION_DURATION_ALERT_TEXT}</PanelAlert>
+  <PanelAlert variant="warning">{SESSION_DURATION_ALERT_TEXT}</PanelAlert>
 );
 
-type Props = WithRouterProps & {
+type Props = {
   api: Client;
-  isEditingDashboard: boolean;
-  location: Location;
-  organization: Organization;
   selection: PageFilters;
-  widget: Widget;
+  widget: TWidget;
   widgetLegendState: WidgetLegendSelectionState;
   widgetLimitReached: boolean;
   borderless?: boolean;
   dashboardFilters?: DashboardFilters;
   disableFullscreen?: boolean;
+  disableTableActions?: boolean;
   disableZoom?: boolean;
   forceDescriptionTooltip?: boolean;
   hasEditAccess?: boolean;
   index?: string;
-  isEditingWidget?: boolean;
   isMobile?: boolean;
   isPreview?: boolean;
-  isWidgetInvalid?: boolean;
   legendOptions?: LegendComponentOption;
-  minTableColumnWidth?: string;
-  onDataFetched?: (results: TableDataWithTitle[]) => void;
+  minTableColumnWidth?: number;
+  onDataFetched?: (results: OnDataFetchedParams) => void;
   onDelete?: () => void;
   onDuplicate?: () => void;
   onEdit?: () => void;
   onLegendSelectChanged?: () => void;
-  onSetTransactionsDataset?: () => void;
-  onUpdate?: (widget: Widget | null) => void;
   onWidgetSplitDecision?: (splitDecision: WidgetType) => void;
-  renderErrorMessage?: (errorMessage?: string) => React.ReactNode;
+  onWidgetTableResizeColumn?: (columns: TabularColumn[]) => void;
+  onWidgetTableSort?: (sort: Sort) => void;
   shouldResize?: boolean;
   showConfidenceWarning?: boolean;
   showContextMenu?: boolean;
   showLoadingText?: boolean;
-  showStoredAlert?: boolean;
   tableItemLimit?: number;
+  widgetInterval?: string;
   windowWidth?: number;
 };
 
 type Data = {
   confidence?: Confidence;
+  dataScanned?: 'full' | 'partial';
   isSampled?: boolean | null;
   pageLinks?: string;
   sampleCount?: number;
   tableResults?: TableDataWithTitle[];
   timeseriesResults?: Series[];
   timeseriesResultsTypes?: Record<string, AggregationOutputType>;
+  timeseriesResultsUnits?: Record<string, DataUnit>;
   totalIssuesCount?: string;
 };
 
 function WidgetCard(props: Props) {
+  const organization = useOrganization();
   const [data, setData] = useState<Data>();
   const [isLoadingTextVisible, setIsLoadingTextVisible] = useState(false);
-  const {setData: setWidgetViewerData} = useContext(WidgetViewerContext);
   const navigate = useNavigate();
+  const location = useLocation();
+  const {dashboardId: currentDashboardId} = useParams<{dashboardId: string}>();
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Resolve TOP_N → AREA before capturing context (the render body mutates
+  // this later, but useLLMContext needs the resolved value on first render).
+  const resolvedDisplayType =
+    props.widget.displayType === DisplayType.TOP_N
+      ? DisplayType.AREA
+      : props.widget.displayType;
+
+  const widgetQueryError = getWidgetConfigError(props.widget);
+
+  // Push widget metadata into the LLM context tree for Seer Explorer.
+  useLLMContext({
+    title: props.widget.title,
+    displayType: resolvedDisplayType,
+    widgetType: props.widget.widgetType,
+    queries: props.widget.queries.map(q => ({
+      name: q.name,
+      conditions: readableConditions(q.conditions),
+      aggregates: q.aggregates,
+      columns: q.columns,
+      orderby: q.orderby,
+    })),
+    ...(widgetQueryError && {error: widgetQueryError}),
+  });
+
   const onDataFetched = (newData: Data) => {
-    const {...rest} = newData;
-    if (props.onDataFetched && rest.tableResults) {
-      props.onDataFetched(rest.tableResults);
+    if (props.onDataFetched) {
+      props.onDataFetched({
+        tableResults: newData.tableResults,
+        timeseriesResultsTypes: newData.timeseriesResultsTypes,
+        timeseriesResultsUnits: newData.timeseriesResultsUnits,
+      });
     }
 
-    setData(prevData => ({...prevData, ...rest}));
+    setData(prevData => ({...prevData, ...newData}));
 
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
@@ -134,20 +189,15 @@ function WidgetCard(props: Props) {
 
   const {
     api,
-    organization,
     selection,
     widget,
     isMobile,
-    renderErrorMessage,
     tableItemLimit,
     windowWidth,
     dashboardFilters,
-    isWidgetInvalid,
-    location,
     onWidgetSplitDecision,
     shouldResize,
     onLegendSelectChanged,
-    onSetTransactionsDataset,
     legendOptions,
     widgetLegendState,
     disableFullscreen,
@@ -155,32 +205,34 @@ function WidgetCard(props: Props) {
     minTableColumnWidth,
     disableZoom,
     showLoadingText,
-    router,
+    onWidgetTableSort,
+    onWidgetTableResizeColumn,
+    disableTableActions,
+    widgetInterval,
   } = props;
 
   if (widget.displayType === DisplayType.TOP_N) {
-    const queries = widget.queries.map(query => ({
-      ...query,
-      // Use the last aggregate because that's where the y-axis is stored
-      aggregates: query.aggregates.length
-        ? [query.aggregates[query.aggregates.length - 1]!]
-        : [],
-    }));
-    widget.queries = queries;
-    widget.limit = DEFAULT_RESULTS_LIMIT;
+    widget.displayType = DisplayType.AREA;
   }
 
   const hasSessionDuration = widget.queries.some(query =>
     query.aggregates.some(aggregate => aggregate.includes('session.duration'))
   );
 
-  const {isMetricsData} = useDashboardsMEPContext();
   const extractionStatus = useExtractionStatus({queryKey: widget});
-  const indexedEventsWarning = useIndexedEventsWarning();
   const onDemandWarning = useOnDemandWarning({widget});
-  const discoverSplitAlert = useDiscoverSplitAlert({widget, onSetTransactionsDataset});
+  const transactionsDeprecationWarning = useTransactionsDeprecationWarning({
+    widget,
+    selection,
+  });
+  const droppedColumnsWarning = useDroppedColumnsWarning(widget);
   const sessionDurationWarning = hasSessionDuration ? SESSION_DURATION_ALERT_TEXT : null;
   const spanTimeRangeWarning = useTimeRangeWarning({widget});
+  const conflictingFilterWarning = useConflictingFilterWarning({
+    widget,
+    dashboardFilters,
+  });
+  const discoverSplitWarning = useDiscoverSplitWarning(widget);
 
   const onDataFetchStart = () => {
     if (timeoutRef.current) {
@@ -203,49 +255,83 @@ function WidgetCard(props: Props) {
     };
   }, [timeoutRef]);
 
-  const onFullScreenViewClick = () => {
-    if (!isWidgetViewerPath(location.pathname)) {
-      setWidgetViewerData({
-        pageLinks: data?.pageLinks,
-        seriesData: data?.timeseriesResults,
-        tableData: data?.tableResults,
-        seriesResultsType: data?.timeseriesResultsTypes,
-        totalIssuesCount: data?.totalIssuesCount,
-        confidence: data?.confidence,
-        sampleCount: data?.sampleCount,
-        isSampled: data?.isSampled,
-      });
+  const onCopyUrlClick =
+    currentDashboardId && props.index !== undefined
+      ? () => {
+          const pathname = normalizeUrl(
+            `/organizations/${organization.slug}/dashboard/${currentDashboardId}/widget/${props.index}/`
+          );
+          const params = qs.parse(location.search);
+          if (!params.interval && widgetInterval) {
+            params.interval = widgetInterval;
+          }
+          const query = qs.stringify(params);
+          const widgetUrl = `${window.location.origin}${pathname}${
+            query ? `?${query}` : ''
+          }`;
+          copyToClipboard(widgetUrl, {
+            successMessage: t('Widget URL copied to clipboard'),
+          });
+        }
+      : undefined;
 
+  const onFullScreenViewClick = () => {
+    if (isWidgetViewerPath(location.pathname)) {
+      return;
+    }
+    if (currentDashboardId) {
+      if (CAN_MARK) {
+        performance.mark('dashboard.widget.fullScreenViewClick');
+      }
       navigate(
-        {
-          pathname: `${location.pathname}${
-            location.pathname.endsWith('/') ? '' : '/'
-          }widget/${props.index}/`,
-          query: location.query,
-        },
+        normalizeUrl({
+          pathname: `/organizations/${organization.slug}/dashboard/${currentDashboardId}/widget/${props.index}/`,
+          query: {
+            ...location.query,
+            sort:
+              widget.displayType === DisplayType.TABLE
+                ? widget.queries[0]?.orderby
+                : location.query.sort,
+          },
+        }),
         {preventScrollReset: true}
       );
+    } else {
+      openWidgetViewerModal({
+        organization,
+        widget,
+        widgetLegendState,
+        dashboardFilters,
+        widgetInterval,
+        onClose: () => {
+          // Filter out Widget Viewer Modal query params when exiting the Modal
+          const query = omit(location.query, Object.values(WidgetViewerQueryField));
+          navigate(
+            {pathname: location.pathname, query},
+            {preventScrollReset: true, replace: true}
+          );
+        },
+      });
     }
   };
 
-  const onDemandExtractionBadge: string | undefined =
+  const onDemandExtractionBadge =
     extractionStatus === 'extracted'
       ? t('Extracted')
       : extractionStatus === 'not-extracted'
         ? t('Not Extracted')
         : undefined;
 
-  const indexedDataBadge: string | undefined = indexedEventsWarning
-    ? t('Indexed')
-    : undefined;
-
-  const badges = [indexedDataBadge, onDemandExtractionBadge].filter(n => n !== undefined);
+  const badges = [onDemandExtractionBadge].filter(n => n !== undefined);
 
   const warnings = [
     onDemandWarning,
-    discoverSplitAlert,
     sessionDurationWarning,
     spanTimeRangeWarning,
+    transactionsDeprecationWarning,
+    droppedColumnsWarning,
+    conflictingFilterWarning,
+    discoverSplitWarning,
   ].filter(Boolean) as string[];
 
   const actionsDisabled = Boolean(props.isPreview);
@@ -259,25 +345,89 @@ function WidgetCard(props: Props) {
         organization,
         selection,
         widget,
-        Boolean(isMetricsData),
         props.widgetLimitReached,
         props.hasEditAccess,
         location,
-        router,
         props.onDelete,
         props.onDuplicate,
-        props.onEdit
+        props.onEdit,
+        data?.timeseriesResults
       )
     : [];
 
-  const widgetQueryError = isWidgetInvalid
-    ? t('Widget query condition is invalid.')
-    : undefined;
+  const errorBoundaryHandler = () => {
+    return (
+      <Widget
+        Title={<Widget.WidgetTitle title={widget.title} />}
+        Visualization={
+          <Widget.WidgetError
+            error={t("Something went wrong with this widget, we're looking into it!")}
+          />
+        }
+        noVisualizationPadding
+      />
+    );
+  };
+
+  const canUseTimeseriesVisualization = widgetCanUseTimeSeriesVisualization(widget);
+  if (canUseTimeseriesVisualization) {
+    // Legend state requires a stable widget ID to persist to the URL.
+    // Unsaved widgets (no ID yet, e.g. in the widget builder preview) skip this.
+    const legendSelectionForWidget = widget.id
+      ? widgetLegendState.getWidgetSelectionState(widget)
+      : undefined;
+
+    const handleLegendSelectionChange = widget.id
+      ? (legendState: LegendSelection) => {
+          widgetLegendState.setWidgetSelectionState(legendState, widget);
+          onLegendSelectChanged?.();
+        }
+      : undefined;
+
+    return (
+      <ErrorBoundary customComponent={errorBoundaryHandler}>
+        <VisuallyCompleteWithData
+          id="DashboardList-FirstWidgetCard"
+          hasData={
+            ((data?.tableResults?.length || data?.timeseriesResults?.length) ?? 0) > 0
+          }
+          disabled={Number(props.index) !== 0}
+        >
+          <WidgetFrame
+            title={widget.title}
+            description={widget.description}
+            badgeProps={badges}
+            warnings={warnings}
+            actionsDisabled={actionsDisabled}
+            error={widgetQueryError}
+            actionsMessage={actionsMessage}
+            actions={actions}
+            noVisualizationPadding={canUseTimeseriesVisualization}
+            onCopyUrlClick={onCopyUrlClick}
+            onFullScreenViewClick={disableFullscreen ? undefined : onFullScreenViewClick}
+            borderless={props.borderless}
+            revealTooltip={props.forceDescriptionTooltip ? 'always' : undefined}
+          >
+            <VisualizationWidget
+              widget={widget}
+              selection={selection}
+              dashboardFilters={dashboardFilters}
+              onDataFetched={onDataFetched}
+              onDataFetchStart={onDataFetchStart}
+              tableItemLimit={tableItemLimit}
+              widgetInterval={widgetInterval}
+              showConfidenceWarning={showConfidenceWarning}
+              legendSelection={legendSelectionForWidget}
+              onLegendSelectionChange={handleLegendSelectionChange}
+            />
+          </WidgetFrame>
+        </VisuallyCompleteWithData>
+      </ErrorBoundary>
+    );
+  }
 
   return (
-    <ErrorBoundary
-      customComponent={() => <ErrorCard>{t('Error loading widget data')}</ErrorCard>}
-    >
+    <ErrorBoundary customComponent={errorBoundaryHandler}>
       <VisuallyCompleteWithData
         id="DashboardList-FirstWidgetCard"
         hasData={
@@ -287,26 +437,26 @@ function WidgetCard(props: Props) {
       >
         <WidgetFrame
           title={widget.title}
-          description={widget.description}
+          description={
+            widget.displayType === DisplayType.TEXT ? undefined : widget.description
+          }
           badgeProps={badges}
           warnings={warnings}
           actionsDisabled={actionsDisabled}
           error={widgetQueryError}
           actionsMessage={actionsMessage}
           actions={actions}
+          onCopyUrlClick={onCopyUrlClick}
           onFullScreenViewClick={disableFullscreen ? undefined : onFullScreenViewClick}
           borderless={props.borderless}
           revealTooltip={props.forceDescriptionTooltip ? 'always' : undefined}
           noVisualizationPadding
         >
           <WidgetCardChartContainer
-            location={location}
             api={api}
-            organization={organization}
             selection={selection}
             widget={widget}
             isMobile={isMobile}
-            renderErrorMessage={renderErrorMessage}
             tableItemLimit={tableItemLimit}
             windowWidth={windowWidth}
             onDataFetched={onDataFetched}
@@ -322,6 +472,9 @@ function WidgetCard(props: Props) {
             disableZoom={disableZoom}
             onDataFetchStart={onDataFetchStart}
             showLoadingText={showLoadingText && isLoadingTextVisible}
+            onWidgetTableSort={onWidgetTableSort}
+            onWidgetTableResizeColumn={onWidgetTableResizeColumn}
+            disableTableActions={disableTableActions}
           />
         </WidgetFrame>
       </VisuallyCompleteWithData>
@@ -329,22 +482,22 @@ function WidgetCard(props: Props) {
   );
 }
 
-export default withApi(withOrganization(withPageFilters(withSentryRouter(WidgetCard))));
+export default registerLLMContext('widget', withApi(withPageFilters(WidgetCard)));
 
-function useOnDemandWarning(props: {widget: Widget}): string | null {
+function useOnDemandWarning(props: {widget: TWidget}): string | null {
   const organization = useOrganization();
 
   if (!hasOnDemandMetricWidgetFeature(organization)) {
     return null;
   }
-  // prettier-ignore
+  // oxfmt-ignore
   const widgetContainsHighCardinality = props.widget.queries.some(
     wq =>
       wq.onDemand?.some(
         d => d.extractionState === OnDemandExtractionState.DISABLED_HIGH_CARDINALITY
       )
   );
-  // prettier-ignore
+  // oxfmt-ignore
   const widgetReachedSpecLimit = props.widget.queries.some(
     wq =>
       wq.onDemand?.some(
@@ -367,38 +520,96 @@ function useOnDemandWarning(props: {widget: Widget}): string | null {
   return null;
 }
 
-function useTimeRangeWarning(props: {widget: Widget}) {
+function useTimeRangeWarning({widget}: {widget: TWidget}) {
   const {
     selection: {datetime},
   } = usePageFilters();
+  const useRetentionLimit =
+    getOverride('react-hook:use-dashboard-dataset-retention-limit') ?? (() => null);
+  const retentionLimitDays = useRetentionLimit({
+    dataset: widget.widgetType ?? WidgetType.ERRORS,
+  });
+  // Capture now once per mount instead of reading it during render
+  const [now] = useState(() => Date.now());
 
-  if (props.widget.widgetType !== WidgetType.SPANS) {
+  if (!retentionLimitDays) {
     return null;
   }
 
-  if (statsPeriodToDays(datetime.period, datetime.start, datetime.end) > 30) {
-    // This message applies if the user has selected a time range >30d because we truncate the
-    // snuba response to 30 days to reduce load on the system.
-    return t(
-      "Spans-based widgets have been truncated to 30 days of data. We're working on ramping this up."
+  // Number of days from now using the stats period
+  const statsPeriodDaysFromNow = statsPeriodToDays(
+    datetime.period,
+    datetime.start,
+    datetime.end
+  );
+
+  // Convert the number of days to ms so we can get an end date to check if the
+  // widget is querying more than its retention allows
+  const statsPeriodToEnd = new Date(now - statsPeriodDaysFromNow * DAYS_TO_MS);
+  const retentionLimitDate = new Date(now - retentionLimitDays * DAYS_TO_MS);
+  if (
+    (retentionLimitDate && datetime.end && retentionLimitDate > datetime.end) ||
+    (retentionLimitDate && statsPeriodToEnd && retentionLimitDate > statsPeriodToEnd)
+  ) {
+    return tct(
+      "You've selected a time range longer than the retention period for some datasets. Data older than [numDays] days may be unavailable.",
+      {
+        numDays: retentionLimitDays,
+      }
     );
   }
 
   return null;
 }
 
-const ErrorCard = styled(Placeholder)`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: ${p => p.theme.alert.error.backgroundLight};
-  border: 1px solid ${p => p.theme.alert.error.border};
-  color: ${p => p.theme.alert.error.textLight};
-  border-radius: ${p => p.theme.borderRadius};
-  margin-bottom: ${space(2)};
-`;
+// Displays a warning message if there is a conflict between widget and global filters
+function useConflictingFilterWarning({
+  widget,
+  dashboardFilters,
+}: {
+  dashboardFilters: DashboardFilters | undefined;
+  widget: TWidget;
+}) {
+  const conflictingFilterKeys = useMemo(() => {
+    if (!dashboardFilters) {
+      return [];
+    }
+
+    const widgetFilterKeys = widget.queries.flatMap(query => {
+      const parseResult = parseQueryBuilderValue(query.conditions, key =>
+        getFieldDefinition(key)
+      );
+      if (!parseResult) {
+        return [];
+      }
+      return parseResult
+        .filter(token => token.type === Token.FILTER)
+        .map(token => token.key.text);
+    });
+    const globalFilterKeys =
+      dashboardFilters?.[DashboardFilterKeys.GLOBAL_FILTER]
+        ?.filter(filter => filter.dataset === widget.widgetType && filter.value !== '')
+        .map(filter => filter.tag.key) ?? [];
+
+    const widgetFilterKeySet = new Set(widgetFilterKeys);
+    return globalFilterKeys.filter(key => widgetFilterKeySet.has(key));
+  }, [widget.queries, widget.widgetType, dashboardFilters]);
+
+  if (conflictingFilterKeys.length > 0) {
+    return tct('[strong:Filter conflicts:] [filters]', {
+      strong: <strong />,
+      filters: conflictingFilterKeys.join(', '),
+    });
+  }
+
+  return null;
+}
 
 export const WidgetDescription = styled('small')`
-  ${p => p.theme.overflowEllipsis}
-  color: ${p => p.theme.subText};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: ${p => p.theme.tokens.content.secondary};
 `;

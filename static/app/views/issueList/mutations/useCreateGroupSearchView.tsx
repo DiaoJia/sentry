@@ -1,51 +1,52 @@
-import {useMutation} from '@tanstack/react-query';
-
 import {
-  setApiQueryData,
-  type UseMutationOptions,
+  useMutation,
   useQueryClient,
-} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import {makeFetchStarredGroupSearchViewsKey} from 'sentry/views/issueList/queries/useFetchStarredGroupSearchViews';
-import type {GroupSearchView, StarredGroupSearchView} from 'sentry/views/issueList/types';
+  type UseMutationOptions,
+} from '@tanstack/react-query';
+import type {Simplify} from 'type-fest';
 
-interface CreateGroupSearchViewData
-  extends Partial<
-    Pick<
-      GroupSearchView,
-      'name' | 'query' | 'querySort' | 'projects' | 'environments' | 'timeFilters'
-    >
-  > {
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {starredGroupSearchViewsApiOptions} from 'sentry/views/issueList/queries/starredGroupSearchViews';
+import type {GroupSearchView} from 'sentry/views/issueList/types';
+
+interface CreateGroupSearchViewData extends Partial<
+  Pick<
+    GroupSearchView,
+    'name' | 'query' | 'querySort' | 'projects' | 'environments' | 'timeFilters'
+  >
+> {
   starred?: boolean;
 }
 
 export function useCreateGroupSearchView(
   options?: UseMutationOptions<GroupSearchView, Error, CreateGroupSearchViewData>
 ) {
-  const api = useApi();
   const organization = useOrganization();
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (data: CreateGroupSearchViewData) =>
-      api.requestPromise(`/organizations/${organization.slug}/group-search-views/`, {
+    mutationFn: (data: Simplify<CreateGroupSearchViewData>) =>
+      fetchMutation<GroupSearchView>({
+        url: getApiUrl('/organizations/$organizationIdOrSlug/group-search-views/', {
+          path: {organizationIdOrSlug: organization.slug},
+        }),
         method: 'POST',
         data,
       }),
     ...options,
-    onSuccess: (data, variables, context) => {
+    onSuccess: (data, variables, onMutateResult, context) => {
       if (variables.starred) {
-        setApiQueryData<StarredGroupSearchView[]>(
-          queryClient,
-          makeFetchStarredGroupSearchViewsKey({
-            orgSlug: organization.slug,
-          }),
-          existingViews => [...(existingViews ?? []), data]
+        const starredKey = starredGroupSearchViewsApiOptions({
+          orgSlug: organization.slug,
+        }).queryKey;
+        queryClient.setQueryData(starredKey, prevData =>
+          prevData ? {...prevData, json: [...prevData.json, data]} : prevData
         );
       }
 
-      options?.onSuccess?.(data, variables, context);
+      options?.onSuccess?.(data, variables, onMutateResult, context);
     },
   });
 }

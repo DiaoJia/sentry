@@ -1,10 +1,11 @@
-import type {ButtonProps} from 'sentry/components/core/button';
-import {Button} from 'sentry/components/core/button';
+import type {ButtonProps} from '@sentry/scraps/button';
+import {Button} from '@sentry/scraps/button';
+
 import {IconPause, IconPlay} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import HookStore from 'sentry/stores/hookStore';
+import {getOverride} from 'sentry/overrideRegistry';
 import type {ObjectStatus} from 'sentry/types/core';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import type {Monitor} from 'sentry/views/insights/crons/types';
 
 interface StatusToggleButtonProps extends Omit<ButtonProps, 'onClick'> {
@@ -20,7 +21,7 @@ export function StatusToggleButton({
   const organization = useOrganization();
   const {status} = monitor;
   const isDisabled = status === 'disabled';
-  const monitorCreationCallbacks = HookStore.get('callback:on-monitor-created');
+  const onMonitorCreated = getOverride('callback:on-monitor-created');
 
   const Icon = isDisabled ? IconPlay : IconPause;
 
@@ -32,12 +33,12 @@ export function StatusToggleButton({
     <Button
       icon={<Icon />}
       aria-label={label}
-      title={label}
+      tooltipProps={{title: label}}
       onClick={async () => {
         await onToggleStatus(isDisabled ? 'active' : 'disabled');
         // TODO(epurkhiser): This hook is probably too specialized and could
         // maybe do to be a component hook instead
-        monitorCreationCallbacks.map(cb => cb(organization));
+        onMonitorCreated?.(organization);
       }}
       {...props}
     />

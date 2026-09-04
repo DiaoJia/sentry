@@ -1,6 +1,5 @@
 import logging
 
-from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied
@@ -10,13 +9,15 @@ from rest_framework.response import Response
 from sentry import audit_log
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint
 from sentry.api.exceptions import ResourceDoesNotExist
 from sentry.api.serializers import serialize
+from sentry.api.utils import to_valid_int_id
 from sentry.apidocs.constants import RESPONSE_BAD_REQUEST, RESPONSE_NO_CONTENT
 from sentry.apidocs.examples.notification_examples import NotificationActionExamples
 from sentry.apidocs.parameters import GlobalParams, NotificationParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
 from sentry.models.organization import Organization
 from sentry.notifications.api.endpoints.notification_actions_index import (
     NotificationActionsPermission,
@@ -25,6 +26,7 @@ from sentry.notifications.api.serializers.notification_action_request import (
     NotificationActionSerializer,
 )
 from sentry.notifications.api.serializers.notification_action_response import (
+    OutgoingNotificationActionResponse,
     OutgoingNotificationActionSerializer,
 )
 from sentry.notifications.models.notificationaction import NotificationAction
@@ -32,10 +34,10 @@ from sentry.notifications.models.notificationaction import NotificationAction
 logger = logging.getLogger(__name__)
 
 
-@region_silo_endpoint
-@extend_schema(tags=["Alerts"])
+@cell_silo_endpoint
+@extend_schema(tags=["Spike Protection"])
 class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
-    owner = ApiOwner.ECOSYSTEM
+    owner = ApiOwner.NOTIFICATIONS
     publish_status = {
         "DELETE": ApiPublishStatus.PUBLIC,
         "GET": ApiPublishStatus.PUBLIC,
@@ -51,45 +53,52 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
 
     permission_classes = (NotificationActionsPermission,)
 
-    def convert_args(self, request: Request, action_id: int, *args, **kwargs):
+    def convert_args(self, request: Request, action_id: str, *args, **kwargs):
         parsed_args, parsed_kwargs = super().convert_args(request, *args, **kwargs)
         organization = parsed_kwargs["organization"]
-        # projects where the user has access
-        accessible_projects = self.get_projects(request, organization, project_ids={-1})
-        # projects where the user has project membership
-        projects = self.get_projects(request, organization)
 
-        # team admins and regular org members don't have project:write on an org level
-        if not request.access.has_scope("project:write"):
-            # team admins will have project:write scoped to their projects, members will not
-            team_admin_has_access = all(
-                [request.access.has_project_scope(project, "project:write") for project in projects]
-            )
-            # all() returns True for empty list, so include a check for it
-            if not team_admin_has_access or not projects:
-                raise PermissionDenied
-
+        # Get the relevant action associated with the organization and request
         try:
-            # It must either have no project affiliation, or be accessible to the user...
-            action = (
-                NotificationAction.objects.filter(
-                    Q(projects=None) | Q(projects__in=accessible_projects),
-                ).distinct()
-                # and must belong to the organization
-                .get(
-                    id=action_id,
-                    organization_id=organization.id,
-                )
+            action = NotificationAction.objects.get(
+                id=to_valid_int_id("action_id", action_id, raise_404=True),
+                organization_id=organization.id,
             )
         except NotificationAction.DoesNotExist:
             raise ResourceDoesNotExist
 
         parsed_kwargs["action"] = action
+        action_projects = action.projects.all()
+
+        # Notification actions not scoped to a particular project require org-level write access for mutations.
+        if not action_projects:
+            if request.method != "GET" and not request.access.has_scope("org:write"):
+                raise PermissionDenied(
+                    detail="You do not have permission to modify this organization-wide notification action."
+                )
+            return (parsed_args, parsed_kwargs)
+
+        if request.method == "GET":
+            # If we're reading the action, the user must have access to one of the associated projects
+            if not any(
+                request.access.has_project_scope(project, "project:read")
+                for project in action_projects
+            ):
+                raise PermissionDenied
+        else:
+            # If we're modifying the action, the user must have access to all associated projects
+            if not all(
+                request.access.has_project_scope(project, "project:write")
+                for project in action_projects
+            ):
+                raise PermissionDenied(
+                    detail="You don't have sufficient permissions to all the projects associated with this action."
+                )
 
         return (parsed_args, parsed_kwargs)
 
     @extend_schema(
-        operation_id="Retrieve a Spike Protection Notification Action",
+        operation_id="getOrganizationNotificationsAction",
+        summary="Retrieve a Spike Protection Notification Action",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             NotificationParams.ACTION_ID,
@@ -99,7 +108,7 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
     )
     def get(
         self, request: Request, organization: Organization, action: NotificationAction
-    ) -> Response:
+    ) -> Response[OutgoingNotificationActionResponse]:
         """
         Returns a serialized Spike Protection Notification Action object.
 
@@ -110,10 +119,12 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
             "notification_action.get_one",
             extra={"organization_id": organization.id, "action_id": action.id},
         )
-        return Response(serialize(action, request.user))
+        body: OutgoingNotificationActionResponse = serialize(action, request.user)
+        return Response(body)
 
     @extend_schema(
-        operation_id="Update a Spike Protection Notification Action",
+        operation_id="updateOrganizationNotificationsAction",
+        summary="Update a Spike Protection Notification Action",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             NotificationParams.ACTION_ID,
@@ -127,7 +138,7 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
     )
     def put(
         self, request: Request, organization: Organization, action: NotificationAction
-    ) -> Response:
+    ) -> Response[OutgoingNotificationActionResponse] | Response[ValidationErrorResponse]:
         """
         Updates a Spike Protection Notification Action.
 
@@ -144,7 +155,7 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
             data=request.data,
         )
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(as_validation_errors(serializer), status=status.HTTP_400_BAD_REQUEST)
 
         action = serializer.save()
         logger.info(
@@ -158,10 +169,12 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
             event=audit_log.get_event_id("NOTIFICATION_ACTION_EDIT"),
             data=action.get_audit_log_data(),
         )
-        return Response(serialize(action, user=request.user), status=status.HTTP_202_ACCEPTED)
+        put_body: OutgoingNotificationActionResponse = serialize(action, user=request.user)
+        return Response(put_body, status=status.HTTP_202_ACCEPTED)
 
     @extend_schema(
-        operation_id="Delete a Spike Protection Notification Action",
+        operation_id="deleteOrganizationNotificationsAction",
+        summary="Delete a Spike Protection Notification Action",
         parameters=[
             GlobalParams.ORG_ID_OR_SLUG,
             NotificationParams.ACTION_ID,
@@ -172,7 +185,7 @@ class NotificationActionsDetailsEndpoint(OrganizationEndpoint):
     )
     def delete(
         self, request: Request, organization: Organization, action: NotificationAction
-    ) -> Response:
+    ) -> Response[None]:
         """
         Deletes a Spike Protection Notification Action.
 

@@ -7,6 +7,7 @@ from abc import abstractmethod
 from datetime import datetime
 from typing import Any
 
+from sentry.constants import ObjectStatus
 from sentry.hybridcloud.rpc.pagination import RpcPaginationArgs, RpcPaginationResult
 from sentry.hybridcloud.rpc.service import RpcService, rpc_method
 from sentry.integrations.services.integration import RpcIntegration, RpcOrganizationIntegration
@@ -80,6 +81,7 @@ class IntegrationService(RpcService):
         organization_id: int | None = None,
         organization_integration_id: int | None = None,
         status: int | None = None,
+        using_replica: bool = False,
     ) -> RpcIntegration | None:
         """
         Returns an RpcIntegration using either the id or a combination of the provider and external_id
@@ -100,11 +102,25 @@ class IntegrationService(RpcService):
         grace_period_expired: bool | None = None,
         limit: int | None = None,
         name: str | None = None,
+        using_replica: bool = False,
     ) -> list[RpcOrganizationIntegration]:
         """
         Returns all RpcOrganizationIntegrations from the matching kwargs.
         If providers is set, it will also be filtered by the integration providers set in the list.
         If has_grace_period is set, it will filter by whether the grace_period is null or not.
+        """
+
+    @rpc_method
+    @abstractmethod
+    def get_organization_ids_with_providers(
+        self,
+        *,
+        providers: list[str],
+        status: int | None = None,
+    ) -> list[int]:
+        """
+        Returns distinct organization IDs that have an integration with one of the given providers.
+        Lightweight alternative to get_organization_integrations when only org IDs are needed.
         """
 
     @rpc_method
@@ -118,6 +134,31 @@ class IntegrationService(RpcService):
             integration_id=integration_id, organization_id=organization_id, limit=1
         )
         return ois[0] if len(ois) > 0 else None
+
+    @rpc_method
+    @abstractmethod
+    def start_grace_period_for_provider(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        grace_period_end: datetime,
+        status: int | None = ObjectStatus.ACTIVE,
+        skip_oldest: bool = False,
+    ) -> list[RpcOrganizationIntegration]:
+        """
+        Start grace period for all OrganizationIntegrations of a given provider for an organization
+
+        Args:
+            organization_id (int): The Organization whose OrganizationIntegrations will be grace perioded
+            provider (str): The provider key - e.g. "github"
+            grace_period_end (datetime): The grace period end date
+            status (int, optional): The status of the OrganizationIntegrations. Defaults to ObjectStatus.ACTIVE. Put None to include all statuses.
+            skip_oldest (bool, optional): Flag for if we want to skip grace period for the oldest OrganizationIntegration per Integration. Defaults to False.
+
+        Returns:
+            list[RpcOrganizationIntegration]: The updated OrganizationIntegrations
+        """
 
     @rpc_method
     @abstractmethod
@@ -270,6 +311,22 @@ class IntegrationService(RpcService):
         identity_external_id: str | None = None,
         identity_provider_external_id: str | None = None,
     ) -> RpcIntegrationIdentityContext:
+        pass
+
+    @rpc_method
+    @abstractmethod
+    def refresh_github_access_token(
+        self, *, integration_id: int, organization_id: int
+    ) -> RpcIntegration | None:
+        pass
+
+    @rpc_method
+    @abstractmethod
+    def get_gcp_service_account_email(
+        self,
+        *,
+        organization_id: int,
+    ) -> str | None:
         pass
 
 

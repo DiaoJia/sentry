@@ -1,11 +1,11 @@
 import styled from '@emotion/styled';
 
-import {Flex} from 'sentry/components/core/layout';
-import {Radio} from 'sentry/components/core/radio';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Radio} from '@sentry/scraps/radio';
+
 import {IconClock} from 'sentry/icons/iconClock';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import formatDuration from 'sentry/utils/duration/formatDuration';
+import {formatDuration} from 'sentry/utils/duration/formatDuration';
 import {EventType, type RecordingFrame} from 'sentry/utils/replays/types';
 
 interface Props {
@@ -16,7 +16,7 @@ interface Props {
   startTimestampMs: number;
 }
 
-export default function MutationOption({
+export function MutationOption({
   frame,
   startTimestampMs,
   isChecked,
@@ -35,9 +35,9 @@ export default function MutationOption({
 
   return (
     <Label htmlFor={id}>
-      <Flex direction="column" gap={space(0.5)} align="center">
-        <Flex gap={space(0.75)} align="center">
-          <IconClock color="gray500" size="sm" />
+      <Stack gap="xs" align="center">
+        <Flex gap="sm" align="center">
+          <IconClock variant="primary" size="sm" />
           <span>{formattedDuration}</span>
         </Flex>
         <span>{name}</span>
@@ -49,14 +49,14 @@ export default function MutationOption({
           value={frame.timestamp - startTimestampMs}
           onChange={onChange}
         />
-      </Flex>
+      </Stack>
     </Label>
   );
 }
 
 const Label = styled('label')`
   cursor: pointer;
-  padding: ${space(1)};
+  padding: ${p => p.theme.space.md};
   font-weight: normal;
   text-align: left;
 `;

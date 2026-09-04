@@ -1,17 +1,38 @@
+from collections.abc import Callable
+from datetime import timedelta
 from hashlib import sha1
 from uuid import uuid4
 
+from django.utils import timezone
+
+from sentry.api.serializers import serialize
+from sentry.constants import ObjectStatus
+from sentry.models.activity import Activity
 from sentry.models.commit import Commit
 from sentry.models.group import GroupStatus
 from sentry.models.grouphistory import GroupHistory, GroupHistoryStatus
 from sentry.models.grouplink import GroupLink
-from sentry.models.pullrequest import PullRequest
+from sentry.models.groupresolution import GroupResolution
+from sentry.models.pullrequest import (
+    CommentType,
+    PullRequest,
+    PullRequestCommit,
+    parse_pull_request_url,
+)
+from sentry.models.releasecommit import ReleaseCommit
+from sentry.models.releaseheadcommit import ReleaseHeadCommit
 from sentry.models.repository import Repository
 from sentry.testutils.cases import TestCase
+from sentry.types.activity import ActivityType
 
 
 class FindReferencedGroupsTest(TestCase):
     def test_resolve_in_commit(self) -> None:
+        """
+        Commits create GroupLinks and referenced activity, but do NOT immediately
+        resolve issues. Resolution happens when a release is created that includes
+        these commits, via update_group_resolutions().
+        """
         group = self.create_group()
 
         repo = Repository.objects.create(name="example", organization_id=group.organization.id)
@@ -20,25 +41,80 @@ class FindReferencedGroupsTest(TestCase):
             key=sha1(uuid4().hex.encode("utf-8")).hexdigest(),
             repository_id=repo.id,
             organization_id=group.organization.id,
-            # It makes reference to the first group
             message=f"Foo Biz\n\nFixes {group.qualified_short_id}",
         )
 
         groups = commit.find_referenced_groups()
         assert len(groups) == 1
         assert group in groups
-        # These are created in resolved_in_commit
-        assert GroupHistory.objects.filter(
+        assert GroupLink.objects.filter(
+            group=group,
+            linked_type=GroupLink.LinkedType.commit,
+            linked_id=commit.id,
+        ).exists()
+        activity = Activity.objects.get(
+            group=group,
+            type=ActivityType.REFERENCED_IN_COMMIT.value,
+        )
+        assert activity.data == {"commit": commit.id}
+        assert not Activity.objects.filter(
+            group=group,
+            type=ActivityType.SET_RESOLVED_IN_COMMIT.value,
+        ).exists()
+        assert not GroupHistory.objects.filter(
             group=group,
             status=GroupHistoryStatus.SET_RESOLVED_IN_COMMIT,
         ).exists()
+        group.refresh_from_db()
+        assert group.status == GroupStatus.UNRESOLVED
+
+    def test_resolve_in_commit_resolved_via_release(self) -> None:
+        """
+        A commit referencing a group on a feature branch leaves the group unresolved.
+        Once that commit lands in a release (i.e. is merged to the default branch
+        and shipped), the release creation flow resolves the group via
+        update_group_resolutions().
+        """
+        group = self.create_group()
+
+        repo = Repository.objects.create(name="example", organization_id=group.organization.id)
+
+        commit = Commit.objects.create(
+            key=sha1(uuid4().hex.encode("utf-8")).hexdigest(),
+            repository_id=repo.id,
+            organization_id=group.organization.id,
+            message=f"Foo Biz\n\nFixes {group.qualified_short_id}",
+        )
+
+        # Feature-branch commit: GroupLink exists but group is still unresolved.
         assert GroupLink.objects.filter(
             group=group,
             linked_type=GroupLink.LinkedType.commit,
             linked_id=commit.id,
         ).exists()
         group.refresh_from_db()
+        assert group.status == GroupStatus.UNRESOLVED
+
+        # Commit lands in a release; resolution should now fire.
+        release = self.create_release(project=group.project, version="1.0.0")
+        release.set_commits([{"id": commit.key, "repository": repo.name}])
+
+        group.refresh_from_db()
         assert group.status == GroupStatus.RESOLVED
+        resolution = GroupResolution.objects.get(group=group)
+        assert resolution.release == release
+        assert resolution.type == GroupResolution.Type.in_release
+        assert resolution.status == GroupResolution.Status.resolved
+        activity = Activity.objects.get(
+            group=group,
+            type=ActivityType.SET_RESOLVED_IN_RELEASE.value,
+        )
+        assert activity.data == {"version": release.version, "commit": commit.id}
+        assert activity.ident == str(resolution.id)
+
+        serialized_data = serialize(activity)["data"]
+        assert serialized_data["version"] == release.version
+        assert serialized_data["commit"]["id"] == commit.key
 
     def test_resolve_in_pull_request(self) -> None:
         group = self.create_group()
@@ -69,3 +145,704 @@ class FindReferencedGroupsTest(TestCase):
         # XXX: Oddly,resolved_in_pull_request doesn't update the group status
         group.refresh_from_db()
         assert group.status == GroupStatus.UNRESOLVED
+
+        pr.message = "no groups here"
+        pr.save()
+
+        assert not GroupLink.objects.filter(
+            group=group,
+            linked_type=GroupLink.LinkedType.pull_request,
+            linked_id=pr.id,
+        ).exists()
+
+    def test_resolve_in_pull_request_resolved_via_release(self) -> None:
+        group = self.create_group()
+        repo = Repository.objects.create(name="example", organization_id=group.organization.id)
+        merge_commit_sha = sha1(uuid4().hex.encode("utf-8")).hexdigest()
+
+        pr = PullRequest.objects.create(
+            key="1",
+            repository_id=repo.id,
+            organization_id=group.organization.id,
+            title="very cool PR to fix the thing",
+            message=f"Foo Biz\n\nFixes {group.qualified_short_id}",
+            merge_commit_sha=merge_commit_sha,
+        )
+
+        assert GroupLink.objects.filter(
+            group=group,
+            linked_type=GroupLink.LinkedType.pull_request,
+            linked_id=pr.id,
+        ).exists()
+        group.refresh_from_db()
+        assert group.status == GroupStatus.UNRESOLVED
+
+        release = self.create_release(project=group.project, version="1.0.0")
+        release.set_commits([{"id": merge_commit_sha, "repository": repo.name}])
+
+        group.refresh_from_db()
+        assert group.status == GroupStatus.RESOLVED
+        resolution = GroupResolution.objects.get(group=group)
+        assert resolution.release == release
+        assert resolution.type == GroupResolution.Type.in_release
+        assert resolution.status == GroupResolution.Status.resolved
+        activity = Activity.objects.get(
+            group=group,
+            type=ActivityType.SET_RESOLVED_IN_RELEASE.value,
+        )
+        commit = Commit.objects.get(key=merge_commit_sha)
+        assert activity.data == {"version": release.version, "commit": commit.id}
+        assert activity.ident == str(resolution.id)
+
+        serialized_data = serialize(activity)["data"]
+        assert serialized_data["version"] == release.version
+        assert serialized_data["commit"]["id"] == commit.key
+        assert serialized_data["commit"]["pullRequest"]["id"] == pr.key
+
+    def test_pull_request_resolves_only_when_released_to_issue_project(self) -> None:
+        frontend_project = self.project
+        backend_project = self.create_project(organization=frontend_project.organization)
+        group = self.create_group(project=frontend_project)
+        repo = self.create_repo(project=frontend_project, name="example-monorepo")
+        merge_commit_sha = sha1(uuid4().hex.encode("utf-8")).hexdigest()
+        pull_request = self.create_pull_request(
+            repository_id=repo.id,
+            organization_id=frontend_project.organization_id,
+            message=f"Fixes {group.qualified_short_id}",
+        )
+        pull_request.update(merge_commit_sha=merge_commit_sha)
+        backend_release = self.create_release(project=backend_project, version="backend@1.0.0")
+
+        backend_release.set_commits([{"id": merge_commit_sha, "repository": repo.name}])
+
+        assert not GroupResolution.objects.filter(group=group, release=backend_release).exists()
+        group.refresh_from_db()
+        assert group.status == GroupStatus.UNRESOLVED
+
+        frontend_release = self.create_release(project=frontend_project, version="frontend@1.0.0")
+        frontend_release.set_commits([{"id": merge_commit_sha, "repository": repo.name}])
+
+        resolution = GroupResolution.objects.get(group=group)
+        assert resolution.release == frontend_release
+        assert resolution.status == GroupResolution.Status.resolved
+        group.refresh_from_db()
+        assert group.status == GroupStatus.RESOLVED
+
+
+class PullRequestRetentionTest(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = timezone.now()
+        self.old_date = self.now - timedelta(days=100)
+        self.recent_date = self.now - timedelta(days=10)
+        self.cutoff_date = self.now - timedelta(days=90)
+
+        self.repo = self.create_repo(
+            project=self.project,
+            name="example-repo",
+        )
+        self.author = self.create_commit_author(
+            project=self.project,
+            email="test@example.com",
+        )
+
+    def create_pr(self, date_added=None, key=None):
+        """Helper to create a PR with specified date"""
+        if date_added is None:
+            date_added = self.old_date
+
+        pr = self.create_pull_request(
+            repository_id=self.repo.id,
+            organization_id=self.organization.id,
+            key=key or "123",
+            title="Test PR",
+            author=self.author,
+        )
+        PullRequest.objects.filter(id=pr.id).update(date_added=date_added)
+        pr.refresh_from_db()
+        return pr
+
+    def create_old_commit(self):
+        """Helper to create a commit that is itself past the cutoff"""
+        commit = self.create_commit(
+            project=self.project,
+            repo=self.repo,
+            author=self.author,
+        )
+        Commit.objects.filter(id=commit.id).update(date_added=self.old_date)
+        commit.refresh_from_db()
+        return commit
+
+    def test_old_pr_with_no_references_is_unused(self) -> None:
+        """An old PR with no references should be marked as unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        assert pr.is_unused(self.cutoff_date)
+
+    def test_recent_pr_is_not_unused(self) -> None:
+        """A PR created after cutoff date should not be unused (though this shouldn't be queried)"""
+        pr = self.create_pr(date_added=self.recent_date)
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_recent_comment_is_not_unused(self) -> None:
+        """PR with a comment created after cutoff should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.recent_date,
+            updated_at=self.old_date,
+        )
+
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_recently_updated_comment_is_not_unused(self) -> None:
+        """PR with a comment updated after cutoff should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.old_date,
+            updated_at=self.recent_date,
+        )
+
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_old_commit_only_is_unused(self) -> None:
+        """PR with only an old commit (not in release) should be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_commit(
+            project=self.project,
+            repo=self.repo,
+            author=self.author,
+        )
+        Commit.objects.filter(id=commit.id).update(date_added=self.old_date)
+        self.create_pull_request_commit(pr, commit)
+        assert pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_recent_commit_is_not_unused(self) -> None:
+        """PR with a commit created after cutoff should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_commit(
+            project=self.project,
+            repo=self.repo,
+            author=self.author,
+        )
+        Commit.objects.filter(id=commit.id).update(date_added=self.recent_date)
+        commit.refresh_from_db()
+
+        self.create_pull_request_commit(pr, commit)
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_commit_in_release_is_not_unused(self) -> None:
+        """PR with a commit that's part of a release should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_old_commit()
+        self.create_pull_request_commit(pr, commit)
+        release = self.create_release(project=self.project)
+        ReleaseCommit.objects.create(
+            organization_id=self.organization.id,
+            release=release,
+            commit=commit,
+            order=1,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_commit_in_old_release_is_not_unused(self) -> None:
+        """The release pin is for the release's lifetime, not its recency: the PR is
+        part of the release's provenance for as long as the release exists"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_old_commit()
+        self.create_pull_request_commit(pr, commit)
+        release = self.create_release(project=self.project, date_added=self.old_date)
+        ReleaseCommit.objects.create(
+            organization_id=self.organization.id,
+            release=release,
+            commit=commit,
+            order=1,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_commit_as_release_head_is_not_unused(self) -> None:
+        """PR with a commit that's a release head should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_old_commit()
+        self.create_pull_request_commit(pr, commit)
+        release = self.create_release(project=self.project)
+        ReleaseHeadCommit.objects.create(
+            organization_id=self.organization.id,
+            repository_id=self.repo.id,
+            release=release,
+            commit=commit,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_commit_as_old_release_head_is_not_unused(self) -> None:
+        """An old release pins the PR through its head commit for its lifetime too"""
+        pr = self.create_pr(date_added=self.old_date)
+        commit = self.create_old_commit()
+        self.create_pull_request_commit(pr, commit)
+        release = self.create_release(project=self.project, date_added=self.old_date)
+        ReleaseHeadCommit.objects.create(
+            organization_id=self.organization.id,
+            repository_id=self.repo.id,
+            release=release,
+            commit=commit,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_linked_to_existing_group_is_not_unused(self) -> None:
+        """PR linked to an existing group via GroupLink should not be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        group = self.create_group(project=self.project)
+        GroupLink.objects.create(
+            group=group,
+            project=self.project,
+            linked_type=GroupLink.LinkedType.pull_request,
+            linked_id=pr.id,
+            relationship=GroupLink.Relationship.resolves,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_linked_to_deleted_group_is_unused(self) -> None:
+        """PR linked to a non-existent group should be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        GroupLink.objects.create(
+            group_id=999999,  # Non-existent group
+            project=self.project,
+            linked_type=GroupLink.LinkedType.pull_request,
+            linked_id=pr.id,
+            relationship=GroupLink.Relationship.resolves,
+        )
+        assert pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_recent_comment_referencing_live_group_is_not_unused(self) -> None:
+        """A comment Sentry can still update keeps its PR, issues referenced or not"""
+        pr = self.create_pr(date_added=self.old_date)
+        group = self.create_group(project=self.project)
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.recent_date,
+            updated_at=self.recent_date,
+            group_ids=[group.id],
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_old_comment_referencing_live_group_is_unused(self) -> None:
+        """A live issue in a stale comment no longer pins the PR -- the comment is
+        past the window in which Sentry would ever rewrite it"""
+        pr = self.create_pr(date_added=self.old_date)
+        group = self.create_group(project=self.project)
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.old_date,
+            updated_at=self.old_date,
+            group_ids=[group.id],
+        )
+        assert pr.is_unused(self.cutoff_date)
+
+    def test_pr_with_deleted_commit_is_unused(self) -> None:
+        """PR with a PullRequestCommit pointing to non-existent commit should be unused"""
+        pr = self.create_pr(date_added=self.old_date)
+        # Create PullRequestCommit with non-existent commit_id. This simulates a commit that was deleted
+        PullRequestCommit.objects.create(
+            pull_request=pr,
+            commit_id=999999,
+        )
+        assert pr.is_unused(self.cutoff_date)
+
+    def test_complex_pr_with_multiple_references(self) -> None:
+        """Test a complex scenario with multiple types of references"""
+        pr = self.create_pr(date_added=self.old_date)
+        # Add old comment with deleted group
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.old_date,
+            updated_at=self.old_date,
+            group_ids=[999999],
+        )
+        # Add old commit that's not in any release
+        commit = self.create_commit(
+            project=self.project,
+            repo=self.repo,
+            author=self.author,
+        )
+        Commit.objects.filter(id=commit.id).update(date_added=self.old_date)
+        self.create_pull_request_commit(pr, commit)
+        # PR with old commit (not in release) should be unused
+        assert pr.is_unused(self.cutoff_date)
+        commit.delete()
+        assert pr.is_unused(self.cutoff_date)
+
+        self.create_pull_request_comment(
+            pull_request=pr,
+            created_at=self.recent_date,
+            updated_at=self.old_date,
+            comment_type=CommentType.OPEN_PR,
+        )
+        assert not pr.is_unused(self.cutoff_date)
+
+
+class GetOrCreateFromReferenceTest(TestCase):
+    def setUp(self) -> None:
+        self.repo = self.create_repo(
+            self.project, name="getsentry/sentry", provider="integrations:github"
+        )
+
+    def _resolve(
+        self,
+        *,
+        repo_name: str = "getsentry/sentry",
+        provider: str | None = "github",
+        key: int | str = 42,
+        repo_external_id: str | None = None,
+    ):
+        return PullRequest.objects.get_or_create_from_reference(
+            organization_id=self.organization.id,
+            repo_name=repo_name,
+            provider=provider,
+            key=key,
+            repo_external_id=repo_external_id,
+        )
+
+    def test_resolves_and_creates_pull_request(self) -> None:
+        resolved = self._resolve()
+
+        assert resolved.repo_resolution == "resolved"
+        assert resolved.provider_unmappable is False
+        assert resolved.resolved_by == "name"
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == self.repo.id
+        assert resolved.pull_request.key == "42"
+
+    def test_resolves_by_external_id_when_name_cannot_match(self) -> None:
+        """GitLab reporters carry ``path_with_namespace`` while the row holds the
+        space-separated ``name_with_namespace``, so the name can never match."""
+        gitlab_repo = self.create_repo(
+            self.project,
+            name="My Group / My Project",
+            provider="integrations:gitlab",
+            external_id="gitlab.example.com:28",
+        )
+
+        resolved = self._resolve(
+            repo_name="my-group/my-project",
+            provider="gitlab",
+            repo_external_id="gitlab.example.com:28",
+        )
+
+        assert resolved.repo_resolution == "resolved"
+        assert resolved.resolved_by == "external_id"
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == gitlab_repo.id
+
+    def test_external_id_resolves_past_duplicate_names(self) -> None:
+        """Duplicate rows sharing a provider are ambiguous by name, and no provider value
+        can separate them -- only the external id can."""
+        duplicate = self.create_repo(
+            self.project,
+            name="getsentry/sentry",
+            provider="integrations:github",
+            external_id="99",
+        )
+        # create_repo get_or_creates: without a distinguishing field it returns the setUp
+        # row, and the duplicate this test is named for never exists.
+        assert duplicate.id != self.repo.id
+        assert self._resolve().repo_resolution == "ambiguous"
+
+        resolved = self._resolve(repo_external_id="99")
+
+        assert resolved.resolved_by == "external_id"
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == duplicate.id
+
+    def test_treats_an_empty_external_id_as_absent(self) -> None:
+        """A reporter with no id for the repo sends ``""``. Querying it would match a row
+        that also has none, attaching the PR to an unrelated repository."""
+        self.create_repo(
+            self.project, name="unrelated/repo", provider="integrations:github", external_id=""
+        )
+
+        resolved = self._resolve(repo_external_id="")
+
+        assert resolved.repo_resolution == "resolved"
+        assert resolved.resolved_by == "name"
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == self.repo.id
+
+    def test_falls_back_to_name_when_external_id_is_stale(self) -> None:
+        """A repo re-added under a new external id must be no worse off than before."""
+        resolved = self._resolve(repo_external_id="no-longer-in-use")
+
+        assert resolved.repo_resolution == "resolved"
+        assert resolved.resolved_by == "name"
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == self.repo.id
+
+    def test_coerces_integer_key_to_string(self) -> None:
+        resolved = self._resolve(key=7)
+
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.key == "7"
+
+    def test_reuses_existing_pull_request_without_overwriting(self) -> None:
+        existing = self.create_pull_request(
+            organization_id=self.organization.id,
+            repository_id=self.repo.id,
+            key="42",
+            title="Real title",
+        )
+
+        resolved = self._resolve()
+
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.id == existing.id
+        # The shell find-or-create must not clobber a title a webhook already filled in.
+        resolved.pull_request.refresh_from_db()
+        assert resolved.pull_request.title == "Real title"
+        assert PullRequest.objects.filter(repository_id=self.repo.id, key="42").count() == 1
+
+    def test_resolves_by_provider_when_name_collides(self) -> None:
+        gitlab_repo = self.create_repo(
+            self.project, name="getsentry/sentry", provider="integrations:gitlab"
+        )
+
+        resolved = self._resolve(provider="github")
+
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == self.repo.id
+        assert not PullRequest.objects.filter(repository_id=gitlab_repo.id).exists()
+
+    def test_not_found_when_no_repository_matches(self) -> None:
+        resolved = self._resolve(repo_name="getsentry/does-not-exist")
+
+        assert resolved.pull_request is None
+        assert resolved.repo_resolution == "not_found"
+        assert resolved.provider_unmappable is False
+
+    def test_ambiguous_when_unknown_provider_matches_many(self) -> None:
+        self.create_repo(self.project, name="getsentry/sentry", provider="integrations:gitlab")
+
+        # Two same-named repos under different providers and no provider to disambiguate —
+        # refuse to guess rather than risk mis-resolution.
+        resolved = self._resolve(provider="unknown")
+
+        assert resolved.pull_request is None
+        assert resolved.repo_resolution == "ambiguous"
+        assert not PullRequest.objects.exists()
+
+    def test_resolves_unknown_provider_when_unambiguous(self) -> None:
+        resolved = self._resolve(provider="unknown")
+
+        assert resolved.pull_request is not None
+        # The "unknown" sentinel is treated as absent, not unmappable.
+        assert resolved.provider_unmappable is False
+
+    def test_flags_unmappable_provider(self) -> None:
+        # An unmapped provider is surfaced via provider_unmappable=True. Resolution still
+        # filters by it, so a repo stored under a recognized provider won't match.
+        resolved = self._resolve(provider="subversion")
+
+        assert resolved.provider_unmappable is True
+        assert resolved.pull_request is None
+        assert resolved.repo_resolution == "not_found"
+
+    def test_unmappable_provider_resolves_against_a_matching_repo(self) -> None:
+        svn_repo = self.create_repo(self.project, name="svn/project", provider="subversion")
+
+        resolved = self._resolve(repo_name="svn/project", provider="subversion")
+
+        # Still flagged, but resolution is attempted and succeeds when a repo actually
+        # carries that provider.
+        assert resolved.provider_unmappable is True
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == svn_repo.id
+
+    def test_scopes_resolution_to_the_given_org(self) -> None:
+        other_org = self.create_organization()
+        other_project = self.create_project(organization=other_org)
+        other_repo = self.create_repo(
+            other_project, name="getsentry/sentry", provider="integrations:github"
+        )
+
+        resolved = PullRequest.objects.get_or_create_from_reference(
+            organization_id=other_org.id,
+            repo_name="getsentry/sentry",
+            provider="github",
+            key=42,
+        )
+
+        assert resolved.pull_request is not None
+        assert resolved.pull_request.repository_id == other_repo.id
+        assert not PullRequest.objects.filter(repository_id=self.repo.id).exists()
+
+
+class ForProviderPrTest(TestCase):
+    def setUp(self) -> None:
+        self.external_id = "556677"
+        self.integration_id = 909
+        self.repo = self.create_repo(
+            self.project,
+            name="getsentry/sentry",
+            provider="integrations:github",
+            external_id=self.external_id,
+            integration_id=self.integration_id,
+        )
+        self.pull_request = self.create_pull_request(
+            organization_id=self.organization.id, repository_id=self.repo.id, key="42"
+        )
+
+    def _for_provider_pr(self, *, integration_id: int | None = None, key: int | str = 42):
+        return PullRequest.objects.for_provider_pr(
+            external_id=self.external_id,
+            integration_id=self.integration_id if integration_id is None else integration_id,
+            key=key,
+        )
+
+    def test_resolves_row_in_own_org(self) -> None:
+        assert [pr.id for pr in self._for_provider_pr()] == [self.pull_request.id]
+
+    def test_fans_across_orgs_sharing_installation(self) -> None:
+        other_org = self.create_organization()
+        other_repo = self.create_repo(
+            self.create_project(organization=other_org),
+            name="getsentry/sentry",
+            provider="integrations:github",
+            external_id=self.external_id,
+            integration_id=self.integration_id,
+        )
+        other_pr = self.create_pull_request(
+            organization_id=other_org.id, repository_id=other_repo.id, key="42"
+        )
+
+        assert {pr.id for pr in self._for_provider_pr()} == {self.pull_request.id, other_pr.id}
+
+    def test_coerces_integer_key_to_string(self) -> None:
+        assert [pr.id for pr in self._for_provider_pr(key=42)] == [self.pull_request.id]
+
+    def test_excludes_other_pr_numbers(self) -> None:
+        self.create_pull_request(
+            organization_id=self.organization.id, repository_id=self.repo.id, key="99"
+        )
+        assert [pr.id for pr in self._for_provider_pr()] == [self.pull_request.id]
+
+    def test_excludes_hidden_repositories(self) -> None:
+        self.repo.update(status=ObjectStatus.HIDDEN)
+        assert self._for_provider_pr() == []
+
+    def test_includes_non_hidden_inactive_repositories(self) -> None:
+        # A pending-deletion repo still gets webhooks (the fan-out only excludes
+        # HIDDEN), so its PR can emit and must stay in its own sibling set — matching
+        # how _repo_external_identity reads the repo regardless of status.
+        self.repo.update(status=ObjectStatus.PENDING_DELETION)
+        assert [pr.id for pr in self._for_provider_pr()] == [self.pull_request.id]
+
+    def test_excludes_other_installations(self) -> None:
+        # Same external_id under a different installation (e.g. a second GHE host,
+        # where repo ids can collide) must not be treated as a sibling.
+        assert self._for_provider_pr(integration_id=self.integration_id + 1) == []
+
+
+class GetOrFetchExternalIdTest(TestCase):
+    def setUp(self) -> None:
+        self.repo = self.create_repo(self.project, name="getsentry/sentry")
+
+    def _fetch(self, fetch: Callable[[], int | None], *, key: str = "42") -> int | None:
+        return PullRequest.objects.get_or_fetch_external_id(
+            organization_id=self.organization.id,
+            repository_id=self.repo.id,
+            key=key,
+            fetch=fetch,
+        )
+
+    def test_returns_stored_id_without_fetch(self) -> None:
+        pr = self.create_pull_request(
+            organization_id=self.organization.id, repository_id=self.repo.id, key="42"
+        )
+        pr.update(external_id=555)
+        calls: list[int] = []
+
+        def fetch() -> int:
+            calls.append(1)
+            return 999
+
+        assert self._fetch(fetch) == 555
+        assert calls == []
+
+    def test_writes_back_onto_existing_row(self) -> None:
+        pr = self.create_pull_request(
+            organization_id=self.organization.id, repository_id=self.repo.id, key="42"
+        )
+
+        assert self._fetch(fetch=lambda: 555) == 555
+        pr.refresh_from_db()
+        assert pr.external_id == 555
+
+    def test_returns_fetched_id_unpersisted_when_row_is_absent(self) -> None:
+        assert self._fetch(fetch=lambda: 555) == 555
+        assert not PullRequest.objects.filter(repository_id=self.repo.id, key="42").exists()
+
+    def test_does_not_store_a_none_fetch(self) -> None:
+        pr = self.create_pull_request(
+            organization_id=self.organization.id, repository_id=self.repo.id, key="42"
+        )
+
+        assert self._fetch(fetch=lambda: None) is None
+        pr.refresh_from_db()
+        assert pr.external_id is None
+
+
+class ParsePullRequestUrlTest(TestCase):
+    def test_parses_each_provider_url_shape(self) -> None:
+        cases = {
+            "https://github.com/getsentry/sentry/pull/42": (42, "github.com", "getsentry/sentry"),
+            "https://github.com/getsentry/sentry/pulls/7": (7, "github.com", "getsentry/sentry"),
+            "https://gitlab.com/gs/sentry/merge_requests/13": (13, "gitlab.com", "gs/sentry"),
+            # GitLab nests projects under subgroups and separates the MR path with "/-/", so
+            # the repo name spans the subgroups but excludes the separator.
+            "https://gitlab.com/grp/sub/proj/-/merge_requests/3": (3, "gitlab.com", "grp/sub/proj"),
+            "https://gitlab.com/grp/sub/proj/merge_requests/3": (3, "gitlab.com", "grp/sub/proj"),
+        }
+        for url, expected in cases.items():
+            assert parse_pull_request_url(url) == expected, url
+
+    def test_parses_past_trailing_url_segments(self) -> None:
+        # A PR URL stays a PR URL with a subpath, query, or fragment appended.
+        for url in [
+            "https://github.com/o/r/pull/5/files",
+            "https://github.com/o/r/pull/5?w=1",
+            "https://github.com/o/r/pull/5#issuecomment-1",
+        ]:
+            assert parse_pull_request_url(url) == (5, "github.com", "o/r"), url
+
+    def test_normalizes_the_host(self) -> None:
+        # Callers compare host to a known value, so casing, port and userinfo must not survive.
+        cases = {
+            "https://GitHub.com/o/r/pull/5": (5, "github.com", "o/r"),
+            "https://github.com:443/o/r/pull/5": (5, "github.com", "o/r"),
+            "https://user@github.com/o/r/pull/5": (5, "github.com", "o/r"),
+            # The real host is what follows the userinfo, not what precedes it.
+            "https://github.com@evil.com/o/r/pull/5": (5, "evil.com", "o/r"),
+        }
+        for url, expected in cases.items():
+            assert parse_pull_request_url(url) == expected, url
+
+    def test_returns_none_when_not_a_pr_url(self) -> None:
+        cases = [
+            # A branch/tree URL or a number-less path must not be mistaken for a PR.
+            "https://github.com/getsentry/sentry/tree/123",
+            "https://github.com/getsentry/sentry/pulls",
+            "https://github.com/getsentry/sentry",
+            # The number must end its path segment, not merely start it.
+            "https://github.com/o/r/pull/12x",
+            # Only https, so a parsed host can be trusted.
+            "http://github.com/o/r/pull/5",
+            # A PR URL smuggled into another URL's query string is not this URL's PR.
+            "https://evil.com/x?u=https://github.com/o/r/pull/5",
+            # A PR segment needs a repo above it; "pull" alone is not an owner/repo.
+            "https://github.com/pull/5",
+            # Malformed authority — urlsplit raises rather than returning a host.
+            "https://[::1/o/r/pull/5",
+            "",
+        ]
+        for url in cases:
+            assert parse_pull_request_url(url) is None, url

@@ -1,24 +1,24 @@
 import type {PropsWithChildren, ReactNode} from 'react';
 import {Fragment, useMemo, useState} from 'react';
-import {useTheme} from '@emotion/react';
+import {useTheme, css} from '@emotion/react';
 import styled from '@emotion/styled';
 
 import BadStackTraceExample from 'sentry-images/issue_details/bad-stack-trace-example.png';
 import GoodStackTraceExample from 'sentry-images/issue_details/good-stack-trace-example.png';
 
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {CodeBlock} from '@sentry/scraps/code';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+import {TabList, TabPanels, Tabs} from '@sentry/scraps/tabs';
+
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
-import {openModal} from 'sentry/actionCreators/modal';
-import {CodeSnippet} from 'sentry/components/codeSnippet';
 import {ContentSliderDiff} from 'sentry/components/contentSliderDiff';
-import {Alert} from 'sentry/components/core/alert';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Flex} from 'sentry/components/core/layout';
-import {TabList, TabPanels, Tabs} from 'sentry/components/core/tabs';
 import {sourceMapSdkDocsMap} from 'sentry/components/events/interfaces/crashContent/exception/utils';
 import {FeedbackModal} from 'sentry/components/featureFeedback/feedbackModal';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import ProgressRing from 'sentry/components/progressRing';
+import {ProgressRing} from 'sentry/components/progressRing';
 import {
   IconCheckmark,
   IconCircle,
@@ -29,14 +29,16 @@ import {
   IconWarning,
 } from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
-import {space} from 'sentry/styles/space';
+import {ConfigStore} from 'sentry/stores/configStore';
 import type {Organization} from 'sentry/types/organization';
-import type {PlatformKey} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {SourceMapWizardBlueThunderAnalyticsParams} from 'sentry/utils/analytics/stackTraceAnalyticsEvents';
-import useProjects from 'sentry/utils/useProjects';
+import {defined} from 'sentry/utils/defined';
+import {getSourceMapsWizardSnippet} from 'sentry/utils/getSourceMapsWizardSnippet';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
 
 const SOURCE_MAP_SCRAPING_REASON_MAP = {
   not_found: {
@@ -155,7 +157,7 @@ export interface SourceMapsDebuggerModalProps extends ModalRenderProps {
   };
   projectId: string;
   sourceResolutionResults: FrameSourceMapDebuggerData;
-  orgSlug?: string;
+  organization?: Organization;
 }
 
 export const projectPlatformToDocsMap: Record<string, string> = {
@@ -167,6 +169,7 @@ export const projectPlatformToDocsMap: Record<string, string> = {
   'node-fastify': 'fastify',
   'node-gcpfunctions': 'gcp-functions',
   'node-hapi': 'hapi',
+  'node-hono': 'hono',
   'node-koa': 'koa',
   'node-nestjs': 'nestjs',
   'node-restify': 'restify',
@@ -185,6 +188,7 @@ export const projectPlatformToDocsMap: Record<string, string> = {
   'javascript-sveltekit': 'sveltekit',
   'javascript-astro': 'astro',
   'javascript-tanstackstart-react': 'tanstackstart-react',
+  'react-native': 'react-native',
 };
 
 function isReactNativeSDK({sdkName}: Pick<FrameSourceMapDebuggerData, 'sdkName'>) {
@@ -208,11 +212,13 @@ function getPlatform({
 export function getSourceMapsDocLinks(platform: string) {
   if (platform === 'react-native') {
     return {
-      sourcemaps: `https://docs.sentry.io/platforms/react-native/sourcemaps/`,
-      legacyUploadingMethods: `https://docs.sentry.io/platforms/react-native/sourcemaps/troubleshooting/legacy-uploading-methods/`,
-      sentryCli: `https://docs.sentry.io/platforms/react-native/sourcemaps/uploading/`,
-      bundlerPluginRepoLink: `https://docs.sentry.io/platforms/react-native/manual-setup/metro/`,
-      debugIds: `https://docs.sentry.io/platforms/react-native/sourcemaps/debug-ids/`,
+      sourcemaps: 'https://docs.sentry.io/platforms/react-native/sourcemaps/',
+      legacyUploadingMethods:
+        'https://docs.sentry.io/platforms/react-native/sourcemaps/troubleshooting/legacy-uploading-methods/',
+      sentryCli: 'https://docs.sentry.io/platforms/react-native/sourcemaps/uploading/',
+      bundlerPluginRepoLink:
+        'https://docs.sentry.io/platforms/react-native/manual-setup/metro/',
+      debugIds: 'https://docs.sentry.io/platforms/react-native/sourcemaps/debug-ids/',
     };
   }
 
@@ -226,7 +232,8 @@ export function getSourceMapsDocLinks(platform: string) {
     // Although we have a few specific sourcemap pages (see: https://github.com/getsentry/sentry-docs/tree/master/platform-includes/sourcemaps/primer),
     // they don't include the Sentry bundler section. All the others just render content for JavaScript.
     // Therefore, we have a static link here.
-    sentryBundleSupport: `https://docs.sentry.io/platforms/javascript/sourcemaps/#sentry-bundler-support`,
+    sentryBundleSupport:
+      'https://docs.sentry.io/platforms/javascript/sourcemaps/#sentry-bundler-support',
     // cordova and capacitor are not supported. (see: https://github.com/getsentry/sentry-docs/blob/c64fb081cad715dc9dd7639265e09c372c3a65e3/docs/platforms/javascript/common/sourcemaps/troubleshooting_js/artifact-bundles.mdx?plain=1#L4-L6)
     debugIds: ['cordova', 'capacitor'].includes(platform)
       ? undefined
@@ -264,17 +271,17 @@ export function getSourceMapsDocLinks(platform: string) {
     ].includes(platform)
       ? undefined
       : `${basePlatformUrl}/sourcemaps/uploading/hosting-publicly/`,
-    bundlerPluginRepoLink: `https://github.com/getsentry/sentry-javascript-bundler-plugins`,
+    bundlerPluginRepoLink:
+      'https://github.com/getsentry/sentry-javascript-bundler-plugins',
   };
 }
 
 function SentryWizardCallout({
   analyticsParams,
-  orgSlug = 'example-org',
-  projectSlug = 'example-project',
-}: Pick<SourceMapsDebuggerModalProps, 'analyticsParams'> & {
-  orgSlug?: string;
-  projectSlug?: string;
+  organization,
+  project,
+}: Pick<SourceMapsDebuggerModalProps, 'analyticsParams' | 'organization'> & {
+  project?: Project;
 }) {
   const isSelfHosted = ConfigStore.get('isSelfHosted');
   return (
@@ -300,7 +307,11 @@ function SentryWizardCallout({
           );
         }}
       >
-        {`npx @sentry/wizard@latest -i sourcemaps${isSelfHosted ? '' : ' --saas'} --org ${orgSlug} --project ${projectSlug}`}
+        {getSourceMapsWizardSnippet({
+          isSelfHosted,
+          organization,
+          project,
+        })}
       </InstructionCodeSnippet>
     </Fragment>
   );
@@ -490,9 +501,11 @@ export function SourceMapsDebuggerModal({
   Footer,
   sourceResolutionResults,
   analyticsParams,
-  orgSlug,
+  organization,
   projectId,
 }: SourceMapsDebuggerModalProps) {
+  const {openModal} = useModal();
+
   const theme = useTheme();
 
   const {projects} = useProjects();
@@ -614,14 +627,14 @@ export function SourceMapsDebuggerModal({
           ) : metaFrameworksWithSentryWizardInOnboarding.includes(platform) ? (
             <MetaFrameworkConfigInfo
               framework={platform}
-              orgSlug={orgSlug}
+              orgSlug={organization?.slug}
               projectSlug={project?.slug}
             />
           ) : (
             <SentryWizardCallout
               analyticsParams={analyticsParams}
-              orgSlug={orgSlug}
-              projectSlug={project?.slug}
+              organization={organization}
+              project={project}
             />
           )}
           <h6>{t('Troubleshooting Checklist')}</h6>
@@ -636,7 +649,7 @@ export function SourceMapsDebuggerModal({
             value={activeTab}
             onChange={setActiveTab}
           >
-            <TabList hideBorder={hideAllTabs}>
+            <TabList>
               <TabList.Item
                 key="debug-ids"
                 textValue={`${t('Debug IDs')} (${
@@ -646,9 +659,11 @@ export function SourceMapsDebuggerModal({
               >
                 <StyledProgressRing
                   progressColor={
-                    activeTab === 'debug-ids' ? theme.purple300 : theme.gray300
+                    activeTab === 'debug-ids'
+                      ? theme.tokens.graphics.accent.vibrant
+                      : theme.tokens.graphics.neutral.vibrant
                   }
-                  backgroundColor={theme.gray200}
+                  backgroundColor={theme.tokens.background.transparent.neutral.muted}
                   value={sourceResolutionResults.debugIdProgressPercent * 100}
                   size={16}
                   barWidth={4}
@@ -668,9 +683,11 @@ export function SourceMapsDebuggerModal({
               >
                 <StyledProgressRing
                   progressColor={
-                    activeTab === 'release' ? theme.purple300 : theme.gray300
+                    activeTab === 'release'
+                      ? theme.tokens.graphics.accent.vibrant
+                      : theme.tokens.graphics.neutral.vibrant
                   }
-                  backgroundColor={theme.gray200}
+                  backgroundColor={theme.tokens.background.transparent.neutral.muted}
                   value={sourceResolutionResults.releaseProgressPercent * 100}
                   size={16}
                   barWidth={4}
@@ -686,9 +703,11 @@ export function SourceMapsDebuggerModal({
               >
                 <StyledProgressRing
                   progressColor={
-                    activeTab === 'fetching' ? theme.purple300 : theme.gray300
+                    activeTab === 'fetching'
+                      ? theme.tokens.graphics.accent.vibrant
+                      : theme.tokens.graphics.neutral.vibrant
                   }
-                  backgroundColor={theme.gray200}
+                  backgroundColor={theme.tokens.background.transparent.neutral.muted}
                   value={sourceResolutionResults.scrapingProgressPercent * 100}
                   size={16}
                   barWidth={4}
@@ -882,21 +901,21 @@ export function SourceMapsDebuggerModal({
 function CheckListItem({children, title, status}: PropsWithChildren<CheckListItemProps>) {
   return (
     <ListItemContainer>
-      <CheckMarkContainer>
+      <Stack align="center">
         {
           {
-            none: <IconCircle size="md" color="gray200" />,
-            checked: <IconCheckmark size="md" color="green300" isCircled />,
-            alert: <IconWarning size="md" color="yellow300" />,
-            question: <IconQuestion size="md" color="gray300" />,
+            none: <IconCircle size="md" variant="muted" />,
+            checked: <IconCheckmark size="md" variant="success" />,
+            alert: <IconWarning size="md" variant="warning" />,
+            question: <IconQuestion size="md" variant="muted" />,
           }[status]
         }
         <Line className="source-map-debugger-modal-checklist-line" />
-      </CheckMarkContainer>
+      </Stack>
       <ListItemContentContainer>
-        <ListItemTitleWrapper>
+        <Flex align="center" minHeight="20px">
           <ListItemTitle status={status}>{title}</ListItemTitle>
-        </ListItemTitleWrapper>
+        </Flex>
         {children}
       </ListItemContentContainer>
     </ListItemContainer>
@@ -926,7 +945,7 @@ function InstalledSdkChecklistItem({
   if (sourceResolutionResults.sdkDebugIdSupport === 'needs-upgrade') {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Outdated SDK')}</h6>
           <p>
             {sourceResolutionResults.sdkVersion === null
@@ -965,7 +984,7 @@ function InstalledSdkChecklistItem({
   if (sourceResolutionResults.sdkDebugIdSupport === 'not-supported') {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t("SDK Doesn't Support Debug IDs")}</h6>
           <p>
             {tct(
@@ -982,7 +1001,7 @@ function InstalledSdkChecklistItem({
 
   return (
     <CheckListItem status="question" title={maybeErrorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('Unofficial SDK')}</h6>
         <p>
           {tct(
@@ -1013,14 +1032,11 @@ function getToolUsedToUploadSourceMaps({
     'esbuild-plugin',
   ];
 
-  return tools.reduce(
-    (acc, tool) => {
-      const key = tool.replace(/-([a-z])/g, (_match, name) => name.toUpperCase());
-      acc[key] = releaseUserAgent?.includes(tool) ?? false;
-      return acc;
-    },
-    {} as Record<string, boolean>
-  );
+  return tools.reduce<Record<string, boolean>>((acc, tool) => {
+    const key = tool.replace(/-([a-z])/g, (_match, name) => name.toUpperCase());
+    acc[key] = releaseUserAgent?.includes(tool) ?? false;
+    return acc;
+  }, {});
 }
 
 type ToolUsedToUploadSourceMaps = ReturnType<typeof getToolUsedToUploadSourceMaps>;
@@ -1176,7 +1192,7 @@ function HasDebugIdChecklistItem({
   if (sourceResolutionResults.eventHasDebugIds) {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Source Is Missing Injection')}</h6>
           <p>
             {tct(
@@ -1195,7 +1211,7 @@ function HasDebugIdChecklistItem({
     );
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>Uploaded Files Not Deployed</h6>
           {isReactNativeSDK({sdkName: sourceResolutionResults.sdkName}) ? (
             <Fragment>
@@ -1252,7 +1268,7 @@ function HasDebugIdChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('No Debug ID Tooling Used')}</h6>
         <p>
           {tct(
@@ -1274,6 +1290,7 @@ function DebugIdMismatchMessage({
   debugId: string | null;
   projectSlug?: string;
 }) {
+  const organization = useOrganization();
   // At this point debugId is always defined. The types need to be fixed
   if (!debugId) {
     return (
@@ -1291,7 +1308,7 @@ function DebugIdMismatchMessage({
       debugId: projectSlug ? (
         <LinkButton
           to={{
-            pathname: `/settings/projects/${projectSlug}/source-maps/`,
+            pathname: `/settings/${organization.slug}/projects/${projectSlug}/source-maps/`,
             query: {
               query: debugId,
             },
@@ -1336,7 +1353,7 @@ function UploadedSourceFileWithCorrectDebugIdChecklistItem({
   if (sourceResolutionResults.uploadedSomeArtifactWithDebugId) {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('No Source File With Matching Debug ID')}</h6>
           <p>
             <DebugIdMismatchMessage
@@ -1356,7 +1373,7 @@ function UploadedSourceFileWithCorrectDebugIdChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('No Artifacts With Debug IDs Uploaded')}</h6>
         <p>
           {tct(
@@ -1397,7 +1414,7 @@ function UploadedSourceMapWithCorrectDebugIdChecklistItem({
   if (sourceResolutionResults.uploadedSomeArtifactWithDebugId) {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('No Source Map With Matching Debug ID')}</h6>
           <p>
             <DebugIdMismatchMessage
@@ -1418,7 +1435,7 @@ function UploadedSourceMapWithCorrectDebugIdChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('No Artifacts Uploaded')}</h6>
         <p>
           {tct(
@@ -1451,7 +1468,7 @@ function EventHasReleaseNameChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('No Release Value')}</h6>
         <p>
           {tct(
@@ -1503,7 +1520,7 @@ function ReleaseHasUploadedArtifactsChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('No Uploaded Artifacts')}</h6>
         <p>
           {t(
@@ -1513,7 +1530,7 @@ function ReleaseHasUploadedArtifactsChecklistItem({
         </p>
         <p>
           {tct(
-            'Read the [link:Sentry Source Maps Documentation] to learn how to to upload your build artifacts to Sentry.',
+            'Read the [link:Sentry Source Maps Documentation] to learn how to upload your build artifacts to Sentry.',
             {
               link: defined(sourceMapsDocLinks.legacyUploadingMethods) ? (
                 <ExternalLinkWithIcon href={sourceMapsDocLinks.legacyUploadingMethods} />
@@ -1551,7 +1568,7 @@ function ReleaseSourceFileMatchingChecklistItem({
   if (sourceResolutionResults.sourceFileReleaseNameFetchingResult === 'wrong-dist') {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Dist Value Not Matching')}</h6>
           <p>
             {t(
@@ -1583,7 +1600,7 @@ function ReleaseSourceFileMatchingChecklistItem({
   if (sourceResolutionResults.stackFramePath === null) {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Stack Frame Without Path')}</h6>
           <p>
             {t(
@@ -1597,7 +1614,7 @@ function ReleaseSourceFileMatchingChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('Stack Frame Not Matching Artifact Name')}</h6>
         <p>
           {tct(
@@ -1672,7 +1689,7 @@ function ReleaseSourceMapMatchingChecklistItem({
   if (sourceResolutionResults.releaseSourceMapReference === null) {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Missing Source Map Reference')}</h6>
           <p>
             {tct(
@@ -1695,7 +1712,7 @@ function ReleaseSourceMapMatchingChecklistItem({
   if (sourceResolutionResults.sourceMapReleaseNameFetchingResult === 'wrong-dist') {
     return (
       <CheckListItem status="alert" title={errorMessage}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Dist Value Not Matching')}</h6>
           <p>
             {t(
@@ -1726,7 +1743,7 @@ function ReleaseSourceMapMatchingChecklistItem({
 
   return (
     <CheckListItem status="alert" title={errorMessage}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>{t('Not Found')}</h6>
         <p>
           {tct(
@@ -1769,7 +1786,7 @@ function ScrapingSourceFileAvailableChecklistItem({
   if (sourceResolutionResults.sourceFileScrapingStatus === null) {
     return (
       <CheckListItem status="alert" title={t('Source file was not fetched')}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Missing Information')}</h6>
           <p>
             {t(
@@ -1791,7 +1808,7 @@ function ScrapingSourceFileAvailableChecklistItem({
   if (sourceResolutionResults.sourceFileScrapingStatus.status === 'not_attempted') {
     return (
       <CheckListItem status="alert" title={t('Source file was not fetched')}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Fetching Was Not Attempted')}</h6>
           <p>
             {t(
@@ -1811,7 +1828,7 @@ function ScrapingSourceFileAvailableChecklistItem({
 
   return (
     <CheckListItem status="alert" title={t('Source file is not available to Sentry')}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>
           {t('Error While Fetching The Source File:')} {failureReasonTexts.shortName}
         </h6>
@@ -1849,7 +1866,7 @@ function ScrapingSourceMapAvailableChecklistItem({
   if (sourceResolutionResults.sourceMapScrapingStatus === null) {
     return (
       <CheckListItem status="none" title={t('Source map was not fetched')}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('No Source Map Reference')}</h6>
           <p>{t('There was no source map reference on the source file.')}</p>
         </CheckListInstruction>
@@ -1861,7 +1878,7 @@ function ScrapingSourceMapAvailableChecklistItem({
   if (sourceResolutionResults.sourceMapScrapingStatus.status === 'not_attempted') {
     return (
       <CheckListItem status="alert" title={t('Source map was not fetched')}>
-        <CheckListInstruction type="muted">
+        <CheckListInstruction variant="muted">
           <h6>{t('Fetching Was Not Attempted')}</h6>
           <p>
             {t(
@@ -1882,7 +1899,7 @@ function ScrapingSourceMapAvailableChecklistItem({
 
   return (
     <CheckListItem status="alert" title={t('Source map is not available to Sentry')}>
-      <CheckListInstruction type="muted">
+      <CheckListInstruction variant="muted">
         <h6>
           {t('Error While Fetching The Source Map:')} {failureReasonTexts.shortName}
         </h6>
@@ -1925,7 +1942,7 @@ function DistCodeSnippet() {
 function VerifyAgainNote() {
   return (
     <CompletionNoteContainer>
-      <IconRefresh size="lg" color="gray300" />
+      <IconRefresh size="lg" variant="muted" />
       <p>
         {t(
           'Once you changed your configuration, redeploy your app and capture a new event to verify your changes!'
@@ -1939,7 +1956,7 @@ function ChecklistDoneNote() {
   const isSelfHosted = ConfigStore.get('isSelfHosted');
   return (
     <CompletionNoteContainer>
-      <IconCheckmark size="md" color="green200" />
+      <IconCheckmark size="md" variant="success" />
       <p>
         {t(
           'You completed all of the steps above. Capture a new event to verify your setup!'
@@ -1959,7 +1976,7 @@ function ChecklistDoneNote() {
 
 function SourceMapStepNotRequiredNote() {
   return (
-    <CheckListInstruction type="muted" showIcon>
+    <CheckListInstruction variant="muted">
       {
         "You can safely ignore this step if you don't do any transformations to your code before deploying."
       }
@@ -1968,12 +1985,16 @@ function SourceMapStepNotRequiredNote() {
 }
 
 const StyledTabPanels = styled(TabPanels)<{hideAllTabs: boolean}>`
-  ${p => !p.hideAllTabs && `padding-top: ${space(2)};`}
+  ${p =>
+    !p.hideAllTabs &&
+    css`
+      padding-top: ${p.theme.space.xl};
+    `}
 `;
 
 const CheckList = styled('ul')`
   margin: 0;
-  padding: 0 ${space(1.5)};
+  padding: 0 ${p => p.theme.space.lg};
   list-style-type: none;
 `;
 
@@ -1992,113 +2013,101 @@ const ListItemContainer = styled('li')`
   }
 `;
 
-const CheckMarkContainer = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-`;
-
 const Line = styled('div')`
-  margin: ${space(0.5)} 0;
+  margin: ${p => p.theme.space.xs} 0;
   flex-grow: 1;
-  width: ${space(0.25)};
-  background-color: ${p => p.theme.gray200};
-  border-radius: ${space(0.25)};
+  width: ${p => p.theme.space['2xs']};
+  background-color: ${p => p.theme.colors.gray200};
+  border-radius: ${p => p.theme.space['2xs']};
 `;
 
 const ListItemContentContainer = styled('div')`
   flex-grow: 1;
-  margin-left: ${space(1.5)};
-  padding-bottom: ${space(2)};
+  margin-left: ${p => p.theme.space.lg};
+  padding-bottom: ${p => p.theme.space.xl};
   max-width: 100%;
 `;
 
 const CompletionNoteContainer = styled('div')`
   display: flex;
   align-items: center;
-  gap: ${space(2)};
-  margin-top: ${space(1)};
-  margin-bottom: ${space(0.5)};
-  padding: 0 ${space(2)} 0 0;
-`;
-
-const ListItemTitleWrapper = styled('div')`
-  min-height: 20px;
-  display: flex;
-  align-items: center;
+  gap: ${p => p.theme.space.xl};
+  margin-top: ${p => p.theme.space.md};
+  margin-bottom: ${p => p.theme.space.xs};
+  padding: 0 ${p => p.theme.space.xl} 0 0;
 `;
 
 const ListItemTitle = styled('p')<{status: 'none' | 'checked' | 'alert' | 'question'}>`
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   color: ${p =>
     ({
-      none: p.theme.subText,
-      question: p.theme.subText,
-      checked: p.theme.green300,
-      alert: p.theme.yellow400,
+      none: p.theme.tokens.content.secondary,
+      question: p.theme.tokens.content.secondary,
+      alert: p.theme.colors.yellow500,
+      checked: p.theme.colors.green400,
     })[p.status]};
 `;
 
 const CheckListInstruction = styled(Alert)`
   width: 100%;
-  margin-top: ${space(1)};
+  margin-top: ${p => p.theme.space.md};
   overflow-x: auto;
 
   h6 {
     font-size: 1rem;
-    margin-bottom: ${space(1)};
+    margin-bottom: ${p => p.theme.space.md};
   }
 
   p {
-    margin-bottom: ${space(1.5)};
+    margin-bottom: ${p => p.theme.space.lg};
   }
 `;
 
 const MonoBlock = styled('code')`
-  padding: ${space(0.25)} ${space(0.5)};
-  color: ${p => p.theme.gray400};
-  background: ${p => p.theme.gray100};
-  border: 1px solid ${p => p.theme.border};
-  font-family: ${p => p.theme.text.familyMono};
-  font-size: ${p => p.theme.fontSize.xs};
-  font-weight: ${p => p.theme.fontWeightNormal};
+  padding: ${p => p.theme.space['2xs']} ${p => p.theme.space.xs};
+  color: ${p => p.theme.colors.gray500};
+  background: ${p => p.theme.colors.gray100};
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  font-family: ${p => p.theme.font.family.mono};
+  font-size: ${p => p.theme.font.size.xs};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
   white-space: nowrap;
 `;
 
 const StyledProgressRing = styled(ProgressRing)`
-  margin-right: ${space(0.5)};
+  margin-right: ${p => p.theme.space.xs};
 `;
 
 const WizardInstructionParagraph = styled('p')`
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
 `;
 
-const InstructionCodeSnippet = styled(CodeSnippet)`
-  margin: ${space(1)} 0 ${space(2)};
+const InstructionCodeSnippet = styled(CodeBlock)`
+  margin: ${p => p.theme.space.md} 0 ${p => p.theme.space.xl};
 `;
 
 const InstructionList = styled('ul')`
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 
   li {
-    margin-bottom: ${space(0.5)};
+    margin-bottom: ${p => p.theme.space.xs};
   }
 `;
 
 const ScrapingSymbolificationErrorMessage = styled('p')`
-  color: ${p => p.theme.subText};
-  border-left: 2px solid ${p => p.theme.gray200};
-  padding-left: ${space(1)};
-  margin-top: -${space(1)};
+  color: ${p => p.theme.tokens.content.secondary};
+  border-left: 2px solid ${p => p.theme.colors.gray200};
+  padding-left: ${p => p.theme.space.md};
+  margin-top: -${p => p.theme.space.md};
 `;
 
 const DebuggerSectionContainer = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(1.5)};
+  gap: ${p => p.theme.space.lg};
   h5 {
     margin-bottom: 0;
-    font-size: ${p => p.theme.fontSize.xl};
+    font-size: ${p => p.theme.font.size.xl};
   }
   h6 {
     font-size: 1rem;
@@ -2109,5 +2118,5 @@ const DebuggerSectionContainer = styled('div')`
       margin-top: 0;
     }
   }
-  margin-bottom: ${space(3)};
+  margin-bottom: ${p => p.theme.space['2xl']};
 `;

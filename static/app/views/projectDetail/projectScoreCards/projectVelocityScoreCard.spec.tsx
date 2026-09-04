@@ -2,9 +2,9 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ProjectVelocityScoreCard from './projectVelocityScoreCard';
+import {ProjectVelocityScoreCard} from './projectVelocityScoreCard';
 
-describe('ProjectDetail > ProjectVelocity', function () {
+describe('ProjectDetail > ProjectVelocity', () => {
   const organization = OrganizationFixture();
 
   const selection = {
@@ -18,17 +18,18 @@ describe('ProjectDetail > ProjectVelocity', function () {
     },
   };
 
-  afterEach(function () {
+  afterEach(() => {
     MockApiClient.clearMockResponses();
   });
 
-  it('renders release count', async function () {
+  it('renders release count', async () => {
     const previousDataEndpointMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/releases/stats/`,
       body: Array.from({length: 98}).map((_item, index) => ({
         version: `0.0.${index + 100}`,
       })),
       status: 200,
+      match: [MockApiClient.matchQuery({statsPeriodStart: '28d'})],
     });
 
     const currentDataEndpointMock = MockApiClient.addMockResponse({
@@ -73,14 +74,14 @@ describe('ProjectDetail > ProjectVelocity', function () {
         query: {
           environment: [],
           project: 1,
-          start: '2017-09-19T02:41:20',
-          end: '2017-10-03T02:41:20',
+          statsPeriodStart: '28d',
+          statsPeriodEnd: '14d',
         },
       })
     );
   });
 
-  it('renders without releases', async function () {
+  it('renders without releases', async () => {
     const dataEndpointMock = MockApiClient.addMockResponse({
       url: `/organizations/${organization.slug}/releases/stats/`,
       body: [],

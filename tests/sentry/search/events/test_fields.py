@@ -110,7 +110,7 @@ from sentry.snuba.dataset import Dataset
         ),
     ],
 )
-def test_get_json_meta_type(field_alias, snuba_type, function, expected):
+def test_get_json_meta_type(field_alias, snuba_type, function, expected) -> None:
     qb = UnresolvedQuery(dataset=Dataset.Discover, params={})
     qb.function_alias_map[field_alias] = function
     assert get_json_meta_type(field_alias, snuba_type, qb) == expected, field_alias
@@ -173,9 +173,25 @@ def test_get_json_meta_type(field_alias, snuba_type, function, expected):
             ("to_other", ["release", r'"asdf @ \"qwer: (3,2)"'], None),
         ),
         ("identity(sessions)", ("identity", ["sessions"], None)),
+        (
+            r'to_other(release,"asdf @ \"`qwer: (3,2)")',
+            ("to_other", ["release", r'"asdf @ \"`qwer: (3,2)"'], None),
+        ),
+        (
+            "count_if(`p50(test, test, test):>test`, sessions)",
+            ("count_if", ["`p50(test, test, test):>test`", "sessions"], None),
+        ),
+        (
+            "count_if(`p50(test, test, test):>test thing:\"blah\" tags[foo]:'bar'`, sessions)",
+            (
+                "count_if",
+                ["`p50(test, test, test):>test thing:\"blah\" tags[foo]:'bar'`", "sessions"],
+                None,
+            ),
+        ),
     ],
 )
-def test_parse_function(function, expected):
+def test_parse_function(function, expected) -> None:
     assert parse_function(function) == expected
 
 
@@ -194,7 +210,7 @@ def test_parse_function(function, expected):
         ("count_if", 'a, b,","', ["a", "b", '","']),
     ],
 )
-def test_parse_arguments(function, columns, result):
+def test_parse_arguments(function, columns, result) -> None:
     assert parse_arguments(function, columns) == result
 
 
@@ -207,7 +223,7 @@ def test_parse_arguments(function, columns, result):
         pytest.param("func_array", ("func_array", None), id="does not accept snake case"),
     ],
 )
-def test_parse_combinator(function, expected):
+def test_parse_combinator(function, expected) -> None:
     assert parse_combinator(function) == expected
 
 
@@ -275,19 +291,19 @@ def resolve_snql_fieldlist(fields):
         ),
     ],
 )
-def test_range_funtions(field, expected):
+def test_range_funtions(field, expected) -> None:
     fields = resolve_snql_fieldlist([field])
     assert len(fields) == 1
     assert fields[0] == expected
 
 
 @pytest.mark.parametrize("combinator", COMBINATORS)
-def test_combinator_names_are_reserved(combinator):
+def test_combinator_names_are_reserved(combinator) -> None:
     fields = UnresolvedQuery(dataset=Dataset.Discover, params={})
     for function in fields.function_converter:
-        assert not function.endswith(
-            combinator.kind
-        ), f"Cannot name function `{function}` because `-{combinator.kind}` suffix is reserved for combinators"
+        assert not function.endswith(combinator.kind), (
+            f"Cannot name function `{function}` because `-{combinator.kind}` suffix is reserved for combinators"
+        )
 
 
 @pytest.mark.parametrize(
@@ -328,5 +344,5 @@ def test_combinator_names_are_reserved(combinator):
         ),
     ],
 )
-def test_resolve_datetime64(value, expected):
+def test_resolve_datetime64(value, expected) -> None:
     assert resolve_datetime64(value) == expected

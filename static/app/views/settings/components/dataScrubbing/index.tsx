@@ -1,33 +1,32 @@
 import {useCallback, useEffect, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {ExternalLink} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Panel from 'sentry/components/panels/panel';
-import PanelAlert from 'sentry/components/panels/panelAlert';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelAlert} from 'sentry/components/panels/panelAlert';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
 import {IconWarning} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
-import {defined} from 'sentry/utils';
-import useApi from 'sentry/utils/useApi';
+import {defined} from 'sentry/utils/defined';
+import {useApi} from 'sentry/utils/useApi';
 import {useNavigate} from 'sentry/utils/useNavigate';
 import {useParams} from 'sentry/utils/useParams';
 
-import Add from './modals/add';
-import Edit from './modals/edit';
+import {Add} from './modals/add';
+import {Edit} from './modals/edit';
 import {convertRelayPiiConfig} from './convertRelayPiiConfig';
 import {OrganizationRules} from './organizationRules';
-import Rules from './rules';
-import submitRules from './submitRules';
-import type {Rule} from './types';
+import {Rules} from './rules';
+import {submitRules} from './submitRules';
+import {type Rule} from './types';
 
 const ADVANCED_DATASCRUBBING_LINK =
   'https://docs.sentry.io/product/data-management-settings/scrubbing/advanced-datascrubbing/';
@@ -51,6 +50,8 @@ export function DataScrubbing({
   additionalContext,
   relayPiiConfig,
 }: Props) {
+  const {openModal} = useModal();
+
   const api = useApi();
   const [rules, setRules] = useState<Rule[]>([]);
   const navigate = useNavigate();
@@ -111,6 +112,7 @@ export function DataScrubbing({
     organization.slug,
     successfullySaved,
     handleCloseModal,
+    openModal,
   ]);
 
   useEffect(() => {
@@ -167,7 +169,7 @@ export function DataScrubbing({
       <PanelHeader>
         <div>{t('Advanced Data Scrubbing')}</div>
       </PanelHeader>
-      <PanelAlert type="info">
+      <PanelAlert variant="info">
         {additionalContext}{' '}
         {tct(
           'The new rules will only apply to upcoming events. For more details, see [linkToDocs].',
@@ -190,16 +192,15 @@ export function DataScrubbing({
             disabled={disabled}
           />
         ) : (
-          <EmptyMessage
-            icon={<IconWarning size="xl" />}
-            description={t('You have no data scrubbing rules')}
-          />
+          <EmptyMessage icon={<IconWarning />}>
+            {t('You have no data scrubbing rules')}
+          </EmptyMessage>
         )}
         <PanelAction>
           <LinkButton href={ADVANCED_DATASCRUBBING_LINK} external>
             {t('Read Docs')}
           </LinkButton>
-          <Button disabled={disabled} onClick={handleAdd} priority="primary">
+          <Button disabled={disabled} onClick={handleAdd} variant="primary">
             {t('Add Rule')}
           </Button>
         </PanelAction>
@@ -209,11 +210,11 @@ export function DataScrubbing({
 }
 
 const PanelAction = styled('div')`
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
   position: relative;
   display: grid;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   grid-template-columns: auto auto;
   justify-content: flex-end;
-  border-top: 1px solid ${p => p.theme.border};
+  border-top: 1px solid ${p => p.theme.tokens.border.primary};
 `;

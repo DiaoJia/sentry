@@ -3,6 +3,7 @@ import re
 from datetime import timedelta
 from functools import reduce
 from string import Template
+from typing import Any
 
 from django.db import router
 from django.db.models import Q
@@ -13,15 +14,15 @@ from rest_framework.response import Response
 from sentry_sdk import capture_exception
 
 from sentry import analytics, options
+from sentry.analytics.events.relocation_created import RelocationCreatedEvent
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import Endpoint, region_silo_endpoint
+from sentry.api.base import Endpoint, cell_silo_endpoint
 from sentry.api.paginator import OffsetPaginator
-from sentry.api.permissions import SentryIsAuthenticated
+from sentry.api.permissions import DisallowAgentToken, SentryIsAuthenticated
 from sentry.api.serializers import serialize
 from sentry.auth.elevated_mode import has_elevated_mode
 from sentry.models.files.file import File
-from sentry.options import get
 from sentry.relocation.api.endpoints import ERR_FEATURE_DISABLED
 from sentry.relocation.api.serializers.relocation import RelocationSerializer
 from sentry.relocation.models.relocation import Relocation, RelocationFile
@@ -29,11 +30,11 @@ from sentry.relocation.tasks.process import uploading_start
 from sentry.relocation.utils import RELOCATION_BLOB_SIZE, RELOCATION_FILE_TYPE
 from sentry.search.utils import tokenize_query
 from sentry.signals import relocation_link_promo_code
-from sentry.slug.patterns import ORG_SLUG_PATTERN
 from sentry.users.models.user import MAX_USERNAME_LENGTH, User
 from sentry.users.services.user.model import RpcUser
 from sentry.users.services.user.service import user_service
 from sentry.utils.db import atomic_transaction
+from sentry.utils.slug import ORG_SLUG_PATTERN
 
 ERR_DUPLICATE_RELOCATION = "An in-progress relocation already exists for this owner."
 ERR_INVALID_ORG_SLUG = Template("Org slug is invalid: `$org_slug`.")
@@ -52,7 +53,7 @@ RELOCATION_FILE_SIZE_SMALL = 10 * 1024**2
 RELOCATION_FILE_SIZE_MEDIUM = 100 * 1024**2
 
 
-def get_relocation_size_category(size) -> str:
+def get_relocation_size_category(size: int) -> str:
     if size < RELOCATION_FILE_SIZE_SMALL:
         return "small"
     elif size < RELOCATION_FILE_SIZE_MEDIUM:
@@ -73,14 +74,14 @@ def should_throttle_relocation(relocation_bucket_size: str) -> bool:
         recent_relocation_files,
         0,
     )
-    if num_recent_same_size_relocation_files < get(
+    if num_recent_same_size_relocation_files < options.get(
         f"relocation.daily-limit.{relocation_bucket_size}"
     ):
         return False
     return True
 
 
-class RelocationsPostSerializer(serializers.Serializer):
+class RelocationsPostSerializer(serializers.Serializer[dict[str, Any]]):
     file = serializers.FileField(required=True)
     orgs = serializers.CharField(required=True, allow_blank=False, allow_null=False)
     owner = serializers.CharField(
@@ -156,7 +157,7 @@ def get_autopause_value(provenance: Relocation.Provenance) -> int | None:
             return None
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class RelocationIndexEndpoint(Endpoint):
     owner = ApiOwner.HYBRID_CLOUD
     publish_status = {
@@ -164,7 +165,7 @@ class RelocationIndexEndpoint(Endpoint):
         "GET": ApiPublishStatus.EXPERIMENTAL,
         "POST": ApiPublishStatus.EXPERIMENTAL,
     }
-    permission_classes = (SentryIsAuthenticated,)
+    permission_classes = (SentryIsAuthenticated, DisallowAgentToken)
 
     def get(self, request: Request) -> Response:
         """
@@ -298,10 +299,11 @@ class RelocationIndexEndpoint(Endpoint):
         uploading_start.apply_async(args=[str(relocation.uuid), None, None])
         try:
             analytics.record(
-                "relocation.created",
-                creator_id=request.user.id,
-                owner_id=owner.id,
-                uuid=str(relocation.uuid),
+                RelocationCreatedEvent(
+                    creator_id=request.user.id,
+                    owner_id=owner.id,
+                    uuid=str(relocation.uuid),
+                )
             )
         except Exception as e:
             capture_exception(e)

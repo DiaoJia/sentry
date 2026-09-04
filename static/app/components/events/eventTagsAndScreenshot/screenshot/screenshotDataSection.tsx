@@ -1,59 +1,58 @@
 import {useState} from 'react';
 
+import {LinkButton} from '@sentry/scraps/button';
+import {useModal} from '@sentry/scraps/modal';
+
 import {
   useDeleteEventAttachmentOptimistic,
   useFetchEventAttachments,
 } from 'sentry/actionCreators/events';
-import {openModal} from 'sentry/actionCreators/modal';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import Screenshot from 'sentry/components/events/eventTagsAndScreenshot/screenshot';
-import ScreenshotModal, {
+import {Screenshot} from 'sentry/components/events/eventTagsAndScreenshot/screenshot';
+import {
   modalCss,
+  ScreenshotModal,
 } from 'sentry/components/events/eventTagsAndScreenshot/screenshot/modal';
-import Link from 'sentry/components/links/link';
 import {t, tn} from 'sentry/locale';
 import type {Event} from 'sentry/types/event';
 import type {EventAttachment} from 'sentry/types/group';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 import {EventAttachmentFilter} from 'sentry/views/issueDetails/groupEventAttachments/groupEventAttachmentsFilter';
-import {SectionKey} from 'sentry/views/issueDetails/streamline/context';
-import {InterimSection} from 'sentry/views/issueDetails/streamline/interimSection';
 import {Tab, TabPaths} from 'sentry/views/issueDetails/types';
-import {useHasStreamlinedUI} from 'sentry/views/issueDetails/utils';
 
 interface ScreenshotDataSectionProps {
   event: Event;
   projectSlug: Project['slug'];
-  isShare?: boolean;
 }
 
 export function ScreenshotDataSection({
   event,
   projectSlug,
-  isShare,
   ...props
 }: ScreenshotDataSectionProps) {
+  const {openModal} = useModal();
+
   const location = useLocation();
   const organization = useOrganization();
-  const hasStreamlinedUI = useHasStreamlinedUI();
   const {data: attachments} = useFetchEventAttachments(
     {
       orgSlug: organization.slug,
       projectSlug,
       eventId: event.id,
     },
-    {enabled: !isShare}
+    {enabled: true}
   );
-  const [screenshotInFocus, setScreenshotInFocus] = useState<number>(0);
+  const [screenshotInFocus, setScreenshotInFocus] = useState(0);
   const {mutate: deleteAttachment} = useDeleteEventAttachmentOptimistic();
   const screenshots = attachments?.filter(attachment =>
     attachment.name.includes('screenshot')
   );
 
-  const showScreenshot = !isShare && !!screenshots?.length;
+  const showScreenshot = !!screenshots?.length;
   if (!showScreenshot) {
     return null;
   }
@@ -110,18 +109,13 @@ export function ScreenshotDataSection({
   const title = tn('Screenshot', 'Screenshots', screenshots.length);
 
   return showScreenshot ? (
-    <InterimSection
-      title={hasStreamlinedUI ? title : <Link to={linkPath}>{title}</Link>}
-      showPermalink={false}
-      help={t('This image was captured around the time that the event occurred.')}
-      data-test-id="screenshot-data-section"
-      type={SectionKey.SCREENSHOT}
+    <FoldSection
+      sectionKey={SectionKey.SCREENSHOT}
+      title={title}
       actions={
-        hasStreamlinedUI ? (
-          <LinkButton to={linkPath} size="xs">
-            {t('View All')}
-          </LinkButton>
-        ) : null
+        <LinkButton to={linkPath} size="xs">
+          {t('View All')}
+        </LinkButton>
       }
       {...props}
     >
@@ -137,6 +131,6 @@ export function ScreenshotDataSection({
         totalScreenshots={screenshots.length}
         openVisualizationModal={handleOpenVisualizationModal}
       />
-    </InterimSection>
+    </FoldSection>
   ) : null;
 }

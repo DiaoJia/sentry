@@ -4,31 +4,34 @@ import logging
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from arroyo import Topic as ArroyoTopic
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer, build_kafka_configuration
+from arroyo.backends.kafka import KafkaPayload
 from django.utils.text import get_text_list
 from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers
 from sentry_kafka_schemas.codecs import Codec
 from sentry_kafka_schemas.schema_types.monitors_incident_occurrences_v1 import IncidentOccurrence
 
 from sentry import options
 from sentry.conf.types.kafka_definition import Topic, get_topic_codec
-from sentry.issues.grouptype import MonitorIncidentType
 from sentry.issues.issue_occurrence import IssueEvidence, IssueOccurrence
 from sentry.issues.producer import PayloadType, produce_occurrence_to_kafka
 from sentry.issues.status_change_message import StatusChangeMessage
 from sentry.models.group import GroupStatus
+from sentry.monitors.grouptype import MonitorIncidentType
 from sentry.monitors.models import (
     CheckInStatus,
     MonitorCheckIn,
     MonitorEnvironment,
     MonitorIncident,
 )
-from sentry.utils.arroyo_producer import SingletonProducer
-from sentry.utils.kafka_config import get_kafka_producer_cluster_options, get_topic_definition
+from sentry.monitors.utils import get_detector_for_monitor
+from sentry.types.actor import validate_actor
+from sentry.utils.arroyo_producer import SingletonProducer, get_arroyo_producer
+from sentry.utils.kafka_config import get_topic_definition
 
 if TYPE_CHECKING:
     from django.utils.functional import _StrPromise
@@ -40,12 +43,12 @@ MONITORS_INCIDENT_OCCURRENCES: Codec[IncidentOccurrence] = get_topic_codec(
 )
 
 
-def _get_producer() -> KafkaProducer:
-    cluster_name = get_topic_definition(Topic.MONITORS_INCIDENT_OCCURRENCES)["cluster"]
-    producer_config = get_kafka_producer_cluster_options(cluster_name)
-    producer_config.pop("compression.type", None)
-    producer_config.pop("message.max.bytes", None)
-    return KafkaProducer(build_kafka_configuration(default_config=producer_config))
+def _get_producer():
+    return get_arroyo_producer(
+        name="sentry.monitors.logic.incident_occurrence",
+        topic=Topic.MONITORS_INCIDENT_OCCURRENCES,
+        exclude_config_keys=["compression.type", "message.max.bytes"],
+    )
 
 
 _incident_occurrence_producer = SingletonProducer(_get_producer)
@@ -135,13 +138,27 @@ def send_incident_occurrence(
     """
     monitor_env = failed_checkin.monitor_environment
 
-    current_timestamp = datetime.now(timezone.utc)
-
     # Get last successful check-in to show in evidence display
     last_successful_checkin_timestamp = "Never"
     last_successful_checkin = monitor_env.get_last_successful_checkin()
     if last_successful_checkin:
         last_successful_checkin_timestamp = last_successful_checkin.date_added.isoformat()
+
+    detector = get_detector_for_monitor(monitor_env.monitor)
+    evidence_data = {}
+    if detector:
+        evidence_data["detector_id"] = detector.id
+
+    owner_actor = monitor_env.monitor.owner_actor
+    if owner_actor:
+        try:
+            validate_actor(owner_actor, monitor_env.monitor.organization_id)
+        except serializers.ValidationError:
+            # If the owner is no longer valid, unassign it from the monitor
+            owner_actor = None
+            monitor_env.monitor.update(owner_user_id=None, owner_team_id=None)
+
+    failure_reason = get_failure_reason(previous_checkins)
 
     occurrence = IssueOccurrence(
         id=uuid.uuid4().hex,
@@ -150,12 +167,12 @@ def send_incident_occurrence(
         event_id=uuid.uuid4().hex,
         fingerprint=[incident.grouphash],
         type=MonitorIncidentType,
-        issue_title=f"Monitor failure: {monitor_env.monitor.name}",
-        subtitle="Your monitor has reached its failure threshold.",
+        issue_title=f"Cron failure: {monitor_env.monitor.name}",
+        subtitle=f"Your monitor is failing: {failure_reason}.",
         evidence_display=[
             IssueEvidence(
                 name="Failure reason",
-                value=str(get_failure_reason(previous_checkins)),
+                value=str(failure_reason),
                 important=True,
             ),
             IssueEvidence(
@@ -169,11 +186,11 @@ def send_incident_occurrence(
                 important=False,
             ),
         ],
-        evidence_data={},
+        evidence_data=evidence_data,
         culprit="",
-        detection_time=current_timestamp,
+        detection_time=failed_checkin.date_added,
         level="error",
-        assignee=monitor_env.monitor.owner_actor,
+        assignee=owner_actor,
     )
 
     if failed_checkin.trace_id:
@@ -198,7 +215,7 @@ def send_incident_occurrence(
             "monitor.slug": str(monitor_env.monitor.slug),
             "monitor.incident": str(incident.id),
         },
-        "timestamp": current_timestamp.isoformat(),
+        "timestamp": received.isoformat(),
     }
 
     if trace_id:
@@ -268,12 +285,13 @@ def get_monitor_environment_context(monitor_environment: MonitorEnvironment):
     }
 
 
-def resolve_incident_group(incident: MonitorIncident, project_id: int):
+def resolve_incident_group(incident: MonitorIncident, project_id: int) -> None:
     status_change = StatusChangeMessage(
         fingerprint=[incident.grouphash],
         project_id=project_id,
         new_status=GroupStatus.RESOLVED,
         new_substatus=None,
+        update_date=incident.resolving_timestamp,
     )
     produce_occurrence_to_kafka(
         payload_type=PayloadType.STATUS_CHANGE,

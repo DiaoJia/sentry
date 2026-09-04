@@ -115,6 +115,7 @@ export const platforms: PlatformIntegration[] = [
     type: 'framework',
     language: 'dotnet',
     link: 'https://docs.sentry.io/platforms/dotnet/guides/uwp/',
+    deprecated: true,
   },
   {
     id: 'dotnet-winforms',
@@ -213,6 +214,7 @@ export const platforms: PlatformIntegration[] = [
     id: 'go-martini',
     name: 'Martini',
     language: 'go',
+    deprecated: true,
   },
   {
     link: 'https://docs.sentry.io/platforms/go/guides/negroni/',
@@ -413,9 +415,12 @@ export const platforms: PlatformIntegration[] = [
   {
     id: 'nintendo-switch',
     name: 'Nintendo Switch',
-    type: 'framework',
-    language: 'native',
+    type: 'console',
+    language: 'console',
     link: 'https://docs.sentry.io/platforms/nintendo-switch/',
+    iconConfig: {
+      withLanguageIcon: false,
+    },
   },
   {
     id: 'node',
@@ -481,6 +486,13 @@ export const platforms: PlatformIntegration[] = [
     link: 'https://docs.sentry.io/platforms/javascript/guides/hapi/',
   },
   {
+    id: 'node-hono',
+    name: 'Hono',
+    type: 'framework',
+    language: 'node',
+    link: 'https://docs.sentry.io/platforms/javascript/guides/hono/',
+  },
+  {
     id: 'node-gcpfunctions',
     name: 'Google Cloud Functions (Node)',
     type: 'framework',
@@ -521,6 +533,13 @@ export const platforms: PlatformIntegration[] = [
     type: 'framework',
     language: 'php',
     link: 'https://docs.sentry.io/platforms/php/guides/symfony/',
+  },
+  {
+    id: 'playstation',
+    name: 'PlayStation',
+    type: 'console',
+    language: 'console',
+    link: 'https://docs.sentry.io/platforms/playstation/',
   },
   {
     id: 'powershell',
@@ -607,6 +626,13 @@ export const platforms: PlatformIntegration[] = [
     link: 'https://docs.sentry.io/platforms/python/guides/flask/',
   },
   {
+    id: 'python-litestar',
+    name: 'Litestar',
+    type: 'framework',
+    language: 'python',
+    link: 'https://docs.sentry.io/platforms/python/integrations/litestar/',
+  },
+  {
     id: 'python-gcpfunctions',
     name: 'Google Cloud Functions (Python)',
     type: 'framework',
@@ -619,6 +645,7 @@ export const platforms: PlatformIntegration[] = [
     type: 'framework',
     language: 'python',
     link: 'https://docs.sentry.io/platforms/python/legacy-sdk/integrations/pylons/',
+    deprecated: true,
   },
   {
     id: 'python-pymongo',
@@ -626,6 +653,7 @@ export const platforms: PlatformIntegration[] = [
     type: 'library',
     language: 'python',
     link: 'https://docs.sentry.io/platforms/python/guides/pymongo/',
+    deprecated: true,
   },
   {
     id: 'python-pyramid',
@@ -739,6 +767,13 @@ export const platforms: PlatformIntegration[] = [
     language: 'unreal',
     link: 'https://docs.sentry.io/platforms/unreal/',
   },
+  {
+    id: 'xbox',
+    name: 'Xbox',
+    type: 'console',
+    language: 'console',
+    link: 'https://docs.sentry.io/platforms/xbox/',
+  },
 ];
 
 export const otherPlatform: PlatformIntegration = {
@@ -752,6 +787,4 @@ export const otherPlatform: PlatformIntegration = {
 /**
  * Array of all platforms that are displayed in the project creation flow.
  */
-const allPlatforms = [...platforms, otherPlatform];
-
-export default allPlatforms;
+export const allPlatforms = [...platforms, otherPlatform];

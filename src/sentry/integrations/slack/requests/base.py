@@ -15,6 +15,7 @@ from sentry.identity.services.identity import RpcIdentity, identity_service
 from sentry.identity.services.identity.model import RpcIdentityProvider
 from sentry.integrations.messaging.commands import CommandInput
 from sentry.integrations.services.integration import RpcIntegration, integration_service
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.users.services.user import RpcUser
 from sentry.users.services.user.service import user_service
 from sentry.utils.safe import get_path
@@ -69,6 +70,18 @@ class SlackRequest:
         self._user: RpcUser | None = None
         self._data: MutableMapping[str, Any] = {}
 
+    def _is_staging_request(self) -> bool:
+        path = self.request.path
+        return isinstance(path, str) and "/extensions/slack-staging/" in path
+
+    @property
+    def _provider_slug(self) -> str:
+        return (
+            IntegrationProviderSlug.SLACK_STAGING.value
+            if self._is_staging_request()
+            else IntegrationProviderSlug.SLACK.value
+        )
+
     def validate(self) -> None:
         """
         Ensure everything is present to properly process this request
@@ -89,7 +102,7 @@ class SlackRequest:
     def is_challenge(self) -> bool:
         return False
 
-    def _get_context(self):
+    def _get_context(self) -> None:
         team_id = None
         user_id = None
         # Let the intended validation methods handle the errors from reading these fields
@@ -99,7 +112,7 @@ class SlackRequest:
         except Exception:
             pass
         context = integration_service.get_integration_identity_context(
-            integration_provider="slack",
+            integration_provider=self._provider_slug,
             integration_external_id=team_id,
             identity_external_id=user_id,
             identity_provider_external_id=team_id,
@@ -162,7 +175,7 @@ class SlackRequest:
 
         if self._provider is None:
             self._provider = identity_service.get_provider(
-                provider_type="slack", provider_ext_id=self.team_id
+                provider_type=self._provider_slug, provider_ext_id=self.team_id
             )
 
         if self._provider is not None:
@@ -196,8 +209,12 @@ class SlackRequest:
         # XXX(meredith): Signing secrets are the preferred way
         # but self-hosted could still have an older slack bot
         # app that just has the verification token.
-        signing_secret = options.get("slack.signing-secret")
-        verification_token = options.get("slack.verification-token")
+        if self._is_staging_request():
+            signing_secret = options.get("slack-staging.signing-secret")
+            verification_token = None
+        else:
+            signing_secret = options.get("slack.signing-secret")
+            verification_token = options.get("slack.verification-token")
 
         if signing_secret:
             if self._check_signing_secret(signing_secret):
@@ -225,7 +242,9 @@ class SlackRequest:
     def validate_integration(self) -> None:
         if not self._integration:
             self._integration = integration_service.get_integration(
-                provider="slack", external_id=self.team_id, status=ObjectStatus.ACTIVE
+                provider=self._provider_slug,
+                external_id=self.team_id,
+                status=ObjectStatus.ACTIVE,
             )
 
         if not self._integration:
@@ -236,7 +255,7 @@ class SlackRequest:
         self._info("slack.request")
 
     def _error(self, key: str) -> None:
-        _logger.error(key, extra={**self.logging_data})
+        _logger.warning(key, extra={**self.logging_data})
 
     def _info(self, key: str) -> None:
         _logger.info(key, extra={**self.logging_data})

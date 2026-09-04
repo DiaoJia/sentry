@@ -2,16 +2,20 @@ import type {Theme} from '@emotion/react';
 import {css, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import BreadcrumbItem from 'sentry/components/replays/breadcrumbs/breadcrumbItem';
+import {Container} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {BreadcrumbItem} from 'sentry/components/replays/breadcrumbs/breadcrumbItem';
 import * as Timeline from 'sentry/components/replays/breadcrumbs/timeline';
 import {getFramesByColumn} from 'sentry/components/replays/utils';
-import {space} from 'sentry/styles/space';
 import {uniq} from 'sentry/utils/array/uniq';
-import getFrameDetails from 'sentry/utils/replays/getFrameDetails';
-import useActiveReplayTab from 'sentry/utils/replays/hooks/useActiveReplayTab';
-import useCrumbHandlers from 'sentry/utils/replays/hooks/useCrumbHandlers';
+import {getFrameDetails} from 'sentry/utils/replays/getFrameDetails';
+import {useActiveReplayTab} from 'sentry/utils/replays/hooks/useActiveReplayTab';
+import {useCrumbHandlers} from 'sentry/utils/replays/hooks/useCrumbHandlers';
 import type {ReplayFrame} from 'sentry/utils/replays/types';
+import {isWebVitalFrame} from 'sentry/utils/replays/types';
+import type {GraphicsVariant} from 'sentry/utils/theme';
+import {HoverOverlayGroupProvider} from 'sentry/utils/useHoverOverlay';
 
 const NODE_SIZES = [8, 12, 16];
 
@@ -23,7 +27,7 @@ interface Props {
   className?: string;
 }
 
-export default function ReplayTimelineEvents({
+export function ReplayTimelineEvents({
   className,
   durationMs,
   frames,
@@ -51,6 +55,8 @@ export default function ReplayTimelineEvents({
 }
 
 const EventColumn = styled(Timeline.Col)`
+  pointer-events: auto;
+
   place-items: stretch;
   display: grid;
   align-items: center;
@@ -61,11 +67,10 @@ const EventColumn = styled(Timeline.Col)`
   }
 `;
 
-type GraphicsKey = keyof Theme['tokens']['graphics'];
-type GraphicsKeyTrio =
-  | [GraphicsKey]
-  | [GraphicsKey, GraphicsKey]
-  | [GraphicsKey, GraphicsKey, GraphicsKey];
+type GraphicsVariantTrio =
+  | [GraphicsVariant]
+  | [GraphicsVariant, GraphicsVariant]
+  | [GraphicsVariant, GraphicsVariant, GraphicsVariant];
 
 function Event({
   frames,
@@ -97,16 +102,33 @@ function Event({
       onShowSnippet={() => {}}
     />
   ));
-  const title = <TooltipWrapper>{buttons}</TooltipWrapper>;
+  // Scope the card's nested hoverable tooltips (e.g. the selector link's own
+  // tooltip in a User Click crumb) to their own hover-overlay delay group.
+  // Otherwise a nested tooltip opening snap-closes this card and unmounts the
+  // link out from under the cursor.
+  const title = (
+    <HoverOverlayGroupProvider>
+      <Container maxHeight="80vh" overflow="auto">
+        {buttons}
+      </Container>
+    </HoverOverlayGroupProvider>
+  );
+
+  // Web vital frames render an expandable JSON block that needs more room than
+  // the default tooltip width, otherwise its content wraps to a very tall sliver.
+  const hasWebVitalFrame = frames.some(isWebVitalFrame);
+  const tooltipWidth = hasWebVitalFrame ? 400 : 291;
+  const mobileMaxWidth = hasWebVitalFrame ? 300 : 220;
 
   const overlayStyle = css`
     /* We make sure to override existing styles */
-    padding: ${space(0.5)} !important;
-    max-width: 291px !important;
-    width: 291px;
+    padding: ${theme.space.xs} !important;
+    max-width: ${tooltipWidth}px !important;
+    width: ${tooltipWidth}px;
 
-    @media screen and (max-width: ${theme.breakpoints.small}) {
-      max-width: 220px !important;
+    /* Viewport-based: the tooltip is portaled to the body, so it has no query container. */
+    @media screen and (max-width: ${theme.breakpoints.sm}) {
+      max-width: ${mobileMaxWidth}px !important;
     }
   `;
 
@@ -126,12 +148,12 @@ function Event({
     'warning',
     'success',
     'accent',
-    'muted',
-  ] as readonly GraphicsKey[];
-  const getColorPos = (c: GraphicsKey) => colorOrder.indexOf(c);
+    'neutral',
+  ] as readonly GraphicsVariant[];
+  const getColorPos = (c: GraphicsVariant) => colorOrder.indexOf(c);
   const sortedUniqueColorTokens = uniqueColorTokens
     .toSorted((x, y) => getColorPos(x) - getColorPos(y))
-    .slice(0, 3) as GraphicsKeyTrio;
+    .slice(0, 3) as GraphicsVariantTrio;
 
   return (
     <IconPosition style={{marginLeft: `${markerWidth / 2}px`}}>
@@ -157,7 +179,7 @@ function Event({
 
 const IconPosition = styled('div')`
   position: absolute;
-  transform: translate(-50%);
+  translate: -50% 0;
 `;
 
 const getBackgroundGradient = ({
@@ -165,13 +187,13 @@ const getBackgroundGradient = ({
   frameCount,
   theme,
 }: {
-  colorTokens: GraphicsKeyTrio;
+  colorTokens: GraphicsVariantTrio;
   frameCount: number;
   theme: Theme;
 }) => {
-  const c0 = theme.tokens.graphics[colorTokens[0]];
-  const c1 = colorTokens[1] ? theme.tokens.graphics[colorTokens[1]] : c0;
-  const c2 = colorTokens[2] ? theme.tokens.graphics[colorTokens[2]] : c1;
+  const c0 = theme.tokens.graphics[colorTokens[0]].vibrant;
+  const c1 = colorTokens[1] ? theme.tokens.graphics[colorTokens[1]].vibrant : c0;
+  const c2 = colorTokens[2] ? theme.tokens.graphics[colorTokens[2]].vibrant : c1;
 
   if (frameCount === 1) {
     return `background: ${c0};`;
@@ -197,7 +219,7 @@ const getBackgroundGradient = ({
 };
 
 const IconNode = styled('button')<{
-  colorTokens: GraphicsKeyTrio;
+  colorTokens: GraphicsVariantTrio;
   frameCount: number;
 }>`
   padding: 0;
@@ -207,13 +229,8 @@ const IconNode = styled('button')<{
   width: ${p => NODE_SIZES[p.frameCount - 1]}px;
   height: ${p => NODE_SIZES[p.frameCount - 1]}px;
   border-radius: 50%;
-  color: ${p => p.theme.white};
+  color: ${p => p.theme.colors.white};
   ${getBackgroundGradient}
-  box-shadow: ${p => p.theme.dropShadowLight};
+  box-shadow: ${p => p.theme.shadow.low};
   user-select: none;
-`;
-
-const TooltipWrapper = styled('div')`
-  max-height: 80vh;
-  overflow: auto;
 `;

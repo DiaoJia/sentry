@@ -1,23 +1,35 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 import zipfile
 from io import BytesIO
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.utils import timezone
 
 from sentry.models.debugfile import (
     DifMeta,
     ProjectDebugFile,
-    create_dif_from_id,
+    create_debug_file_from_dif,
+    create_dif_from_file,
+    create_dif_from_fileobj,
+    create_files_from_dif_zip,
     detect_dif_from_path,
+    detect_single_dif_from_path,
+    get_debug_id_from_dif_request,
 )
 from sentry.models.files.file import File
+from sentry.objectstore import UsecaseId, get_session
 from sentry.testutils.cases import APITestCase, TestCase
+from sentry.testutils.objectstore import debug_files_test_both_backends
+from sentry.testutils.skips import requires_objectstore
 
 # This is obviously a freely generated UUID and not the checksum UUID.
 # This is permissible if users want to send different UUIDs
@@ -31,7 +43,7 @@ org.slf4j.helpers.Util$ClassContextSecurityManager -> org.a.b.g$a:
 
 
 class DebugFileTest(TestCase):
-    def test_delete_dif(self):
+    def test_delete_dif(self) -> None:
         dif = self.create_dif_file(
             debug_id="dfb8e43a-f242-3d73-a453-aeb6a777ef75-feedface", features=["debug", "unwind"]
         )
@@ -42,7 +54,35 @@ class DebugFileTest(TestCase):
         assert not ProjectDebugFile.objects.filter(id=dif_id).exists()
         assert not File.objects.filter(id=dif.file.id).exists()
 
-    def test_find_dif_by_debug_id(self):
+    def test_delete_shared_file_keeps_file_until_last_reference_removed(self) -> None:
+        file = self.create_file(
+            name="shared.dSYM",
+            type="project.dif",
+            headers={"Content-Type": "application/x-mach-binary"},
+        )
+        file.putfile(ContentFile(b""))
+
+        dif1 = self.create_dif_file(
+            debug_id="00000000-0000-0000-0000-000000000000",
+            file=file,
+        )
+        dif2 = self.create_dif_file(
+            debug_id="11111111-1111-1111-1111-111111111111",
+            file=file,
+        )
+
+        dif1.delete()
+
+        assert not ProjectDebugFile.objects.filter(id=dif1.id).exists()
+        assert ProjectDebugFile.objects.filter(id=dif2.id).exists()
+        assert File.objects.filter(id=file.id).exists()
+
+        dif2.delete()
+
+        assert not ProjectDebugFile.objects.filter(id=dif2.id).exists()
+        assert not File.objects.filter(id=file.id).exists()
+
+    def test_find_dif_by_debug_id(self) -> None:
         debug_id1 = "dfb8e43a-f242-3d73-a453-aeb6a777ef75"
         debug_id2 = "19bd7a09-3e31-4911-a5cd-8e829b845407"
         debug_id3 = "7d402821-fae6-4ebc-bbb2-152f8e3b3352"
@@ -59,7 +99,7 @@ class DebugFileTest(TestCase):
         assert difs[debug_id2].id == dif2.id
         assert debug_id3 not in difs
 
-    def test_find_dif_by_feature(self):
+    def test_find_dif_by_feature(self) -> None:
         debug_id1 = "dfb8e43a-f242-3d73-a453-aeb6a777ef75"
         debug_id2 = "19bd7a09-3e31-4911-a5cd-8e829b845407"
         debug_id3 = "7d402821-fae6-4ebc-bbb2-152f8e3b3352"
@@ -77,7 +117,7 @@ class DebugFileTest(TestCase):
         assert difs[debug_id2].id == dif2.id
         assert debug_id3 not in difs
 
-    def test_find_dif_by_features(self):
+    def test_find_dif_by_features(self) -> None:
         debug_id1 = "dfb8e43a-f242-3d73-a453-aeb6a777ef75"
         debug_id2 = "19bd7a09-3e31-4911-a5cd-8e829b845407"
         debug_id3 = "7d402821-fae6-4ebc-bbb2-152f8e3b3352"
@@ -97,7 +137,7 @@ class DebugFileTest(TestCase):
         assert difs[debug_id2].id == dif2.id
         assert debug_id3 not in difs
 
-    def test_find_legacy_dif_by_features(self):
+    def test_find_legacy_dif_by_features(self) -> None:
         debug_id1 = "dfb8e43a-f242-3d73-a453-aeb6a777ef75"
         self.create_dif_file(debug_id=debug_id1)
         dif1 = self.create_dif_file(debug_id=debug_id1)
@@ -109,7 +149,7 @@ class DebugFileTest(TestCase):
         )
         assert difs[debug_id1].id == dif1.id
 
-    def test_find_dif_miss_by_features(self):
+    def test_find_dif_miss_by_features(self) -> None:
         debug_id = "dfb8e43a-f242-3d73-a453-aeb6a777ef75"
         self.create_dif_file(debug_id=debug_id, features=[])
 
@@ -118,10 +158,168 @@ class DebugFileTest(TestCase):
         )
         assert debug_id not in difs
 
-    def test_find_missing(self):
+    def test_find_missing(self) -> None:
         dif = self.create_dif_file(debug_id="dfb8e43a-f242-3d73-a453-aeb6a777ef75-feedface")
         ret = ProjectDebugFile.objects.find_missing([dif.checksum, "a" * 40], self.project)
         assert ret == ["a" * 40]
+
+    def test_file_extension_dartsymbolmap(self) -> None:
+        """Test that dartsymbolmap files return .json file extension."""
+        # Create a file with dartsymbolmap content type
+        file = File.objects.create(
+            name="dartsymbolmap",
+            type="project.dif",
+            headers={"Content-Type": "application/x-dartsymbolmap+json"},
+        )
+
+        # Create a ProjectDebugFile
+        dif = ProjectDebugFile.objects.create(
+            file=file,
+            checksum="test-checksum",
+            object_name="dartsymbolmap",
+            cpu_name="any",
+            project_id=self.project.id,
+            debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75",
+            data={"features": ["mapping"]},
+        )
+
+        # Verify that file_extension returns .json
+        assert dif.file_extension == ".json"
+
+    def test_file_extension_macho_dbg(self) -> None:
+        """Test that macho files return empty file extension."""
+        file = File.objects.create(
+            name="foo",
+            type="project.dif",
+            headers={"Content-Type": "application/x-mach-binary"},
+        )
+
+        dif = ProjectDebugFile.objects.create(
+            file=file,
+            checksum="test-checksum",
+            object_name="foo",
+            cpu_name="x86_64",
+            project_id=self.project.id,
+            debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75",
+            data={"type": "dbg"},
+        )
+
+        assert dif.file_extension == ".debug"
+
+    def test_file_extension_macho_exe(self) -> None:
+        file = File.objects.create(
+            name="foo",
+            type="project.dif",
+            headers={"Content-Type": "application/x-mach-binary"},
+        )
+
+        dif = ProjectDebugFile.objects.create(
+            file=file,
+            checksum="test-checksum",
+            object_name="foo",
+            cpu_name="x86_64",
+            project_id=self.project.id,
+            debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75",
+            data={"type": "exe"},
+        )
+
+        assert dif.file_extension == ""
+
+    def test_file_extension_macho_lib(self) -> None:
+        file = File.objects.create(
+            name="foo",
+            type="project.dif",
+            headers={"Content-Type": "application/x-mach-binary"},
+        )
+
+        dif = ProjectDebugFile.objects.create(
+            file=file,
+            checksum="test-checksum",
+            object_name="foo",
+            cpu_name="x86_64",
+            project_id=self.project.id,
+            debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75",
+            data={"type": "lib"},
+        )
+
+        assert dif.file_extension == ""
+
+
+class DebugFileObjectstoreTest(TestCase):
+    """Tests for Objectstore-backed debug files."""
+
+    def _get_session(self):
+        return get_session(UsecaseId.DEBUG_FILES, self.project)
+
+    def _create_objectstore_dif(self, content=b"test-content", **kwargs):
+        storage_path = self._get_session().put(content, compress="zstd")
+        defaults = {
+            "debug_id": "dfb8e43a-f242-3d73-a453-aeb6a777ef75",
+            "project_id": self.project.id,
+            "object_name": "test.dSYM",
+            "cpu_name": "x86_64",
+            "checksum": "a" * 40,
+            "storage_path": storage_path,
+            "content_type": "application/x-mach-binary",
+            "file_size": len(content),
+            "date_created": timezone.now(),
+        }
+        defaults.update(kwargs)
+        return ProjectDebugFile.objects.create(**defaults)
+
+    def _create_non_objectstore_dif(
+        self, debug_id: str = "dfb8e43a-f242-3d73-a453-aeb6a777ef75", **kwargs: Any
+    ):
+        return self.create_dif_file(debug_id=debug_id, **kwargs)
+
+    @requires_objectstore
+    def test_metadata_reads_from_new_columns_when_storage_path_set(self):
+        ts = timezone.now()
+        dif = self._create_objectstore_dif(
+            content_type="text/x-proguard+plain",
+            file_size=9999,
+            date_created=ts,
+        )
+
+        assert dif.get_content_type() == "text/x-proguard+plain"
+        assert dif.get_file_size() == 9999
+        assert dif.get_date_created() == ts
+        assert dif.file_format == "proguard"
+
+    def test_metadata_reads_from_file_columns_when_file_set(self):
+        dif = self._create_non_objectstore_dif()
+
+        assert dif.get_content_type() == "application/x-mach-binary"
+        assert dif.get_file_size() == dif.file.size
+        assert dif.get_date_created() == dif.file.timestamp
+
+    @requires_objectstore
+    def test_get_file(self):
+        dif = self._create_objectstore_dif()
+
+        assert dif.get_file().read() == b"test-content"
+
+    @requires_objectstore
+    def test_save_to(self):
+        dif = self._create_objectstore_dif()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "output")
+            dif.save_to(path)
+
+            with open(path, "rb") as f:
+                assert f.read() == b"test-content"
+
+    @requires_objectstore
+    def test_delete(self):
+        dif = self._create_objectstore_dif()
+        storage_path = dif.storage_path
+        assert storage_path is not None
+        dif_id = dif.id
+        dif.delete()
+
+        assert not ProjectDebugFile.objects.filter(id=dif_id).exists()
+        assert self._get_session().get(storage_path) is None
 
 
 class CreateDebugFileTest(APITestCase):
@@ -129,7 +327,7 @@ class CreateDebugFileTest(APITestCase):
     def file_path(self):
         return os.path.join(os.path.dirname(__file__), "fixtures", "crash.dsym")
 
-    def create_dif(self, fileobj=None, file=None, **kwargs):
+    def _create_meta(self, **kwargs) -> DifMeta:
         args: dict[str, Any] = {
             "file_format": "macho",
             "arch": "x86_64",
@@ -139,13 +337,30 @@ class CreateDebugFileTest(APITestCase):
         }
 
         args.update(kwargs)
-        return create_dif_from_id(self.project, DifMeta(**args), fileobj=fileobj, file=file)
+        return DifMeta(**args)
 
-    def test_create_dif_from_file(self):
-        file = self.create_file(
-            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
-        )
-        dif, created = self.create_dif(file=file)
+    def create_dif(self, file: File, **kwargs):
+        if file.size is None:
+            file.size = 0
+            file.save(update_fields=["size"])
+        return create_dif_from_file(self.project, self._create_meta(**kwargs), file)
+
+    def create_dif_from_fileobj(self, fileobj, **kwargs):
+        return create_dif_from_fileobj(self.project, self._create_meta(**kwargs), fileobj)
+
+    def create_dif_from_content(self, content: bytes, **kwargs):
+        file = self.create_file(name="crash.dsym")
+        file.putfile(ContentFile(content))
+        return self.create_dif(file, **kwargs)
+
+    def create_stored_file(self, content: bytes) -> File:
+        file = self.create_file(name="crash.dsym")
+        file.putfile(ContentFile(content))
+        return file
+
+    def test_create_dif_from_file(self) -> None:
+        file = self.create_stored_file(b"debug symbols")
+        dif, created = self.create_dif(file)
 
         assert created
         assert dif is not None
@@ -153,60 +368,236 @@ class CreateDebugFileTest(APITestCase):
         assert "Content-Type" in dif.file.headers
         assert ProjectDebugFile.objects.filter(id=dif.id).exists()
 
-    def test_create_dif_from_fileobj(self):
+    def test_create_dif_rejects_unknown_format(self) -> None:
+        meta = DifMeta(
+            file_format="unknown",
+            arch="x86_64",
+            debug_id="67e9247c-814e-392b-a027-dbde6748fcbf",
+            path="unknown.dif",
+        )
+
+        with pytest.raises(TypeError, match="unknown dif type 'unknown'"):
+            create_dif_from_file(self.project, meta, self.create_stored_file(b"debug symbols"))
+
+    @requires_objectstore
+    def test_objectstore_backed_create_dif_from_file(self) -> None:
         with open(self.file_path, "rb") as f:
-            dif, created = self.create_dif(fileobj=f)
-
-        assert created
-        assert dif is not None
-        assert dif.file.type == "project.dif"
-        assert "Content-Type" in dif.file.headers
-        assert ProjectDebugFile.objects.filter(id=dif.id).exists()
-
-    def test_keep_disjoint_difs(self):
-        file = self.create_file(
-            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
-        )
-        dif1, created1 = self.create_dif(file=file, data={"features": ["unwind"]})
+            content = f.read()
 
         file = self.create_file(
             name="crash.dsym", checksum="2b92c5472f4442a27da02509951ea2e0f529511c"
         )
+        file.putfile(ContentFile(content))
+
+        with self.feature("organizations:objectstore-debugfiles-write"):
+            dif, created = create_dif_from_file(
+                self.project, detect_single_dif_from_path(self.file_path), file
+            )
+
+        assert created
+        assert dif.file_id is not None
+        assert dif.file is not None
+        assert dif.storage_path is not None
+        assert dif.content_type == "application/x-mach-binary"
+        assert dif.file.getfile().read() == content
+        assert dif.get_file().read() == content
+
+    @requires_objectstore
+    def test_exclusive_objectstore_create_dif_from_fileobj(self) -> None:
+        content = b"objectstore-dif-content"
+        checksum = "46b15fc7714307c2d13a1e42651ba92245662ab0"
+        with self.feature(
+            {
+                "organizations:objectstore-debugfiles-exclusive-write": True,
+                "organizations:objectstore-debugfiles-write": True,
+            }
+        ):
+            dif, created = self.create_dif_from_fileobj(BytesIO(content))
+
+        assert created
+        assert dif.file_id is None
+        assert dif.storage_path is not None
+        assert dif.checksum == checksum
+        assert dif.content_type == "application/x-mach-binary"
+        assert dif.file_size == len(content)
+        assert dif.get_file().read() == content
+
+    @patch("sentry.models.debugfile.get_session")
+    def test_exclusive_objectstore_dif_is_idempotent(self, get_session) -> None:
+        content = b"objectstore-dif-content"
+        get_session.return_value.put.return_value = "storage-path"
+
+        with self.feature("organizations:objectstore-debugfiles-exclusive-write"):
+            first, first_created = self.create_dif_from_fileobj(BytesIO(content))
+            second, second_created = self.create_dif_from_fileobj(BytesIO(content))
+
+        assert first_created
+        assert not second_created
+        assert first.id == second.id
+        get_session.return_value.put.assert_called_once()
+
+    @patch("sentry.models.debugfile.ProjectDebugFile.objects.create")
+    @patch("sentry.models.debugfile.get_session")
+    def test_exclusive_objectstore_dif_cleans_up_after_database_error(
+        self, get_session, create
+    ) -> None:
+        get_session.return_value.put.return_value = "storage-path"
+        create.side_effect = RuntimeError
+
+        with (
+            self.feature("organizations:objectstore-debugfiles-exclusive-write"),
+            pytest.raises(RuntimeError),
+        ):
+            self.create_dif_from_fileobj(BytesIO(b"objectstore-dif-content"))
+
+        get_session.return_value.delete.assert_called_once_with("storage-path")
+
+    @requires_objectstore
+    @patch("sentry.utils.retries.time.sleep")
+    @patch("sentry.models.debugfile.get_session")
+    def test_exclusive_objectstore_write_failure_does_not_create_file(
+        self, get_session, sleep
+    ) -> None:
+        get_session.return_value.put.side_effect = RuntimeError
+        with (
+            self.feature("organizations:objectstore-debugfiles-exclusive-write"),
+            pytest.raises(RuntimeError),
+        ):
+            self.create_dif_from_fileobj(BytesIO(b"objectstore-dif-content"))
+
+        assert get_session.return_value.put.call_count == 3
+        assert sleep.call_count == 2
+        assert not ProjectDebugFile.objects.filter(project_id=self.project.id).exists()
+        assert not File.objects.filter(type="project.dif").exists()
+
+    @patch("sentry.models.debugfile.create_dif_from_file", side_effect=RuntimeError)
+    def test_create_debug_file_cleans_up_legacy_file_after_create_error(self, create_dif) -> None:
+        with tempfile.NamedTemporaryFile() as file:
+            file.write(b"debug symbols")
+            file.flush()
+
+            with pytest.raises(RuntimeError):
+                create_debug_file_from_dif([self._create_meta(path=file.name)], self.project)
+
+        assert not File.objects.filter(name=self._create_meta().debug_id).exists()
+
+    def test_legacy_zip_reupload_skips_file_creation(self) -> None:
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr(f"proguard/{PROGUARD_UUID}.txt", PROGUARD_SOURCE)
+
+        first_upload = create_files_from_dif_zip(BytesIO(archive.getvalue()), self.project)
+        file_count = File.objects.count()
+
+        with patch("sentry.models.debugfile.File.putfile") as putfile:
+            second_upload = create_files_from_dif_zip(BytesIO(archive.getvalue()), self.project)
+
+        assert len(first_upload) == 1
+        assert second_upload == []
+        putfile.assert_not_called()
+        assert File.objects.count() == file_count
+
+    @requires_objectstore
+    def test_objectstore_write_failure_preserves_legacy_dif(self) -> None:
+        content = b"objectstore-dif-content"
+
+        with (
+            self.feature("organizations:objectstore-debugfiles-write"),
+            patch(
+                "sentry.models.debugfile.get_session",
+                return_value=MagicMock(put=MagicMock(side_effect=RuntimeError)),
+            ),
+        ):
+            dif, created = self.create_dif_from_content(content)
+
+        assert created
+        assert dif.file_id is not None
+        assert dif.storage_path is None
+        assert dif.file.getfile().read() == content
+
+    @requires_objectstore
+    def test_delete_dual_written_dif(self) -> None:
+        content = b"objectstore-dif-content"
+        with self.feature("organizations:objectstore-debugfiles-write"):
+            dif, created = self.create_dif_from_content(content)
+
+        assert created
+        file_id = dif.file_id
+        storage_path = dif.storage_path
+        assert file_id is not None
+        assert storage_path is not None
+
+        dif.delete()
+
+        assert not File.objects.filter(id=file_id).exists()
+        session = get_session(UsecaseId.DEBUG_FILES, self.project)
+        assert session.get(storage_path) is None
+
+    @requires_objectstore
+    def test_read_gate_prefers_legacy_file_when_disabled(self) -> None:
+        legacy_content = b"legacy-content"
+        objectstore_content = b"objectstore-content"
+        with self.feature("organizations:objectstore-debugfiles-write"):
+            dif, created = self.create_dif_from_content(legacy_content)
+
+        assert created
+        storage_path = dif.storage_path
+        assert storage_path is not None
+        session = get_session(UsecaseId.DEBUG_FILES, self.project)
+        session.delete(storage_path)
+        replacement_storage_path = session.put(objectstore_content, compress="none")
+        dif.storage_path = replacement_storage_path
+        dif.save(update_fields=["storage_path"])
+
+        assert dif.get_file().read() == legacy_content
+
+        with self.feature("organizations:objectstore-debugfiles-read"):
+            assert dif.get_file().read() == objectstore_content
+
+    @requires_objectstore
+    def test_read_gate_does_not_fall_back_when_objectstore_read_fails(self) -> None:
+        with self.feature("organizations:objectstore-debugfiles-write"):
+            dif, created = self.create_dif_from_content(b"legacy-content")
+
+        assert created
+        with (
+            self.feature("organizations:objectstore-debugfiles-read"),
+            patch.object(dif, "get_objectstore_session") as get_session,
+        ):
+            get_session.return_value.get.side_effect = RuntimeError("Objectstore unavailable")
+            with pytest.raises(RuntimeError):
+                dif.get_file()
+
+    def test_keep_disjoint_difs(self) -> None:
+        file = self.create_stored_file(b"unwind symbols")
+        dif1, created1 = self.create_dif(file=file, data={"features": ["unwind"]})
+
+        file = self.create_stored_file(b"debug symbols")
         dif2, created2 = self.create_dif(file=file, data={"features": ["debug"]})
 
         assert created1 and created2
         assert ProjectDebugFile.objects.filter(id=dif1.id).exists()
         assert ProjectDebugFile.objects.filter(id=dif2.id).exists()
 
-    def test_keep_overlapping_difs(self):
-        file = self.create_file(
-            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
-        )
+    def test_keep_overlapping_difs(self) -> None:
+        file = self.create_stored_file(b"symtab unwind symbols")
         dif1, created1 = self.create_dif(file=file, data={"features": ["symtab", "unwind"]})
 
-        file = self.create_file(
-            name="crash.dsym", checksum="2b92c5472f4442a27da02509951ea2e0f529511c"
-        )
+        file = self.create_stored_file(b"symtab debug symbols")
         dif2, created2 = self.create_dif(file=file, data={"features": ["symtab", "debug"]})
 
         assert created1 and created2
         assert ProjectDebugFile.objects.filter(id=dif1.id).exists()
         assert ProjectDebugFile.objects.filter(id=dif2.id).exists()
 
-    def test_keep_latest_dif(self):
-        file = self.create_file(
-            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
-        )
+    def test_keep_latest_dif(self) -> None:
+        file = self.create_stored_file(b"debug unwind symbols")
         dif1, created1 = self.create_dif(file=file, data={"features": ["debug", "unwind"]})
 
-        file = self.create_file(
-            name="crash.dsym", checksum="2b92c5472f4442a27da02509951ea2e0f529511c"
-        )
+        file = self.create_stored_file(b"debug symbols")
         dif2, created2 = self.create_dif(file=file, data={"features": ["debug"]})
 
-        file = self.create_file(
-            name="crash.dsym", checksum="3c60980275c4adc81a657f6aae00e11ed528b538"
-        )
+        file = self.create_stored_file(b"symbols")
         dif3, created3 = self.create_dif(file=file, data={"features": []})
 
         # XXX: dif2 and dif3 would actually be redundant, but since they are more
@@ -218,26 +609,26 @@ class CreateDebugFileTest(APITestCase):
         assert ProjectDebugFile.objects.filter(id=dif2.id).exists()
         assert ProjectDebugFile.objects.filter(id=dif3.id).exists()
 
-    def test_skip_redundant_dif(self):
-        with open(self.file_path, "rb") as f:
-            dif1, created1 = self.create_dif(fileobj=f)
+    def test_skip_redundant_dif(self) -> None:
+        file = self.create_file(
+            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
+        )
+        dif1, created1 = self.create_dif(file)
 
-        with open(self.file_path, "rb") as f:
-            dif2, created2 = self.create_dif(fileobj=f)
+        file = self.create_file(
+            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
+        )
+        dif2, created2 = self.create_dif(file)
 
         assert created1
         assert not created2
         assert dif1 == dif2
 
-    def test_remove_redundant_dif(self):
-        file = self.create_file(
-            name="crash.dsym", checksum="dc1e3f3e411979d336c3057cce64294f3420f93a"
-        )
+    def test_remove_redundant_dif(self) -> None:
+        file = self.create_stored_file(b"first debug symbols")
         dif1, created1 = self.create_dif(file=file, data={"features": ["debug"]})
 
-        file = self.create_file(
-            name="crash.dsym", checksum="2b92c5472f4442a27da02509951ea2e0f529511c"
-        )
+        file = self.create_stored_file(b"second debug symbols")
         dif2, created2 = self.create_dif(file=file, data={"features": ["debug"]})
 
         assert created1 and created2
@@ -245,8 +636,9 @@ class CreateDebugFileTest(APITestCase):
         assert ProjectDebugFile.objects.filter(id=dif2.id).exists()
 
 
+@debug_files_test_both_backends
 class DebugFilesClearTest(APITestCase):
-    def test_simple_cache_clear(self):
+    def test_simple_cache_clear(self) -> None:
         project = self.create_project(name="foo")
 
         url = reverse(
@@ -331,7 +723,7 @@ class DebugFilesClearTest(APITestCase):
         ),
     ),
 )
-def test_proguard_files_detected(path, name, uuid):
+def test_proguard_files_detected(path: str, name: str | None, uuid: str) -> None:
     # ProGuard files are detected by the path/name, not the file contents.
     # So, the ProGuard check should not depend on the file existing.
     detected = detect_dif_from_path(path, name)
@@ -361,10 +753,118 @@ def test_proguard_files_detected(path, name, uuid):
         ),
     ),
 )
-def test_proguard_file_not_detected(path, name):
+def test_proguard_file_not_detected(path: str, name: str | None) -> None:
     with pytest.raises(FileNotFoundError):
         # If the file is not detected as a ProGuard file, detect_dif_from_path
         # attempts to open the file, which probably doesn't exist.
         # Note that if the path or name does exist as a file on the filesystem,
         # this test will fail.
         detect_dif_from_path(path, name)
+
+
+def test_get_debug_id_from_dif_request_normalizes_debug_id() -> None:
+    assert (
+        get_debug_id_from_dif_request(
+            name=None,
+            debug_id="67E9247C814E392BA027DBDE6748FCBF",
+        )
+        == "67e9247c-814e-392b-a027-dbde6748fcbf"
+    )
+
+
+def test_get_debug_id_from_dif_request_invalid_debug_id_returns_none() -> None:
+    assert get_debug_id_from_dif_request(name=None, debug_id="not-a-debug-id") is None
+
+
+def test_get_debug_id_from_dif_request_reads_proguard_name() -> None:
+    assert (
+        get_debug_id_from_dif_request(
+            name="/proguard/mapping-00000000-0000-0000-0000-000000000000.txt",
+            debug_id=None,
+        )
+        == "00000000-0000-0000-0000-000000000000"
+    )
+
+
+def test_dartsymbolmap_file_detected() -> None:
+    """Test that dartsymbolmap files are properly detected and validated."""
+    # Create a temporary dartsymbolmap file (array format)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
+        f.write('["ExceptionClass", "xyz", "DatabaseError", "abc"]')
+        f.flush()
+
+        detected = detect_dif_from_path(
+            f.name, name="dartsymbolmap.json", debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75"
+        )
+
+        assert len(detected) == 1
+        dif_meta = detected[0]
+
+        assert dif_meta.file_format == "dartsymbolmap"
+        assert dif_meta.arch == "any"
+        assert dif_meta.debug_id == "b8e43a-f242-3d73-a453-aeb6a777ef75"
+        assert dif_meta.name == "dartsymbolmap.json"
+        assert dif_meta.data == {"features": ["mapping"]}
+
+
+def test_dartsymbolmap_file_odd_array_fails() -> None:
+    """Test that dartsymbolmap with odd number of elements fails."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
+        f.write('["one", "two", "three"]')  # Odd number of elements
+        f.flush()
+
+        from sentry.models.debugfile import BadDif
+
+        with pytest.raises(
+            BadDif, match="dartsymbolmap array must have an even number of elements"
+        ):
+            detect_dif_from_path(
+                f.name, name="dartsymbolmap.json", debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75"
+            )
+
+
+def test_dartsymbolmap_file_dict_format() -> None:
+    """Test that dict format JSON files are detected as Il2Cpp, not dartsymbolmap."""
+    # Note: Files starting with '{' are detected as Il2Cpp files, not dartsymbolmap
+    # This is because determine_dif_kind() checks for '{' before '[' and assigns Il2Cpp
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
+        f.write('{"xyz": "ExceptionClass", "abc": "DatabaseError"}')
+        f.flush()
+
+        # This will be detected as Il2Cpp, not dartsymbolmap
+        detected = detect_dif_from_path(
+            f.name, name="dartsymbolmap.json", debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75"
+        )
+
+        assert len(detected) == 1
+        dif_meta = detected[0]
+
+        # Should be detected as il2cpp, not dartsymbolmap
+        assert dif_meta.file_format == "il2cpp"
+        assert dif_meta.debug_id == "b8e43a-f242-3d73-a453-aeb6a777ef75"
+
+
+def test_dartsymbolmap_file_invalid_json() -> None:
+    """Test that invalid JSON fails for dartsymbolmap."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
+        f.write("[invalid json")
+        f.flush()
+
+        from sentry.models.debugfile import BadDif
+
+        with pytest.raises(BadDif, match="Invalid dartsymbolmap:"):
+            detect_dif_from_path(
+                f.name, name="dartsymbolmap.json", debug_id="b8e43a-f242-3d73-a453-aeb6a777ef75"
+            )
+
+
+def test_dartsymbolmap_file_missing_debug_id() -> None:
+    """Test that dartsymbolmap without debug_id fails."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
+        f.write('["one", "two"]')
+        f.flush()
+
+        from sentry.models.debugfile import BadDif
+
+        with pytest.raises(BadDif, match="Missing debug_id for dartsymbolmap"):
+            detect_dif_from_path(f.name, name="dartsymbolmap.json", debug_id=None)

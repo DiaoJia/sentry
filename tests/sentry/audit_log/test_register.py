@@ -6,7 +6,7 @@ from sentry.testutils.cases import TestCase
 
 
 class AuditLogEventRegisterTest(TestCase):
-    def test_get_api_names(self):
+    def test_get_api_names(self) -> None:
         self._event_registry: dict[str, AuditLogEvent] = {}
         self._event_id_lookup: dict[int, AuditLogEvent] = {}
         self._api_name_lookup: dict[str, AuditLogEvent] = {}
@@ -34,6 +34,12 @@ class AuditLogEventRegisterTest(TestCase):
                     name="UPTIME_MONITOR_REMOVE",
                     api_name="uptime_monitor.remove",
                     template="removed uptime monitor {name}",
+                ),
+                AuditLogEvent(
+                    event_id=40000,
+                    name="UPTIME_MONITOR_DISABLE_BROKEN",
+                    api_name="uptime_monitor.disable_broken",
+                    template="Automatically disabled broken uptime monitor {name}",
                 ),
             ]
             for event in events:

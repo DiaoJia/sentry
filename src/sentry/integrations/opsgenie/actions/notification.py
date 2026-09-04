@@ -13,6 +13,7 @@ from sentry.integrations.opsgenie.client import (
 )
 from sentry.integrations.opsgenie.utils import get_team
 from sentry.integrations.services.integration import integration_service
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.rules.actions import IntegrationEventAction
 from sentry.shared_integrations.exceptions import ApiError
 
@@ -25,7 +26,7 @@ class OpsgenieNotifyTeamAction(IntegrationEventAction):
         "Send a notification to Opsgenie account {account} and team {team} with {priority} priority"
     )
     prompt = "Send an Opsgenie notification"
-    provider = "opsgenie"
+    provider = IntegrationProviderSlug.OPSGENIE.value
     integration_key = "account"
 
     def __init__(self, *args, **kwargs):
@@ -45,12 +46,12 @@ class OpsgenieNotifyTeamAction(IntegrationEventAction):
     def after(self, event, notification_uuid: str | None = None):
         integration = self.get_integration()
         if not integration:
-            logger.error("Integration removed, but the rule still refers to it")
+            logger.warning("Integration removed, but the rule still refers to it")
             return
 
         org_integration = self.get_organization_integration()
         if not org_integration:
-            logger.error("No associated org integration.")
+            logger.warning("No associated org integration.")
             return
 
         team = get_team(self.get_option("team"), org_integration)
@@ -60,7 +61,7 @@ class OpsgenieNotifyTeamAction(IntegrationEventAction):
         )
 
         if not team:
-            logger.error(
+            logger.warning(
                 "The Opsgenie team no longer exists, or the team does not belong to the selected account."
             )
             return

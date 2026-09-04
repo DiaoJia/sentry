@@ -1,15 +1,17 @@
 import {ClassNames} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import InteractionStateLayer from 'sentry/components/core/interactionStateLayer';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Stack} from '@sentry/scraps/layout';
+
 import {Hovercard} from 'sentry/components/hovercard';
-import LoadingError from 'sentry/components/loadingError';
-import Placeholder from 'sentry/components/placeholder';
+import {LoadingError} from 'sentry/components/loadingError';
+import {Placeholder} from 'sentry/components/placeholder';
 import {EmptyCell} from 'sentry/components/workflowEngine/gridCell/emptyCell';
 import {tn} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {defined} from 'sentry/utils/defined';
+import {useAutomationListDetectors} from 'sentry/views/automations/hooks/useAutomationListDetectors';
 import {DetectorLink} from 'sentry/views/detectors/components/detectorLink';
-import {useDetectorsQuery} from 'sentry/views/detectors/hooks';
 
 type AutomationListConnectedDetectorsProps = {
   detectorIds: string[];
@@ -18,32 +20,32 @@ type AutomationListConnectedDetectorsProps = {
 const MAX_DISPLAYED_DETECTORS = 5;
 
 function ConnectedDetectorsBody({detectorIds}: {detectorIds: string[]}) {
-  const shownDetectors = detectorIds.slice(0, MAX_DISPLAYED_DETECTORS);
-  const {data, isPending, isError} = useDetectorsQuery({
-    ids: detectorIds.slice(0, MAX_DISPLAYED_DETECTORS),
-  });
+  const {detectorsById, isLoading, isError} = useAutomationListDetectors();
+  const shownIds = detectorIds.slice(0, MAX_DISPLAYED_DETECTORS);
   const hasMore = detectorIds.length > MAX_DISPLAYED_DETECTORS;
 
   if (isError) {
     return <LoadingError />;
   }
 
-  if (isPending) {
+  if (isLoading) {
     return (
       <div>
-        {Array.from({length: shownDetectors.length}).map((_, index) => (
-          <HovercardSkeletonRow key={index}>
+        {Array.from({length: shownIds.length}).map((_, index) => (
+          <Stack padding="md xl" gap="xs" minHeight="64px" key={index}>
             <Placeholder height="20px" width="100%" />
             <Placeholder height="18px" width="70%" />
-          </HovercardSkeletonRow>
+          </Stack>
         ))}
       </div>
     );
   }
 
+  const detectors = shownIds.map(id => detectorsById.get(id)).filter(defined);
+
   return (
     <div>
-      {data?.map(detector => {
+      {detectors.map(detector => {
         return (
           <HovercardRow key={detector.id}>
             <InteractionStateLayer />
@@ -92,35 +94,27 @@ const WiderHovercard = styled(Hovercard)`
 `;
 
 const ConnectedDetectors = styled('div')`
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   display: flex;
   flex-direction: row;
-  gap: ${space(0.5)};
-`;
-
-const HovercardSkeletonRow = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(0.5)};
-  padding: ${space(1)} ${space(2)};
-  min-height: 64px;
+  gap: ${p => p.theme.space.xs};
 `;
 
 const HovercardRow = styled('div')`
   position: relative;
   display: flex;
   justify-content: center;
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
   min-height: 64px;
 
   &:not(:last-child) {
-    border-bottom: 1px solid ${p => p.theme.innerBorder};
+    border-bottom: 1px solid ${p => p.theme.tokens.border.secondary};
   }
 `;
 
 const MoreText = styled('p')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   text-align: center;
   margin: 0;
-  padding: ${space(1)} ${space(2)};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.xl};
 `;

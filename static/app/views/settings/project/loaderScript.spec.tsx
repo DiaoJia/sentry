@@ -29,8 +29,8 @@ function mockApi({
   });
 }
 
-describe('LoaderScript', function () {
-  it('renders error', async function () {
+describe('LoaderScript', () => {
+  it('renders error', async () => {
     const {organization, project} = initializeOrg();
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
@@ -39,7 +39,10 @@ describe('LoaderScript', function () {
       statusCode: 400,
     });
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
@@ -48,12 +51,15 @@ describe('LoaderScript', function () {
     );
   });
 
-  it('renders empty', async function () {
+  it('renders empty', async () => {
     const {organization, project} = initializeOrg();
 
     mockApi({organization, project, projectKeys: []});
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
@@ -62,14 +68,17 @@ describe('LoaderScript', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders for single project', async function () {
+  it('renders for single project', async () => {
     const {organization, project} = initializeOrg();
-    const projectKey = ProjectKeysFixture()[0]!;
+    const projectKey = ProjectKeysFixture()[0];
     const projectKeys = [projectKey];
 
     mockApi({organization, project, projectKeys});
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
@@ -82,7 +91,7 @@ describe('LoaderScript', function () {
     expect(loaderScriptValue).toEqual(expect.stringContaining(projectKeys[0]!.dsn.cdn));
   });
 
-  it('renders multiple keys', async function () {
+  it('renders multiple keys', async () => {
     const {organization, project} = initializeOrg();
     const projectKeys = ProjectKeysFixture([
       {
@@ -100,6 +109,9 @@ describe('LoaderScript', function () {
           crons: '',
           playstation:
             'http://dev.getsentry.net:8000/api/1/playstation?sentry_key=188ee45a58094d939428d8585aa6f662',
+          integration: 'http://dev.getsentry.net:8000/api/1/integration/',
+          otlp_traces: 'http://dev.getsentry.net:8000/api/1/integration/otlp/v1/traces',
+          otlp_logs: 'http://dev.getsentry.net:8000/api/1/integration/otlp/v1/logs',
         },
         public: '188ee45a58094d939428d8585aa6f662',
         secret: 'a33bf9aba64c4bbdaf873bb9023b6d2c',
@@ -121,20 +133,25 @@ describe('LoaderScript', function () {
           ],
         },
         dynamicSdkLoaderOptions: {
+          hasDebug: false,
+          hasFeedback: false,
           hasPerformance: false,
           hasReplay: false,
-          hasDebug: false,
+          hasLogsAndMetrics: false,
         },
       },
     ]);
 
     mockApi({organization, project, projectKeys});
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
-    expect(screen.getByText(`Client Key: ${projectKeys[0]!.name}`)).toBeInTheDocument();
+    expect(screen.getByText(`Client Key: ${projectKeys[0].name}`)).toBeInTheDocument();
     expect(screen.getByText(`Client Key: ${projectKeys[1]!.name}`)).toBeInTheDocument();
 
     const allLoaderScripts = screen.getAllByRole('textbox', {
@@ -144,9 +161,9 @@ describe('LoaderScript', function () {
     expect(allLoaderScripts).toHaveLength(2);
   });
 
-  it('allows to update key settings', async function () {
+  it('allows to update key settings', async () => {
     const {organization, project} = initializeOrg();
-    const baseKey = ProjectKeysFixture()[0]!;
+    const baseKey = ProjectKeysFixture()[0];
     const projectKey = {
       ...baseKey,
       dynamicSdkLoaderOptions: {
@@ -169,16 +186,19 @@ describe('LoaderScript', function () {
       },
     });
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
-    expect(screen.getByText('Enable Performance Monitoring')).toBeInTheDocument();
+    expect(screen.getByText('Enable Tracing')).toBeInTheDocument();
     expect(screen.getByText('Enable Session Replay')).toBeInTheDocument();
-    expect(screen.getByText('Enable Debug Bundles & Logging')).toBeInTheDocument();
+    expect(screen.getByText('Enable SDK debugging')).toBeInTheDocument();
 
     let performanceCheckbox = screen.getByRole('checkbox', {
-      name: 'Enable Performance Monitoring',
+      name: 'Enable Tracing',
     });
     expect(performanceCheckbox).toBeEnabled();
     expect(performanceCheckbox).not.toBeChecked();
@@ -190,7 +210,7 @@ describe('LoaderScript', function () {
     expect(replayCheckbox).toBeChecked();
 
     const debugCheckbox = screen.getByRole('checkbox', {
-      name: 'Enable Debug Bundles & Logging',
+      name: 'Enable SDK debugging',
     });
     expect(debugCheckbox).toBeEnabled();
     expect(debugCheckbox).not.toBeChecked();
@@ -198,12 +218,12 @@ describe('LoaderScript', function () {
     // Toggle performance option
     await userEvent.click(
       screen.getByRole('checkbox', {
-        name: 'Enable Performance Monitoring',
+        name: 'Enable Tracing',
       })
     );
 
     performanceCheckbox = await screen.findByRole('checkbox', {
-      name: 'Enable Performance Monitoring',
+      name: 'Enable Tracing',
       checked: true,
     });
     expect(performanceCheckbox).toBeEnabled();
@@ -212,17 +232,12 @@ describe('LoaderScript', function () {
     expect(mockPut).toHaveBeenCalledWith(
       `/projects/${organization.slug}/${project.slug}/keys/${projectKey.id}/`,
       expect.objectContaining({
-        data: expect.objectContaining({
-          dynamicSdkLoaderOptions: {
-            ...projectKey.dynamicSdkLoaderOptions,
-            hasPerformance: true,
-          },
-        }),
+        data: {dynamicSdkLoaderOptions: {hasPerformance: true}},
       })
     );
   });
 
-  it('allows to update one of multiple keys', async function () {
+  it('allows to update one of multiple keys', async () => {
     const {organization, project} = initializeOrg();
     const projectKeys = ProjectKeysFixture([
       {
@@ -240,6 +255,9 @@ describe('LoaderScript', function () {
           crons: '',
           playstation:
             'http://dev.getsentry.net:8000/api/1/playstation?sentry_key=188ee45a58094d939428d8585aa6f662',
+          integration: 'http://dev.getsentry.net:8000/api/1/integration/',
+          otlp_traces: 'http://dev.getsentry.net:8000/api/1/integration/otlp/v1/traces',
+          otlp_logs: 'http://dev.getsentry.net:8000/api/1/integration/otlp/v1/logs',
         },
         public: '188ee45a58094d939428d8585aa6f662',
         secret: 'a33bf9aba64c4bbdaf873bb9023b6d2c',
@@ -261,9 +279,11 @@ describe('LoaderScript', function () {
           ],
         },
         dynamicSdkLoaderOptions: {
+          hasDebug: false,
+          hasFeedback: false,
           hasPerformance: false,
           hasReplay: false,
-          hasDebug: false,
+          hasLogsAndMetrics: false,
         },
       },
     ]);
@@ -282,13 +302,16 @@ describe('LoaderScript', function () {
       },
     });
 
-    render(<LoaderScript project={project} />);
+    render(<LoaderScript />, {
+      organization,
+      outletContext: {project},
+    });
 
     await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
 
     expect(
       screen.getAllByRole('checkbox', {
-        name: 'Enable Performance Monitoring',
+        name: 'Enable Tracing',
         checked: false,
       })
     ).toHaveLength(2);
@@ -300,7 +323,7 @@ describe('LoaderScript', function () {
     ).toHaveLength(2);
     expect(
       screen.getAllByRole('checkbox', {
-        name: 'Enable Debug Bundles & Logging',
+        name: 'Enable SDK debugging',
         checked: false,
       })
     ).toHaveLength(2);
@@ -308,20 +331,20 @@ describe('LoaderScript', function () {
     // Toggle performance option
     await userEvent.click(
       screen.getAllByRole('checkbox', {
-        name: 'Enable Performance Monitoring',
+        name: 'Enable Tracing',
       })[1]!
     );
 
     expect(
       await screen.findByRole('checkbox', {
-        name: 'Enable Performance Monitoring',
+        name: 'Enable Tracing',
         checked: true,
       })
     ).toBeInTheDocument();
 
     expect(
       screen.getByRole('checkbox', {
-        name: 'Enable Performance Monitoring',
+        name: 'Enable Tracing',
         checked: false,
       })
     ).toBeInTheDocument();
@@ -333,7 +356,7 @@ describe('LoaderScript', function () {
     ).toHaveLength(2);
     expect(
       screen.getAllByRole('checkbox', {
-        name: 'Enable Debug Bundles & Logging',
+        name: 'Enable SDK debugging',
         checked: false,
       })
     ).toHaveLength(2);
@@ -341,12 +364,7 @@ describe('LoaderScript', function () {
     expect(mockPut).toHaveBeenCalledWith(
       `/projects/${organization.slug}/${project.slug}/keys/${projectKey!.id}/`,
       expect.objectContaining({
-        data: expect.objectContaining({
-          dynamicSdkLoaderOptions: {
-            ...projectKey!.dynamicSdkLoaderOptions,
-            hasPerformance: true,
-          },
-        }),
+        data: {dynamicSdkLoaderOptions: {hasPerformance: true}},
       })
     );
   });

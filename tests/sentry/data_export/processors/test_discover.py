@@ -8,7 +8,7 @@ from sentry.utils.samples import load_data
 
 
 class DiscoverProcessorTest(TestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user()
         self.org = self.create_organization(owner=self.user)
@@ -22,7 +22,7 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
             "query": "",
         }
 
-    def test_get_projects(self):
+    def test_get_projects(self) -> None:
         project = DiscoverProcessor.get_projects(
             organization_id=self.org.id, query={"project": [self.project1.id]}
         )
@@ -35,15 +35,22 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
         with pytest.raises(ExportError):
             DiscoverProcessor.get_projects(organization_id=self.org.id, query={"project": [-1]})
 
-    def test_handle_issue_id_fields(self):
+    def test_get_projects_rejects_cross_org_project(self) -> None:
+        other_org = self.create_organization()
+        other_project = self.create_project(organization=other_org)
+        with pytest.raises(ExportError):
+            DiscoverProcessor.get_projects(
+                organization_id=self.org.id, query={"project": [other_project.id]}
+            )
+
+    def test_handle_issue_id_fields(self) -> None:
         processor = DiscoverProcessor(organization=self.org, discover_query=self.discover_query)
         assert processor.header_fields == ["count_id", "fake_field", "issue"]
         result_list = [{"issue": self.group.id, "issue.id": self.group.id}]
         new_result_list = processor.handle_fields(result_list)
-        assert new_result_list[0] != result_list
         assert new_result_list[0]["issue"] == self.group.qualified_short_id
 
-    def test_handle_transaction_status_fields(self):
+    def test_handle_transaction_status_fields(self) -> None:
         self.discover_query = {
             **self.discover_query,
             "field": ["title", "event.type", "transaction.status"],
@@ -58,15 +65,14 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
         assert new_result_list[0]["transaction.status"] == "ok"
         assert new_result_list[1]["transaction.status"] == "not_found"
 
-    def test_handle__fields(self):
+    def test_handle__fields(self) -> None:
         processor = DiscoverProcessor(organization=self.org, discover_query=self.discover_query)
         assert processor.header_fields == ["count_id", "fake_field", "issue"]
         result_list = [{"issue": self.group.id, "issue.id": self.group.id}]
         new_result_list = processor.handle_fields(result_list)
-        assert new_result_list[0] != result_list
         assert new_result_list[0]["issue"] == self.group.qualified_short_id
 
-    def test_handle_equations(self):
+    def test_handle_equations(self) -> None:
         self.discover_query["field"] = ["count(id)", "fake(field)"]
         self.discover_query["equations"] = ["count(id) / fake(field)", "count(id) / 2"]
         processor = DiscoverProcessor(organization=self.org, discover_query=self.discover_query)
@@ -78,11 +84,10 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
         ]
         result_list = [{"equation[0]": 5, "equation[1]": 8}]
         new_result_list = processor.handle_fields(result_list)
-        assert new_result_list[0] != result_list
         assert new_result_list[0]["count(id) / fake(field)"] == 5
         assert new_result_list[0]["count(id) / 2"] == 8
 
-    def test_handle_transactions_dataset(self):
+    def test_handle_transactions_dataset(self) -> None:
         # Store an error event to show we're querying transactions
         self.store_event(load_data("python"), project_id=self.project1.id)
 
@@ -104,7 +109,7 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
             "project.name": self.project1.slug,
         }
 
-    def test_handle_errors_dataset(self):
+    def test_handle_errors_dataset(self) -> None:
         # Store a transaction event to show we're querying errors
         self.store_event(load_data("transaction"), project_id=self.project1.id)
 
@@ -125,7 +130,7 @@ class DiscoverProcessorTest(TestCase, SnubaTestCase):
 
 
 class DiscoverIssuesProcessorTest(TestCase, PerformanceIssueTestCase):
-    def test_handle_dataset(self):
+    def test_handle_dataset(self) -> None:
         query = {
             "statsPeriod": "14d",
             "project": [self.project.id],

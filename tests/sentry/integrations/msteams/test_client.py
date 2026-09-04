@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from unittest import mock
 from unittest.mock import call, patch
 from urllib.parse import urlencode
@@ -5,9 +6,10 @@ from urllib.parse import urlencode
 import pytest
 import responses
 from django.test import override_settings
+from requests import Request
 
 from sentry.integrations.models.integration import Integration
-from sentry.integrations.msteams.client import MsTeamsClient
+from sentry.integrations.msteams.client import MsTeamsClient, OAuthMsTeamsClient
 from sentry.shared_integrations.exceptions import IntegrationError
 from sentry.silo.base import SiloMode
 from sentry.silo.util import (
@@ -18,6 +20,7 @@ from sentry.silo.util import (
     PROXY_SIGNATURE_HEADER,
 )
 from sentry.testutils.cases import TestCase
+from sentry.testutils.helpers.options import override_options
 from sentry.testutils.silo import control_silo_test
 from tests.sentry.integrations.test_helpers import add_control_silo_proxy_response
 
@@ -25,11 +28,11 @@ from tests.sentry.integrations.test_helpers import add_control_silo_proxy_respon
 @control_silo_test
 class MsTeamsClientTest(TestCase):
     @pytest.fixture(autouse=True)
-    def _setup_metric_patch(self):
+    def _setup_metric_patch(self) -> Generator[None]:
         with mock.patch("sentry.shared_integrations.client.base.metrics") as self.metrics:
             yield
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.expires_at = 1594768808
         self.organization = self.create_organization(owner=self.user)
         self.integration = self.create_integration(
@@ -61,7 +64,7 @@ class MsTeamsClientTest(TestCase):
         self.msteams_client = MsTeamsClient(self.integration)
 
     @responses.activate
-    def test_token_refreshes(self):
+    def test_token_refreshes(self) -> None:
         with patch("time.time") as mock_time:
             mock_time.return_value = self.expires_at
             # accessing the property should refresh the token
@@ -84,7 +87,7 @@ class MsTeamsClientTest(TestCase):
             }
 
     @responses.activate
-    def test_token_refreshes_with_integration_not_found(self):
+    def test_token_refreshes_with_integration_not_found(self) -> None:
         self.integration.delete()
         with patch("time.time") as mock_time:
             mock_time.return_value = self.expires_at
@@ -93,7 +96,7 @@ class MsTeamsClientTest(TestCase):
                 self.msteams_client.access_token
 
     @responses.activate
-    def test_no_token_refresh(self):
+    def test_no_token_refresh(self) -> None:
         with patch("time.time") as mock_time:
             mock_time.return_value = self.expires_at - 100
             # accessing the property should refresh the token
@@ -108,7 +111,7 @@ class MsTeamsClientTest(TestCase):
             }
 
     @responses.activate
-    def test_simple(self):
+    def test_simple(self) -> None:
         self.msteams_client.get_channel_list("foobar")
         assert len(responses.calls) == 2
         token_request = responses.calls[0].request
@@ -142,7 +145,7 @@ class MsTeamsClientTest(TestCase):
         assert self.metrics.incr.mock_calls == calls
 
     @responses.activate
-    def test_api_client_from_integration_installation(self):
+    def test_api_client_from_integration_installation(self) -> None:
         installation = self.integration.get_installation(organization_id=self.organization.id)
         client = installation.get_client()
         assert isinstance(client, MsTeamsClient)
@@ -180,7 +183,7 @@ class MsTeamsClientTest(TestCase):
         assert self.metrics.incr.mock_calls == calls
 
 
-def assert_proxy_request(request, is_proxy=True):
+def assert_proxy_request(request: Request, is_proxy: bool = True) -> None:
     assert (PROXY_BASE_PATH in request.url) == is_proxy
     assert (PROXY_OI_HEADER in request.headers) == is_proxy
     assert (PROXY_SIGNATURE_HEADER in request.headers) == is_proxy
@@ -194,7 +197,7 @@ def assert_proxy_request(request, is_proxy=True):
     SENTRY_CONTROL_ADDRESS="http://controlserver",
 )
 class MsTeamsProxyApiClientTest(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.expires_at = 1594768808
         self.organization = self.create_organization(owner=self.user)
         self.integration = self.create_integration(
@@ -227,7 +230,7 @@ class MsTeamsProxyApiClientTest(TestCase):
         )
 
     @responses.activate
-    def test_integration_proxy_is_active(self):
+    def test_integration_proxy_is_active(self) -> None:
         class MsTeamsProxyApiTestClient(MsTeamsClient):
             _use_proxy_url_for_tests = True
 
@@ -273,7 +276,7 @@ class MsTeamsProxyApiClientTest(TestCase):
             assert_proxy_request(request, is_proxy=False)
 
         responses.calls.reset()
-        with override_settings(SILO_MODE=SiloMode.REGION):
+        with override_settings(SILO_MODE=SiloMode.CELL):
             client = MsTeamsProxyApiTestClient(self.integration)
             client.get_channel_list("foobar")
             assert len(responses.calls) == 1
@@ -285,3 +288,18 @@ class MsTeamsProxyApiClientTest(TestCase):
             assert request.headers[PROXY_BASE_URL_HEADER] == "https://smba.trafficmanager.net/amer"
             assert client.base_url not in request.url
             assert_proxy_request(request, is_proxy=True)
+
+
+@control_silo_test
+class OAuthMsTeamsClientTest(TestCase):
+    def test_defaults_to_botframework_authority(self) -> None:
+        client = OAuthMsTeamsClient("client-id", "client-secret")
+        assert client.base_url == "https://login.microsoftonline.com/botframework.com"
+
+    @override_options({"msteams.tenant-id": "00000000-1111-2222-3333-444444444444"})
+    def test_uses_tenant_authority_when_configured(self) -> None:
+        client = OAuthMsTeamsClient("client-id", "client-secret")
+        assert (
+            client.base_url
+            == "https://login.microsoftonline.com/00000000-1111-2222-3333-444444444444"
+        )

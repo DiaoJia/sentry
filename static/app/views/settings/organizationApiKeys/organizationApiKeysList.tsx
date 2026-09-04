@@ -1,18 +1,16 @@
-import {Fragment} from 'react';
-import styled from '@emotion/styled';
+import {AlertLink} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import type {TableColumnConfig} from '@sentry/scraps/table';
 
-import Confirm from 'sentry/components/confirm';
-import {AlertLink} from 'sentry/components/core/alert/alertLink';
-import {Button} from 'sentry/components/core/button';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import TextCopyInput from 'sentry/components/textCopyInput';
+import {Confirm} from 'sentry/components/confirm';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TextCopyInput} from 'sentry/components/textCopyInput';
 import {IconAdd, IconDelete} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
-import SettingsPageHeader from 'sentry/views/settings/components/settingsPageHeader';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
 
 import type {DeprecatedApiKey} from './types';
 
@@ -34,7 +32,13 @@ type Props = {
   organization: Organization;
 };
 
-function OrganizationApiKeysList({
+const API_KEY_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: 'auto'},
+  {key: 'key', width: 'auto'},
+  {key: 'actions', width: 'auto'},
+];
+
+export function OrganizationApiKeysList({
   organization,
   keys,
   busy,
@@ -44,22 +48,23 @@ function OrganizationApiKeysList({
 }: Props) {
   const hasKeys = Boolean(keys?.length);
 
-  const action = (
-    <Button
-      priority="primary"
-      size="sm"
-      icon={<IconAdd isCircled />}
-      busy={busy}
-      disabled={busy}
-      onClick={onAddApiKey}
-    >
-      {t('New API Key')}
-    </Button>
-  );
-
   return (
     <div>
-      <SettingsPageHeader title={t('API Keys')} action={action} />
+      <SettingsPageHeader
+        title={t('API Keys')}
+        action={
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<IconAdd />}
+            busy={busy}
+            disabled={busy}
+            onClick={onAddApiKey}
+          >
+            {t('New API Key')}
+          </Button>
+        }
+      />
 
       <TextBlock>
         {tct(
@@ -73,7 +78,7 @@ function OrganizationApiKeysList({
       </TextBlock>
 
       <AlertLink.Container>
-        <AlertLink to="/settings/account/api/auth-tokens/" type="info">
+        <AlertLink to="/settings/account/api/auth-tokens/" variant="info">
           {tct(
             'Until Sentry supports OAuth, you might want to switch to using [tokens:Personal Tokens] instead.',
             {
@@ -82,44 +87,50 @@ function OrganizationApiKeysList({
           )}
         </AlertLink>
       </AlertLink.Container>
-      <PanelTable
-        isLoading={loading}
-        isEmpty={!hasKeys}
-        emptyMessage={t('No API keys for this organization')}
-        headers={[t('Name'), t('Key'), t('Actions')]}
+      <SimpleTable
+        columns={API_KEY_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Name')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Key')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Actions')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
-        {keys?.map(({id, key, label}) => {
-          return (
-            <Fragment key={key}>
-              <Cell>
-                <Link to={`/settings/${organization.slug}/api-keys/${id}/`}>{label}</Link>
-              </Cell>
+        {loading && <SimpleTable.Loading />}
+        {!loading && !hasKeys && (
+          <SimpleTable.Empty>{t('No API keys for this organization')}</SimpleTable.Empty>
+        )}
+        {!loading &&
+          keys?.map(({id, key, label}) => {
+            return (
+              <SimpleTable.Row key={key}>
+                <SimpleTable.RowCell>
+                  <Link to={`/settings/${organization.slug}/api-keys/${id}/`}>
+                    {label}
+                  </Link>
+                </SimpleTable.RowCell>
 
-              <TextCopyInput size="md" monospace>
-                {key}
-              </TextCopyInput>
+                <SimpleTable.RowCell>
+                  <TextCopyInput size="md" monospace>
+                    {key}
+                  </TextCopyInput>
+                </SimpleTable.RowCell>
 
-              <Cell>
-                <Confirm
-                  onConfirm={() => onRemove(id)}
-                  message={t('Are you sure you want to remove this API key?')}
-                >
-                  <Button priority="danger" size="sm" icon={<IconDelete />}>
-                    {t('Remove API Key')}
-                  </Button>
-                </Confirm>
-              </Cell>
-            </Fragment>
-          );
-        })}
-      </PanelTable>
+                <SimpleTable.RowCell>
+                  <Confirm
+                    onConfirm={() => onRemove(id)}
+                    message={t('Are you sure you want to remove this API key?')}
+                  >
+                    <Button variant="danger" size="sm" icon={<IconDelete />}>
+                      {t('Remove API Key')}
+                    </Button>
+                  </Confirm>
+                </SimpleTable.RowCell>
+              </SimpleTable.Row>
+            );
+          })}
+      </SimpleTable>
     </div>
   );
 }
-
-const Cell = styled('div')`
-  display: flex;
-  align-items: center;
-`;
-
-export default OrganizationApiKeysList;

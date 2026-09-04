@@ -4,40 +4,59 @@ import styled from '@emotion/styled';
 import {useButton} from '@react-aria/button';
 import {useMenuTrigger} from '@react-aria/menu';
 import {Item, Section} from '@react-stately/collections';
+import type {LocationDescriptor} from 'history';
 
 import type {DropdownButtonProps} from 'sentry/components/dropdownButton';
-import DropdownButton from 'sentry/components/dropdownButton';
-import type {FormSize} from 'sentry/utils/theme';
+import {DropdownButton} from 'sentry/components/dropdownButton';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import type {UseOverlayProps} from 'sentry/utils/useOverlay';
-import useOverlay from 'sentry/utils/useOverlay';
+import {useOverlay} from 'sentry/utils/useOverlay';
 
 import type {MenuItemProps} from './item';
 import type {DropdownMenuListProps} from './list';
-import DropdownMenuList, {DropdownMenuContext} from './list';
+import {DropdownMenuContext, DropdownMenuList} from './list';
 
 export type {MenuItemProps};
 
+// react-aria uses the href prop on item state to determine if the item is a link
+// and will navigate there when selected
+function makeItemHref(item: MenuItemProps): LocationDescriptor | undefined {
+  if (item.to) {
+    // This matches the behavior of the Link component
+    return normalizeUrl(item.to);
+  }
+
+  return item.externalHref;
+}
+
 /**
  * Recursively removes hidden items, including those nested in submenus
+ * Apply href to items that have a to or externalHref prop
  */
-function removeHiddenItems(source: MenuItemProps[]): MenuItemProps[] {
+function removeHiddenItemsAndSetHref(source: MenuItemProps[]): MenuItemProps[] {
   return source
     .filter(item => !item.hidden)
-    .map(item => ({
-      ...item,
-      ...(item.children ? {children: removeHiddenItems(item.children)} : {}),
-    }));
+    .map(item => {
+      const href = makeItemHref(item);
+
+      return {
+        ...item,
+        ...(href === undefined ? {} : {href}),
+        ...(item.children ? {children: removeHiddenItemsAndSetHref(item.children)} : {}),
+      };
+    });
 }
 
 /**
  * Recursively finds and returns disabled items
  */
 function getDisabledKeys(source: MenuItemProps[]): Array<MenuItemProps['key']> {
-  return source.reduce<string[]>((acc, cur) => {
+  return source.reduce<Array<MenuItemProps['key']>>((acc, cur) => {
     if (cur.disabled) {
       // If an item is disabled, then its children will be inaccessible, so we
       // can skip them and just return the parent item
-      return acc.concat([cur.key]);
+      acc.push(cur.key);
+      return acc;
     }
 
     if (cur.children) {
@@ -49,7 +68,8 @@ function getDisabledKeys(source: MenuItemProps[]): Array<MenuItemProps['key']> {
 }
 
 export interface DropdownMenuProps
-  extends Omit<
+  extends
+    Omit<
       DropdownMenuListProps,
       'overlayState' | 'overlayPositionProps' | 'items' | 'children' | 'menuTitle'
     >,
@@ -66,11 +86,12 @@ export interface DropdownMenuProps
       | 'preventOverflowOptions'
       | 'flipOptions'
       | 'shouldApplyMinWidth'
+      | 'strategy'
     > {
   /**
    * Items to display inside the dropdown menu. If the item has a `children`
    * prop, it will be rendered as a menu section. If it has a `children` prop
-   * and its `isSubmenu` prop is true, it will be rendered as a submenu.
+   * and its `submenu` prop is set, it will be rendered as a submenu.
    */
   items: MenuItemProps[];
   /**
@@ -82,9 +103,17 @@ export interface DropdownMenuProps
    */
   isDisabled?: boolean;
   /**
+   * Maximum menu width
+   */
+  maxMenuHeight?: number;
+  /**
    * Title for the current menu.
    */
   menuTitle?: React.ReactNode;
+  /**
+   * Minimum menu width
+   */
+  minMenuWidth?: number;
   /**
    * Reference to the container element that the portal should be rendered into.
    */
@@ -96,7 +125,7 @@ export interface DropdownMenuProps
   /**
    * Affects the size of the trigger button and menu items.
    */
-  size?: FormSize;
+  size?: DropdownMenuListProps['size'];
   /**
    * Optionally replace the trigger button with a different component. Note
    * that the replacement must have the `props` and `ref` (supplied in
@@ -117,13 +146,14 @@ export interface DropdownMenuProps
    * not been provided), then `triggerProps` will be passed on to the button
    * component.
    */
-  triggerProps?: DropdownButtonProps;
-
+  triggerProps?: Partial<DropdownButtonProps>;
   /**
    * Whether to render the menu inside a React portal (false by default). This should
    * only be enabled if necessary, e.g. when the dropdown menu is inside a small,
    * scrollable container that messes with the menu's position. Some features, namely
    * submenus, will not work correctly inside portals.
+   *
+   * Consider passing `strategy` as `'fixed'` before using `usePortal`
    */
   usePortal?: boolean;
 }
@@ -157,6 +187,10 @@ function DropdownMenu({
   flipOptions,
   portalContainerRef,
   shouldApplyMinWidth,
+  maxMenuHeight,
+  minMenuWidth,
+  // This prop is from popperJS and is an alternative to portals. Use this with components like modals where portalling to document body doesn't work well.
+  strategy,
   ...props
 }: DropdownMenuProps) {
   const isDisabled = disabledProp ?? (!items || items.length === 0);
@@ -182,6 +216,7 @@ function DropdownMenu({
     flipOptions,
     onOpenChange,
     shouldApplyMinWidth,
+    strategy,
   });
 
   const {menuTriggerProps, menuProps} = useMenuTrigger(
@@ -191,7 +226,7 @@ function DropdownMenu({
   );
   // We manually handle focus in the dropdown menu, so we don't want the default autofocus behavior
   // Avoids the menu from focusing before popper has placed it in the correct position
-  menuProps.autoFocus = false;
+  const resolvedMenuProps = {...menuProps, autoFocus: false as const};
 
   const {buttonProps} = useButton(
     {
@@ -218,17 +253,7 @@ function DropdownMenu({
     );
   }
 
-  const activeItems = useMemo(
-    () =>
-      removeHiddenItems(items).map(item => {
-        return {
-          ...item,
-          // react-aria uses the href prop on item state to determine if the item is a link
-          href: item.to ?? item.externalHref,
-        };
-      }),
-    [items]
-  );
+  const activeItems = useMemo(() => removeHiddenItemsAndSetHref(items), [items]);
   const defaultDisabledKeys = useMemo(() => getDisabledKeys(activeItems), [activeItems]);
 
   function renderMenu() {
@@ -239,27 +264,40 @@ function DropdownMenu({
     const menu = (
       <DropdownMenuList
         {...props}
-        {...menuProps}
+        {...resolvedMenuProps}
         size={size}
         disabledKeys={disabledKeys ?? defaultDisabledKeys}
-        overlayPositionProps={overlayProps}
+        overlayPositionProps={{
+          ...overlayProps,
+          style: {
+            ...overlayProps.style,
+            minWidth: minMenuWidth ?? overlayProps.style?.minWidth,
+            maxHeight: maxMenuHeight ?? overlayProps.style?.maxHeight,
+          },
+        }}
         overlayState={overlayState}
         items={activeItems}
       >
         {(item: MenuItemProps) => {
-          if (item.children && item.children.length > 0 && !item.isSubmenu) {
+          const {onAction: _onAction, ...itemProps} = item;
+
+          if (item.children && item.children.length > 0 && !item.submenu) {
             return (
               <Section key={item.key} title={item.label} items={item.children}>
-                {sectionItem => (
-                  <Item size={size} {...sectionItem} key={sectionItem.key}>
-                    {sectionItem.label}
-                  </Item>
-                )}
+                {sectionItem => {
+                  const {onAction: _sectionOnAction, ...sectionItemProps} = sectionItem;
+
+                  return (
+                    <Item size={size} {...sectionItemProps} key={sectionItem.key}>
+                      {sectionItem.label}
+                    </Item>
+                  );
+                }}
               </Section>
             );
           }
           return (
-            <Item size={size} {...item} key={item.key}>
+            <Item size={size} {...itemProps} key={item.key}>
               {item.label}
             </Item>
           );

@@ -1,26 +1,65 @@
-from dataclasses import dataclass
-
+from sentry.notifications.platform.registry import template_registry
 from sentry.notifications.platform.types import (
+    BlockQuoteSection,
+    BoldTextBlock,
+    CodeSection,
+    CodeTextBlock,
+    ItalicTextBlock,
+    LinkTextBlock,
     NotificationCategory,
     NotificationData,
+    NotificationRenderedAction,
+    NotificationRenderedImage,
     NotificationRenderedTemplate,
     NotificationSource,
     NotificationStrategy,
     NotificationTarget,
     NotificationTemplate,
+    ParagraphSection,
+    PlainTextBlock,
 )
 
 
-@dataclass(kw_only=True, frozen=True)
 class MockNotification(NotificationData):
-    category = NotificationCategory.DEBUG
-    source = NotificationSource.TEST
+    source: NotificationSource = NotificationSource.TEST
     message: str
 
 
+@template_registry.register(NotificationSource.TEST)
 class MockNotificationTemplate(NotificationTemplate[MockNotification]):
-    def process(self, *, data: MockNotification) -> NotificationRenderedTemplate:
-        return data.message
+    category = NotificationCategory.DEBUG
+    example_data = MockNotification(message="This is a mock notification")
+
+    def render(self, data: MockNotification) -> NotificationRenderedTemplate:
+        return NotificationRenderedTemplate(
+            subject=[
+                PlainTextBlock(text="Alert:"),
+                ItalicTextBlock(text="Mock Notification"),
+            ],
+            body=[
+                ParagraphSection(
+                    blocks=[
+                        PlainTextBlock(text=data.message),
+                        BoldTextBlock(text="important"),
+                        ItalicTextBlock(text="urgent"),
+                        LinkTextBlock(text="View Issue", url="https://sentry.io/issue/1"),
+                    ]
+                ),
+                CodeSection(blocks=[PlainTextBlock(text="raise Exception('test')")]),
+                BlockQuoteSection(blocks=[PlainTextBlock(text="This is a quoted message")]),
+            ],
+            actions=[
+                NotificationRenderedAction(label="Visit Sentry", link="https://www.sentry.io")
+            ],
+            chart=NotificationRenderedImage(
+                url="https://raw.githubusercontent.com/knobiknows/all-the-bufo/main/all-the-bufo/bufo-pog.png",
+                alt_text="Bufo Pog",
+            ),
+            footer=[
+                PlainTextBlock(text="Sent via"),
+                CodeTextBlock(text="sentry-alerts"),
+            ],
+        )
 
 
 class MockStrategy(NotificationStrategy):

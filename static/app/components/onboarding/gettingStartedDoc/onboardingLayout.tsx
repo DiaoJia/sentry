@@ -1,35 +1,49 @@
-import {Fragment, useEffect, useMemo} from 'react';
+import {Fragment, useCallback, useEffect, useMemo} from 'react';
 import styled from '@emotion/styled';
 
-import HookOrDefault from 'sentry/components/hookOrDefault';
-import ExternalLink from 'sentry/components/links/externalLink';
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
+import {Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
 import {AuthTokenGeneratorProvider} from 'sentry/components/onboarding/gettingStartedDoc/authTokenGenerator';
+import {
+  docsFlowMarkdownParams,
+  docsFlowProjectIdParams,
+  docsFlowVariantParams,
+  DSN_COPIED_EVENT,
+  NEXT_STEP_CLICKED_EVENT,
+  resolveDocsFlowEvent,
+} from 'sentry/components/onboarding/gettingStartedDoc/docsFlowAnalytics';
+import {OnboardingCopyMarkdownButton} from 'sentry/components/onboarding/gettingStartedDoc/onboardingCopyMarkdownButton';
+import {TabSelectionScope} from 'sentry/components/onboarding/gettingStartedDoc/selectedCodeTabContext';
 import {Step} from 'sentry/components/onboarding/gettingStartedDoc/step';
 import {
+  ProductSolution,
   type ConfigType,
   type Docs,
+  type DocsFlow,
   type DocsParams,
-  ProductSolution,
 } from 'sentry/components/onboarding/gettingStartedDoc/types';
 import {useSourcePackageRegistries} from 'sentry/components/onboarding/gettingStartedDoc/useSourcePackageRegistries';
+import {injectCopyDsnButtonIntoFirstConfigureStep} from 'sentry/components/onboarding/gettingStartedDoc/utils';
 import {
   PlatformOptionsControl,
   useUrlPlatformOptions,
 } from 'sentry/components/onboarding/platformOptionsControl';
 import {ProductSelection} from 'sentry/components/onboarding/productSelection';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
 import {t} from 'sentry/locale';
-import ConfigStore from 'sentry/stores/configStore';
+import {ConfigStore} from 'sentry/stores/configStore';
 import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import {space} from 'sentry/styles/space';
-import type {PlatformKey, Project, ProjectKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project, ProjectKey} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useApi} from 'sentry/utils/useApi';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-const ProductSelectionAvailabilityHook = HookOrDefault({
-  hookName: 'component:product-selection-availability',
+const ProductSelectionAvailabilityHook = OverrideOrDefault({
+  overrideName: 'component:product-selection-availability',
   defaultComponent: ProductSelection,
 });
 
@@ -37,12 +51,17 @@ export type OnboardingLayoutProps = {
   docsConfig: Docs<any>;
   dsn: ProjectKey['dsn'];
   platformKey: PlatformKey;
-  projectId: Project['id'];
+  project: Project;
   projectKeyId: ProjectKey['id'];
-  projectSlug: Project['slug'];
   activeProductSelection?: ProductSolution[];
   configType?: ConfigType;
-  newOrg?: boolean;
+  docsFlow?: DocsFlow;
+  /**
+   * Fires after every product toggle in addition to the doc's
+   * onProductSelectionChange. Used by SCM onboarding to keep its context in
+   * sync when the user changes products on the setup-docs step.
+   */
+  onProductSelectionSync?: (products: ProductSolution[]) => void;
 };
 
 const EMPTY_ARRAY: never[] = [];
@@ -51,12 +70,12 @@ export function OnboardingLayout({
   docsConfig,
   dsn,
   platformKey,
-  projectId,
-  projectSlug,
+  project,
   activeProductSelection = EMPTY_ARRAY,
-  newOrg,
+  docsFlow,
   projectKeyId,
   configType = 'onboarding',
+  onProductSelectionSync,
 }: OnboardingLayoutProps) {
   const api = useApi();
   const organization = useOrganization();
@@ -83,9 +102,10 @@ export function OnboardingLayout({
       dsn,
       organization,
       platformKey,
-      projectId,
-      projectSlug,
+      project,
+      isLogsSelected: activeProductSelection.includes(ProductSolution.LOGS),
       isFeedbackSelected: false,
+      isMetricsSelected: activeProductSelection.includes(ProductSolution.METRICS),
       isPerformanceSelected: activeProductSelection.includes(
         ProductSolution.PERFORMANCE_MONITORING
       ),
@@ -98,7 +118,7 @@ export function OnboardingLayout({
       urlPrefix,
       isSelfHosted,
       platformOptions: selectedOptions,
-      newOrg,
+      docsFlow,
       profilingOptions: {
         defaultProfilingMode: organization.features.includes('continuous-profiling')
           ? 'continuous'
@@ -111,7 +131,18 @@ export function OnboardingLayout({
       introduction: doc.introduction?.(docParams),
       steps: [
         ...doc.install(docParams),
-        ...doc.configure(docParams),
+        ...injectCopyDsnButtonIntoFirstConfigureStep({
+          configureSteps: doc.configure(docParams),
+          dsn,
+          onCopyDsn: () => {
+            trackAnalytics(resolveDocsFlowEvent(DSN_COPIED_EVENT, docsFlow), {
+              organization,
+              platform: platformKey,
+              ...docsFlowProjectIdParams(docsFlow, project.id),
+              ...docsFlowVariantParams(docsFlow),
+            });
+          },
+        }),
         ...doc.verify(docParams),
       ],
       nextSteps: doc.nextSteps?.(docParams) || [],
@@ -125,11 +156,10 @@ export function OnboardingLayout({
     docsConfig,
     dsn,
     isLoadingRegistry,
-    newOrg,
+    docsFlow,
     organization,
     platformKey,
-    projectId,
-    projectSlug,
+    project,
     registryData,
     selectedOptions,
     configType,
@@ -144,80 +174,122 @@ export function OnboardingLayout({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleProductSelectionChange = useCallback(
+    (params: {previousProducts: ProductSolution[]; products: ProductSolution[]}) => {
+      onProductSelectionChange?.(params);
+      onProductSelectionSync?.(params.products);
+    },
+    [onProductSelectionChange, onProductSelectionSync]
+  );
+
+  const hideInstructionsCopy = (docsConfig[configType] ?? docsConfig.onboarding)
+    ?.hideInstructionsCopy;
+
   return (
-    <AuthTokenGeneratorProvider projectSlug={projectSlug}>
-      <Wrapper>
-        <Header>
-          {introduction && <Introduction>{introduction}</Introduction>}
-          {configType === 'onboarding' && (
-            <ProductSelectionAvailabilityHook
-              organization={organization}
-              platform={platformKey}
-              onChange={onProductSelectionChange}
-              onLoad={onProductSelectionLoad}
-            />
+    <AuthTokenGeneratorProvider projectSlug={project.slug}>
+      <TabSelectionScope>
+        <Wrapper>
+          <Stack gap="xl">
+            {introduction && <Introduction>{introduction}</Introduction>}
+            {configType === 'onboarding' && (
+              <ProductSelectionAvailabilityHook
+                organization={organization}
+                platform={platformKey}
+                onChange={handleProductSelectionChange}
+                onLoad={onProductSelectionLoad}
+              />
+            )}
+            {platformOptions ? (
+              <PlatformOptionsControl
+                platformOptions={platformOptions}
+                onChange={onPlatformOptionsChange}
+              />
+            ) : null}
+          </Stack>
+          <Divider withBottomMargin />
+          <div>
+            {steps.map((step, index) => {
+              const showCopy = index === 0 && !hideInstructionsCopy;
+              const copyButton = showCopy ? (
+                <OnboardingCopyMarkdownButton
+                  steps={steps}
+                  {...docsFlowMarkdownParams(docsFlow)}
+                />
+              ) : null;
+
+              const trailingItems = copyButton ? (
+                step.trailingItems ? (
+                  <Fragment>
+                    {step.trailingItems}
+                    {copyButton}
+                  </Fragment>
+                ) : (
+                  copyButton
+                )
+              ) : (
+                step.trailingItems
+              );
+
+              return (
+                <StyledStep
+                  key={step.title ?? step.type}
+                  stepIndex={index}
+                  {...step}
+                  trailingItems={trailingItems}
+                />
+              );
+            })}
+          </div>
+          {nextSteps.length > 0 && (
+            <Fragment>
+              <Divider />
+              <h4>{t('Additional Information')}</h4>
+              <List symbol="bullet">
+                {nextSteps
+                  .filter((step): step is Exclude<typeof step, null> => step !== null)
+                  .map(step => (
+                    <ListItem key={step.name}>
+                      <ExternalLink
+                        href={step.link}
+                        onClick={() =>
+                          trackAnalytics(
+                            resolveDocsFlowEvent(NEXT_STEP_CLICKED_EVENT, docsFlow),
+                            {
+                              organization,
+                              platform: platformKey,
+                              project_id: project.id,
+                              products: activeProductSelection,
+                              step: step.name,
+                              newOrg:
+                                docsFlow === 'onboarding' ||
+                                docsFlow === 'onboarding-scm',
+                              ...docsFlowVariantParams(docsFlow),
+                            }
+                          )
+                        }
+                      >
+                        {step.name}
+                      </ExternalLink>
+                      {': '}
+                      {step.description}
+                    </ListItem>
+                  ))}
+              </List>
+            </Fragment>
           )}
-          {platformOptions ? (
-            <PlatformOptionsControl
-              platformOptions={platformOptions}
-              onChange={onPlatformOptionsChange}
-            />
-          ) : null}
-        </Header>
-        <Divider withBottomMargin />
-        <div>
-          {steps.map(step => (
-            <StyledStep key={step.title ?? step.type} {...step} />
-          ))}
-        </div>
-        {nextSteps.length > 0 && (
-          <Fragment>
-            <Divider />
-            <h4>{t('Additional Information')}</h4>
-            <List symbol="bullet">
-              {nextSteps
-                .filter((step): step is Exclude<typeof step, null> => step !== null)
-                .map(step => (
-                  <ListItem key={step.name}>
-                    <ExternalLink
-                      href={step.link}
-                      onClick={() =>
-                        trackAnalytics('onboarding.next_step_clicked', {
-                          organization,
-                          platform: platformKey,
-                          project_id: projectId,
-                          products: activeProductSelection,
-                          step: step.name,
-                          newOrg: newOrg ?? false,
-                        })
-                      }
-                    >
-                      {step.name}
-                    </ExternalLink>
-                    {': '}
-                    {step.description}
-                  </ListItem>
-                ))}
-            </List>
-          </Fragment>
-        )}
-      </Wrapper>
+        </Wrapper>
+      </TabSelectionScope>
     </AuthTokenGeneratorProvider>
   );
 }
 
-const Header = styled('div')`
-  display: flex;
-  flex-direction: column;
-  gap: ${space(2)};
-`;
-
 const Divider = styled('hr')<{withBottomMargin?: boolean}>`
   height: 1px;
   width: 100%;
-  background: ${p => p.theme.border};
+  /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+  background: ${p => p.theme.tokens.border.primary};
   border: none;
-  ${p => p.withBottomMargin && `margin-bottom: ${space(3)}`}
+  ${p => p.withBottomMargin && `margin-bottom: ${p.theme.space['2xl']}`}
 `;
 
 const StyledStep = styled(Step)`
@@ -242,6 +314,6 @@ const Wrapper = styled('div')`
 
 const Introduction = styled('div')`
   & > p:not(:last-child) {
-    margin-bottom: ${space(2)};
+    margin-bottom: ${p => p.theme.space.xl};
   }
 `;

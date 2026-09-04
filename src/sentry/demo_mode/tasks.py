@@ -18,21 +18,20 @@ from sentry.models.debugfile import ProguardArtifactRelease, ProjectDebugFile
 from sentry.models.files import FileBlobOwner
 from sentry.models.organization import Organization
 from sentry.models.project import Project
+from sentry.objectstore import UsecaseId, get_session
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import demomode_tasks
 from sentry.utils.db import atomic_transaction
+from sentry.utils.tracing import set_span_data, start_span
 
 logger = logging.getLogger(__name__)
 
 
 @instrumented_task(
     name="sentry.demo_mode.tasks.sync_debug_artifacts",
-    queue="demo_mode",
-    taskworker_config=TaskworkerConfig(namespace=demomode_tasks),
+    namespace=demomode_tasks,
 )
-def sync_debug_artifacts():
-
+def sync_debug_artifacts() -> None:
     if (
         not options.get("sentry.demo_mode.sync_debug_artifacts.enable")
         or not is_demo_mode_enabled()
@@ -53,8 +52,8 @@ def sync_debug_artifacts():
 
 
 def _sync_artifact_bundles(
-    source_org: Organization, target_org: Organization, cutoff_date: datetime
-):
+    source_org: Organization | None, target_org: Organization | None, cutoff_date: datetime
+) -> None:
     if not source_org or not target_org:
         return
 
@@ -75,12 +74,12 @@ def _sync_artifact_bundles(
 
 
 def _sync_project_debug_files(
-    source_org: Organization, target_org: Organization, cutoff_date: datetime
-):
+    source_org: Organization | None, target_org: Organization | None, cutoff_date: datetime
+) -> None:
     if not source_org or not target_org:
         return
 
-    with sentry_sdk.start_span(name="sync-project-debug-files-get-project-ids") as span:
+    with start_span(name="sync-project-debug-files-get-project-ids") as span:
         source_project_ids = list(
             Project.objects.filter(
                 organization_id=source_org.id,
@@ -92,8 +91,8 @@ def _sync_project_debug_files(
                 organization_id=target_org.id,
             ).values_list("id", flat=True)
         )
-        span.set_data("source_project_ids", source_project_ids)
-        span.set_data("target_project_ids", target_project_ids)
+        set_span_data(span, "source_project_ids", source_project_ids)
+        set_span_data(span, "target_project_ids", target_project_ids)
 
     project_debug_files = ProjectDebugFile.objects.filter(
         Q(project_id__in=source_project_ids) | Q(project_id__in=target_project_ids),
@@ -113,14 +112,14 @@ def _sync_project_debug_files(
     )
 
     for source_project_debug_file in different_project_debug_files:
-        with sentry_sdk.start_span(name="sync-project-debug-files-sync-project-debug-file") as span:
-            span.set_data("source_project_debug_file_id", source_project_debug_file.id)
+        with start_span(name="sync-project-debug-files-sync-project-debug-file") as span:
+            set_span_data(span, "source_project_debug_file_id", source_project_debug_file.id)
             _sync_project_debug_file(source_project_debug_file, target_org)
 
 
 def _sync_proguard_artifact_releases(
-    source_org: Organization, target_org: Organization, cutoff_date: datetime
-):
+    source_org: Organization | None, target_org: Organization | None, cutoff_date: datetime
+) -> None:
     if not source_org or not target_org:
         return
 
@@ -144,7 +143,7 @@ def _sync_proguard_artifact_releases(
         _sync_proguard_artifact_release(source_proguard_artifact_release, target_org)
 
 
-def _sync_artifact_bundle(source_artifact_bundle: ArtifactBundle, target_org: Organization):
+def _sync_artifact_bundle(source_artifact_bundle: ArtifactBundle, target_org: Organization) -> None:
     try:
         with atomic_transaction(
             using=(
@@ -180,7 +179,7 @@ def _sync_artifact_bundle(source_artifact_bundle: ArtifactBundle, target_org: Or
 def _sync_project_artifact_bundle(
     source_artifact_bundle: ArtifactBundle,
     target_artifact_bundle: ArtifactBundle,
-):
+) -> None:
     source_project_artifact_bundle = ProjectArtifactBundle.objects.filter(
         artifact_bundle_id=source_artifact_bundle.id,
         organization_id=source_artifact_bundle.organization_id,
@@ -207,7 +206,7 @@ def _sync_project_artifact_bundle(
 def _sync_release_artifact_bundle(
     source_artifact_bundle: ArtifactBundle,
     target_artifact_bundle: ArtifactBundle,
-):
+) -> None:
     source_release_artifact_bundle = ReleaseArtifactBundle.objects.filter(
         artifact_bundle_id=source_artifact_bundle.id,
         organization_id=source_artifact_bundle.organization_id,
@@ -227,6 +226,8 @@ def _sync_release_artifact_bundle(
 def _sync_project_debug_file(
     source_project_debug_file: ProjectDebugFile, target_org: Organization
 ) -> ProjectDebugFile | None:
+    target_project = None
+    target_storage_path = None
     try:
         with atomic_transaction(using=(router.db_for_write(ProjectDebugFile))):
             target_project = _find_matching_project(
@@ -237,9 +238,28 @@ def _sync_project_debug_file(
             if not target_project:
                 return None
 
+            if source_project_debug_file.storage_path is not None:
+                response = source_project_debug_file.get_objectstore_session().get(
+                    source_project_debug_file.storage_path
+                )
+                if response is None:
+                    raise FileNotFoundError("Debug file does not exist in objectstore")
+                source_fileobj = response.payload
+                try:
+                    target_storage_path = get_session(UsecaseId.DEBUG_FILES, target_project).put(
+                        source_fileobj,
+                        content_type=source_project_debug_file.get_content_type(),
+                    )
+                finally:
+                    source_fileobj.close()
+
             return ProjectDebugFile.objects.create(
                 project_id=target_project.id,
                 file=source_project_debug_file.file,
+                storage_path=target_storage_path,
+                content_type=source_project_debug_file.content_type,
+                file_size=source_project_debug_file.file_size,
+                date_created=source_project_debug_file.date_created,
                 checksum=source_project_debug_file.checksum,
                 object_name=source_project_debug_file.object_name,
                 cpu_name=source_project_debug_file.cpu_name,
@@ -248,14 +268,14 @@ def _sync_project_debug_file(
                 data=source_project_debug_file.data,
                 date_accessed=source_project_debug_file.date_accessed,
             )
-    except IntegrityError as e:
+    except Exception as e:
         sentry_sdk.capture_exception(e)
         return None
 
 
 def _sync_proguard_artifact_release(
     source_proguard_artifact_release: ProguardArtifactRelease, target_org: Organization
-):
+) -> None:
     try:
         with atomic_transaction(using=(router.db_for_write(ProguardArtifactRelease))):
             target_project = _find_matching_project(
@@ -293,7 +313,7 @@ def _sync_proguard_artifact_release(
         sentry_sdk.capture_exception(e)
 
 
-def _find_matching_project(project_id, organization_id):
+def _find_matching_project(project_id: int, organization_id: int) -> Project | None:
     try:
         source_project = Project.objects.get(id=project_id)
 
@@ -302,6 +322,13 @@ def _find_matching_project(project_id, organization_id):
             slug=source_project.slug,
         )
     except Project.DoesNotExist:
-        sentry_sdk.set_context("project_id", project_id)
-        sentry_sdk.set_context("organization_id", organization_id)
+        sentry_sdk.set_context(
+            "args",
+            {
+                "project_id": project_id,
+                "organization_id": organization_id,
+            },
+        )
+        sentry_sdk.set_attribute("args.project_id", project_id)
+        sentry_sdk.set_attribute("args.organization_id", organization_id)
         return None

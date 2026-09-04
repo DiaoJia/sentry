@@ -1,41 +1,43 @@
-import {Fragment, useEffect, useState} from 'react';
+import {Fragment, useMemo} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import {AnimatePresence, type AnimationProps, motion} from 'framer-motion';
+import {useQueryClient} from '@tanstack/react-query';
+import {AnimatePresence, motion, type MotionNodeAnimationOptions} from 'framer-motion';
 
-import {bulkDelete, bulkUpdate, mergeGroups} from 'sentry/actionCreators/group';
-import {
-  addErrorMessage,
-  addLoadingMessage,
-  clearIndicators,
-} from 'sentry/actionCreators/indicator';
-import {Alert} from 'sentry/components/core/alert';
-import {Checkbox} from 'sentry/components/core/checkbox';
-import {Flex} from 'sentry/components/core/layout';
-import IssueStreamHeaderLabel from 'sentry/components/IssueStreamHeaderLabel';
+import {Alert} from '@sentry/scraps/alert';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {Flex, Grid} from '@sentry/scraps/layout';
+
+import {bulkDelete, mergeGroups} from 'sentry/actionCreators/group';
+import {useAnalyticsArea} from 'sentry/components/analyticsArea';
+import type {GroupListColumn} from 'sentry/components/issues/groupList';
+import {IssueStreamHeaderLabel} from 'sentry/components/IssueStreamHeaderLabel';
 import {Sticky} from 'sentry/components/sticky';
 import {t, tct, tn} from 'sentry/locale';
-import GroupStore from 'sentry/stores/groupStore';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import SelectedGroupStore from 'sentry/stores/selectedGroupStore';
-import {useLegacyStore} from 'sentry/stores/useLegacyStore';
-import {space} from 'sentry/styles/space';
+import {GroupStore} from 'sentry/stores/groupStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import type {PageFilters} from 'sentry/types/core';
 import type {Group} from 'sentry/types/group';
-import {defined} from 'sentry/utils';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {uniq} from 'sentry/utils/array/uniq';
-import {useQueryClient} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useMedia from 'sentry/utils/useMedia';
-import useOrganization from 'sentry/utils/useOrganization';
-import {useSyncedLocalStorageState} from 'sentry/utils/useSyncedLocalStorageState';
+import {useApi} from 'sentry/utils/useApi';
+import {useMedia} from 'sentry/utils/useMedia';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {
+  useIssueSelectionActions,
+  useIssueSelectionSummary,
+} from 'sentry/views/issueList/issueSelectionContext';
 import type {IssueUpdateData} from 'sentry/views/issueList/types';
-import {SAVED_SEARCHES_SIDEBAR_OPEN_LOCALSTORAGE_KEY} from 'sentry/views/issueList/utils';
 
-import ActionSet from './actionSet';
-import Headers from './headers';
-import {BULK_LIMIT, BULK_LIMIT_STR, ConfirmAction} from './utils';
+import {ActionSet} from './actionSet';
+import {Headers} from './headers';
+import {
+  BULK_LIMIT,
+  BULK_LIMIT_STR,
+  ConfirmAction,
+  invalidateIssueQueries,
+  performBulkUpdate,
+} from './utils';
 
 type IssueListActionsProps = {
   allResultsVisible: boolean;
@@ -48,9 +50,10 @@ type IssueListActionsProps = {
   selection: PageFilters;
   statsPeriod: string;
   onActionTaken?: (itemIds: string[], data: IssueUpdateData) => void;
+  withColumns?: GroupListColumn[];
 };
 
-const animationProps: AnimationProps = {
+const animationProps: MotionNodeAnimationOptions = {
   initial: {translateY: 8, opacity: 0},
   animate: {translateY: 0, opacity: 1},
   exit: {translateY: -8, opacity: 0},
@@ -70,11 +73,12 @@ function ActionsBarPriority({
   handleDelete,
   handleMerge,
   handleUpdate,
+  toggleSelectAllVisible,
   selectedProjectSlug,
   onSelectStatsPeriod,
-  isSavedSearchesOpen,
   statsPeriod,
   selection,
+  withColumns,
 }: {
   allInQuerySelected: boolean;
   anySelected: boolean;
@@ -82,7 +86,6 @@ function ActionsBarPriority({
   handleDelete: () => void;
   handleMerge: () => void;
   handleUpdate: (data: IssueUpdateData) => void;
-  isSavedSearchesOpen: boolean;
   multiSelected: boolean;
   narrowViewport: boolean;
   onSelectStatsPeriod: (period: string) => void;
@@ -93,25 +96,32 @@ function ActionsBarPriority({
   selectedProjectSlug: string | undefined;
   selection: PageFilters;
   statsPeriod: string;
+  toggleSelectAllVisible: () => void;
+  withColumns?: GroupListColumn[];
 }) {
   const shouldDisplayActions = anySelected && !narrowViewport;
 
   return (
     <ActionsBarContainer>
       {!narrowViewport && (
-        <ActionsCheckbox isReprocessingQuery={displayReprocessingActions}>
-          <Checkbox
-            onChange={() => SelectedGroupStore.toggleSelectAll()}
-            checked={pageSelected || (anySelected ? 'indeterminate' : false)}
-            aria-label={pageSelected ? t('Deselect all') : t('Select all')}
-            disabled={displayReprocessingActions}
-          />
-        </ActionsCheckbox>
+        <Checkbox
+          onChange={toggleSelectAllVisible}
+          checked={pageSelected || (anySelected ? 'indeterminate' : false)}
+          aria-label={pageSelected ? t('Deselect all') : t('Select all')}
+          disabled={displayReprocessingActions}
+        />
       )}
       {!displayReprocessingActions && (
         <AnimatePresence initial={false} mode="wait">
           {shouldDisplayActions ? (
-            <HeaderButtonsWrapper key="actions" {...animationProps}>
+            <HeaderButtonsWrapper
+              key="actions"
+              width={{zero: 'auto', '4xl': '50%'}}
+              gap="xs"
+              flow="column"
+              justify="start"
+              {...animationProps}
+            >
               <ActionSet
                 queryCount={queryCount}
                 query={query}
@@ -129,9 +139,7 @@ function ActionsBarPriority({
               />
             </HeaderButtonsWrapper>
           ) : (
-            <NarrowHeaderButtonsWrapper>
-              <IssueStreamHeaderLabel hideDivider>{t('Issue')}</IssueStreamHeaderLabel>
-            </NarrowHeaderButtonsWrapper>
+            <IssueStreamHeaderLabel hideDivider>{t('Issue')}</IssueStreamHeaderLabel>
           )}
         </AnimatePresence>
       )}
@@ -143,7 +151,7 @@ function ActionsBarPriority({
               selection={selection}
               statsPeriod={statsPeriod}
               isReprocessingQuery={displayReprocessingActions}
-              isSavedSearchesOpen={isSavedSearchesOpen}
+              withColumns={withColumns}
             />
           </AnimatedHeaderItemsContainer>
         )}
@@ -152,7 +160,7 @@ function ActionsBarPriority({
   );
 }
 
-function IssueListActions({
+export function IssueListActions({
   allResultsVisible,
   displayReprocessingActions,
   groupIds,
@@ -163,31 +171,25 @@ function IssueListActions({
   query,
   selection,
   statsPeriod,
+  withColumns,
 }: IssueListActionsProps) {
   const api = useApi();
   const queryClient = useQueryClient();
   const organization = useOrganization();
-  const {
-    pageSelected,
-    multiSelected,
-    anySelected,
-    allInQuerySelected,
-    selectedIdsSet,
-    selectedProjectSlug,
-    setAllInQuerySelected,
-  } = useSelectedGroupsState();
-  const [isSavedSearchesOpen] = useSyncedLocalStorageState(
-    SAVED_SEARCHES_SIDEBAR_OPEN_LOCALSTORAGE_KEY,
-    false
-  );
+  const {setAllInQuerySelected, deselectAll, toggleSelectAllVisible} =
+    useIssueSelectionActions();
+  const {pageSelected, multiSelected, anySelected, allInQuerySelected, selectedIdsSet} =
+    useIssueSelectionSummary();
+  const selectedProjectSlug = useMemo(() => {
+    const projects = Array.from(selectedIdsSet, id => GroupStore.get(id))
+      .filter((group): group is Group => !!group?.project)
+      .map(group => group.project.slug);
+    const uniqProjects = uniq(projects);
+    return uniqProjects.length === 1 ? uniqProjects[0] : undefined;
+  }, [selectedIdsSet]);
   const theme = useTheme();
-
-  const disableActions = useMedia(
-    `(max-width: ${
-      isSavedSearchesOpen ? theme.breakpoints.xlarge : theme.breakpoints.medium
-    })`
-  );
-
+  const disableActions = useMedia(`(width < ${theme.breakpoints.sm})`);
+  const area = useAnalyticsArea();
   const numIssues = selectedIdsSet.size;
 
   function actionSelectedGroups(callback: (itemIds: string[] | undefined) => void) {
@@ -197,7 +199,7 @@ function IssueListActions({
 
     callback(selectedIds);
 
-    SelectedGroupStore.deselectAll();
+    deselectAll();
   }
 
   // TODO: Remove issue.category:error filter when merging/deleting performance issues is supported
@@ -246,110 +248,30 @@ function IssueListActions({
           project_id: trackProject?.id,
           platform: trackProject?.platform,
           items_merged: allInQuerySelected ? 'all_in_query' : itemIds?.length,
+          area,
         });
       }
     });
   }
 
-  // If all selected groups are from the same project, return the project ID.
-  // Otherwise, return the global selection projects. This is important because
-  // resolution in release requires that a project is specified, but the global
-  // selection may not have that information if My Projects is selected.
-  function getSelectedProjectIds(selectedGroupIds: string[] | undefined) {
-    if (!selectedGroupIds) {
-      return selection.projects;
-    }
-
-    const groups = selectedGroupIds.map(id => GroupStore.get(id));
-
-    const projectIds = new Set(groups.map(group => group?.project?.id).filter(defined));
-
-    if (projectIds.size === 1) {
-      return [...projectIds];
-    }
-
-    return selection.projects;
-  }
-
   function handleUpdate(data: IssueUpdateData) {
-    if ('status' in data && data.status === 'ignored') {
-      const statusDetails =
-        'ignoreCount' in data.statusDetails
-          ? 'ignoreCount'
-          : 'ignoreDuration' in data.statusDetails
-            ? 'ignoreDuration'
-            : 'ignoreUserCount' in data.statusDetails
-              ? 'ignoreUserCount'
-              : undefined;
-      trackAnalytics('issues_stream.archived', {
-        action_status_details: statusDetails,
-        action_substatus: data.substatus,
-        organization,
-      });
-    }
-
-    if ('priority' in data) {
-      trackAnalytics('issues_stream.updated_priority', {
-        organization,
-        priority: data.priority,
-      });
-    }
-
     actionSelectedGroups(itemIds => {
-      // If `itemIds` is undefined then it means we expect to bulk update all items
-      // that match the query.
-      //
-      // We need to always respect the projects selected in the global selection header:
-      // * users with no global views requires a project to be specified
-      // * users with global views need to be explicit about what projects the query will run against
-      const projectConstraints = {project: getSelectedProjectIds(itemIds)};
-
-      if (itemIds?.length) {
-        addLoadingMessage(t('Saving changes\u2026'));
-      }
-
-      bulkUpdate(
+      performBulkUpdate({
         api,
-        {
-          orgId: organization.slug,
-          itemIds,
-          data,
-          query,
-          environment: selection.environments,
-          failSilently: true,
-          ...projectConstraints,
-          ...selection.datetime,
+        data,
+        itemIds,
+        organizationSlug: organization.slug,
+        query,
+        selection,
+        onSuccess: updatedItemIds => {
+          onActionTaken?.(updatedItemIds ?? [], data);
+          invalidateIssueQueries({
+            itemIds: updatedItemIds,
+            organizationSlug: organization.slug,
+            queryClient,
+          });
         },
-        {
-          success: () => {
-            clearIndicators();
-            onActionTaken?.(itemIds ?? [], data);
-
-            // Prevents stale data on issue details
-            if (itemIds?.length) {
-              for (const itemId of itemIds) {
-                queryClient.invalidateQueries({
-                  queryKey: [`/organizations/${organization.slug}/issues/${itemId}/`],
-                  exact: false,
-                });
-              }
-            } else {
-              // If we're doing a full query update we invalidate all issue queries to be safe
-              queryClient.invalidateQueries({
-                predicate: apiQuery =>
-                  typeof apiQuery.queryKey[0] === 'string' &&
-                  apiQuery.queryKey[0].startsWith(
-                    `/organizations/${organization.slug}/issues/`
-                  ),
-              });
-            }
-          },
-          error: () => {
-            clearIndicators();
-            addErrorMessage(t('Unable to update issues'));
-          },
-        }
-      );
+      });
     });
   }
 
@@ -367,16 +289,17 @@ function IssueListActions({
         handleDelete={handleDelete}
         handleMerge={handleMerge}
         handleUpdate={handleUpdate}
+        toggleSelectAllVisible={toggleSelectAllVisible}
         multiSelected={multiSelected}
         narrowViewport={disableActions}
         selectedProjectSlug={selectedProjectSlug}
-        isSavedSearchesOpen={isSavedSearchesOpen}
         anySelected={anySelected}
         onSelectStatsPeriod={onSelectStatsPeriod}
+        withColumns={withColumns}
       />
       {!allResultsVisible && pageSelected && (
-        <Alert system type="warning">
-          <Flex justify="center" wrap="wrap" gap={space(1)}>
+        <Alert system variant="info">
+          <Flex justify="start" wrap="wrap" gap="md">
             {allInQuerySelected ? (
               queryCount >= BULK_LIMIT ? (
                 tct(
@@ -419,42 +342,6 @@ function IssueListActions({
   );
 }
 
-function useSelectedGroupsState() {
-  const [allInQuerySelected, setAllInQuerySelected] = useState(false);
-  const selectedGroupState = useLegacyStore(SelectedGroupStore);
-  const selectedIds = SelectedGroupStore.getSelectedIds();
-
-  const projects = [...selectedIds]
-    .map(id => GroupStore.get(id))
-    .filter((group): group is Group => !!group?.project)
-    .map(group => group.project.slug);
-
-  const uniqProjects = uniq(projects);
-  // we only want selectedProjectSlug set if there is 1 project
-  // more or fewer should result in a null so that the action toolbar
-  // can behave correctly.
-  const selectedProjectSlug = uniqProjects.length === 1 ? uniqProjects[0] : undefined;
-
-  const pageSelected = SelectedGroupStore.allSelected();
-  const multiSelected = SelectedGroupStore.multiSelected();
-  const anySelected = SelectedGroupStore.anySelected();
-  const selectedIdsSet = SelectedGroupStore.getSelectedIds();
-
-  useEffect(() => {
-    setAllInQuerySelected(false);
-  }, [selectedGroupState]);
-
-  return {
-    pageSelected,
-    multiSelected,
-    anySelected,
-    allInQuerySelected,
-    selectedIdsSet,
-    selectedProjectSlug,
-    setAllInQuerySelected,
-  };
-}
-
 function shouldConfirm(
   action: ConfirmAction,
   {pageSelected, selectedIdsSet}: {pageSelected: boolean; selectedIdsSet: Set<string>}
@@ -477,7 +364,7 @@ function shouldConfirm(
 }
 
 const StickyActions = styled(Sticky)`
-  z-index: ${p => p.theme.zIndex.issuesList.stickyHeader};
+  z-index: ${p => p.theme.zIndex.header};
 
   /* Remove border radius from the action bar when stuck. Without this there is
    * a small gap where color can peek through. */
@@ -485,61 +372,33 @@ const StickyActions = styled(Sticky)`
     border-radius: 0;
   }
 
-  border-bottom: 1px solid ${p => p.theme.border};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
   border-top: none;
-  border-radius: ${p => p.theme.borderRadius} ${p => p.theme.borderRadius} 0 0;
+  border-radius: ${p => p.theme.radius.md} ${p => p.theme.radius.md} 0 0;
 `;
 
 const ActionsBarContainer = styled('div')`
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content 1fr max-content;
+  gap: ${p => p.theme.space.md};
   min-height: 36px;
-  padding-top: ${space(0.5)};
-  padding-bottom: ${space(0.5)};
+  padding-top: ${p => p.theme.space.xs};
+  padding-bottom: ${p => p.theme.space.xs};
+  padding-left: ${p => p.theme.space.xl};
   align-items: center;
-  background: ${p => p.theme.backgroundSecondary};
+  background: ${p => p.theme.tokens.background.secondary};
   border-radius: 6px 6px 0 0;
 `;
 
-const ActionsCheckbox = styled('div')<{isReprocessingQuery: boolean}>`
-  display: flex;
-  align-items: center;
-  padding-left: ${space(2)};
-  margin-bottom: 1px;
-  ${p => p.isReprocessingQuery && 'flex: 1'};
-`;
+const MotionGrid = motion.create(Grid);
 
-const HeaderButtonsWrapper = styled(motion.div)`
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    width: 50%;
-  }
-  flex: 1;
-  margin: 0 ${space(1)};
-  display: grid;
-  gap: ${space(0.5)};
-  grid-auto-flow: column;
-  justify-content: flex-start;
-  white-space: nowrap;
-`;
-
-const NarrowHeaderButtonsWrapper = styled(motion.div)`
-  @media (min-width: ${p => p.theme.breakpoints.large}) {
-    width: 50%;
-  }
-  flex: 1;
-  margin-left: ${space(1)};
-  margin-right: ${space(2)};
-  display: grid;
-  gap: ${space(0.5)};
-  grid-auto-flow: column;
-  justify-content: space-between;
+const HeaderButtonsWrapper = styled(MotionGrid)`
+  grid-column: 2 / -1;
   white-space: nowrap;
 `;
 
 const AnimatedHeaderItemsContainer = styled(motion.div)`
+  grid-column: -1;
   display: flex;
   align-items: center;
 `;
-
-export {IssueListActions};
-
-export default IssueListActions;

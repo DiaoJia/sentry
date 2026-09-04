@@ -3,9 +3,8 @@ import styled from '@emotion/styled';
 
 import onboardingFrameworkSelectionJavascript from 'sentry-images/spot/replay-dead-rage-changelog.svg';
 
-import ClippedBox from 'sentry/components/clippedBox';
+import {ClippedBox} from 'sentry/components/clippedBox';
 import * as Storybook from 'sentry/stories';
-import {space} from 'sentry/styles/space';
 
 export default Storybook.story('ClippedBox', story => {
   story('Default', () => (
@@ -34,8 +33,8 @@ export default Storybook.story('ClippedBox', story => {
     left: 0;
     right: 0;
     bottom: 0;
-    padding: ${space(1)};
-    background: ${p => p.theme.background};
+    padding: ${p => p.theme.space.md};
+    background: ${p => p.theme.tokens.background.primary};
     text-align: center;
     pointer-events: none;
   `;
@@ -53,7 +52,7 @@ export default Storybook.story('ClippedBox', story => {
       render={ClippedBox}
       propMatrix={{
         btnText: ['Custom Label'],
-        buttonProps: [undefined, {priority: 'danger'}],
+        buttonProps: [undefined, {variant: 'danger'}],
         clipHeight: [100],
         clipFade: [
           undefined,
@@ -72,15 +71,11 @@ export default Storybook.story('ClippedBox', story => {
       <Fragment>
         <p>
           Some callbacks are available:{' '}
-          <Storybook.JSXProperty name="onSetRenderedHeight" value={Function} />&{' '}
           <Storybook.JSXProperty name="onReveal" value={Function} />.
         </p>
         <Storybook.SideBySide>
           {[50, 100, 150].map(imgHeight => {
             const [isRevealed, setIsRevealed] = useState(false);
-            const [renderedHeight, setRenderedHeight] = useState<number | undefined>(
-              undefined
-            );
             return (
               <div key={imgHeight}>
                 <p>
@@ -89,13 +84,8 @@ export default Storybook.story('ClippedBox', story => {
                   </Storybook.JSXNode>
                 </p>
                 <p>isRevealed = {String(isRevealed)}</p>
-                <p>renderedHeight = {renderedHeight}</p>
                 <Storybook.SizingWindow>
-                  <ClippedBox
-                    clipHeight={100}
-                    onReveal={() => setIsRevealed(true)}
-                    onSetRenderedHeight={setRenderedHeight}
-                  >
+                  <ClippedBox clipHeight={100} onReveal={() => setIsRevealed(true)}>
                     <img
                       src={onboardingFrameworkSelectionJavascript}
                       height={imgHeight}

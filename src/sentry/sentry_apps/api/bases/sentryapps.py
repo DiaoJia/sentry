@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from functools import wraps
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 import sentry_sdk
@@ -10,12 +9,13 @@ from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from sentry.api.authentication import ClientIdSecretAuthentication
+from sentry import options
+from sentry.api.authentication import ClientIdSecretAuthentication, JWTClientSecretAuthentication
 from sentry.api.base import Endpoint
 from sentry.api.permissions import SentryPermission, StaffPermissionMixin
+from sentry.auth.scope_declaration import update_permission_scope_declaration
 from sentry.auth.staff import is_active_staff
 from sentry.auth.superuser import is_active_superuser, superuser_has_permission
-from sentry.coreapi import APIError
 from sentry.integrations.api.bases.integration import PARANOID_GET
 from sentry.models.organization import OrganizationStatus
 from sentry.organizations.services.organization import (
@@ -24,9 +24,11 @@ from sentry.organizations.services.organization import (
 )
 from sentry.sentry_apps.models.sentry_app import SentryApp
 from sentry.sentry_apps.services.app import RpcSentryApp, app_service
+from sentry.sentry_apps.services.cell.model import RpcSentryAppError
 from sentry.sentry_apps.utils.errors import (
     SentryAppError,
     SentryAppIntegratorError,
+    SentryAppPublicErrorBody,
     SentryAppSentryError,
 )
 from sentry.users.models.user import User
@@ -37,17 +39,6 @@ from sentry.utils.strings import to_single_line_str
 COMPONENT_TYPES = ["stacktrace-link", "issue-link"]
 
 logger = logging.getLogger(__name__)
-
-
-def catch_raised_errors(func):
-    @wraps(func)
-    def wrapped(self, *args, **kwargs):
-        try:
-            return func(self, *args, **kwargs)
-        except APIError as e:
-            return Response({"detail": e.msg}, status=400)
-
-    return wrapped
 
 
 def ensure_scoped_permission(request: Request, allowed_scopes: Sequence[str] | None) -> bool:
@@ -105,7 +96,41 @@ class SentryAppsAndStaffPermission(StaffPermissionMixin, SentryAppsPermission):
     staff_allowed_methods = {"GET"}
 
 
+def _check_sentry_app_disabled(
+    endpoint: IntegrationPlatformEndpoint,
+    request: Request,
+    sentry_app: SentryApp | RpcSentryApp,
+) -> None:
+    if not options.get("sentry-apps.disabled-enforcement"):
+        return
+
+    if not sentry_app.is_disabled:
+        return
+
+    if request.method in endpoint.allow_disabled_sentry_app_for_methods:
+        return
+
+    raise SentryAppError(
+        message="This Sentry App has been disabled",
+        status_code=403,
+    )
+
+
 class IntegrationPlatformEndpoint(Endpoint):
+    allow_disabled_sentry_app_for_methods: set[str] = set()
+
+    def respond_rpc_sentry_app_error(
+        self, rpc_error: RpcSentryAppError
+    ) -> Response[SentryAppPublicErrorBody]:
+        """
+        Surfaces errors from the cell-side Sentry App RPC to the client.
+        """
+        response_body = rpc_error.get_public_dict()
+        status_code = rpc_error.status_code or 500
+        response = Response(response_body, status=status_code)
+        response.exception = True
+        return response
+
     def handle_exception_with_details(self, request, exc, handler_context=None, scope=None):
         return self._handle_sentry_app_exception(
             exception=exc
@@ -191,7 +216,7 @@ class SentryAppsBaseEndpoint(IntegrationPlatformEndpoint):
         objects from URI params, we're applying the same logic for a param in
         the request body.
         """
-        if not request.data:
+        if request.method != "POST":
             return (args, kwargs)
 
         context = self._get_org_context(request)
@@ -209,18 +234,16 @@ class SentryAppPermission(SentryPermission):
         "DELETE": ("org:admin",),
     }
 
-    published_scope_map = {
+    published_scope_map = scope_map = {
         "GET": PARANOID_GET,
         "PUT": ("org:write", "org:admin"),
         "POST": ("org:admin",),
         "DELETE": ("org:admin",),
     }
 
-    @property
-    def scope_map(self):
-        return self.published_scope_map
-
     def has_object_permission(self, request: Request, view, sentry_app: RpcSentryApp | SentryApp):
+        scope_map = self._scopes_for_sentry_app(sentry_app)
+
         if not hasattr(request, "user") or not request.user:
             return False
 
@@ -245,7 +268,6 @@ class SentryAppPermission(SentryPermission):
                     message="User must be in the app owner's organization for unpublished apps",
                     status_code=403,
                     public_context={
-                        "integration": sentry_app.slug,
                         "user_organizations": [org.slug for org in organizations],
                     },
                 )
@@ -256,15 +278,16 @@ class SentryAppPermission(SentryPermission):
         if sentry_app.is_published and request.method == "GET":
             return True
 
-        return ensure_scoped_permission(
-            request, self._scopes_for_sentry_app(sentry_app).get(request.method)
-        )
+        return ensure_scoped_permission(request, scope_map.get(request.method))
 
     def _scopes_for_sentry_app(self, sentry_app):
+        scope_map: Mapping[str, Collection[str]]
         if sentry_app.is_published:
-            return self.published_scope_map
+            scope_map = self.published_scope_map
         else:
-            return self.unpublished_scope_map
+            scope_map = self.unpublished_scope_map
+        update_permission_scope_declaration(self, scope_map)
+        return scope_map
 
 
 class SentryAppAndStaffPermission(StaffPermissionMixin, SentryAppPermission):
@@ -286,14 +309,16 @@ class SentryAppBaseEndpoint(IntegrationPlatformEndpoint):
             raise SentryAppError(message="Could not find the requested sentry app", status_code=404)
 
         self.check_object_permissions(request, sentry_app)
+        _check_sentry_app_disabled(self, request, sentry_app)
 
         sentry_sdk.get_isolation_scope().set_tag("sentry_app", sentry_app.slug)
+        sentry_sdk.get_isolation_scope().set_attribute("sentry_app", sentry_app.slug)
 
         kwargs["sentry_app"] = sentry_app
         return (args, kwargs)
 
 
-class RegionSentryAppBaseEndpoint(IntegrationPlatformEndpoint):
+class CellSentryAppBaseEndpoint(IntegrationPlatformEndpoint):
     def convert_args(
         self, request: Request, sentry_app_id_or_slug: int | str, *args: Any, **kwargs: Any
     ):
@@ -305,8 +330,10 @@ class RegionSentryAppBaseEndpoint(IntegrationPlatformEndpoint):
             raise SentryAppError(message="Could not find the requested sentry app", status_code=404)
 
         self.check_object_permissions(request, sentry_app)
+        _check_sentry_app_disabled(self, request, sentry_app)
 
         sentry_sdk.get_isolation_scope().set_tag("sentry_app", sentry_app.slug)
+        sentry_sdk.get_isolation_scope().set_attribute("sentry_app", sentry_app.slug)
 
         kwargs["sentry_app"] = sentry_app
         return (args, kwargs)
@@ -431,8 +458,10 @@ class SentryAppInstallationBaseEndpoint(IntegrationPlatformEndpoint):
             )
 
         self.check_object_permissions(request, installation)
+        _check_sentry_app_disabled(self, request, installation.sentry_app)
 
         sentry_sdk.get_isolation_scope().set_tag("sentry_app_installation", installation.uuid)
+        sentry_sdk.get_isolation_scope().set_attribute("sentry_app_installation", installation.uuid)
 
         kwargs["installation"] = installation
         return (args, kwargs)
@@ -440,7 +469,7 @@ class SentryAppInstallationBaseEndpoint(IntegrationPlatformEndpoint):
 
 class SentryAppInstallationExternalIssuePermission(SentryAppInstallationPermission):
     scope_map = {
-        "POST": ("event:read", "event:write", "event:admin"),
+        "POST": ("event:write", "event:admin"),
         "DELETE": ("event:admin",),
     }
 
@@ -469,7 +498,7 @@ class SentryAppAuthorizationsPermission(SentryPermission):
 
 
 class SentryAppAuthorizationsBaseEndpoint(SentryAppInstallationBaseEndpoint):
-    authentication_classes = (ClientIdSecretAuthentication,)
+    authentication_classes = (JWTClientSecretAuthentication, ClientIdSecretAuthentication)
     permission_classes = (SentryAppAuthorizationsPermission,)
 
 
@@ -530,3 +559,45 @@ class SentryAppStatsPermission(SentryPermission):
 
         assert request.method, "method must be present in request to get permissions"
         return ensure_scoped_permission(request, self.scope_map.get(request.method))
+
+
+class SentryAppWebhookRequestsPermission(SentryPermission):
+    internal_app_scope_map: dict[str, Sequence[str]] = {
+        "GET": ("org:read", "org:integrations", "org:write", "org:admin"),
+    }
+    public_app_scope_map: dict[str, Sequence[str]] = {
+        "GET": ("org:admin", "org:integrations"),
+    }
+    # Token authentication checks scopes before the Sentry App is resolved. The
+    # internal policy is the union of all scopes that can be valid for this endpoint.
+    scope_map = internal_app_scope_map
+
+    def has_object_permission(self, request: Request, view, sentry_app: SentryApp | RpcSentryApp):
+        if not hasattr(request, "user") or not request.user:
+            return False
+
+        owner_app = organization_service.get_organization_by_id(
+            id=sentry_app.owner_id, user_id=request.user.id
+        )
+        if owner_app is None:
+            logger.error(
+                "sentry_app_webhook_requests.permission_org_not_found",
+                extra={
+                    "sentry_app_id": sentry_app.id,
+                    "owner_org_id": sentry_app.owner_id,
+                    "user_id": request.user.id,
+                },
+            )
+            return False
+        self.determine_access(request, owner_app)
+
+        if is_active_superuser(request):
+            return True
+
+        assert request.method, "method must be present in request to get permissions"
+        allowed_scopes = (
+            self.internal_app_scope_map.get(request.method)
+            if sentry_app.is_internal
+            else self.public_app_scope_map.get(request.method)
+        )
+        return ensure_scoped_permission(request, allowed_scopes)

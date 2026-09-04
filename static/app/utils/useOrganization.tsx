@@ -1,7 +1,7 @@
 import {useContext} from 'react';
 
 import type {Organization} from 'sentry/types/organization';
-import {OrganizationContext} from 'sentry/views/organizationContext';
+import {OrganizationContext} from 'sentry/utils/organizationContext';
 
 interface Options<AllowNull extends boolean = boolean> {
   /**
@@ -16,10 +16,10 @@ interface Options<AllowNull extends boolean = boolean> {
 // The additional signatures provide proper type hints for when we set
 // `allowNull` to true.
 
-function useOrganization(opts?: Options<false>): Organization;
-function useOrganization(opts: Options<true>): Organization | null;
+export function useOrganization(opts?: Options<false>): Organization;
+export function useOrganization(opts: Options<true>): Organization | null;
 
-function useOrganization({allowNull = false}: Options = {}) {
+export function useOrganization({allowNull = false}: Options = {}) {
   const organization = useContext(OrganizationContext);
 
   if (allowNull) {
@@ -32,5 +32,3 @@ function useOrganization({allowNull = false}: Options = {}) {
 
   return organization;
 }
-
-export default useOrganization;

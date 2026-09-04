@@ -22,9 +22,9 @@ function BaseSimilarSpectrum({className, highSpectrumLabel, lowSpectrumLabel}: P
   );
 }
 
-const SimilarSpectrum = styled(BaseSimilarSpectrum)`
+export const SimilarSpectrum = styled(BaseSimilarSpectrum)`
   display: flex;
-  font-size: ${p => p.theme.fontSize.sm};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 type ItemProps = {
@@ -35,7 +35,5 @@ const SpectrumItem = styled('span')<ItemProps>`
   border-radius: 2px;
   margin: 5px;
   width: 14px;
-  ${p => `background-color: ${SIMILARITY_SCORE_COLORS[p.colorIndex]};`};
+  background-color: ${p => SIMILARITY_SCORE_COLORS[p.colorIndex]};
 `;
-
-export default SimilarSpectrum;

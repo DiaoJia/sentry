@@ -33,7 +33,9 @@ def create_title_block(text: str) -> ColumnSetBlock:
     )
 
 
-def build_installation_card(signed_params: str, title: str, description: str, instruction: str):
+def build_installation_card(
+    signed_params: str, title: str, description: str, instruction: str
+) -> AdaptiveCard:
     url = absolute_uri(
         InstallationMessages.MSTEAMS_CONFIGURE_URL.format(signed_params=signed_params)
     )
@@ -83,8 +85,8 @@ def build_installation_confirmation_message(
 def build_team_installation_confirmation_message(
     organization: Organization | RpcOrganizationSummary,
 ) -> AdaptiveCard:
-    alert_rule_url = absolute_uri(
-        InstallationMessages.ALERT_RULE_URL.format(organization_slug=organization.slug)
+    monitors_url = absolute_uri(
+        InstallationMessages.MONITORS_URL.format(organization_slug=organization.slug)
     )
 
     return build_installation_confirmation_message(
@@ -93,7 +95,7 @@ def build_team_installation_confirmation_message(
         ),
         text=InstallationMessages.TEAM_INSTALLATION_CONFIRMATION_INSTRUCTION,
         button_title=InstallationMessages.TEAM_INSTALLATION_CONFIRMATION_BUTTON,
-        url=alert_rule_url,
+        url=monitors_url,
     )
 
 

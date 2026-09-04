@@ -1,23 +1,22 @@
-import {GitHubIntegrationProviderFixture} from 'sentry-fixture/githubIntegrationProvider';
+import {IntegrationProviderFixture} from 'sentry-fixture/integrationProvider';
 import {OrganizationFixture} from 'sentry-fixture/organization';
-import {ProjectFixture} from 'sentry-fixture/project';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
+import * as pipelineModal from 'sentry/components/pipeline/modal';
 import type {IntegrationProvider} from 'sentry/types/integrations';
 import type {Organization} from 'sentry/types/organization';
-import IntegrationButton from 'sentry/views/settings/organizationIntegrations/integrationButton';
+import {IntegrationButton} from 'sentry/views/settings/organizationIntegrations/integrationButton';
 import {IntegrationContext} from 'sentry/views/settings/organizationIntegrations/integrationContext';
 
-describe('AddIntegrationButton', function () {
+describe('AddIntegrationButton', () => {
   let org: Organization,
     provider: IntegrationProvider,
     hasAccess: boolean,
     externalInstallText: string | undefined;
-  const project = ProjectFixture();
 
-  beforeEach(function () {
-    provider = GitHubIntegrationProviderFixture();
+  beforeEach(() => {
+    provider = IntegrationProviderFixture({key: 'github', slug: 'github'});
     org = OrganizationFixture();
     hasAccess = true;
     externalInstallText = undefined;
@@ -33,7 +32,6 @@ describe('AddIntegrationButton', function () {
           view: 'onboarding',
           already_installed: false,
         },
-        modalParams: {project: project.id},
       }}
     >
       <IntegrationButton
@@ -41,28 +39,26 @@ describe('AddIntegrationButton', function () {
         onAddIntegration={jest.fn()}
         onExternalClick={jest.fn()}
         externalInstallText={externalInstallText}
-        buttonProps={null}
+        buttonProps={{}}
       />
     </IntegrationContext>
   );
 
-  it('Opens the setup dialog on click', async function () {
-    const focus = jest.fn();
-    const open = jest.fn().mockReturnValue({focus, close: jest.fn()});
-    // any is needed here because getSentry has different types for global
-    (global as any).open = open;
+  it('Opens the pipeline modal on click', async () => {
+    const openPipelineModalSpy = jest
+      .spyOn(pipelineModal, 'openPipelineModal')
+      .mockImplementation(() => {});
 
     render(getComponent());
 
     await userEvent.click(screen.getByText(/add installation/i));
-    expect(open.mock.calls).toHaveLength(1);
-    expect(focus.mock.calls).toHaveLength(1);
-    expect(open.mock.calls[0][2]).toBe(
-      'scrollbars=yes,width=100,height=100,top=334,left=462'
+
+    expect(openPipelineModalSpy).toHaveBeenCalledWith(
+      expect.objectContaining({type: 'integration', provider: 'github'})
     );
   });
 
-  it('Renders request button when user does not have access', async function () {
+  it('Renders request button when user does not have access', async () => {
     hasAccess = false;
 
     render(getComponent(), {organization: org});
@@ -70,7 +66,7 @@ describe('AddIntegrationButton', function () {
     await userEvent.click(screen.getByText('Request Installation'));
   });
 
-  it('Handles external installations with default button text', async function () {
+  it('Handles external installations with default button text', async () => {
     provider.canAdd = false;
     provider.metadata.aspects = {
       externalInstall: {
@@ -86,7 +82,7 @@ describe('AddIntegrationButton', function () {
     await userEvent.click(screen.getByText('Teams Marketplace'));
   });
 
-  it('Handles external installations with custom button text', async function () {
+  it('Handles external installations with custom button text', async () => {
     provider.canAdd = false;
     provider.metadata.aspects = {
       externalInstall: {
@@ -101,5 +97,32 @@ describe('AddIntegrationButton', function () {
     render(getComponent(), {organization: org});
 
     await userEvent.click(screen.getByText('Add Installation'));
+  });
+
+  it('renders Enable Integration button when directEnable aspect is set and canAdd is true', () => {
+    provider.canAdd = true;
+    provider.metadata.aspects = {directEnable: true};
+
+    MockApiClient.addMockResponse({
+      url: `/organizations/${org.slug}/integrations/direct-enable/${provider.slug}/`,
+      method: 'POST',
+      body: {},
+    });
+
+    render(getComponent(), {organization: org});
+
+    expect(screen.getByRole('button', {name: 'Enable Integration'})).toBeInTheDocument();
+  });
+
+  it('renders nothing when directEnable aspect is set and canAdd is false (already installed)', () => {
+    provider.canAdd = false;
+    provider.metadata.aspects = {directEnable: true};
+
+    render(getComponent(), {organization: org});
+
+    expect(
+      screen.queryByRole('button', {name: 'Enable Integration'})
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 });

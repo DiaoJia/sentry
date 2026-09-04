@@ -1,16 +1,14 @@
 import {EventFixture} from 'sentry-fixture/event';
-import {GroupFixture} from 'sentry-fixture/group';
 import {ProjectFixture} from 'sentry-fixture/project';
 
 import {render, screen} from 'sentry-test/reactTestingLibrary';
 
-import ContextCard from 'sentry/components/events/contexts/contextCard';
+import {ContextCard} from 'sentry/components/events/contexts/contextCard';
 import * as iconTools from 'sentry/components/events/contexts/contextIcon';
 
-describe('ContextCard', function () {
-  const group = GroupFixture();
+describe('ContextCard', () => {
   const project = ProjectFixture();
-  it('renders the card with formatted context data', function () {
+  it('renders the card with formatted context data', () => {
     const event = EventFixture();
     const alias = 'Things in my Vicinity';
     const simpleContext = {
@@ -37,7 +35,6 @@ describe('ContextCard', function () {
         alias={alias}
         value={customContext}
         event={event}
-        group={group}
         project={project}
       />
     );
@@ -55,7 +52,7 @@ describe('ContextCard', function () {
     });
   });
 
-  it('renders with icons if able', function () {
+  it('renders with icons if able', () => {
     const event = EventFixture();
     const iconSpy = jest
       .spyOn(iconTools, 'getLogoImage')
@@ -72,7 +69,6 @@ describe('ContextCard', function () {
         alias="browser"
         value={browserContext}
         event={event}
-        group={group}
         project={project}
       />
     );
@@ -93,7 +89,6 @@ describe('ContextCard', function () {
         alias="organization"
         value={unknownContext}
         event={event}
-        group={group}
         project={project}
       />
     );
@@ -101,7 +96,7 @@ describe('ContextCard', function () {
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 
-  it('renders the annotated text and errors', function () {
+  it('renders the annotated text and errors', () => {
     const alias = 'broken';
     const event = EventFixture({
       _meta: {
@@ -150,7 +145,6 @@ describe('ContextCard', function () {
         alias={alias}
         value={errorContext}
         event={event}
-        group={group}
         project={project}
       />
     );

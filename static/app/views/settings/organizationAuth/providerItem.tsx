@@ -1,17 +1,17 @@
 import styled from '@emotion/styled';
 
-import Access from 'sentry/components/acl/access';
+import {Tag} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+
+import {Access} from 'sentry/components/acl/access';
 import Feature from 'sentry/components/acl/feature';
-import FeatureDisabled from 'sentry/components/acl/featureDisabled';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
+import {FeatureDisabled} from 'sentry/components/acl/featureDisabled';
 import {Hovercard} from 'sentry/components/hovercard';
-import PanelItem from 'sentry/components/panels/panelItem';
+import {PanelItem} from 'sentry/components/panels/panelItem';
 import {IconLock} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {AuthProvider} from 'sentry/types/auth';
-import type {FeatureDisabledHooks} from 'sentry/types/hooks';
+import type {FeatureDisabledOverrides} from 'sentry/types/overrides';
 import {descopeFeatureName} from 'sentry/utils';
 
 type RenderInstallButtonProps = {
@@ -32,14 +32,9 @@ type LockedFeatureProps = {
 type Props = {
   active: boolean;
   provider: AuthProvider;
-  onConfigure?: (providerKey: string, e: React.MouseEvent) => void;
 };
 
-function ProviderItem({provider, active, onConfigure}: Props) {
-  const handleConfigure = (e: React.MouseEvent) => {
-    onConfigure?.(provider.key, e);
-  };
-
+export function ProviderItem({provider, active}: Props) {
   const renderDisabledLock = (p: LockedFeatureProps) => (
     <LockedFeature provider={p.provider} features={p.features} />
   );
@@ -53,7 +48,6 @@ function ProviderItem({provider, active, onConfigure}: Props) {
           size="sm"
           value={provider.key}
           disabled={!hasFeature || !hasAccess}
-          onClick={handleConfigure}
         >
           {t('Configure')}
         </Button>
@@ -61,14 +55,14 @@ function ProviderItem({provider, active, onConfigure}: Props) {
     </Access>
   );
 
-  // TODO(epurkhiser): We should probably use a more explicit hook name,
+  // TODO(epurkhiser): We should probably use a more explicit override name,
   // instead of just the feature names (sso-basic, sso-saml2, etc).
   const featureKey = provider.requiredFeature;
-  const hookName = featureKey
-    ? (`feature-disabled:${descopeFeatureName(featureKey)}` as keyof FeatureDisabledHooks)
+  const overrideName = featureKey
+    ? (`feature-disabled:${descopeFeatureName(featureKey)}` as keyof FeatureDisabledOverrides)
     : null;
 
-  const featureProps = hookName ? {hookName} : {};
+  const featureProps = overrideName ? {overrideName} : {};
 
   const getProviderDescription = (providerName: any) => {
     if (providerName === 'SAML2') {
@@ -87,7 +81,7 @@ function ProviderItem({provider, active, onConfigure}: Props) {
   return (
     <Feature
       {...featureProps}
-      features={[featureKey].filter(f => f)}
+      features={[featureKey].filter(Boolean)}
       renderDisabled={({children, ...props}) =>
         typeof children === 'function' &&
         // TODO(ts): the Feature component isn't correctly templatized to allow
@@ -137,13 +131,11 @@ function ProviderItem({provider, active, onConfigure}: Props) {
   );
 }
 
-export default ProviderItem;
-
 const ProviderInfo = styled('div')`
   flex: 1;
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: ${space(2)};
+  gap: ${p => p.theme.space.xl};
 `;
 
 const ProviderLogo = styled('div')`
@@ -155,12 +147,12 @@ const ProviderLogo = styled('div')`
 `;
 
 const ProviderName = styled('div')`
-  font-weight: ${p => p.theme.fontWeightBold};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
 const ProviderDescription = styled('div')`
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
+  font-size: ${p => p.theme.font.size.sm};
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const FeatureBadge = styled('div')`
@@ -168,9 +160,9 @@ const FeatureBadge = styled('div')`
 `;
 
 const ActiveIndicator = styled('div')`
-  background: ${p => p.theme.green300};
-  color: ${p => p.theme.white};
-  padding: ${space(1)} ${space(1.5)};
+  background: ${p => p.theme.colors.green400};
+  color: ${p => p.theme.colors.white};
+  padding: ${p => p.theme.space.md} ${p => p.theme.space.lg};
   border-radius: 2px;
   font-size: 0.8em;
 `;
@@ -192,7 +184,7 @@ function LockedFeature({provider, features, className}: LockedFeatureProps) {
         />
       }
     >
-      <Tag role="status" icon={<IconLock locked />}>
+      <Tag variant="muted" role="status" icon={<IconLock locked />}>
         {t('disabled')}
       </Tag>
     </DisabledHovercard>

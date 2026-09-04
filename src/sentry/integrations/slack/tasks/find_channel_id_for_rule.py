@@ -10,6 +10,7 @@ from sentry.integrations.slack.utils.channel import (
 )
 from sentry.integrations.slack.utils.constants import SLACK_RATE_LIMITED_MESSAGE
 from sentry.integrations.slack.utils.rule_status import RedisRuleStatus
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.models.project import Project
 from sentry.models.rule import Rule, RuleActivity, RuleActivityType
 from sentry.projects.project_rules.creator import ProjectRuleCreator
@@ -17,19 +18,16 @@ from sentry.projects.project_rules.updater import ProjectRuleUpdater
 from sentry.shared_integrations.exceptions import ApiRateLimitedError, DuplicateDisplayNameError
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import integrations_tasks
+from sentry.types.actor import Actor
 
 logger = logging.getLogger("sentry.integrations.slack.tasks")
 
 
 @instrumented_task(
     name="sentry.integrations.slack.tasks.search_channel_id_for_rule",
-    queue="integrations",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=integrations_tasks,
-    ),
+    namespace=integrations_tasks,
+    silo_mode=SiloMode.CELL,
 )
 def find_channel_id_for_rule(
     actions: Sequence[dict[str, Any]],
@@ -60,7 +58,9 @@ def find_channel_id_for_rule(
             break
 
     integrations = integration_service.get_integrations(
-        organization_id=organization.id, providers=["slack"], integration_ids=[integration_id]
+        organization_id=organization.id,
+        providers=[IntegrationProviderSlug.SLACK.value],
+        integration_ids=[integration_id],
     )
     if not integrations:
         redis_rule_status.set_value("failed")
@@ -109,6 +109,11 @@ def find_channel_id_for_rule(
 
         kwargs["actions"] = actions
         kwargs["project"] = project
+
+        # Deserialize owner string identifier back to Actor object
+        owner = kwargs.get("owner")
+        if owner and isinstance(owner, str):
+            kwargs["owner"] = Actor.from_identifier(owner)
 
         if rule_id:
             rule = Rule.objects.get(id=rule_id)

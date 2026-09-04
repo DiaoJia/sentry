@@ -1,150 +1,73 @@
 import type {Location} from 'history';
 
+import type {LinkProps} from '@sentry/scraps/link';
+
 import type {Crumb} from 'sentry/components/breadcrumbs';
-import Breadcrumbs from 'sentry/components/breadcrumbs';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
 import {t} from 'sentry/locale';
 import type {Organization} from 'sentry/types/organization';
-import type {SpanSlug} from 'sentry/utils/performance/suspectSpans/types';
-import {decodeScalar} from 'sentry/utils/queryString';
-import {DOMAIN_VIEW_BASE_TITLE} from 'sentry/views/insights/pages/settings';
 import type {DomainView} from 'sentry/views/insights/pages/useFilters';
-import {vitalDetailRouteWithQuery} from 'sentry/views/performance/vitalDetail/utils';
 
-import type Tab from './transactionSummary/tabs';
 import {transactionSummaryRouteWithQuery} from './transactionSummary/utils';
 
-type Props = {
+type TabCrumbProps = {
   location: Location;
   organization: Organization;
-  eventSlug?: string;
-  spanSlug?: SpanSlug;
-  tab?: Tab;
-  traceSlug?: string;
-  transaction?: {
-    name: string;
-    project: string;
-  };
-  vitalName?: string;
-};
-
-function Breadcrumb(props: Props) {
-  function getCrumbs() {
-    const crumbs: Crumb[] = [];
-    const {
-      organization,
-      location,
-      transaction,
-      vitalName,
-      spanSlug,
-      eventSlug,
-      traceSlug,
-    } = props;
-
-    crumbs.push({
-      label: DOMAIN_VIEW_BASE_TITLE,
-    });
-
-    crumbs.push(
-      ...getTabCrumbs({
-        location,
-        organization,
-        transaction,
-        vitalName,
-        spanSlug,
-        eventSlug,
-        traceSlug,
-      })
-    );
-
-    return crumbs;
-  }
-
-  return <Breadcrumbs crumbs={getCrumbs()} />;
-}
-
-export const getTabCrumbs = ({
-  location,
-  organization,
-  transaction,
-  spanSlug,
-  eventSlug,
-  traceSlug,
-  view,
-  vitalName,
-  shouldUseOTelFriendlyUI,
-}: {
-  location: Location;
-  organization: Organization;
-  eventSlug?: string;
-  shouldUseOTelFriendlyUI?: boolean;
-  spanSlug?: SpanSlug;
-  traceSlug?: string;
   transaction?: {
     name: string;
     project: string;
   };
   view?: DomainView;
-  vitalName?: string;
-}) => {
-  const crumbs: Crumb[] = [];
+};
 
-  if (vitalName) {
-    const webVitalsTarget = vitalDetailRouteWithQuery({
-      orgSlug: organization.slug,
-      vitalName: 'fcp',
-      projectID: decodeScalar(location.query.project),
-      query: location.query,
-    });
-    crumbs.push({
-      to: webVitalsTarget,
-      label: t('Vital Detail'),
-      preservePageFilters: true,
-    });
-    return crumbs;
-  }
+/**
+ * A parent crumb of the transaction summary. Labels are plain strings so the
+ * same list can feed the legacy `Breadcrumbs` and the typed `BreadcrumbList`.
+ */
+export interface TransactionSummaryParentCrumb {
+  label: string;
+  to: LinkProps['to'];
+}
 
+/**
+ * The crumbs leading up to the transaction summary. Excludes the transaction
+ * itself — that is the page title. Only linked crumbs are produced, since an
+ * unlinked parent is not worth a slot.
+ */
+export function getTransactionSummaryParentCrumbs({
+  location,
+  organization,
+  transaction,
+  view,
+}: TabCrumbProps): TransactionSummaryParentCrumb[] {
   if (!transaction) {
-    return crumbs;
+    return [];
   }
 
-  const routeQuery = {
+  const to = transactionSummaryRouteWithQuery({
     organization,
     transaction: transaction.name,
     projectID: transaction.project,
     query: location.query,
     view,
-  };
+  });
 
-  shouldUseOTelFriendlyUI
-    ? crumbs.push({
-        to: transactionSummaryRouteWithQuery(routeQuery),
-        label: t('Service Entry Span Summary'),
-        preservePageFilters: true,
-      })
-    : crumbs.push({
-        to: transactionSummaryRouteWithQuery(routeQuery),
-        label: t('Transaction Summary'),
-        preservePageFilters: true,
-      });
+  return [
+    {
+      label: t('Transaction Summary'),
+      to: {
+        ...to,
+        // `transactionSummaryRouteWithQuery` forwards most page filters but not
+        // `utc`, which would silently reinterpret an absolute range in local
+        // time. Merge the selection in the way `preservePageFilters` used to.
+        query: {...extractSelectionParameters(location.query), ...to.query},
+      },
+    },
+  ];
+}
 
-  if (spanSlug) {
-    crumbs.push({
-      to: '',
-      label: t('Span Summary'),
-    });
-  } else if (eventSlug) {
-    crumbs.push({
-      to: '',
-      label: t('Event Details'),
-    });
-  } else if (traceSlug) {
-    crumbs.push({
-      to: '',
-      label: t('Trace Details'),
-    });
-  }
-
-  return crumbs;
-};
-
-export default Breadcrumb;
+export const getTabCrumbs = (props: TabCrumbProps): Crumb[] =>
+  getTransactionSummaryParentCrumbs(props).map(crumb => ({
+    ...crumb,
+    preservePageFilters: true,
+  }));

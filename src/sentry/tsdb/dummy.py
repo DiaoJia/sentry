@@ -39,6 +39,8 @@ class DummyTSDB(BaseTSDB):
         tenant_ids: dict[str, str | int] | None = None,
         referrer_suffix: str | None = None,
         group_on_time: bool = True,
+        aggregation_override: str | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[TSDBKey, list[tuple[int, int]]]:
         self.validate_arguments([model], _environment_ids(environment_ids))
         _, series = self.get_optimal_rollup_series(start, end, rollup)
@@ -56,6 +58,7 @@ class DummyTSDB(BaseTSDB):
         rollup: int | None = None,
         environment_id: int | None = None,
         tenant_ids: dict[str, str | int] | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[int, list[tuple[int, Any]]]:
         self.validate_arguments([model], [environment_id])
         _, series = self.get_optimal_rollup_series(start, end, rollup)
@@ -75,6 +78,7 @@ class DummyTSDB(BaseTSDB):
         referrer_suffix=None,
         conditions=None,
         group_on_time: bool = False,
+        project_ids: Sequence[int] | None = None,
     ):
         self.validate_arguments([model], [environment_id])
         return {k: 0 for k in keys}
@@ -89,14 +93,6 @@ class DummyTSDB(BaseTSDB):
     ):
         self.validate_arguments(models, _environment_ids(environment_ids))
 
-    def record_frequency_multi(
-        self,
-        requests: Sequence[tuple[TSDBModel, Mapping[str, Mapping[str, int | float]]]],
-        timestamp=None,
-        environment_id=None,
-    ):
-        self.validate_arguments([model for model, request in requests], [environment_id])
-
     def get_frequency_series(
         self,
         model: TSDBModel,
@@ -106,6 +102,7 @@ class DummyTSDB(BaseTSDB):
         rollup: int | None = None,
         environment_id: int | None = None,
         tenant_ids: dict[str, str | int] | None = None,
+        project_ids: Sequence[int] | None = None,
     ) -> dict[TSDBKey, list[tuple[float, dict[TSDBItem, float]]]]:
         self.validate_arguments([model], [environment_id])
         rollup, series = self.get_optimal_rollup_series(start, end, rollup)
@@ -114,21 +111,6 @@ class DummyTSDB(BaseTSDB):
             key: [(timestamp, {k: 0.0 for k in members}) for timestamp in series]
             for key, members in items.items()
         }
-
-    def merge_frequencies(
-        self,
-        model: TSDBModel,
-        destination: str,
-        sources: Sequence[TSDBKey],
-        timestamp: datetime | None = None,
-        environment_ids: Iterable[int] | None = None,
-    ) -> None:
-        self.validate_arguments([model], _environment_ids(environment_ids))
-
-    def delete_frequencies(
-        self, models, keys, start=None, end=None, timestamp=None, environment_ids=None
-    ):
-        self.validate_arguments(models, _environment_ids(environment_ids))
 
     def flush(self):
         pass

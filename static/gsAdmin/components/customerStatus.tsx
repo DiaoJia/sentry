@@ -1,11 +1,11 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {space} from 'sentry/styles/space';
+import {InfoText} from '@sentry/scraps/info';
 
 import type {Subscription} from 'getsentry/types';
-import formatCurrency from 'getsentry/utils/formatCurrency';
+import {isTrial} from 'getsentry/utils/billing';
+import {formatCurrency} from 'getsentry/utils/formatCurrency';
 
 type Props = {
   customer: Subscription;
@@ -13,10 +13,10 @@ type Props = {
 
 const getLabel = (item: Subscription) => {
   if (item.isEnterpriseTrial) {
-    return `Trialing (${item.trialTier} enterprise)`;
+    return `Trialing (${item.trialPlan} enterprise)`;
   }
-  if (item.isTrial) {
-    return `Trialing (${item.trialTier})`;
+  if (isTrial(item)) {
+    return `Trialing (${item.trialPlan})`;
   }
   if (item.isFree) {
     return 'Free Account';
@@ -42,11 +42,7 @@ const getTooltip = ({planDetails, trialPlan}: Subscription) => (
       </Fragment>
     )}
     <dt>Base Price:</dt>
-    <dd>{formatCurrency(planDetails?.price)}</dd>
-    <dt>On-Demand:</dt>
-    <dd>{formatCurrency(planDetails?.onDemandEventPrice)} / event</dd>
-    <dt>Contract:</dt>
-    <dd>{planDetails?.contractInterval}</dd>
+    <dd>{formatCurrency(planDetails?.totalPrice)}</dd>
     <dt>Billed:</dt>
     <dd>{planDetails?.billingInterval}</dd>
   </StatusList>
@@ -55,7 +51,7 @@ const getTooltip = ({planDetails, trialPlan}: Subscription) => (
 const StatusList = styled('dl')`
   display: grid;
   grid-template-columns: max-content max-content;
-  gap: 0 ${space(1)};
+  gap: 0 ${p => p.theme.space.md};
 
   dt {
     text-align: right;
@@ -65,18 +61,16 @@ const StatusList = styled('dl')`
   }
 `;
 
-function CustomerStatus({customer}: Props) {
+export function CustomerStatus({customer}: Props) {
   const label = getLabel(customer);
 
   return (
     <Fragment>
       {typeof label !== 'object' && label}
       <br />
-      <Tooltip title={getTooltip(customer)}>
-        <small>{`${customer.planDetails?.name} Plan (${customer.planTier})`}</small>
-      </Tooltip>
+      <InfoText variant="inherit" title={getTooltip(customer)}>
+        <small>{`${customer.planDetails?.name} Plan (${customer.planDetails?.id})`}</small>
+      </InfoText>
     </Fragment>
   );
 }
-
-export default CustomerStatus;

@@ -1,24 +1,27 @@
 import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import {Alert} from 'sentry/components/core/alert';
-import ExternalLink from 'sentry/components/links/externalLink';
-import Link from 'sentry/components/links/link';
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
+import {Alert} from '@sentry/scraps/alert';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
 import {t, tct} from 'sentry/locale';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 
 interface Props {
   orgSlug: string;
 }
 
-export default function MissingReplayAlert({orgSlug}: Props) {
+export function MissingReplayAlert({orgSlug}: Props) {
   const reasons = [
     t('The replay is still processing.'),
     tct(
       'The replay was rate-limited and could not be accepted. [link:View the stats page] for more information.',
       {
-        link: <Link to={`/organizations/${orgSlug}/stats/?dataCategory=replays`} />,
+        link: (
+          <Link to={normalizeUrl(`/settings/${orgSlug}/stats/?dataCategory=replays`)} />
+        ),
       }
     ),
     t('The replay has been deleted by a member in your organization.'),
@@ -27,11 +30,7 @@ export default function MissingReplayAlert({orgSlug}: Props) {
       "An ad-blocker was turned on for the user's session. [link:Read our docs] for a workaround.",
       {
         link: (
-          <ExternalLink
-            href={
-              'https://docs.sentry.io/platforms/javascript/troubleshooting/#dealing-with-ad-blockers'
-            }
-          />
+          <ExternalLink href="https://docs.sentry.io/platforms/javascript/troubleshooting/#dealing-with-ad-blockers" />
         ),
       }
     ),
@@ -39,8 +38,7 @@ export default function MissingReplayAlert({orgSlug}: Props) {
   return (
     <Alert.Container>
       <Alert
-        type="info"
-        showIcon
+        variant="info"
         data-test-id="replay-error"
         expand={
           <Fragment>
@@ -54,10 +52,12 @@ export default function MissingReplayAlert({orgSlug}: Props) {
         }
       >
         {tct(
-          "The replay associated with this event cannot be found. In most cases, the replay wasn't accepted because your replay quota was exceeded at the time. To learn more, [link:read our docs].",
+          "A replay isn't available for this event. To learn more, [statsLink:check your replay usage].",
           {
-            link: (
-              <ExternalLink href="https://docs.sentry.io/platforms/javascript/session-replay/#error-linking" />
+            statsLink: (
+              <Link
+                to={normalizeUrl(`/settings/${orgSlug}/stats/?dataCategory=replays`)}
+              />
             ),
           }
         )}

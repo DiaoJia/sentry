@@ -2,18 +2,17 @@ import {useEffect, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import {mergeRefs} from '@react-aria/utils';
 
-import {Button} from 'sentry/components/core/button';
-import {Input} from 'sentry/components/core/input';
-import {useAutosizeInput} from 'sentry/components/core/input/useAutosizeInput';
-import * as Layout from 'sentry/components/layouts/thirds';
+import {Button} from '@sentry/scraps/button';
+import {Input, useAutosizeInput} from '@sentry/scraps/input';
+
 import {IconEdit} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useUser} from 'sentry/utils/useUser';
 import {useUpdateGroupSearchView} from 'sentry/views/issueList/mutations/useUpdateGroupSearchView';
 import type {GroupSearchView} from 'sentry/views/issueList/types';
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 export function EditableIssueViewHeader({view}: {view: GroupSearchView}) {
   // TODO(msun): Add tests for this component
@@ -56,25 +55,27 @@ export function EditableIssueViewHeader({view}: {view: GroupSearchView}) {
     setIsEditing(true);
   };
 
-  return isEditing ? (
-    <EditingViewTitle
-      initialTitle={view.name}
-      onSave={handleOnSave}
-      stopEditing={() => {
-        setIsEditing(false);
-      }}
-    />
-  ) : (
-    <ViewTitleWrapper>
-      <ViewTitle onDoubleClick={handleBeginEditing}>{view.name}</ViewTitle>
-      <Button
-        icon={<IconEdit />}
-        onClick={handleBeginEditing}
-        aria-label={t('Edit view name')}
-        size="sm"
-        borderless
-      />
-    </ViewTitleWrapper>
+  return (
+    <TopBar.Slot name="title">
+      {isEditing ? (
+        <EditingViewTitle
+          initialTitle={view.name}
+          onSave={handleOnSave}
+          stopEditing={() => setIsEditing(false)}
+        />
+      ) : (
+        <ViewTitleWrapper>
+          <ViewTitle onDoubleClick={handleBeginEditing}>{view.name}</ViewTitle>
+          <Button
+            icon={<IconEdit />}
+            onClick={handleBeginEditing}
+            aria-label={t('Edit view name')}
+            size="sm"
+            variant="transparent"
+          />
+        </ViewTitleWrapper>
+      )}
+    </TopBar.Slot>
   );
 }
 
@@ -102,8 +103,6 @@ function EditingViewTitle({
       case 'Escape':
         stopEditing();
         break;
-      default:
-        break;
     }
   };
 
@@ -117,7 +116,7 @@ function EditingViewTitle({
   });
 
   return (
-    <StyledGrowingInput
+    <GrowingInput
       value={title}
       ref={mergeRefs(inputRef, autosizeInputRef)}
       onChange={handleOnChange}
@@ -128,10 +127,14 @@ function EditingViewTitle({
   );
 }
 
-const ViewTitleWrapper = styled(Layout.Title)`
+const ViewTitleWrapper = styled('div')`
   display: flex;
   align-items: center;
-  width: min-content;
+
+  > div {
+    height: auto;
+    border-bottom: none;
+  }
 
   :not(:hover, :focus-within) {
     button {
@@ -146,33 +149,33 @@ const ViewTitleWrapper = styled(Layout.Title)`
 
 const ViewTitle = styled('div')`
   height: 40px;
-  white-space: nowrap;
   letter-spacing: normal;
-  margin-right: ${space(0.25)};
+  margin-right: ${p => p.theme.space['2xs']};
   font-size: inherit;
-  display: flex;
   align-items: center;
-  border-bottom: 1px dotted ${p => p.theme.border};
+  border-bottom: 1px dotted ${p => p.theme.tokens.border.primary};
 
-  ${p => p.theme.overflowEllipsis}
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
-const StyledGrowingInput = styled(Input)`
+const GrowingInput = styled(Input)`
   position: relative;
   border: none;
   margin: 0;
   padding: 0;
   background: transparent;
   min-height: 0px;
-  height: 40px;
+  height: auto;
   border-radius: 0px;
   text-overflow: ellipsis;
   cursor: text;
-
-  /* <Layout.Title /> styles */
-  font-size: 1.625rem;
-  font-weight: 600;
-  line-height: 40px;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
 
   &,
   &:focus,

@@ -1,30 +1,40 @@
 import {Fragment, useEffect, useMemo, useState} from 'react';
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import chunk from 'lodash/chunk';
 import isEqual from 'lodash/isEqual';
 import uniqBy from 'lodash/uniqBy';
 
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import SearchBar from 'sentry/components/searchBar';
-import SuggestedAvatarStack from 'sentry/components/suggestedAvatarStack';
+import {Tag} from '@sentry/scraps/badge';
+import {Button, ButtonBar} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Text} from '@sentry/scraps/text';
+
+import {SearchBar} from 'sentry/components/searchBar';
+import {SuggestedAvatarStack} from 'sentry/components/suggestedAvatarStack';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconChevron} from 'sentry/icons';
 import {t, tn} from 'sentry/locale';
-import MemberListStore from 'sentry/stores/memberListStore';
-import TeamStore from 'sentry/stores/teamStore';
-import {space} from 'sentry/styles/space';
-import type {ParsedOwnershipRule} from 'sentry/types/group';
+import {TeamStore} from 'sentry/stores/teamStore';
+import type {Actor} from 'sentry/types/core';
 import type {CodeOwner} from 'sentry/types/integrations';
+import type {ParsedOwnershipRule} from 'sentry/types/ownership';
+import {defined} from 'sentry/utils/defined';
+import {useMembers} from 'sentry/utils/members/useMembers';
 import {useTeams} from 'sentry/utils/useTeams';
 import {useUser} from 'sentry/utils/useUser';
 import {OwnershipOwnerFilter} from 'sentry/views/settings/project/projectOwnership/ownershipOwnerFilter';
 
+const OWNERSHIP_COLUMNS: TableColumnConfig[] = [
+  {key: 'type', width: 'min-content'},
+  {key: 'rule', width: '1fr'},
+  {key: 'owner', width: 'auto'},
+];
+
 interface OwnershipRulesTableProps {
   codeowners: CodeOwner[];
   projectRules: ParsedOwnershipRule[];
+  actions?: React.ReactNode;
 }
 
 /**
@@ -39,10 +49,11 @@ const PAGE_LIMIT = 25;
 export function OwnershipRulesTable({
   projectRules,
   codeowners,
+  actions,
 }: OwnershipRulesTableProps) {
   const user = useUser();
-  const [search, setSearch] = useState<string>('');
-  const [page, setPage] = useState<number>(0);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
   const [selectedActors, setSelectedActors] = useState<string[] | null>(null);
   const {teams} = useTeams({provideUserTeams: true});
 
@@ -64,7 +75,7 @@ export function OwnershipRulesTable({
     const actors = combinedRules
       .flatMap(rule => rule.owners)
       .filter(actor => actor.name)
-      .map(owner => ({...owner, id: `${owner.id}`}));
+      .map(owner => ({...owner, id: owner.id}));
     return (
       uniqBy(actors, actor => `${actor.type}:${actor.id}`)
         // Sort by type, then by name
@@ -80,10 +91,25 @@ export function OwnershipRulesTable({
         })
     );
   }, [combinedRules]);
+  const memberIds = useMemo(
+    () =>
+      allActors.flatMap(actor =>
+        actor.type === 'user' && defined(actor.id) ? [actor.id] : []
+      ),
+    [allActors]
+  );
+  const {data: members = []} = useMembers({
+    enabled: memberIds.length > 0,
+    ids: memberIds,
+  });
 
   const myTeams = useMemo(() => {
     const memberTeamsIds = teams.filter(team => team.isMember).map(team => team.id);
     return allActors.filter(actor => {
+      if (!defined(actor.id)) {
+        return false;
+      }
+
       if (actor.type === 'user') {
         return actor.id === user.id;
       }
@@ -110,6 +136,7 @@ export function OwnershipRulesTable({
         (selectedActors === null ||
           // Selected actors was cleared
           selectedActors.length === 0 ||
+          rule.owners.length === 0 ||
           rule.owners.some(owner => selectedActors.includes(`${owner.type}:${owner.id}`)))
     );
 
@@ -138,9 +165,9 @@ export function OwnershipRulesTable({
 
   return (
     <RulesTableWrapper data-test-id="ownership-rules-table">
-      <SearchAndSelectorWrapper>
+      <Flex align="center" gap="xl">
         <OwnershipOwnerFilter
-          actors={allActors}
+          actors={allActors.filter((actor): actor is Actor => defined(actor.id))}
           selectedTeams={selectedActors ?? []}
           handleChangeFilter={handleChangeFilter}
           isMyTeams={
@@ -158,51 +185,75 @@ export function OwnershipRulesTable({
           query={search}
           onChange={handleSearch}
         />
-      </SearchAndSelectorWrapper>
+        {actions}
+      </Flex>
 
-      <StyledPanelTable
-        headers={[t('Type'), t('Rule'), t('Owner')]}
-        isEmpty={chunkedRules.length === 0}
-        emptyMessage={t('No ownership rules found')}
+      <StyledSimpleTable
+        columns={OWNERSHIP_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Type')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Rule')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Owner')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
+        {chunkedRules.length === 0 && (
+          <SimpleTable.Empty>{t('No ownership rules found')}</SimpleTable.Empty>
+        )}
         {chunkedRules[page]?.map((rule, index) => {
-          let name: string | undefined = 'unknown';
-          // ID might not be a string, so we need to convert it
-          const owners = rule.owners.map(owner => ({...owner, id: `${owner.id}`}));
-          if (owners[0]?.type === 'team') {
-            const team = TeamStore.getById(owners[0].id);
-            if (team?.slug) {
-              name = `#${team.slug}`;
+          const isExclusionRule = rule.owners.length === 0;
+          const hasUnknownOwners = rule.owners.some(owner => !defined(owner.id));
+          const ownerNames = rule.owners.map(owner => {
+            if (!owner.id) {
+              return owner.name;
             }
-          } else if (owners[0]?.type === 'user') {
-            const firstUser = MemberListStore.getById(owners[0].id);
-            name = firstUser?.name;
-          }
+            if (owner.type === 'team') {
+              const team = TeamStore.getById(owner.id);
+              return team?.slug ? `#${team.slug}` : owner.name;
+            }
+            const memberUser = members.find(member => member.id === owner.id);
+            return memberUser?.name ?? owner.name;
+          });
+
+          const name = ownerNames[0] ?? 'unknown';
 
           return (
-            <Fragment key={`${rule.matcher.type}:${rule.matcher.pattern}-${index}`}>
-              <RowItem>
-                <Tag type="highlight">{rule.matcher.type}</Tag>
-              </RowItem>
+            <SimpleTable.Row
+              key={`${rule.matcher.type}:${rule.matcher.pattern}-${index}`}
+            >
+              <SimpleTable.RowCell gap="md">
+                <Tag variant="info">{rule.matcher.type}</Tag>
+              </SimpleTable.RowCell>
               <RowRule>{rule.matcher.pattern}</RowRule>
-              <RowItem>
-                <AvatarContainer numAvatars={Math.min(owners.length, 3)}>
-                  <SuggestedAvatarStack
-                    owners={owners}
-                    suggested={false}
-                    reverse={false}
-                  />
-                </AvatarContainer>
-                {name}
-                {owners.length > 1 &&
-                  tn(' and %s other', ' and %s others', owners.length - 1)}
-              </RowItem>
-            </Fragment>
+              <SimpleTable.RowCell gap="md">
+                {isExclusionRule ? (
+                  <Text variant="muted">{t('No Owner')}</Text>
+                ) : (
+                  <Fragment>
+                    <AvatarContainer numAvatars={Math.min(rule.owners.length, 3)}>
+                      {/* Avoid attempting to render the avatar stack if there are broken owners */}
+                      {!hasUnknownOwners && (
+                        <SuggestedAvatarStack
+                          owners={rule.owners as Actor[]}
+                          suggested={false}
+                          reverse={false}
+                          tooltip={ownerNames.join(', ')}
+                        />
+                      )}
+                    </AvatarContainer>
+                    {name}
+                    {rule.owners.length > 1 &&
+                      tn(' and %s other', ' and %s others', rule.owners.length - 1)}
+                  </Fragment>
+                )}
+              </SimpleTable.RowCell>
+            </SimpleTable.Row>
           );
         })}
-      </StyledPanelTable>
-      <PaginationWrapper>
-        <ButtonBar merged>
+      </StyledSimpleTable>
+      <Flex justify="end">
+        <ButtonBar>
           <Button
             icon={<IconChevron direction="left" size="sm" />}
             onClick={() => {
@@ -222,16 +273,10 @@ export function OwnershipRulesTable({
             aria-label={t('Next page')}
           />
         </ButtonBar>
-      </PaginationWrapper>
+      </Flex>
     </RulesTableWrapper>
   );
 }
-
-const SearchAndSelectorWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(2)};
-`;
 
 const StyledSearchBar = styled(SearchBar)`
   flex-grow: 1;
@@ -240,41 +285,25 @@ const StyledSearchBar = styled(SearchBar)`
 const RulesTableWrapper = styled('div')`
   display: flex;
   flex-direction: column;
-  gap: ${space(2)};
-  margin-bottom: ${space(2)};
+  gap: ${p => p.theme.space.xl};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
-const StyledPanelTable = styled(PanelTable)`
-  grid-template-columns: min-content minmax(1fr, max-content) auto;
-  font-size: ${p => p.theme.fontSize.md};
+const StyledSimpleTable = styled(SimpleTable)`
+  font-size: ${p => p.theme.font.size.md};
   margin-bottom: 0;
 
-  ${p =>
-    !p.isEmpty &&
-    css`
-      & > div {
-        padding: ${space(1.5)} ${space(2)};
-      }
-    `}
+  [role='cell'] {
+    padding: ${p => p.theme.space.lg} ${p => p.theme.space.xl};
+  }
 `;
 
-const PaginationWrapper = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-`;
-
-const RowItem = styled('div')`
+const RowRule = styled(SimpleTable.RowCell)`
   display: flex;
   align-items: center;
-  gap: ${space(1)};
-`;
-
-const RowRule = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(1)};
-  font-family: ${p => p.theme.text.familyMono};
-  font-size: ${p => p.theme.fontSize.sm};
+  gap: ${p => p.theme.space.md};
+  font-family: ${p => p.theme.font.family.mono};
+  font-size: ${p => p.theme.font.size.sm};
   word-break: break-word;
 `;
 

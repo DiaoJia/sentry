@@ -1,4 +1,4 @@
-import type {ResponseMeta} from 'sentry/api';
+import type {ResponseMeta} from 'sentry/types/api';
 import type {Config} from 'sentry/types/system';
 import {extractSlug} from 'sentry/utils/extractSlug';
 import {shouldPreloadData} from 'sentry/utils/shouldPreloadData';
@@ -67,11 +67,9 @@ async function promiseRequest(url: string) {
       };
       return [json, response.statusText, responseMeta];
     }
-    // eslint-disable-next-line no-throw-literal
-    throw [response.status, response.statusText];
-  } catch (error) {
-    // eslint-disable-next-line no-throw-literal
-    throw [error.status, error.statusText];
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -93,7 +91,7 @@ function preloadOrganizationData(config: Config) {
   // When running in 'dev-ui' mode we need to use /region/$region instead of
   // subdomains so that webpack/vercel can proxy requests.
   if (host && window.__SENTRY_DEV_UI) {
-    const domainpattern = /https?\:\/\/([^.]*)\.sentry.io/;
+    const domainpattern = /https?:\/\/([^.]*)\.sentry.io/;
     const domainmatch = host.match(domainpattern);
     if (domainmatch) {
       host = `/region/${domainmatch[1]}`;

@@ -1,17 +1,25 @@
 import type {ReactNode} from 'react';
 import {Fragment, useMemo} from 'react';
-import {type Theme, useTheme} from '@emotion/react';
+import {useTheme, type Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 import type {Location} from 'history';
 import kebabCase from 'lodash/kebabCase';
-import mapValues from 'lodash/mapValues';
 
-import ClippedBox from 'sentry/components/clippedBox';
-import {CodeSnippet} from 'sentry/components/codeSnippet';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {LinkButton} from '@sentry/scraps/button';
+import {CodeBlock} from '@sentry/scraps/code';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {ClippedBox} from 'sentry/components/clippedBox';
 import {getKeyValueListData as getRegressionIssueKeyValueList} from 'sentry/components/events/eventStatisticalDetector/eventRegressionSummary';
-import KeyValueList from 'sentry/components/events/interfaces/keyValueList';
+import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
+import {
+  extractSpanURLString,
+  formatChangingQueryParameters,
+  getSpanDuration,
+  getSpanFieldBytes,
+} from 'sentry/components/events/interfaces/performance/spanMetrics';
 import {getSpanInfoFromTransactionEvent} from 'sentry/components/events/interfaces/performance/utils';
 import type {
   ProcessedSpanType,
@@ -23,7 +31,7 @@ import {
   SpanSubTimingName,
 } from 'sentry/components/events/interfaces/spans/utils';
 import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
-import Link from 'sentry/components/links/link';
+import {IconGraph} from 'sentry/icons/iconGraph';
 import {t} from 'sentry/locale';
 import type {Entry, EntryRequest, Event, EventTransaction} from 'sentry/types/event';
 import {EntryType} from 'sentry/types/event';
@@ -35,13 +43,22 @@ import {
   isTransactionBased,
 } from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
-import {formatBytesBase2} from 'sentry/utils/bytes/formatBytesBase2';
 import {generateLinkToEventInTraceView} from 'sentry/utils/discover/urls';
-import toRoundedPercent from 'sentry/utils/number/toRoundedPercent';
-import {SQLishFormatter} from 'sentry/utils/sqlish/SQLishFormatter';
-import {safeURL} from 'sentry/utils/url/safeURL';
+import {getAttributeValue} from 'sentry/utils/fields/getAttributeValue';
+import {toRoundedPercent} from 'sentry/utils/number/toRoundedPercent';
+import {SQLishFormatter} from 'sentry/utils/sqlish';
 import {useLocation} from 'sentry/utils/useLocation';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {
+  MissingFrame,
+  StackTraceMiniFrame,
+} from 'sentry/views/insights/database/components/stackTraceMiniFrame';
+import {SpanFields} from 'sentry/views/insights/types';
+import {SpanSummaryLink} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/span/components/spanSummaryLink';
+import {
+  getSearchInExploreTarget,
+  TraceDrawerActionKind,
+} from 'sentry/views/performance/newTraceDetails/traceDrawer/details/utils';
 import {transactionSummaryRouteWithQuery} from 'sentry/views/performance/transactionSummary/utils';
 import {getPerformanceDuration} from 'sentry/views/performance/utils/getPerformanceDuration';
 
@@ -106,15 +123,13 @@ function ConsecutiveHTTPSpanEvidence({
 }: SpanEvidenceKeyValueListProps) {
   return (
     <PresortedKeyValueList
-      data={
-        [
-          makeTransactionNameRow(event, organization, location, projectSlug),
-          makeRow(
-            'Offending Spans',
-            offendingSpans.map(span => span.description)
-          ),
-        ].filter(Boolean) as KeyValueListData
-      }
+      data={[
+        makeTransactionNameRow(event, organization, location, projectSlug),
+        makeRow(
+          'Offending Spans',
+          offendingSpans.map(span => span.description)
+        ),
+      ].filter(Boolean)}
     />
   );
 }
@@ -128,17 +143,15 @@ function LargeHTTPPayloadSpanEvidence({
 }: SpanEvidenceKeyValueListProps) {
   return (
     <PresortedKeyValueList
-      data={
-        [
-          makeTransactionNameRow(event, organization, location, projectSlug),
-          makeRow(t('Large HTTP Payload Span'), getSpanEvidenceValue(offendingSpans[0]!)),
-          makeRow(
-            t('Payload Size'),
-            getSpanFieldBytes(offendingSpans[0]!, 'http.response_content_length') ??
-              getSpanFieldBytes(offendingSpans[0]!, 'Encoded Body Size')
-          ),
-        ].filter(Boolean) as KeyValueListData
-      }
+      data={[
+        makeTransactionNameRow(event, organization, location, projectSlug),
+        makeRow(t('Large HTTP Payload Span'), getSpanEvidenceValue(offendingSpans[0]!)),
+        makeRow(
+          t('Payload Size'),
+          getSpanFieldBytes(offendingSpans[0], 'http.response_content_length') ??
+            getSpanFieldBytes(offendingSpans[0], 'Encoded Body Size')
+        ),
+      ].filter(Boolean)}
     />
   );
 }
@@ -153,13 +166,11 @@ function HTTPOverheadSpanEvidence({
 }: SpanEvidenceKeyValueListProps) {
   return (
     <PresortedKeyValueList
-      data={
-        [
-          makeTransactionNameRow(event, organization, location, projectSlug),
+      data={[
+        makeTransactionNameRow(event, organization, location, projectSlug),
 
-          makeRow(t('Max Queue Time'), getHTTPOverheadMaxTime(offendingSpans, theme)),
-        ].filter(Boolean) as KeyValueListData
-      }
+        makeRow(t('Max Queue Time'), getHTTPOverheadMaxTime(offendingSpans, theme)),
+      ].filter(Boolean)}
     />
   );
 }
@@ -184,7 +195,6 @@ function NPlusOneDBQueriesSpanEvidence({
     );
   const evidenceData = event?.occurrence?.evidenceData ?? {};
   const patternSize = evidenceData.patternSize ?? 0;
-  const patternSpanIds = (evidenceData.patternSpanIds ?? []).join(', ');
 
   return (
     <PresortedKeyValueList
@@ -197,9 +207,6 @@ function NPlusOneDBQueriesSpanEvidence({
             : null,
           ...repeatingSpanRows,
           patternSize > 0 ? makeRow(t('Pattern Size'), patternSize) : null,
-          patternSpanIds.length > 0
-            ? makeRow(t('Pattern Span IDs'), patternSpanIds)
-            : null,
         ].filter(Boolean) as KeyValueListData
       }
     />
@@ -218,7 +225,8 @@ function NPlusOneAPICallsSpanEvidence({
   const evidenceData = occurrence?.evidenceData ?? {};
   const baseURL = requestEntry?.data?.url;
 
-  const queryParameters = formatChangingQueryParameters(offendingSpans, baseURL);
+  const queryParameters =
+    evidenceData.parameters ?? formatChangingQueryParameters(offendingSpans, baseURL);
   const pathParameters = evidenceData.pathParameters ?? [];
   const commonPathPrefix =
     occurrence?.subtitle ?? formatBasePath(offendingSpans[0]!, baseURL);
@@ -302,11 +310,9 @@ function MainThreadFunctionEvidence({
 }
 
 function RegressionEvidence({event, issueType}: SpanEvidenceKeyValueListProps) {
-  const organization = useOrganization();
   const data = useMemo(
-    () =>
-      issueType ? getRegressionIssueKeyValueList(organization, issueType, event) : null,
-    [organization, event, issueType]
+    () => (issueType ? getRegressionIssueKeyValueList(issueType, event) : null),
+    [event, issueType]
   );
   return data ? <PresortedKeyValueList data={data} /> : null;
 }
@@ -350,6 +356,60 @@ function DBQueryInjectionVulnerabilityEvidence({
   );
 }
 
+function AIDetectedSpanEvidence({
+  event,
+  organization,
+  location,
+  projectSlug,
+}: SpanEvidenceKeyValueListProps) {
+  const evidenceData = event?.occurrence?.evidenceData ?? {};
+  const transactionName = evidenceData.transaction ?? event.title;
+
+  const transactionSummaryLocation = transactionSummaryRouteWithQuery({
+    organization,
+    projectID: event.projectID,
+    transaction: transactionName,
+    query: {},
+  });
+
+  const traceSlug = event.contexts?.trace?.trace_id ?? '';
+
+  const eventDetailsLocation = generateLinkToEventInTraceView({
+    traceSlug,
+    eventId: event.eventID,
+    timestamp: event.endTimestamp ?? '',
+    location,
+    organization,
+  });
+
+  const actionButton = projectSlug ? (
+    <LinkButton size="xs" to={eventDetailsLocation}>
+      {t('View Full Trace')}
+    </LinkButton>
+  ) : undefined;
+
+  const transactionRow = makeRow(
+    t('Transaction'),
+    <pre>
+      <Tooltip title={t('View Transaction Summary')} skipWrapper>
+        <Link to={transactionSummaryLocation}>{transactionName}</Link>
+      </Tooltip>
+    </pre>,
+    actionButton
+  );
+
+  return (
+    <PresortedKeyValueList
+      data={[
+        transactionRow,
+        makeRow(t('Explanation'), evidenceData.explanation),
+        makeRow(t('Impact'), evidenceData.impact),
+        makeRow(t('Evidence'), evidenceData.evidence),
+      ]}
+    />
+  );
+}
+
 const PREVIEW_COMPONENTS: Partial<
   Record<IssueType, (p: SpanEvidenceKeyValueListProps) => React.ReactElement | null>
 > = {
@@ -362,14 +422,22 @@ const PREVIEW_COMPONENTS: Partial<
   [IssueType.PERFORMANCE_CONSECUTIVE_HTTP]: ConsecutiveHTTPSpanEvidence,
   [IssueType.PERFORMANCE_LARGE_HTTP_PAYLOAD]: LargeHTTPPayloadSpanEvidence,
   [IssueType.PERFORMANCE_HTTP_OVERHEAD]: HTTPOverheadSpanEvidence,
-  [IssueType.PERFORMANCE_ENDPOINT_REGRESSION]: RegressionEvidence,
   [IssueType.PROFILE_FILE_IO_MAIN_THREAD]: MainThreadFunctionEvidence,
   [IssueType.PROFILE_IMAGE_DECODE_MAIN_THREAD]: MainThreadFunctionEvidence,
   [IssueType.PROFILE_JSON_DECODE_MAIN_THREAD]: MainThreadFunctionEvidence,
   [IssueType.PROFILE_REGEX_MAIN_THREAD]: MainThreadFunctionEvidence,
   [IssueType.PROFILE_FRAME_DROP]: MainThreadFunctionEvidence,
   [IssueType.PROFILE_FUNCTION_REGRESSION]: RegressionEvidence,
-  [IssueType.DB_QUERY_INJECTION_VULNERABILITY]: DBQueryInjectionVulnerabilityEvidence,
+  [IssueType.QUERY_INJECTION_VULNERABILITY]: DBQueryInjectionVulnerabilityEvidence,
+  [IssueType.WEB_VITALS]: WebVitalsEvidence,
+  [IssueType.LLM_DETECTED_EXPERIMENTAL]: AIDetectedSpanEvidence,
+  [IssueType.LLM_DETECTED_EXPERIMENTAL_V2]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_HTTP]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_DB]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_RUNTIME_PERFORMANCE]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_SECURITY]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_CODE_HEALTH]: AIDetectedSpanEvidence,
+  [IssueType.AI_DETECTED_GENERAL]: AIDetectedSpanEvidence,
 };
 
 export function SpanEvidenceKeyValueList({
@@ -403,7 +471,6 @@ export function SpanEvidenceKeyValueList({
       />
     );
   }
-
   const Component = PREVIEW_COMPONENTS[issueType] ?? DefaultSpanEvidence;
 
   return (
@@ -422,7 +489,7 @@ export function SpanEvidenceKeyValueList({
 }
 
 const HighlightedEvidence = styled('span')`
-  color: ${p => p.theme.errorText};
+  color: ${p => p.theme.tokens.content.danger};
 `;
 
 const isRequestEntry = (entry: Entry): entry is EntryRequest => {
@@ -436,15 +503,72 @@ function SlowDBQueryEvidence({
   projectSlug,
   location,
 }: SpanEvidenceKeyValueListProps) {
+  const span = offendingSpans[0]!;
+  const sentryTags = 'sentry_tags' in span ? span.sentry_tags : undefined;
+  const groupHash = sentryTags?.group ?? span.hash ?? '';
+  const hasExplore = organization.features.includes('visibility-explore-view');
+
+  const codeFilepath = getAttributeValue(span.data ?? {}, 'code.file.path', 'string');
+  const codeLineNumber = getAttributeValue(span.data ?? {}, 'code.line.number', 'number');
+  const codeFunction = getAttributeValue(span.data ?? {}, 'code.function', 'string');
+
+  const queryValue = (
+    <QueryCard>
+      <Stack minWidth={0}>
+        <NoPaddingClippedBox clipHeight={200}>
+          <StyledCodeSnippet language="sql">
+            {formatter.toString(span.description ?? '')}
+          </StyledCodeSnippet>
+        </NoPaddingClippedBox>
+        {codeFilepath ? (
+          <StackTraceMiniFrame
+            projectId={event.projectID}
+            event={event}
+            frame={{
+              filename: codeFilepath,
+              lineNo: codeLineNumber === undefined ? undefined : Number(codeLineNumber),
+              function: codeFunction,
+            }}
+          />
+        ) : (
+          <MissingFrame source="span" />
+        )}
+      </Stack>
+      <Flex gap="md" padding="md lg" borderTop="muted">
+        <SpanSummaryLink
+          op={span.op}
+          category={sentryTags?.category}
+          group={groupHash}
+          organization={organization}
+        />
+        {hasExplore && span.description && (
+          <Link
+            to={getSearchInExploreTarget(
+              organization,
+              location,
+              event.projectID,
+              SpanFields.SPAN_DESCRIPTION,
+              span.description,
+              TraceDrawerActionKind.INCLUDE
+            )}
+          >
+            <Flex align="center" gap="xs">
+              <IconGraph type="scatter" size="xs" />
+              {t('More Samples')}
+            </Flex>
+          </Link>
+        )}
+      </Flex>
+    </QueryCard>
+  );
+
   return (
-    <PresortedKeyValueList
+    <KeyValueList
+      shouldSort={false}
       data={[
         makeTransactionNameRow(event, organization, location, projectSlug),
-        makeRow(t('Slow DB Query'), getSpanEvidenceValue(offendingSpans[0]!)),
-        makeRow(
-          t('Duration Impact'),
-          getSingleSpanDurationImpact(event, offendingSpans[0]!)
-        ),
+        makeRow(t('Duration Impact'), getSingleSpanDurationImpact(event, span)),
+        makeRow(t('Slow DB Query'), queryValue),
       ]}
     />
   );
@@ -466,10 +590,7 @@ function RenderBlockingAssetSpanEvidence({
         makeRow(t('Slow Resource Span'), getSpanEvidenceValue(offendingSpan!)),
         makeRow(
           t('FCP Delay'),
-          formatDelay(
-            getSpanDuration(offendingSpan!),
-            event.measurements?.fcp?.value ?? 0
-          )
+          formatDelay(getSpanDuration(offendingSpan), event.measurements?.fcp?.value ?? 0)
         ),
         makeRow(t('Duration Impact'), getSingleSpanDurationImpact(event, offendingSpan!)),
       ]}
@@ -491,8 +612,8 @@ function UncompressedAssetSpanEvidence({
         makeRow(t('Slow Resource Span'), getSpanEvidenceValue(offendingSpans[0]!)),
         makeRow(
           t('Asset Size'),
-          getSpanFieldBytes(offendingSpans[0]!, 'http.response_content_length') ??
-            getSpanFieldBytes(offendingSpans[0]!, 'Encoded Body Size')
+          getSpanFieldBytes(offendingSpans[0], 'http.response_content_length') ??
+            getSpanFieldBytes(offendingSpans[0], 'Encoded Body Size')
         ),
         makeRow(
           t('Duration Impact'),
@@ -501,6 +622,15 @@ function UncompressedAssetSpanEvidence({
       ]}
     />
   );
+}
+
+function WebVitalsEvidence({event}: SpanEvidenceKeyValueListProps) {
+  const transactionRow = makeRow(
+    t('Transaction'),
+    <pre>{event.tags.find(tag => tag.key === 'transaction')?.value}</pre>
+  );
+
+  return <PresortedKeyValueList data={[transactionRow].filter(Boolean)} />;
 }
 
 function DefaultSpanEvidence({
@@ -545,7 +675,6 @@ const makeTransactionNameRow = (
 
   const eventDetailsLocation = generateLinkToEventInTraceView({
     traceSlug,
-    projectSlug: projectSlug ?? '',
     eventId: event.eventID,
     timestamp: event.endTimestamp ?? '',
     location,
@@ -612,7 +741,7 @@ function getSpanEvidenceValue(span: Span | null) {
   return `${span.op} - ${span.description}`;
 }
 
-const StyledCodeSnippet = styled(CodeSnippet)`
+const StyledCodeSnippet = styled(CodeBlock)`
   pre {
     /* overflow is set to visible in global styles so need to enforce auto here */
     overflow: auto !important;
@@ -668,10 +797,6 @@ const sumSpanDurations = (spans: Span[]) => {
   return totalDuration;
 };
 
-const getSpanDuration = ({timestamp, start_timestamp}: Span) => {
-  return ((timestamp ?? 0) - (start_timestamp ?? 0)) * 1000;
-};
-
 function getDurationImpact(event: EventTransaction, durationAdded: number) {
   const transactionTime = (event.endTimestamp - event.startTimestamp) * 1000;
   if (!transactionTime) {
@@ -701,92 +826,6 @@ function getSingleSpanDurationImpact(event: EventTransaction, span: Span) {
   return getDurationImpact(event, getSpanDuration(span));
 }
 
-function getSpanDataField(span: Span, field: string) {
-  return span.data?.[field];
-}
-
-function getSpanFieldBytes(span: Span, field: string) {
-  const bytes = getSpanDataField(span, field);
-  if (!bytes) {
-    return null;
-  }
-  return `${formatBytesBase2(bytes)} (${bytes} B)`;
-}
-
-type ParameterLookup = Record<string, string[]>;
-
-/**
- * Extracts changing URL query parameters from a list of `http.client` spans.
- * e.g.,
- *
- * https://service.io/r?id=1&filter=none
- * https://service.io/r?id=2&filter=none
- * https://service.io/r?id=3&filter=none
- *
- * @returns A condensed string describing the query parameters changing
- * between the URLs of the given span. e.g., "id:{1,2,3}"
- */
-function formatChangingQueryParameters(spans: Span[], baseURL?: string): string[] {
-  const URLs = spans
-    .map(span => extractSpanURLString(span, baseURL))
-    .filter((url): url is URL => url instanceof URL);
-
-  const allQueryParameters = extractQueryParameters(URLs);
-
-  const pairs: string[] = [];
-  for (const key in allQueryParameters) {
-    const values = allQueryParameters[key]!;
-
-    // By definition, if the parameter only has one value that means it's not
-    // changing between calls, so omit it!
-    if (values.length > 1) {
-      pairs.push(`${key}:{${values.join(',')}}`);
-    }
-  }
-
-  return pairs;
-}
-
-/**
- * Parses the span data and pulls out the URL. Accounts for different SDKs and
- * different versions of SDKs formatting and parsing the URL contents
- * differently. Mirror of `get_url_from_span`. Ideally, this should not exist,
- * and instead it should use the data provided by the backend
- */
-export const extractSpanURLString = (span: Span, baseURL?: string): URL | null => {
-  let url = span?.data?.url;
-  if (url) {
-    const query = span.data['http.query'];
-    if (query) {
-      url += `?${query}`;
-    }
-
-    const parsedURL = safeURL(url, baseURL);
-    if (parsedURL) {
-      return parsedURL;
-    }
-  }
-
-  const [_method, _url] = (span?.description ?? '').split(' ', 2) as [string, string];
-
-  return safeURL(_url, baseURL) ?? null;
-};
-
-export function extractQueryParameters(URLs: URL[]): ParameterLookup {
-  const parameterValuesByKey: ParameterLookup = {};
-
-  URLs.forEach(url => {
-    for (const [key, value] of url.searchParams) {
-      parameterValuesByKey[key] ??= [];
-      parameterValuesByKey[key].push(value);
-    }
-  });
-
-  return mapValues(parameterValuesByKey, parameterList => {
-    return Array.from(new Set(parameterList));
-  });
-}
-
 function formatBasePath(span: Span, baseURL?: string): string {
   const spanURL = extractSpanURLString(span, baseURL);
 
@@ -795,4 +834,14 @@ function formatBasePath(span: Span, baseURL?: string): string {
 
 const NoPaddingClippedBox = styled(ClippedBox)`
   padding: 0;
+`;
+
+const QueryCard = styled('div')`
+  border-radius: ${p => p.theme.radius.md};
+  overflow: hidden;
+  border: 1px solid ${p => p.theme.tokens.border.secondary};
+  pre {
+    margin: 0 !important;
+    padding-top: ${p => p.theme.space.md} !important;
+  }
 `;

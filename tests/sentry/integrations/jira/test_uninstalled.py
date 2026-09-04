@@ -49,7 +49,9 @@ class JiraUninstalledTest(APITestCase):
 
     @patch("sentry_sdk.set_tag")
     @patch("sentry.integrations.utils.scope.bind_organization_context")
-    def test_with_shared_secret(self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock):
+    def test_with_shared_secret(
+        self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock
+    ) -> None:
         org = self.organization
 
         integration = self.create_provider_integration(
@@ -67,7 +69,7 @@ class JiraUninstalledTest(APITestCase):
         integration = Integration.objects.get(id=integration.id)
 
         mock_set_tag.assert_any_call("integration_id", integration.id)
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             mock_bind_org_context.assert_called_with(serialize_rpc_organization(org))
         assert integration.status == ObjectStatus.DISABLED
         assert resp.status_code == 200
@@ -75,7 +77,7 @@ class JiraUninstalledTest(APITestCase):
     @patch("sentry_sdk.set_tag")
     @patch("sentry.integrations.utils.scope.bind_organization_context")
     @responses.activate
-    def test_with_key_id(self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock):
+    def test_with_key_id(self, mock_bind_org_context: MagicMock, mock_set_tag: MagicMock) -> None:
         org = self.organization
 
         integration = self.create_provider_integration(
@@ -96,7 +98,7 @@ class JiraUninstalledTest(APITestCase):
         integration = Integration.objects.get(id=integration.id)
 
         mock_set_tag.assert_any_call("integration_id", integration.id)
-        with assume_test_silo_mode(SiloMode.REGION):
+        with assume_test_silo_mode(SiloMode.CELL):
             mock_bind_org_context.assert_called_with(serialize_rpc_organization(org))
         assert integration.status == ObjectStatus.DISABLED
         assert resp.status_code == 200

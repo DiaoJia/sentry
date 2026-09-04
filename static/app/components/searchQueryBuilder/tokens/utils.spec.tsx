@@ -1,0 +1,63 @@
+import {WildcardOperators} from 'sentry/components/searchSyntax/parser';
+import {FieldKind, FieldValueType, type FieldDefinition} from 'sentry/utils/fields';
+
+import {getInitialFilterText} from './utils';
+
+describe('getInitialFilterText', () => {
+  it('defaults missing field definitions to contains', () => {
+    expect(getInitialFilterText('custom_tag_name', null)).toBe(
+      `custom_tag_name:${WildcardOperators.CONTAINS}""`
+    );
+  });
+
+  it('quotes typed filter keys containing colons', () => {
+    expect(
+      getInitialFilterText('imaginary.attribute:made_up_key', {
+        kind: FieldKind.FIELD,
+        valueType: FieldValueType.STRING,
+      })
+    ).toBe(`"imaginary.attribute:made_up_key":${WildcardOperators.CONTAINS}""`);
+  });
+
+  it('defaults null value types to contains', () => {
+    const fieldDefinition: FieldDefinition = {
+      kind: FieldKind.FIELD,
+      valueType: null,
+    };
+
+    expect(getInitialFilterText('message', fieldDefinition)).toBe(
+      `message:${WildcardOperators.CONTAINS}""`
+    );
+  });
+
+  it('does not default to contains when wildcard operators are disallowed', () => {
+    const fieldDefinition: FieldDefinition = {
+      kind: FieldKind.FIELD,
+      valueType: FieldValueType.STRING,
+      disallowWildcardOperators: true,
+    };
+
+    expect(getInitialFilterText('message', fieldDefinition)).toBe('message:""');
+  });
+
+  it('builds array membership filters with the [*] suffix and no wildcard', () => {
+    const fieldDefinition: FieldDefinition = {
+      kind: FieldKind.ARRAY,
+      valueType: FieldValueType.STRING,
+    };
+
+    // Non-tag array: no wrapping.
+    expect(getInitialFilterText('some.array', fieldDefinition)).toBe('some.array[*]:""');
+    // Tag array (key without `[*]`, eg. from selection): the operator is added.
+    expect(getInitialFilterText('tags[csv_headers,array]', fieldDefinition)).toBe(
+      'tags[csv_headers,array][*]:""'
+    );
+    // Key that already carries `[*]` (eg. user-typed): not doubled.
+    expect(getInitialFilterText('tags[csv_headers,array][*]', fieldDefinition)).toBe(
+      'tags[csv_headers,array][*]:""'
+    );
+    expect(getInitialFilterText('some.array[*]', fieldDefinition)).toBe(
+      'some.array[*]:""'
+    );
+  });
+});

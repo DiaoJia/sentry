@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 import sentry_sdk
-from celery import Task
 from django.conf import settings
 from django.db.models import Max, Min
+from taskbroker_client.task import Task
 
 from sentry.hybridcloud.models.outbox import (
+    CellOutboxBase,
     ControlOutboxBase,
     OutboxBase,
     OutboxFlushError,
-    RegionOutboxBase,
 )
 from sentry.hybridcloud.tasks.backfill_outboxes import backfill_outboxes_for
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import hybridcloud_control_tasks, hybridcloud_tasks
 from sentry.utils import metrics
 from sentry.utils.env import in_test_environment
@@ -25,11 +25,9 @@ from sentry.utils.env import in_test_environment
 
 @instrumented_task(
     name="sentry.tasks.enqueue_outbox_jobs_control",
-    queue="outbox.control",
+    namespace=hybridcloud_control_tasks,
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(
-        namespace=hybridcloud_control_tasks,
-    ),
+    processing_deadline_duration=30,
 )
 def enqueue_outbox_jobs_control(
     concurrency: int | None = None, process_outbox_backfills: bool = True, **kwargs: Any
@@ -44,17 +42,15 @@ def enqueue_outbox_jobs_control(
 
 @instrumented_task(
     name="sentry.tasks.enqueue_outbox_jobs",
-    queue="outbox",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=hybridcloud_tasks,
-    ),
+    namespace=hybridcloud_tasks,
+    silo_mode=SiloMode.CELL,
+    processing_deadline_duration=30,
 )
 def enqueue_outbox_jobs(
     concurrency: int | None = None, process_outbox_backfills: bool = True, **kwargs: Any
 ) -> None:
     schedule_batch(
-        silo_mode=SiloMode.REGION,
+        silo_mode=SiloMode.CELL,
         drain_task=drain_outbox_shards,
         concurrency=concurrency,
         process_outbox_backfills=process_outbox_backfills,
@@ -72,62 +68,21 @@ CONCURRENCY = 5
 
 def schedule_batch(
     silo_mode: SiloMode,
-    drain_task: Task,
+    drain_task: Task[Any, Any],
     concurrency: int | None = None,
     process_outbox_backfills: bool = True,
 ) -> None:
     scheduled_count = 0
 
-    if not concurrency:
-        concurrency = CONCURRENCY
     try:
-        for outbox_name in settings.SENTRY_OUTBOX_MODELS[silo_mode.name]:
+        for outbox_name in settings.SENTRY_HYBRIDCLOUD_OUTBOX_MODELS[silo_mode.name]:
             outbox_model: type[OutboxBase] = OutboxBase.from_outbox_name(outbox_name)
-
-            aggregates = outbox_model.objects.all().aggregate(Min("id"), Max("id"))
-
-            lo = aggregates["id__min"] or 0
-            hi = aggregates["id__max"] or -1
-            if hi < lo:
-                continue
-
-            scheduled_count += hi - lo + 1
-            batch_size = math.ceil((hi - lo + 1) / concurrency)
-
-            metrics_tags = dict(silo_mode=silo_mode.name, outbox_name=outbox_name)
-            metrics.gauge(
-                "deliver_from_outbox.queued_batch_size",
-                value=batch_size,
-                tags=metrics_tags,
-                sample_rate=1.0,
-            )
-
-            # Notably, when l and h are close, this will result in creating tasks that are processing future ids --
-            # that's totally fine.
-            for i in range(concurrency):
-                drain_task.delay(
-                    outbox_name=outbox_name,
-                    outbox_identifier_low=lo + i * batch_size,
-                    outbox_identifier_hi=lo + (i + 1) * batch_size,
-                )
-
-            deepest_shard_information = outbox_model.get_shard_depths_descending(limit=1)
-            max_shard_depth = (
-                float(deepest_shard_information[0]["depth"]) if deepest_shard_information else 0.0
-            )
-            metrics.gauge(
-                "deliver_from_outbox.maximum_shard_depth",
-                value=max_shard_depth,
-                tags=metrics_tags,
-                sample_rate=1.0,
-            )
-
-            outbox_count = outbox_model.get_total_outbox_count()
-            metrics.gauge(
-                "deliver_from_outbox.total_outbox_count",
-                value=outbox_count,
-                tags=metrics_tags,
-                sample_rate=1.0,
+            scheduled_count += schedule_outbox_model(
+                silo_mode=silo_mode,
+                outbox_model=outbox_model,
+                drain_task=drain_task,
+                concurrency=concurrency,
+                drain_task_kwargs={"outbox_name": outbox_name},
             )
         if process_outbox_backfills:
             backfill_outboxes_for(silo_mode, scheduled_count)
@@ -137,14 +92,66 @@ def schedule_batch(
         raise
 
 
+def schedule_outbox_model(
+    *,
+    silo_mode: SiloMode,
+    outbox_model: type[OutboxBase],
+    drain_task: Task[Any, Any],
+    concurrency: int | None = None,
+    drain_task_kwargs: Mapping[str, Any] | None = None,
+) -> int:
+    if not concurrency:
+        concurrency = CONCURRENCY
+
+    id_range = outbox_model.objects.all().aggregate(Min("id"), Max("id"))
+    identifier_low = id_range["id__min"] or 0
+    identifier_high = id_range["id__max"] or -1
+    if identifier_high < identifier_low:
+        return 0
+
+    scheduled_count = identifier_high - identifier_low + 1
+    batch_size = math.ceil(scheduled_count / concurrency)
+    metrics_tags = dict(silo_mode=silo_mode.name, outbox_name=outbox_model._meta.label)
+    metrics.gauge(
+        "deliver_from_outbox.queued_batch_size",
+        value=batch_size,
+        tags=metrics_tags,
+        sample_rate=1.0,
+    )
+
+    # Notably, when low and high are close, some tasks process future ids. That's fine.
+    task_kwargs = drain_task_kwargs or {}
+    for i in range(concurrency):
+        drain_task.delay(
+            outbox_identifier_low=identifier_low + i * batch_size,
+            outbox_identifier_hi=identifier_low + (i + 1) * batch_size,
+            **task_kwargs,
+        )
+
+    deepest_shards = outbox_model.get_shard_depths_descending(limit=1)
+    max_shard_depth = float(deepest_shards[0]["depth"]) if deepest_shards else 0.0
+    metrics.gauge(
+        "deliver_from_outbox.maximum_shard_depth",
+        value=max_shard_depth,
+        tags=metrics_tags,
+        sample_rate=1.0,
+    )
+
+    outbox_count = outbox_model.get_total_outbox_count()
+    metrics.gauge(
+        "deliver_from_outbox.total_outbox_count",
+        value=outbox_count,
+        tags=metrics_tags,
+        sample_rate=1.0,
+    )
+    return scheduled_count
+
+
 @instrumented_task(
     name="sentry.tasks.drain_outbox_shards",
-    queue="outbox",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=hybridcloud_tasks,
-        processing_deadline_duration=90,
-    ),
+    namespace=hybridcloud_tasks,
+    processing_deadline_duration=90,
+    silo_mode=SiloMode.CELL,
 )
 def drain_outbox_shards(
     outbox_identifier_low: int = 0,
@@ -153,10 +160,10 @@ def drain_outbox_shards(
 ) -> None:
     try:
         if outbox_name is None:
-            outbox_name = settings.SENTRY_OUTBOX_MODELS["REGION"][0]
+            outbox_name = settings.SENTRY_HYBRIDCLOUD_OUTBOX_MODELS["CELL"][0]
 
         assert outbox_name, "Could not determine outbox name"
-        outbox_model: type[RegionOutboxBase] = RegionOutboxBase.from_outbox_name(outbox_name)
+        outbox_model: type[CellOutboxBase] = CellOutboxBase.from_outbox_name(outbox_name)
 
         process_outbox_batch(outbox_identifier_hi, outbox_identifier_low, outbox_model)
     except Exception:
@@ -166,12 +173,9 @@ def drain_outbox_shards(
 
 @instrumented_task(
     name="sentry.tasks.drain_outbox_shards_control",
-    queue="outbox.control",
+    namespace=hybridcloud_control_tasks,
+    processing_deadline_duration=90,
     silo_mode=SiloMode.CONTROL,
-    taskworker_config=TaskworkerConfig(
-        namespace=hybridcloud_control_tasks,
-        processing_deadline_duration=90,
-    ),
 )
 def drain_outbox_shards_control(
     outbox_identifier_low: int = 0,
@@ -180,7 +184,7 @@ def drain_outbox_shards_control(
 ) -> None:
     try:
         if outbox_name is None:
-            outbox_name = settings.SENTRY_OUTBOX_MODELS["CONTROL"][0]
+            outbox_name = settings.SENTRY_HYBRIDCLOUD_OUTBOX_MODELS["CONTROL"][0]
 
         assert outbox_name, "Could not determine outbox name"
         outbox_model: type[ControlOutboxBase] = ControlOutboxBase.from_outbox_name(outbox_name)

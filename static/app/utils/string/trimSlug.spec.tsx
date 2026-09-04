@@ -1,22 +1,22 @@
 import {trimSlug} from 'sentry/utils/string/trimSlug';
 
-describe('trimSlug', function () {
-  it('returns slug if it is already short enough', function () {
-    expect(trimSlug('javascript', 20)).toBe('javascript');
+describe('trimSlug', () => {
+  it('returns slug if it is already short enough', () => {
+    expect(trimSlug('javascript')).toBe('javascript');
   });
 
-  it('trims long but unhyphenated slug', function () {
-    expect(trimSlug('javascriptfrontendproject', 20)).toBe('javascriptfrontendp…');
+  it('trims long but unhyphenated slug', () => {
+    expect(trimSlug('javascriptfrontendproject')).toBe('javascriptfrontendp…');
   });
 
-  it('trims slug from the middle, preserves whole words', function () {
-    expect(trimSlug('symbol-collector-console', 20)).toBe('symbol…console');
-    expect(trimSlug('symbol-collector-mobile', 20)).toBe('symbol…mobile');
-    expect(trimSlug('visual-snapshot-cloud-run', 20)).toBe('visual…cloud-run');
+  it('trims slug from the middle, preserves whole words', () => {
+    expect(trimSlug('symbol-collector-console')).toBe('symbol…console');
+    expect(trimSlug('symbol-collector-mobile')).toBe('symbol…mobile');
+    expect(trimSlug('visual-snapshot-cloud-run')).toBe('visual…cloud-run');
   });
 
-  it('trims slug from the middle, cuts whole words', function () {
-    expect(trimSlug('sourcemapsio-javascript', 20)).toBe('sourcemaps…javascript');
-    expect(trimSlug('armcknight-ios-ephemeraldemo', 20)).toBe('armcknig…phemeraldemo');
+  it('trims slug from the middle, cuts whole words', () => {
+    expect(trimSlug('sourcemapsio-javascript')).toBe('sourcemaps…javascript');
+    expect(trimSlug('armcknight-ios-ephemeraldemo')).toBe('armcknig…phemeraldemo');
   });
 });

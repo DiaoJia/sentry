@@ -1,9 +1,10 @@
 import styled from '@emotion/styled';
 
-import {Tooltip} from 'sentry/components/core/tooltip';
-import RadioGroup from 'sentry/components/forms/controls/radioGroup';
+import {InfoText} from '@sentry/scraps/info';
+import {Flex} from '@sentry/scraps/layout';
+
+import {RadioGroup} from 'sentry/components/forms/controls/radioGroup';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {ProjectionSamplePeriod} from 'sentry/views/settings/dynamicSampling/utils/useProjectSampleCounts';
 
 interface Props {
@@ -13,13 +14,13 @@ interface Props {
 
 export function ProjectionPeriodControl({period, onChange}: Props) {
   return (
-    <Wrapper>
-      <Tooltip
-        showUnderline
+    <Flex as="label" align="center" gap="md" marginBottom="0">
+      <InfoText
+        variant="inherit"
         title={t('The time period for which the estimated sample rates are calculated.')}
       >
         {t('Project the next')}
-      </Tooltip>
+      </InfoText>
       <StyledRadioGroup
         orientInline
         label={t('Project the next')}
@@ -30,17 +31,10 @@ export function ProjectionPeriodControl({period, onChange}: Props) {
           ['30d', t('30d')],
         ]}
       />
-    </Wrapper>
+    </Flex>
   );
 }
 
-const Wrapper = styled('label')`
-  display: flex;
-  align-items: center;
-  gap: ${space(1)};
-  margin-bottom: 0;
-`;
-
 const StyledRadioGroup = styled(RadioGroup<ProjectionSamplePeriod>)`
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;

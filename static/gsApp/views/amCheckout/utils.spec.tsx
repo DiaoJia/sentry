@@ -1,172 +1,20 @@
 import {PlanDetailsLookupFixture} from 'getsentry-test/fixtures/planDetailsLookup';
 
-import {DataCategory} from 'sentry/types/core';
-
-import {InvoiceItemType, PlanTier} from 'getsentry/types';
-import {SelectableProduct} from 'getsentry/views/amCheckout/types';
+import {AddOnCategory} from 'getsentry/types';
 import * as utils from 'getsentry/views/amCheckout/utils';
 import {getCheckoutAPIData} from 'getsentry/views/amCheckout/utils';
 
-describe('utils', function () {
-  const teamPlan = PlanDetailsLookupFixture('am1_team')!;
-  const teamPlanAnnual = PlanDetailsLookupFixture('am1_team_auf')!;
-  const bizPlan = PlanDetailsLookupFixture('am1_business')!;
-  const bizPlanAnnual = PlanDetailsLookupFixture('am1_business_auf')!;
-  const am3TeamPlan = PlanDetailsLookupFixture('am3_team')!;
-  const am3TeamPlanAnnual = PlanDetailsLookupFixture('am3_team_auf')!;
-  const DEFAULT_SELECTED_PRODUCTS = {
-    [SelectableProduct.SEER]: {
+describe('utils', () => {
+  const teamPlan = PlanDetailsLookupFixture('am1_team');
+  const bizPlan = PlanDetailsLookupFixture('am1_business');
+  const DEFAULT_ADDONS = {
+    [AddOnCategory.LEGACY_SEER]: {
       enabled: false,
     },
   };
 
-  describe('getReservedTotal', function () {
-    it('can get base price for team plan', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: teamPlan,
-        reserved: {
-          errors: 50_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('29');
-    });
-
-    it('can get base price for annual team plan', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: teamPlanAnnual,
-        reserved: {
-          errors: 50_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('312');
-    });
-
-    it('can get base price for business plan', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: bizPlan,
-        reserved: {
-          errors: 50_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('89');
-    });
-
-    it('can get base price for annual business plan', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: bizPlanAnnual,
-        reserved: {
-          errors: 50_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('960');
-    });
-
-    it('adds comma to price', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: bizPlanAnnual,
-        reserved: {
-          errors: 200_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('1,992');
-    });
-
-    it('includes Seer price in the total when enabled', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: am3TeamPlan,
-        reserved: {
-          errors: 50_000,
-          spans: 10_000_000,
-          replays: 50,
-          attachments: 1,
-        },
-        selectedProducts: {
-          [SelectableProduct.SEER]: {
-            enabled: true,
-          },
-        },
-      });
-      expect(priceDollars).toBe('49');
-    });
-
-    it('includes Seer annual price in the total when enabled', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: am3TeamPlanAnnual,
-        reserved: {
-          errors: 50_000,
-          spans: 10_000_000,
-          replays: 50,
-          attachments: 1,
-        },
-        selectedProducts: {
-          [SelectableProduct.SEER]: {
-            enabled: true,
-          },
-        },
-      });
-      expect(priceDollars).toBe('528');
-    });
-
-    it('does not include Seer budget when not enabled', function () {
-      const priceDollars = utils.getReservedTotal({
-        plan: teamPlan,
-        reserved: {
-          errors: 50_000,
-          transactions: 100_000,
-          attachments: 1,
-        },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
-      });
-      expect(priceDollars).toBe('29');
-    });
-  });
-
-  describe('discountPrice', function () {
-    it('discounts price correctly', function () {
-      expect(
-        utils.getDiscountedPrice({
-          basePrice: 1000,
-          amount: 10 * 100,
-          discountType: 'percentPoints',
-          creditCategory: InvoiceItemType.SUBSCRIPTION,
-        })
-      ).toBe(900);
-      expect(
-        utils.getDiscountedPrice({
-          basePrice: 8900,
-          amount: 40 * 100,
-          discountType: 'percentPoints',
-          creditCategory: InvoiceItemType.SUBSCRIPTION,
-        })
-      ).toBe(5340);
-      expect(
-        utils.getDiscountedPrice({
-          basePrice: 10000,
-          amount: 1000,
-          discountType: 'amountCents',
-          creditCategory: InvoiceItemType.SUBSCRIPTION,
-        })
-      ).toBe(9000);
-    });
-  });
-
-  describe('formatPrice', function () {
-    it('formats price correctly', function () {
+  describe('formatPrice', () => {
+    it('formats price correctly', () => {
       expect(utils.formatPrice({cents: 0})).toBe('0');
       expect(utils.formatPrice({cents: 1500})).toBe('15');
       expect(utils.formatPrice({cents: 1510})).toBe('15.10');
@@ -176,8 +24,8 @@ describe('utils', function () {
     });
   });
 
-  describe('displayPrice', function () {
-    it('formats price correctly', function () {
+  describe('displayPrice', () => {
+    it('formats price correctly', () => {
       expect(utils.displayPrice({cents: 0})).toBe('$0');
       expect(utils.displayPrice({cents: 1500})).toBe('$15');
       expect(utils.displayPrice({cents: 92430})).toBe('$924.30');
@@ -186,8 +34,8 @@ describe('utils', function () {
     });
   });
 
-  describe('displayPriceWithCents', function () {
-    it('formats price correctly', function () {
+  describe('displayPriceWithCents', () => {
+    it('formats price correctly', () => {
       expect(utils.displayPriceWithCents({cents: 0})).toBe('$0.00');
       expect(utils.displayPriceWithCents({cents: 1500})).toBe('$15.00');
       expect(utils.displayPriceWithCents({cents: 92430})).toBe('$924.30');
@@ -196,8 +44,8 @@ describe('utils', function () {
     });
   });
 
-  describe('displayUnitPrice', function () {
-    it('formats unit price correctly', function () {
+  describe('displayUnitPrice', () => {
+    it('formats unit price correctly', () => {
       expect(utils.displayUnitPrice({cents: 24, minDigits: 2, maxDigits: 2})).toBe(
         '$0.24'
       );
@@ -212,29 +60,14 @@ describe('utils', function () {
     });
   });
 
-  describe('getEventsWithUnit', function () {
-    it('returns correct event amount', function () {
-      expect(utils.getEventsWithUnit(1_000, DataCategory.ERRORS)).toBe('1K');
-      expect(utils.getEventsWithUnit(50_000, DataCategory.ERRORS)).toBe('50K');
-      expect(utils.getEventsWithUnit(1_000_000, DataCategory.TRANSACTIONS)).toBe('1M');
-      expect(utils.getEventsWithUnit(4_000_000, DataCategory.TRANSACTIONS)).toBe('4M');
-      expect(utils.getEventsWithUnit(1, DataCategory.ATTACHMENTS)).toBe('1GB');
-      expect(utils.getEventsWithUnit(25, DataCategory.ATTACHMENTS)).toBe('25GB');
-      expect(utils.getEventsWithUnit(1_000, DataCategory.ATTACHMENTS)).toBe('1,000GB');
-      expect(utils.getEventsWithUnit(4_000, DataCategory.ATTACHMENTS)).toBe('4,000GB');
-      expect(utils.getEventsWithUnit(1_000_000_000, DataCategory.ERRORS)).toBe('1B');
-      expect(utils.getEventsWithUnit(10_000_000_000, DataCategory.ERRORS)).toBe('10B');
-    });
-  });
-
-  describe('utils.getBucket', function () {
-    it('can get exact bucket by events', function () {
+  describe('utils.getBucket', () => {
+    it('can get exact bucket by events', () => {
       const events = 100_000;
       const bucket = utils.getBucket({events, buckets: bizPlan.planCategories.errors});
       expect(bucket.events).toBe(events);
     });
 
-    it('can get exact bucket by events with minimize strategy', function () {
+    it('can get exact bucket by events with minimize strategy', () => {
       const events = 100_000;
       const bucket = utils.getBucket({
         events,
@@ -244,13 +77,13 @@ describe('utils', function () {
       expect(bucket.events).toBe(events);
     });
 
-    it('can get approximate bucket if event level does not exist', function () {
+    it('can get approximate bucket if event level does not exist', () => {
       const events = 90_000;
       const bucket = utils.getBucket({events, buckets: bizPlan.planCategories.errors});
       expect(bucket.events).toBeGreaterThanOrEqual(events);
     });
 
-    it('can get approximate bucket if event level does not exist with minimize strategy', function () {
+    it('can get approximate bucket if event level does not exist with minimize strategy', () => {
       const events = 90_000;
       const bucket = utils.getBucket({
         events,
@@ -260,7 +93,7 @@ describe('utils', function () {
       expect(bucket.events).toBeLessThanOrEqual(events);
     });
 
-    it('can get first bucket by events', function () {
+    it('can get first bucket by events', () => {
       const events = 0;
       const bucket = utils.getBucket({
         events,
@@ -269,7 +102,7 @@ describe('utils', function () {
       expect(bucket.events).toBeGreaterThanOrEqual(events);
     });
 
-    it('can get first bucket by events with minimize strategy', function () {
+    it('can get first bucket by events with minimize strategy', () => {
       const events = 0;
       const bucket = utils.getBucket({
         events,
@@ -279,7 +112,7 @@ describe('utils', function () {
       expect(bucket.events).toBeGreaterThanOrEqual(events);
     });
 
-    it('can get last bucket by events', function () {
+    it('can get last bucket by events', () => {
       const events = 1_000_000;
       const bucket = utils.getBucket({
         events,
@@ -288,7 +121,7 @@ describe('utils', function () {
       expect(bucket.events).toBeLessThanOrEqual(events);
     });
 
-    it('can get last bucket by events with minimize strategy', function () {
+    it('can get last bucket by events with minimize strategy', () => {
       const events = 1_000_000;
       const bucket = utils.getBucket({
         events,
@@ -298,7 +131,7 @@ describe('utils', function () {
       expect(bucket.events).toBeLessThanOrEqual(events);
     });
 
-    it('can get exact bucket by price', function () {
+    it('can get exact bucket by price', () => {
       const price = 48000;
       const bucket = utils.getBucket({
         price,
@@ -308,7 +141,7 @@ describe('utils', function () {
       expect(bucket.events).toBe(3_500_000);
     });
 
-    it('can get exact bucket by price with minimize strategy', function () {
+    it('can get exact bucket by price with minimize strategy', () => {
       const price = 48000;
       const bucket = utils.getBucket({
         price,
@@ -319,7 +152,7 @@ describe('utils', function () {
       expect(bucket.events).toBe(3_500_000);
     });
 
-    it('can get approximate bucket if price level does not exist', function () {
+    it('can get approximate bucket if price level does not exist', () => {
       const price = 60000;
       const bucket = utils.getBucket({
         price,
@@ -329,7 +162,7 @@ describe('utils', function () {
       expect(bucket.events).toBe(4_500_000);
     });
 
-    it('can get approximate bucket if price level does not exist with minimize strategy', function () {
+    it('can get approximate bucket if price level does not exist with minimize strategy', () => {
       const price = 60000;
       const bucket = utils.getBucket({
         price,
@@ -340,7 +173,7 @@ describe('utils', function () {
       expect(bucket.events).toBe(4_000_000);
     });
 
-    it('can get first bucket by price', function () {
+    it('can get first bucket by price', () => {
       const price = 0;
       const bucket = utils.getBucket({
         price,
@@ -349,7 +182,7 @@ describe('utils', function () {
       expect(bucket.price).toBe(price);
     });
 
-    it('can get first bucket by price with minimize strategy', function () {
+    it('can get first bucket by price with minimize strategy', () => {
       const price = 0;
       const bucket = utils.getBucket({
         price,
@@ -359,7 +192,7 @@ describe('utils', function () {
       expect(bucket.price).toBe(price);
     });
 
-    it('can get last bucket by price', function () {
+    it('can get last bucket by price', () => {
       const price = 263500;
       const bucket = utils.getBucket({
         price,
@@ -368,7 +201,7 @@ describe('utils', function () {
       expect(bucket.price).toBeLessThanOrEqual(price);
     });
 
-    it('can get last bucket by price with minimize strategy', function () {
+    it('can get last bucket by price with minimize strategy', () => {
       const price = 263500;
       const bucket = utils.getBucket({
         price,
@@ -379,17 +212,8 @@ describe('utils', function () {
     });
   });
 
-  describe('utils.getToggleTier', function () {
-    it('gets the correct toggle tier given a checkout tier', function () {
-      expect(utils.getToggleTier(undefined)).toBeNull();
-      expect(utils.getToggleTier(PlanTier.AM3)).toBeNull();
-      expect(utils.getToggleTier(PlanTier.AM2)).toBe(PlanTier.AM1);
-      expect(utils.getToggleTier(PlanTier.AM1)).toBe(PlanTier.AM2);
-    });
-  });
-
-  describe('utils.getCheckoutAPIData', function () {
-    it('returns correct reserved api data', function () {
+  describe('utils.getCheckoutAPIData', () => {
+    it('returns correct reserved api data', () => {
       const formData = {
         plan: 'am3_business',
         onDemandMaxSpend: 100,
@@ -403,7 +227,7 @@ describe('utils', function () {
           attachments: 70,
           profileDuration: 80,
         },
-        selectedProducts: DEFAULT_SELECTED_PRODUCTS,
+        addOns: DEFAULT_ADDONS,
       };
 
       expect(getCheckoutAPIData({formData})).toEqual({
@@ -418,7 +242,7 @@ describe('utils', function () {
         reservedUptime: 60,
         reservedAttachments: 70,
         reservedProfileDuration: 80,
-        seer: false,
+        addOnLegacySeer: false,
       });
     });
   });

@@ -14,15 +14,20 @@ from django.http import Http404, HttpRequest, HttpResponse
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
+from sentry import options
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import Endpoint, region_silo_endpoint
+from sentry.api.base import Endpoint, cell_silo_endpoint
 from sentry.api.exceptions import SentryAPIException
+from sentry.api.utils import to_valid_int_id
 from sentry.integrations.base import IntegrationDomain
 from sentry.integrations.bitbucket.constants import BITBUCKET_IP_RANGES, BITBUCKET_IPS
 from sentry.integrations.services.integration.service import integration_service
 from sentry.integrations.source_code_management.webhook import SCMWebhook
+from sentry.integrations.types import IntegrationProviderSlug
 from sentry.integrations.utils.metrics import IntegrationWebhookEvent, IntegrationWebhookEventType
+from sentry.integrations.utils.webhook_viewer_context import webhook_viewer_context
+from sentry.issues.action_log import ActionSource, GroupActionActor, action_context_scope
 from sentry.models.commit import Commit
 from sentry.models.commitauthor import CommitAuthor
 from sentry.models.organization import Organization
@@ -74,7 +79,7 @@ class WebhookInvalidSignatureException(SentryAPIException):
 class BitbucketWebhook(SCMWebhook, ABC):
     @property
     def provider(self) -> str:
-        return "bitbucket"
+        return IntegrationProviderSlug.BITBUCKET.value
 
     def update_repo_data(self, repo: Repository, event: Mapping[str, Any]) -> None:
         """
@@ -156,9 +161,9 @@ class PushEventWebhook(BitbucketWebhook):
                     pass
 
 
-@region_silo_endpoint
+@cell_silo_endpoint
 class BitbucketWebhookEndpoint(Endpoint):
-    owner = ApiOwner.INTEGRATIONS
+    owner = ApiOwner.CODING_WORKFLOWS
     publish_status = {
         "POST": ApiPublishStatus.PRIVATE,
     }
@@ -175,20 +180,21 @@ class BitbucketWebhookEndpoint(Endpoint):
 
         return super().dispatch(request, *args, **kwargs)
 
-    def post(self, request: HttpRequest, organization_id: int) -> HttpResponse:
+    def post(self, request: HttpRequest, organization_id: str) -> HttpResponse:
+        org_id = to_valid_int_id("organization_id", organization_id, raise_404=True)
         try:
-            organization = Organization.objects.get_from_cache(id=organization_id)
+            organization = Organization.objects.get_from_cache(id=org_id)
         except Organization.DoesNotExist:
             logger.info(
                 "%s.webhook.invalid-organization",
                 PROVIDER_NAME,
-                extra={"organization_id": organization_id},
+                extra={"organization_id": org_id},
             )
             return HttpResponse(status=400)
 
         body = bytes(request.body)
         if not body:
-            logger.error(
+            logger.warning(
                 "%s.webhook.missing-body", PROVIDER_NAME, extra={"organization_id": organization.id}
             )
             return HttpResponse(status=400)
@@ -196,7 +202,7 @@ class BitbucketWebhookEndpoint(Endpoint):
         try:
             handler = self.get_handler(request.META["HTTP_X_EVENT_KEY"])
         except KeyError:
-            logger.exception(
+            logger.warning(
                 "%s.webhook.missing-event",
                 PROVIDER_NAME,
                 extra={"organization_id": organization.id},
@@ -215,7 +221,7 @@ class BitbucketWebhookEndpoint(Endpoint):
                 break
 
         if not valid_ip and address_string not in BITBUCKET_IPS:
-            logger.error(
+            logger.warning(
                 "%s.webhook.invalid-ip-range",
                 PROVIDER_NAME,
                 extra={"organization_id": organization.id},
@@ -225,7 +231,7 @@ class BitbucketWebhookEndpoint(Endpoint):
         try:
             event = orjson.loads(body)
         except orjson.JSONDecodeError:
-            logger.exception(
+            logger.warning(
                 "%s.webhook.invalid-json",
                 PROVIDER_NAME,
                 extra={"organization_id": organization.id},
@@ -241,7 +247,10 @@ class BitbucketWebhookEndpoint(Endpoint):
         except Repository.DoesNotExist:
             raise Http404()
 
-        integration = integration_service.get_integration(integration_id=repo.integration_id)
+        integration = integration_service.get_integration(
+            integration_id=repo.integration_id,
+            using_replica=options.get("integration_service.get_integration.using_replica"),
+        )
         if integration and "webhook_secret" in integration.metadata:
             secret = integration.metadata["webhook_secret"]
             try:
@@ -257,11 +266,15 @@ class BitbucketWebhookEndpoint(Endpoint):
 
         event_handler = handler()
 
-        with IntegrationWebhookEvent(
-            interaction_type=event_handler.event_type,
-            domain=IntegrationDomain.SOURCE_CODE_MANAGEMENT,
-            provider_key=event_handler.provider,
-        ).capture():
+        with (
+            webhook_viewer_context(organization.id),
+            IntegrationWebhookEvent(
+                interaction_type=event_handler.event_type,
+                domain=IntegrationDomain.SOURCE_CODE_MANAGEMENT,
+                provider_key=event_handler.provider,
+            ).capture(),
+            action_context_scope(ActionSource.BITBUCKET, GroupActionActor.org(organization.id)),
+        ):
             event_handler(event, repo=repo, organization=organization)
 
         return HttpResponse(status=204)

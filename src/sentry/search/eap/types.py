@@ -1,10 +1,15 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
-from sentry_protos.snuba.v1.trace_item_attribute_pb2 import Reliability
+from sentry_protos.snuba.v1.request_common_pb2 import PageToken
+from sentry_protos.snuba.v1.trace_item_attribute_pb2 import ExtrapolationMode, Reliability
+from sentry_protos.snuba.v1.trace_item_filter_pb2 import TraceItemFilter
 
 from sentry.search.events.types import EventsResponse
+
+if TYPE_CHECKING:
+    from sentry.search.eap.resolver import SearchResolver
 
 
 @dataclass(frozen=True)
@@ -13,7 +18,7 @@ class FieldsACL:
     attributes: set[str] = field(default_factory=set)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class SearchResolverConfig:
     # Automatically add id, etc. if there are no aggregates
     auto_fields: bool = False
@@ -26,8 +31,26 @@ class SearchResolverConfig:
     fields_acl: FieldsACL = field(default_factory=lambda: FieldsACL())
     # If set to True, do not extrapolate any values regardless of individual aggregate settings
     disable_aggregate_extrapolation: bool = False
+    extrapolation_mode: ExtrapolationMode.ValueType | None = None
     # Whether to set the timestamp granularities to stable buckets
     stable_timestamp_quantization: bool = True
+    # Whether to 0 when timeseries results have missing data
+    zerofill_timeseries: bool = True
+    # When True, ResolvedAttributes whose internal_type is ARRAY are silently dropped based on
+    # feature flag organizations:trace-item-details-array-fields
+    disable_array_attributes: bool = True
+    # API-only visibility enforcement. Non-API callers should leave this as None
+    # so backend resolution semantics remain unchanged.
+    api_attribute_visibility_item_type: str | None = None
+    api_attribute_visibility_include_internal: bool = False
+
+    def extra_conditions(
+        self,
+        search_resolver: "SearchResolver",
+        selected_columns: list[str] | None,
+        equations: list[str] | None,
+    ) -> TraceItemFilter | None:
+        return None
 
 
 CONFIDENCES: dict[Reliability.ValueType, Literal["low", "high"]] = {
@@ -42,13 +65,45 @@ ConfidenceData = list[dict[str, Confidence]]
 class SupportedTraceItemType(str, Enum):
     LOGS = "logs"
     SPANS = "spans"
+    UPTIME_RESULTS = "uptime_results"
+    TRACEMETRICS = "tracemetrics"
+    PROFILE_FUNCTIONS = "profile_functions"
+    PREPROD = "preprod"
+    ATTACHMENTS = "attachments"
+    PROCESSING_ERRORS = "processing_errors"
+    OCCURRENCES = "occurrences"
+    REPLAYS = "replays"
+
+
+class AttributeSourceType(str, Enum):
+    SENTRY = "sentry"
+    USER = "user"
+
+
+class AttributeSource(TypedDict):
+    source_type: AttributeSourceType
+    is_transformed_alias: NotRequired[bool]
+
+
+ScalarType = Literal["str", "int", "float", "bool"]
+ColumnType = Literal["string", "number", "boolean", "array"]
+ScalarValueType = float | bool | str
 
 
 class TraceItemAttribute(TypedDict):
     name: str
-    type: Literal["string", "number"]
-    value: str | int | float
+    type: ScalarType | Literal["array"]
+    value: str | int | float | bool | list[str | int | float | bool] | None
 
 
 class EAPResponse(EventsResponse):
     confidence: ConfidenceData
+    page_token: NotRequired[PageToken]
+
+
+@dataclass()
+class AdditionalQueries:
+    span: list[str] | None
+    log: list[str] | None
+    metric: list[str] | None
+    occurrences: list[str] | None

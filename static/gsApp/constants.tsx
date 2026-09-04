@@ -3,7 +3,6 @@ import {t} from 'sentry/locale';
 import {DataCategoryExact} from 'sentry/types/core';
 
 import type {BilledDataCategoryInfo} from 'getsentry/types';
-import {PlanTier} from 'getsentry/types';
 
 export const MONTHLY = 'monthly';
 export const ANNUAL = 'annual';
@@ -18,14 +17,22 @@ export const CPE_MULTIPLIER_TO_CENTS = 0.000001;
 
 export const GIGABYTE = 10 ** 9;
 
-// the first tier is the default tier
-export const SUPPORTED_TIERS = [PlanTier.AM3, PlanTier.AM2, PlanTier.AM1];
-export const DEFAULT_TIER = SUPPORTED_TIERS[0];
-export const UPSELL_TIER = SUPPORTED_TIERS[1]; // TODO(am3): Update to DEFAULT_TIER when upsells are configured for AM3
-
-const BASIC_TRIAL_PLANS = ['am1_t', 'am2_t', 'am3_t'];
-const ENTERPRISE_TRIAL_PLANS = ['am1_t_ent', 'am2_t_ent', 'am3_t_ent', 'am3_t_ent_ds'];
-export const TRIAL_PLANS = [...BASIC_TRIAL_PLANS, ...ENTERPRISE_TRIAL_PLANS];
+/**
+ * Pseudo-tiers accepted by the customer billing-config endpoint as its `tier`
+ * query param. The backend resolves each server-side so the frontend doesn't
+ * have to replicate the selection logic. See getsentry's
+ * `CustomerBillingConfigEndpoint`.
+ */
+export enum BillingConfigTier {
+  /** Tier to show in upsells: AM3 for AM3 customers, otherwise AM2. */
+  UPSELL = 'upsell',
+  /** Tier a customer should check out on. */
+  CHECKOUT = 'checkout',
+  /** The latest tier, independent of the org's current plan. */
+  DEFAULT = 'default',
+  /** Plans across all usable tiers (staff/superuser only). */
+  ALL = 'all',
+}
 
 // While we no longer offer or support unlimited ondemand we still
 // need to render billing history records that have unlimited ondemand.
@@ -50,17 +57,18 @@ const DEFAULT_BILLED_DATA_CATEGORY_INFO = {
 } as Record<DataCategoryExact, BilledDataCategoryInfo>;
 Object.entries(DEFAULT_BILLED_DATA_CATEGORY_INFO).forEach(
   ([categoryExact, categoryInfo]) => {
-    if (!categoryInfo.isBilledCategory) {
-      DEFAULT_BILLED_DATA_CATEGORY_INFO[categoryExact as DataCategoryExact] = {
-        ...categoryInfo,
-        canAllocate: false,
-        canProductTrial: false,
-        maxAdminGift: 0,
-        freeEventsMultiple: 0,
-        feature: null,
-        reservedVolumeTooltip: null,
-      };
-    }
+    DEFAULT_BILLED_DATA_CATEGORY_INFO[categoryExact as DataCategoryExact] = {
+      ...categoryInfo,
+      canAllocate: false,
+      canProductTrial: false,
+      freeEventsMultiple: 0,
+      feature: null,
+      hasSpikeProtection: false,
+      checkoutTooltip: null,
+      tallyType: 'usage',
+      hasPerCategory: false,
+      adminOnlyProductTrialFeature: null,
+    };
   }
 );
 
@@ -74,111 +82,155 @@ export const BILLED_DATA_CATEGORY_INFO = {
   [DataCategoryExact.ERROR]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.ERROR],
     canAllocate: true,
-    canProductTrial: false,
-    maxAdminGift: 10_000_000,
     freeEventsMultiple: 1_000,
-    reservedVolumeTooltip: t(
+    hasSpikeProtection: true,
+    checkoutTooltip: t(
       'Errors are sent every time an SDK catches a bug. You can send them manually too, if you want.'
     ),
+    hasPerCategory: true,
   },
   [DataCategoryExact.TRANSACTION]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.TRANSACTION],
     canAllocate: true,
     canProductTrial: true,
-    maxAdminGift: 50_000_000,
     freeEventsMultiple: 1_000,
     feature: 'performance-view',
-    reservedVolumeTooltip: t(
+    hasSpikeProtection: true,
+    checkoutTooltip: t(
       'Transactions are sent when your service receives a request and sends a response.'
     ),
+    hasPerCategory: true,
+    shortenedUnitName: t('unit'),
   },
   [DataCategoryExact.ATTACHMENT]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.ATTACHMENT],
     canAllocate: true,
-    canProductTrial: false,
-    maxAdminGift: 10_000,
     freeEventsMultiple: 1,
     feature: 'event-attachments',
-    reservedVolumeTooltip: t(
-      'Attachments are files attached to errors, such as minidumps.'
-    ),
+    hasSpikeProtection: true,
+    checkoutTooltip: t('Attachments are files attached to errors, such as minidumps.'),
+    hasPerCategory: true,
+    shortenedUnitName: 'GB',
   },
   [DataCategoryExact.REPLAY]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.REPLAY],
-    canAllocate: false,
     canProductTrial: true,
-    maxAdminGift: 1_000_000,
     freeEventsMultiple: 1,
     feature: 'session-replay',
-    reservedVolumeTooltip: t(
+    checkoutTooltip: t(
       'Session Replays are video-like reproductions of your users’ sessions navigating your app or website.'
     ),
+    hasPerCategory: true,
   },
   [DataCategoryExact.SPAN]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SPAN],
-    canAllocate: false,
     canProductTrial: true,
-    maxAdminGift: 1_000_000_000,
     freeEventsMultiple: 100_000,
     feature: 'spans-usage-tracking',
-    reservedVolumeTooltip: t(
+    hasSpikeProtection: true,
+    checkoutTooltip: t(
       'Tracing is enabled by spans. A span represents a single operation of work within a trace.'
     ),
   },
   [DataCategoryExact.SPAN_INDEXED]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SPAN_INDEXED],
-    canAllocate: false,
     canProductTrial: true,
-    maxAdminGift: 1_000_000_000,
     freeEventsMultiple: 100_000,
     feature: 'spans-usage-tracking',
   },
   [DataCategoryExact.MONITOR_SEAT]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.MONITOR_SEAT],
-    canAllocate: false,
-    canProductTrial: false,
-    maxAdminGift: 10_000,
     freeEventsMultiple: 1,
     feature: 'monitor-seat-billing',
+    tallyType: 'seat',
+    hasPerCategory: true,
+    checkoutTooltip: t(
+      'Crons monitors scheduled jobs to confirm they run on time and alert you when they fail or misfire.'
+    ),
+    shortenedUnitName: t('monitor'),
   },
   [DataCategoryExact.UPTIME]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.UPTIME],
-    canAllocate: false,
-    canProductTrial: false,
-    maxAdminGift: 10_000,
     freeEventsMultiple: 1,
-    feature: 'uptime',
+    feature: 'uptime-billing',
+    tallyType: 'seat',
+    hasPerCategory: true,
+    checkoutTooltip: t(
+      'Uptime monitoring checks your application’s availability and alerts you when services go down so you can respond quickly.'
+    ),
+    shortenedUnitName: t('monitor'),
   },
   [DataCategoryExact.PROFILE_DURATION]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.PROFILE_DURATION],
-    canAllocate: false,
     canProductTrial: true,
-    maxAdminGift: 10_000,
     freeEventsMultiple: 1, // in hours
-    feature: null,
+    hasPerCategory: true,
+    checkoutTooltip: t(
+      'Continuous profiling tracks how code runs while your service is active, helping you find bottlenecks and improve efficiency.'
+    ),
+    shortenedUnitName: t('hour'),
   },
   [DataCategoryExact.PROFILE_DURATION_UI]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.PROFILE_DURATION_UI],
-    canAllocate: false,
     canProductTrial: true,
-    maxAdminGift: 10_000,
     freeEventsMultiple: 1, // in hours
-    feature: null,
+    hasPerCategory: true,
+    checkoutTooltip: t(
+      'UI profiling tracks code performance during user sessions in frontend or mobile apps, helping you spot slowdowns and improve experience.'
+    ),
+    shortenedUnitName: t('hour'),
   },
+  // Seer categories have product trials through ReservedBudgetCategoryType.SEER, not as individual categories
   [DataCategoryExact.SEER_AUTOFIX]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SEER_AUTOFIX],
-    canAllocate: false,
-    canProductTrial: false,
-    maxAdminGift: 0,
-    freeEventsMultiple: 0,
     feature: 'seer-billing',
+    shortenedUnitName: t('fix'),
   },
   [DataCategoryExact.SEER_SCANNER]: {
     ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SEER_SCANNER],
-    canAllocate: false,
-    canProductTrial: false,
-    maxAdminGift: 0,
-    freeEventsMultiple: 0,
     feature: 'seer-billing',
+    shortenedUnitName: t('scan'),
+  },
+  [DataCategoryExact.LOG_BYTE]: {
+    ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.LOG_BYTE],
+    canAllocate: false,
+    canProductTrial: true,
+    freeEventsMultiple: 1,
+    hasSpikeProtection: false,
+    feature: 'logs-billing',
+    checkoutTooltip: t(
+      'A log records events from your application, giving you the context to debug issues and understand system behavior.'
+    ),
+    shortenedUnitName: 'GB',
+  },
+  [DataCategoryExact.TRACE_METRIC_BYTE]: {
+    ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.TRACE_METRIC_BYTE],
+    canProductTrial: true,
+    freeEventsMultiple: 1,
+    feature: 'expose-category-trace-metric-byte',
+    shortenedUnitName: 'GB',
+    checkoutTooltip: t(
+      'Application Metrics capture key signals from your application using counters, gauges, and distributions.'
+    ),
+  },
+  [DataCategoryExact.SEER_USER]: {
+    ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SEER_USER],
+    feature: 'seer-user-billing-launch',
+    canProductTrial: false,
+    freeEventsMultiple: 1,
+    tallyType: 'seat',
+    shortenedUnitName: t('contributor'),
+  },
+  [DataCategoryExact.SIZE_ANALYSIS]: {
+    ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.SIZE_ANALYSIS],
+    freeEventsMultiple: 1,
+    shortenedUnitName: t('build'),
+    adminOnlyProductTrialFeature: true,
+  },
+  [DataCategoryExact.INSTALLABLE_BUILD]: {
+    ...DEFAULT_BILLED_DATA_CATEGORY_INFO[DataCategoryExact.INSTALLABLE_BUILD],
+    freeEventsMultiple: 1,
+    shortenedUnitName: t('install'),
+    adminOnlyProductTrialFeature: 'expose-category-installable-build',
   },
 } as const satisfies Record<DataCategoryExact, BilledDataCategoryInfo>;

@@ -3,15 +3,15 @@ import {Fragment} from 'react';
 import BadStackTraceExample from 'sentry-images/issue_details/bad-stack-trace-example.png';
 import GoodStackTraceExample from 'sentry-images/issue_details/good-stack-trace-example.png';
 
-import {Flex} from 'sentry/components/core/layout';
-import QuestionTooltip from 'sentry/components/questionTooltip';
+import {InfoTip} from '@sentry/scraps/info';
+import {Flex} from '@sentry/scraps/layout';
+
 import * as Storybook from 'sentry/stories';
-import {space} from 'sentry/styles/space';
 
 import {ContentSliderDiff} from '.';
 
 export default Storybook.story('ContentSliderDiff', story => {
-  story('Comparing images', function () {
+  story('Comparing images', () => {
     return (
       <Fragment>
         <p>
@@ -29,13 +29,13 @@ export default Storybook.story('ContentSliderDiff', story => {
         </p>
         <div>
           <ContentSliderDiff.Header>
-            <Flex align="center" gap={space(0.5)}>
+            <Flex align="center" gap="xs">
               Before
-              <QuestionTooltip title="This is the before image" size="xs" />
+              <InfoTip title="This is the before image" size="xs" />
             </Flex>
-            <Flex align="center" gap={space(0.5)}>
+            <Flex align="center" gap="xs">
               After
-              <QuestionTooltip title="This is the after image" size="xs" />
+              <InfoTip title="This is the after image" size="xs" />
             </Flex>
           </ContentSliderDiff.Header>
           <ContentSliderDiff.Body

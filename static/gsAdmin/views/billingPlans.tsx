@@ -1,20 +1,20 @@
-import {useEffect, useState} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import * as Sentry from '@sentry/react';
+import {useQuery} from '@tanstack/react-query';
 
-import {Badge} from 'sentry/components/core/badge';
-import {Button} from 'sentry/components/core/button';
-import Panel from 'sentry/components/panels/panel';
+import {Badge} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {Container} from '@sentry/scraps/layout';
+
+import {Panel} from 'sentry/components/panels/panel';
 import {IconDownload} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
 import type {DataCategory} from 'sentry/types/core';
-import useApi from 'sentry/utils/useApi';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
 
-import ResultTable from 'admin/components/resultTable';
-import formatCurrency from 'getsentry/utils/formatCurrency';
+import {ResultTable} from 'admin/components/resultTable';
+import {formatCurrency} from 'getsentry/utils/formatCurrency';
 import {displayUnitPrice} from 'getsentry/views/amCheckout/utils';
 
-/** @internal exported for tests only */
 export interface BillingPlansResponse {
   data: Plans;
   not_live: string[];
@@ -39,32 +39,24 @@ interface PriceTier {
   annual: number;
   monthly: number;
   od_ppe: number;
+  reserved_ppe: number;
   tier: number;
   volume: number;
 }
 
-function BillingPlans() {
-  const api = useApi();
-  const [billingPlansResponse, setBillingPlansResponse] = useState<BillingPlansResponse>({
-    not_live: [],
-    data: {},
-  });
+export function BillingPlans() {
+  const {
+    data: billingPlansResponse = {
+      not_live: [],
+      data: {},
+    },
+  } = useQuery(
+    apiOptions.as<BillingPlansResponse>()('/billing-plans/', {
+      staleTime: 0,
+    })
+  );
 
   const plans = billingPlansResponse.data;
-
-  useEffect(() => {
-    async function fetchPlans() {
-      try {
-        const response: BillingPlansResponse =
-          await api.requestPromise('/billing-plans/');
-        setBillingPlansResponse(response);
-      } catch (error) {
-        Sentry.captureException(error);
-      }
-    }
-
-    fetchPlans();
-  }, [api]);
 
   function handleDownloadCsv() {
     if (!plans) {
@@ -97,7 +89,8 @@ function BillingPlans() {
             '', // Volume (max)
             '', // Monthly
             '', // Annual
-            '', // OD PPE / PAYG PPE
+            '', // Reserved PPE
+            '', // PAYG PPE
             '' // empty column
           );
         });
@@ -117,7 +110,8 @@ function BillingPlans() {
             'Volume (max)',
             'Monthly',
             'Annual',
-            'OD PPE / PAYG PPE',
+            'Reserved PPE',
+            'PAYG PPE',
             ' ' // empty column
           );
         });
@@ -148,7 +142,8 @@ function BillingPlans() {
                 tier.volume.toString(), // Volume (max)
                 formatCurrency(tier.monthly), // Monthly
                 formatCurrency(tier.annual), // Annual
-                displayUnitPrice({cents: tier.od_ppe, minDigits: 2, maxDigits: 10}), // OD PPE / PAYG PPE
+                displayUnitPrice({cents: tier.reserved_ppe, minDigits: 2, maxDigits: 10}), // Reserved PPE
+                displayUnitPrice({cents: tier.od_ppe, minDigits: 2, maxDigits: 10}), // PAYG PPE
                 ' ' // empty column
               );
             } else {
@@ -158,7 +153,8 @@ function BillingPlans() {
                 ' ', // Volume (max)
                 ' ', // Monthly
                 ' ', // Annual
-                ' ', // OD PPE / PAYG PPE
+                ' ', // Reserved PPE
+                ' ', // PAYG PPE
                 ' ' // empty column
               );
             }
@@ -190,7 +186,7 @@ function BillingPlans() {
   }
 
   return (
-    <BillingPlansContainer>
+    <Container padding="xl">
       <h1>Billing Plans</h1>
       <Button icon={<IconDownload />} onClick={handleDownloadCsv}>
         Download CSV
@@ -204,7 +200,7 @@ function BillingPlans() {
           notLive={billingPlansResponse.not_live}
         />
       ))}
-    </BillingPlansContainer>
+    </Container>
   );
 }
 
@@ -298,17 +294,22 @@ function PlanDetailsSection({
   planTierIdFormatted: string;
   notLive?: boolean;
 }) {
+  const theme = useTheme();
   const planNameFormatted = formatPlanName(planName);
   const planTypeId = `${planTierIdFormatted}-${planNameFormatted}`;
   const pricingId = `${planTierIdFormatted}-${planNameFormatted}-pricing`;
 
   return (
     <div>
-      <div style={{display: 'flex', alignItems: 'center', marginBottom: space(3)}}>
+      <div
+        style={{display: 'flex', alignItems: 'center', marginBottom: theme.space['2xl']}}
+      >
         <h3 id={planTypeId} style={{margin: 0}}>
           {planTierIdFormatted} {planNameFormatted} Plan
         </h3>
-        <Badge type={notLive ? 'warning' : 'new'}>{notLive ? 'NOT LIVE' : 'LIVE'}</Badge>
+        <Badge variant={notLive ? 'warning' : 'new'}>
+          {notLive ? 'NOT LIVE' : 'LIVE'}
+        </Badge>
       </div>
 
       {/* Pricing Table */}
@@ -348,8 +349,8 @@ function PricingTable({pricing}: {pricing: Record<string, Price>}) {
           {Object.entries(pricing).map(([platform, price]) => (
             <tr key={platform}>
               <td>{platform}</td>
-              <td>{formatCurrency(price.monthly)}</td>
-              <td>{formatCurrency(price.annual)}</td>
+              <td data-label="Monthly">{formatCurrency(price.monthly)}</td>
+              <td data-label="Annual">{formatCurrency(price.annual)}</td>
             </tr>
           ))}
         </tbody>
@@ -373,6 +374,7 @@ function PriceTiersTable({
   tiers: PriceTier[];
   notLive?: boolean;
 }) {
+  const theme = useTheme();
   const dataCategoryFormatted = formatDataCategory(dataCategory);
   const dataCategoryId = `${planTierIdFormatted}-${planNameFormatted}-${dataCategoryFormatted}`;
 
@@ -383,11 +385,13 @@ function PriceTiersTable({
 
   return (
     <div>
-      <div style={{display: 'flex', alignItems: 'center', marginBottom: space(3)}}>
+      <div
+        style={{display: 'flex', alignItems: 'center', marginBottom: theme.space['2xl']}}
+      >
         <h5 id={dataCategoryId} style={{margin: 0}}>
           {dataCategoryFormatted} for {planTierIdFormatted} {planNameFormatted}
         </h5>
-        <Badge type={badgeType}>{badgeText}</Badge>
+        <Badge variant={badgeType}>{badgeText}</Badge>
       </div>
       <Panel>
         <StyledResultTable>
@@ -397,17 +401,25 @@ function PriceTiersTable({
               <th>Volume</th>
               <th>Monthly</th>
               <th>Annual</th>
-              <th>OD PPE / PAYG PPE</th>
+              <th>Reserved PPE</th>
+              <th>PAYG PPE</th>
             </tr>
           </thead>
           <tbody>
             {tiers.map((tier, index) => (
               <tr key={`${dataCategoryId}-${tier.tier}-${index}`}>
                 <td>{tier.tier}</td>
-                <td>{Number(tier.volume).toLocaleString('en-US')}</td>
-                <td>{formatCurrency(tier.monthly)}</td>
-                <td>{formatCurrency(tier.annual)}</td>
-                <td>
+                <td data-label="Volume">{Number(tier.volume).toLocaleString('en-US')}</td>
+                <td data-label="Monthly">{formatCurrency(tier.monthly)}</td>
+                <td data-label="Annual">{formatCurrency(tier.annual)}</td>
+                <td data-label="Reserved PPE">
+                  {displayUnitPrice({
+                    cents: tier.reserved_ppe,
+                    minDigits: 2,
+                    maxDigits: 10,
+                  })}
+                </td>
+                <td data-label="PAYG PPE">
                   {displayUnitPrice({cents: tier.od_ppe, minDigits: 2, maxDigits: 10})}
                 </td>
               </tr>
@@ -419,26 +431,22 @@ function PriceTiersTable({
   );
 }
 
-const BillingPlansContainer = styled('div')`
-  padding: ${space(2)};
-`;
-
 const StyledResultTable = styled(ResultTable)`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 const TOCContainer = styled('nav')`
-  margin-bottom: ${space(4)};
+  margin-bottom: ${p => p.theme.space['3xl']};
   ul {
     list-style-type: none;
-    padding-left: ${space(2)};
+    padding-left: ${p => p.theme.space.xl};
   }
   li {
-    margin-bottom: ${space(1)};
+    margin-bottom: ${p => p.theme.space.md};
   }
   a {
     text-decoration: none;
-    color: ${p => p.theme.linkColor};
+    color: ${p => p.theme.tokens.interactive.link.accent.rest};
     &:hover {
       text-decoration: underline;
     }
@@ -476,5 +484,3 @@ function escapeCsvField(field: string): string {
   }
   return field;
 }
-
-export default BillingPlans;

@@ -3,11 +3,11 @@ from django.db.models.signals import post_delete
 from django.utils import timezone
 
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import FlexibleForeignKey, Model, region_silo_model, sane_repr
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
 from sentry.utils.cache import cache
 
 
-@region_silo_model
+@cell_silo_model
 class GroupEnvironment(Model):
     __relocation_scope__ = RelocationScope.Excluded
 
@@ -34,7 +34,7 @@ class GroupEnvironment(Model):
     __repr__ = sane_repr("group_id", "environment_id")
 
     @classmethod
-    def _get_cache_key(self, group_id, environment_id):
+    def _get_cache_key(self, group_id, environment_id) -> str:
         return f"groupenv:1:{group_id}:{environment_id}"
 
     @classmethod

@@ -3,31 +3,30 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {SubscriptionFixture} from 'getsentry-test/fixtures/subscription';
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import Footer from 'getsentry/components/upsellModal/footer';
+import {Footer} from 'getsentry/components/upsellModal/footer';
 
-describe('Business Landing Footer', function () {
+describe('Business Landing Footer', () => {
   const organization = OrganizationFixture({access: ['org:billing']});
   const subscription = SubscriptionFixture({organization});
 
-  const checkoutPage = `/settings/${organization.slug}/billing/checkout/?referrer=upgrade-business-landing.unknown`;
+  const checkoutPage = `/checkout/${organization.slug}/?referrer=upgrade-business-landing.unknown`;
 
-  beforeEach(function () {
+  beforeEach(() => {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
-      url: `/subscriptions/${organization.slug}/`,
+      url: `/customers/${organization.slug}/`,
       method: 'GET',
       body: subscription,
     });
   });
 
-  it('renders start trial if can trial', async function () {
+  it('renders start trial if can trial', async () => {
     render(
       <Footer
         subscription={{
           ...subscription,
           plan: 'mm2_f',
           canTrial: true,
-          isTrial: false,
         }}
         organization={organization}
         onCloseModal={jest.fn()}
@@ -40,14 +39,14 @@ describe('Business Landing Footer', function () {
     ).toBeInTheDocument();
   });
 
-  it('renders upgrade button if trialing', async function () {
+  it('renders upgrade button if trialing', async () => {
     render(
       <Footer
         subscription={{
           ...subscription,
           plan: 'am1_t',
           canTrial: false,
-          isTrial: true,
+          trialPlan: 'am1_t',
         }}
         organization={organization}
         onCloseModal={jest.fn()}
@@ -61,14 +60,13 @@ describe('Business Landing Footer', function () {
     expect(button).toHaveAttribute('href', checkoutPage);
   });
 
-  it('renders upgrade button if cannot trial and not trialing', async function () {
+  it('renders upgrade button if cannot trial and not trialing', async () => {
     render(
       <Footer
         subscription={{
           ...subscription,
           plan: 'mm2_f',
           canTrial: false,
-          isTrial: false,
         }}
         organization={organization}
         onCloseModal={jest.fn()}
@@ -81,14 +79,13 @@ describe('Business Landing Footer', function () {
     expect(screen.queryByText('Start 14-Day Trial')).not.toBeInTheDocument();
   });
 
-  it('directs to checkout if cannot trial and not trialing', async function () {
+  it('directs to checkout if cannot trial and not trialing', async () => {
     render(
       <Footer
         subscription={{
           ...subscription,
           plan: 'mm2_a_500k',
           canTrial: false,
-          isTrial: false,
         }}
         organization={organization}
         onCloseModal={jest.fn()}
@@ -101,7 +98,7 @@ describe('Business Landing Footer', function () {
     expect(screen.queryByText(/trial/i)).not.toBeInTheDocument();
   });
 
-  it('click request upgrade button if no billing permissions', async function () {
+  it('click request upgrade button if no billing permissions', async () => {
     const upgradeRequest = MockApiClient.addMockResponse({
       method: 'POST',
       url: `/organizations/${organization.slug}/plan-upgrade-request/`,
@@ -116,7 +113,6 @@ describe('Business Landing Footer', function () {
           ...subscription,
           plan: 'mm2_f',
           canTrial: false,
-          isTrial: false,
         }}
         organization={OrganizationFixture({
           ...organization,
@@ -140,7 +136,7 @@ describe('Business Landing Footer', function () {
     );
   });
 
-  it('click request trial button if no billing permissions', async function () {
+  it('click request trial button if no billing permissions', async () => {
     const upgradeRequest = MockApiClient.addMockResponse({
       method: 'POST',
       url: `/organizations/${organization.slug}/trial-request/`,
@@ -155,7 +151,6 @@ describe('Business Landing Footer', function () {
           ...subscription,
           plan: 'mm2_f',
           canTrial: true,
-          isTrial: false,
         }}
         organization={OrganizationFixture({
           ...organization,

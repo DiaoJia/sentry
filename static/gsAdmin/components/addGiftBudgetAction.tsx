@@ -1,17 +1,18 @@
 import {Fragment, useEffect, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
 
+import {Flex, Container} from '@sentry/scraps/layout';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import type {ModalRenderProps} from 'sentry/actionCreators/modal';
 import {openModal} from 'sentry/actionCreators/modal';
-import InputField from 'sentry/components/forms/fields/inputField';
-import NumberField from 'sentry/components/forms/fields/numberField';
-import TextField from 'sentry/components/forms/fields/textField';
-import Form from 'sentry/components/forms/form';
-import {space} from 'sentry/styles/space';
+import {InputField} from 'sentry/components/forms/fields/inputField';
+import {NumberField} from 'sentry/components/forms/fields/numberField';
+import {TextField} from 'sentry/components/forms/fields/textField';
+import {Form} from 'sentry/components/forms/form';
 import type {DataCategory} from 'sentry/types/core';
 import type {Organization} from 'sentry/types/organization';
-import useApi from 'sentry/utils/useApi';
+import {useApi} from 'sentry/utils/useApi';
 
 import type {Subscription} from 'getsentry/types';
 import {getPlanCategoryName} from 'getsentry/utils/dataCategory';
@@ -34,7 +35,7 @@ function AddGiftBudgetModal({
 }: ModalProps) {
   const api = useApi();
   const [selectedBudgetId, setSelectedBudgetId] = useState<string | null>(null);
-  const [giftAmount, setGiftAmount] = useState<number>(0);
+  const [giftAmount, setGiftAmount] = useState(0);
   const [ticketUrl, setTicketUrl] = useState<string | null>(null);
   const [notes, setNotes] = useState<string | null>(null);
 
@@ -100,14 +101,14 @@ function AddGiftBudgetModal({
         ) : (
           <div />
         )}
-        <Form onSubmit={onSubmit} submitLabel={'Confirm'} onCancel={closeModal}>
+        <Form onSubmit={onSubmit} submitLabel="Confirm" onCancel={closeModal}>
           {reservedBudgetOptions.map(budget => (
             <BudgetCard
               key={budget.id}
               isSelected={selectedBudgetId === budget.id}
               onClick={() => setSelectedBudgetId(budget.id)}
             >
-              <BudgetHeader>
+              <Flex justify="between" marginBottom="md">
                 <div>
                   <strong>Reserved Budget:</strong> $
                   {(budget.reservedBudget / 100).toLocaleString()}
@@ -116,8 +117,8 @@ function AddGiftBudgetModal({
                   <strong>Existing Free Budget:</strong> $
                   {(budget.freeBudget / 100).toLocaleString()}
                 </div>
-              </BudgetHeader>
-              <BudgetCategories>
+              </Flex>
+              <Container marginBottom="md">
                 <strong>Categories:</strong>{' '}
                 {Object.keys(budget.categories)
                   .map(category =>
@@ -129,7 +130,7 @@ function AddGiftBudgetModal({
                     })
                   )
                   .join(', ') || 'None'}
-              </BudgetCategories>
+              </Container>
               {selectedBudgetId === budget.id && (
                 <NumberField
                   inline={false}
@@ -159,7 +160,7 @@ function AddGiftBudgetModal({
           {reservedBudgetOptions.length === 0 && (
             <div>No reserved budgets available.</div>
           )}
-          <AuditFields>
+          <Container marginTop="xl">
             <InputField
               data-test-id="url-field"
               name="ticket-url"
@@ -181,7 +182,7 @@ function AddGiftBudgetModal({
               required // serializer requires this to be present
               onChange={(notesInput: any) => setNotes(notesInput)}
             />
-          </AuditFields>
+          </Container>
         </Form>
       </Body>
     </Fragment>
@@ -190,33 +191,17 @@ function AddGiftBudgetModal({
 
 type Options = Pick<Props, 'onSuccess' | 'organization' | 'subscription'>;
 
-const addGiftBudgetAction = (opts: Options) => {
+export const addGiftBudgetAction = (opts: Options) => {
   return openModal(deps => <AddGiftBudgetModal {...deps} {...opts} />, {
     closeEvents: 'escape-key',
   });
 };
 
-export default addGiftBudgetAction;
-
 const BudgetCard = styled('div')<{isSelected: boolean}>`
-  padding: ${space(2)};
-  margin: ${space(1)} 0;
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
-  background-color: ${p => (p.isSelected ? p.theme.surface100 : 'transparent')};
+  padding: ${p => p.theme.space.xl};
+  margin: ${p => p.theme.space.md} 0;
+  border: 1px solid ${p => p.theme.tokens.border.primary};
+  border-radius: ${p => p.theme.radius.md};
+  background-color: ${p => (p.isSelected ? p.theme.colors.surface200 : 'transparent')};
   cursor: pointer;
-`;
-
-const BudgetHeader = styled('div')`
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: ${space(1)};
-`;
-
-const BudgetCategories = styled('div')`
-  margin-bottom: ${space(1)};
-`;
-
-const AuditFields = styled('div')`
-  margin-top: ${space(2)};
 `;

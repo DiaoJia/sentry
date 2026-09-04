@@ -1,22 +1,23 @@
-import {Fragment, useState} from 'react';
+import {useMemo, useState} from 'react';
+
+import {Stack} from '@sentry/scraps/layout';
 
 import * as Layout from 'sentry/components/layouts/thirds';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import SentryDocumentTitle from 'sentry/components/sentryDocumentTitle';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
 import {t} from 'sentry/locale';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Member, Organization} from 'sentry/types/organization';
-import type {Project} from 'sentry/types/project';
-import useRouteAnalyticsEventNames from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
-import useRouteAnalyticsParams from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
+import type {InjectedRouter} from 'sentry/types/legacyReactRouter';
+import {useRouteAnalyticsEventNames} from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
 import {useLocation} from 'sentry/utils/useLocation';
-import {useUserTeams} from 'sentry/utils/useUserTeams';
-import BuilderBreadCrumbs from 'sentry/views/alerts/builder/builderBreadCrumbs';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {useRoutes} from 'sentry/utils/useRoutes';
+import {BuilderBreadCrumbs} from 'sentry/views/alerts/builder/builderBreadCrumbs';
+import {useAlertBuilderOutlet} from 'sentry/views/alerts/builder/projectProvider';
+import {UptimeRulesEdit} from 'sentry/views/detectors/components/uptime/edit';
 
 import {CronRulesEdit} from './rules/crons/edit';
-import IssueEditor from './rules/issue';
-import {MetricRulesEdit} from './rules/metric/edit';
-import {UptimeRulesEdit} from './rules/uptime/edit';
 import {CombinedAlertType} from './types';
 
 type RouteParams = {
@@ -24,30 +25,41 @@ type RouteParams = {
   ruleId: string;
 };
 
-type Props = RouteComponentProps<RouteParams> & {
-  hasMetricAlerts: boolean;
-  hasUptimeAlerts: boolean;
-  members: Member[] | undefined;
-  organization: Organization;
-  project: Project;
-};
-
-function ProjectAlertsEditor(props: Props) {
-  const {members, organization, project} = props;
+export default function ProjectAlertsEditor() {
+  const organization = useOrganization();
   const location = useLocation();
+  const params = useParams<RouteParams>();
+  const navigate = useNavigate();
+  const routes = useRoutes();
+  const {project} = useAlertBuilderOutlet();
+
+  // The legacy alert rule editors below still consume the react-router 3
+  // `InjectedRouter` interface. Build a minimal compatible shim until they're
+  // migrated to use the navigate / location hooks directly.
+  const router = useMemo<InjectedRouter>(
+    () =>
+      ({
+        go: delta => navigate(delta),
+        push: path => navigate(path),
+        replace: path => navigate(path, {replace: true}),
+        goBack: () => navigate(-1),
+        goForward: () => navigate(1),
+        location,
+        params,
+        routes,
+        isActive: () => false,
+      }) as InjectedRouter,
+    [location, navigate, params, routes]
+  );
 
   const [title, setTitle] = useState('');
 
   const alertTypeUrls = [
-    {url: '/alerts/metric-rules/', type: CombinedAlertType.METRIC},
     {url: '/alerts/uptime-rules/', type: CombinedAlertType.UPTIME},
     {url: '/alerts/crons-rules/', type: CombinedAlertType.CRONS},
-    {url: '/alerts/rules/', type: CombinedAlertType.ISSUE},
   ] as const;
 
-  const alertType =
-    alertTypeUrls.find(({url}) => location.pathname.includes(url))?.type ??
-    CombinedAlertType.ISSUE;
+  const alertType = alertTypeUrls.find(({url}) => location.pathname.includes(url))?.type;
 
   useRouteAnalyticsEventNames('edit_alert_rule.viewed', 'Edit Alert Rule: Viewed');
   useRouteAnalyticsParams({
@@ -60,10 +72,8 @@ function ProjectAlertsEditor(props: Props) {
   //  Currently used to help people add `is:unresolved` to their metric alert query.
   const isMigration = location?.query?.migration === '1';
 
-  const {teams, isLoading: teamsLoading} = useUserTeams();
-
   return (
-    <Fragment>
+    <Stack flex={1}>
       <SentryDocumentTitle
         title={title}
         orgSlug={organization.slug}
@@ -80,43 +90,26 @@ function ProjectAlertsEditor(props: Props) {
         </Layout.HeaderContent>
       </Layout.Header>
       <Layout.Body>
-        {teamsLoading ? (
-          <LoadingIndicator />
-        ) : (
-          <Fragment>
-            {alertType === CombinedAlertType.ISSUE && (
-              <IssueEditor
-                {...props}
-                project={project}
-                onChangeTitle={setTitle}
-                userTeamIds={teams.map(({id}) => id)}
-                members={members}
-              />
-            )}
-            {alertType === CombinedAlertType.METRIC && (
-              <MetricRulesEdit
-                {...props}
-                project={project}
-                onChangeTitle={setTitle}
-                userTeamIds={teams.map(({id}) => id)}
-              />
-            )}
-            {alertType === CombinedAlertType.UPTIME && (
-              <UptimeRulesEdit
-                {...props}
-                project={project}
-                onChangeTitle={setTitle}
-                userTeamIds={teams.map(({id}) => id)}
-              />
-            )}
-            {alertType === CombinedAlertType.CRONS && (
-              <CronRulesEdit {...props} project={project} onChangeTitle={setTitle} />
-            )}
-          </Fragment>
+        {alertType === CombinedAlertType.UPTIME && (
+          <UptimeRulesEdit
+            location={location}
+            params={params}
+            router={router}
+            routes={routes}
+            route={{}}
+            routeParams={params}
+            organization={organization}
+            onChangeTitle={setTitle}
+          />
+        )}
+        {alertType === CombinedAlertType.CRONS && (
+          <CronRulesEdit
+            organization={organization}
+            project={project}
+            onChangeTitle={setTitle}
+          />
         )}
       </Layout.Body>
-    </Fragment>
+    </Stack>
   );
 }
-
-export default ProjectAlertsEditor;

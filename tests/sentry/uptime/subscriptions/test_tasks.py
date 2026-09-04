@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import uuid
 from datetime import datetime, timedelta
+from unittest import mock
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -12,7 +13,7 @@ from django.conf import settings
 from django.test import override_settings
 from django.utils import timezone
 from redis import StrictRedis
-from rediscluster import RedisCluster
+from sentry_redis_tools.clients import RedisCluster
 
 from sentry.conf.types.uptime import UptimeRegionConfig
 from sentry.constants import ObjectStatus
@@ -21,12 +22,7 @@ from sentry.testutils.cases import UptimeTestCase
 from sentry.testutils.helpers import override_options
 from sentry.testutils.skips import requires_kafka
 from sentry.uptime.config_producer import get_partition_keys
-from sentry.uptime.models import (
-    UptimeStatus,
-    UptimeSubscription,
-    UptimeSubscriptionRegion,
-    get_detector,
-)
+from sentry.uptime.models import UptimeSubscription, UptimeSubscriptionRegion
 from sentry.uptime.subscriptions.regions import get_region_config
 from sentry.uptime.subscriptions.tasks import (
     SUBSCRIPTION_STATUS_MAX_AGE,
@@ -38,8 +34,9 @@ from sentry.uptime.subscriptions.tasks import (
     update_remote_uptime_subscription,
     uptime_subscription_to_check_config,
 )
-from sentry.uptime.types import ProjectUptimeSubscriptionMode
+from sentry.uptime.types import UptimeMonitorMode
 from sentry.utils import redis
+from sentry.workflow_engine.types import DetectorPriorityLevel
 
 pytestmark = [requires_kafka]
 
@@ -118,24 +115,20 @@ class BaseUptimeSubscriptionTaskTest(ConfigPusherTestMixin, metaclass=abc.ABCMet
             region_slugs=["default"],
         )
 
-    def test_no_subscription(self):
+    def test_no_subscription(self) -> None:
         self.task(12345)
         self.metrics.incr.assert_called_once_with(
-            "uptime.subscriptions.{}.subscription_does_not_exist".format(
-                self.status_translations[self.expected_status]
-            ),
+            f"uptime.subscriptions.{self.status_translations[self.expected_status]}.subscription_does_not_exist",
             sample_rate=1.0,
         )
 
-    def test_invalid_status(self):
+    def test_invalid_status(self) -> None:
         sub = self.create_subscription(
             UptimeSubscription.Status.ACTIVE, subscription_id=uuid.uuid4().hex
         )
         self.task(sub.id)
         self.metrics.incr.assert_called_once_with(
-            "uptime.subscriptions.{}.incorrect_status".format(
-                self.status_translations[self.expected_status]
-            ),
+            f"uptime.subscriptions.{self.status_translations[self.expected_status]}.incorrect_status",
             sample_rate=1.0,
         )
         self.assert_redis_config("default", sub, None, None)
@@ -145,7 +138,7 @@ class CreateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
     expected_status = UptimeSubscription.Status.CREATING
     task = create_remote_uptime_subscription
 
-    def test(self):
+    def test(self) -> None:
         sub = self.create_subscription(UptimeSubscription.Status.CREATING)
         create_remote_uptime_subscription(sub.id)
         sub.refresh_from_db()
@@ -155,7 +148,7 @@ class CreateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
             "default", sub, "upsert", UptimeSubscriptionRegion.RegionMode.ACTIVE
         )
 
-    def test_with_regions(self):
+    def test_with_regions(self) -> None:
         sub = self.create_uptime_subscription(
             status=UptimeSubscription.Status.CREATING, region_slugs=["default"]
         )
@@ -167,7 +160,7 @@ class CreateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
             "default", sub, "upsert", UptimeSubscriptionRegion.RegionMode.ACTIVE
         )
 
-    def test_multi_overlapping_regions(self):
+    def test_multi_overlapping_regions(self) -> None:
         regions = [
             UptimeRegionConfig(
                 slug="region1",
@@ -215,7 +208,7 @@ class CreateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
                 "region3", sub2, "upsert", UptimeSubscriptionRegion.RegionMode.ACTIVE
             )
 
-    def test_active_shadow_regions(self):
+    def test_active_shadow_regions(self) -> None:
         regions = [
             UptimeRegionConfig(
                 slug="region1",
@@ -285,7 +278,7 @@ class DeleteUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
     expected_status = UptimeSubscription.Status.DELETING
     task = delete_remote_uptime_subscription
 
-    def test(self):
+    def test(self) -> None:
         subscription_id = uuid4().hex
         sub = self.create_subscription(
             UptimeSubscription.Status.DELETING, subscription_id=subscription_id
@@ -294,13 +287,13 @@ class DeleteUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
         assert not UptimeSubscription.objects.filter(id=sub.id).exists()
         self.assert_redis_config("default", sub, "delete", None)
 
-    def test_no_subscription_id(self):
+    def test_no_subscription_id(self) -> None:
         sub = self.create_subscription(UptimeSubscription.Status.DELETING)
         assert sub.subscription_id is None
         delete_remote_uptime_subscription(sub.id)
         assert not UptimeSubscription.objects.filter(id=sub.id).exists()
 
-    def test_delete_with_regions(self):
+    def test_delete_with_regions(self) -> None:
         sub = self.create_uptime_subscription(
             status=UptimeSubscription.Status.DELETING,
             subscription_id=uuid4().hex,
@@ -314,7 +307,7 @@ class DeleteUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
 
 
 class UptimeSubscriptionToCheckConfigTest(UptimeTestCase):
-    def test_basic(self):
+    def test_basic(self) -> None:
         sub = self.create_uptime_subscription(region_slugs=["default"])
 
         subscription_id = uuid4().hex
@@ -328,11 +321,13 @@ class UptimeSubscriptionToCheckConfigTest(UptimeTestCase):
             "request_method": "GET",
             "request_headers": [],
             "trace_sampling": False,
+            "capture_response_on_failure": True,
             "active_regions": ["default"],
+            "assertion": None,
             "region_schedule_mode": "round_robin",
         }
 
-    def test_request_fields(self):
+    def test_request_fields(self) -> None:
         headers = [["hi", "bye"]]
         body = "some request body"
         method = "POST"
@@ -357,11 +352,13 @@ class UptimeSubscriptionToCheckConfigTest(UptimeTestCase):
             "request_headers": headers,
             "request_body": body,
             "trace_sampling": True,
+            "capture_response_on_failure": True,
             "active_regions": ["default"],
+            "assertion": None,
             "region_schedule_mode": "round_robin",
         }
 
-    def test_no_regions(self):
+    def test_no_regions(self) -> None:
         sub = self.create_uptime_subscription()
         subscription_id = uuid4().hex
         assert uptime_subscription_to_check_config(
@@ -374,11 +371,34 @@ class UptimeSubscriptionToCheckConfigTest(UptimeTestCase):
             "request_method": "GET",
             "request_headers": [],
             "trace_sampling": False,
+            "capture_response_on_failure": True,
             "active_regions": [],
+            "assertion": None,
             "region_schedule_mode": "round_robin",
         }
 
-    def test_region_mode(self):
+    def test_capture_response_disabled(self) -> None:
+        sub = self.create_uptime_subscription(region_slugs=["default"])
+        sub.update(capture_response_on_failure=False)
+
+        subscription_id = uuid4().hex
+        assert uptime_subscription_to_check_config(
+            sub, subscription_id, UptimeSubscriptionRegion.RegionMode.ACTIVE
+        ) == {
+            "subscription_id": subscription_id,
+            "url": sub.url,
+            "interval_seconds": sub.interval_seconds,
+            "timeout_ms": sub.timeout_ms,
+            "request_method": "GET",
+            "request_headers": [],
+            "trace_sampling": False,
+            "capture_response_on_failure": False,
+            "active_regions": ["default"],
+            "region_schedule_mode": "round_robin",
+            "assertion": None,
+        }
+
+    def test_region_mode(self) -> None:
         sub = self.create_uptime_subscription(region_slugs=["default"])
 
         subscription_id = uuid4().hex
@@ -407,7 +427,7 @@ class UptimeSubscriptionToCheckConfigTest(UptimeTestCase):
 
 
 class SendUptimeConfigDeletionTest(ConfigPusherTestMixin):
-    def test_with_region(self):
+    def test_with_region(self) -> None:
         subscription_id = uuid4().hex
         region_slug = "default"
         send_uptime_config_deletion(region_slug, subscription_id)
@@ -417,7 +437,7 @@ class SendUptimeConfigDeletionTest(ConfigPusherTestMixin):
 
 
 class SubscriptionCheckerTest(UptimeTestCase):
-    def test_create_update_delete(self):
+    def test_create_update_delete(self) -> None:
         for status in (
             UptimeSubscription.Status.CREATING,
             UptimeSubscription.Status.UPDATING,
@@ -453,7 +473,7 @@ class UpdateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
     task = update_remote_uptime_subscription
     expected_status = UptimeSubscription.Status.UPDATING
 
-    def test_update(self):
+    def test_update(self) -> None:
         sub = self.create_uptime_subscription(
             status=UptimeSubscription.Status.UPDATING, region_slugs=["default"]
         )
@@ -467,67 +487,132 @@ class UpdateUptimeSubscriptionTaskTest(BaseUptimeSubscriptionTaskTest):
             "default", sub, "upsert", UptimeSubscriptionRegion.RegionMode.ACTIVE
         )
 
+    def test_invalid_status(self) -> None:
+        sub = self.create_subscription(
+            UptimeSubscription.Status.DELETING, subscription_id=uuid.uuid4().hex
+        )
+        self.task(sub.id)
+        self.metrics.incr.assert_called_once_with(
+            f"uptime.subscriptions.{self.status_translations[self.expected_status]}.incorrect_status",
+            sample_rate=1.0,
+        )
+        self.assert_redis_config("default", sub, None, None)
+
 
 class BrokenMonitorCheckerTest(UptimeTestCase):
-    def test(self):
+    def test(self) -> None:
         self.run_test(
-            ProjectUptimeSubscriptionMode.AUTO_DETECTED_ACTIVE,
-            UptimeStatus.FAILED,
-            timezone.now() - timedelta(days=8),
-            ObjectStatus.DISABLED,
-            UptimeStatus.OK,
+            mode=UptimeMonitorMode.AUTO_DETECTED_ACTIVE,
+            detector_state=DetectorPriorityLevel.HIGH,
+            update_date=timezone.now() - timedelta(days=8),
+            expected_status=ObjectStatus.DISABLED,
+            expected_priority_level=DetectorPriorityLevel.OK,
         )
 
-    def test_manual(self):
+    def test_manual(self) -> None:
         self.run_test(
-            ProjectUptimeSubscriptionMode.MANUAL,
-            UptimeStatus.FAILED,
-            timezone.now() - timedelta(days=8),
-            ObjectStatus.ACTIVE,
-            UptimeStatus.FAILED,
+            mode=UptimeMonitorMode.MANUAL,
+            detector_state=DetectorPriorityLevel.HIGH,
+            update_date=timezone.now() - timedelta(days=8),
+            expected_status=ObjectStatus.ACTIVE,
+            expected_priority_level=DetectorPriorityLevel.HIGH,
         )
 
-    def test_auto_young(self):
+    def test_auto_young(self) -> None:
         self.run_test(
-            ProjectUptimeSubscriptionMode.AUTO_DETECTED_ACTIVE,
-            UptimeStatus.FAILED,
-            timezone.now() - timedelta(days=4),
-            ObjectStatus.ACTIVE,
-            UptimeStatus.FAILED,
+            mode=UptimeMonitorMode.AUTO_DETECTED_ACTIVE,
+            detector_state=DetectorPriorityLevel.HIGH,
+            update_date=timezone.now() - timedelta(days=4),
+            expected_status=ObjectStatus.ACTIVE,
+            expected_priority_level=DetectorPriorityLevel.HIGH,
         )
 
-    def test_auto_not_failed(self):
+    def test_auto_not_failed(self) -> None:
         self.run_test(
-            ProjectUptimeSubscriptionMode.AUTO_DETECTED_ACTIVE,
-            UptimeStatus.OK,
-            timezone.now() - timedelta(days=8),
-            ObjectStatus.ACTIVE,
-            UptimeStatus.OK,
+            mode=UptimeMonitorMode.AUTO_DETECTED_ACTIVE,
+            detector_state=DetectorPriorityLevel.OK,
+            update_date=timezone.now() - timedelta(days=8),
+            expected_status=ObjectStatus.ACTIVE,
+            expected_priority_level=DetectorPriorityLevel.OK,
         )
+
+    def test_already_disabled(self) -> None:
+        """Test that already disabled detectors are not processed"""
+        detector = self.create_uptime_detector(
+            mode=UptimeMonitorMode.AUTO_DETECTED_ACTIVE,
+            detector_state=DetectorPriorityLevel.HIGH,
+            enabled=False,
+        )
+
+        # Update the detector state date to simulate an old failure
+        detector_state = detector.detectorstate_set.first()
+        assert detector_state is not None
+        detector_state.update(date_updated=timezone.now() - timedelta(days=8))
+
+        with (
+            self.tasks(),
+            mock.patch(
+                "sentry.uptime.subscriptions.subscriptions.disable_uptime_detector"
+            ) as mock_disable,
+        ):
+            broken_monitor_checker()
+            # Should not be called since detector is already disabled
+            mock_disable.assert_not_called()
+
+    def test_handle_disable_detector_exceptions(self) -> None:
+        detector = self.create_uptime_detector(
+            mode=UptimeMonitorMode.AUTO_DETECTED_ACTIVE,
+            detector_state=DetectorPriorityLevel.HIGH,
+        )
+
+        # Update the detector state date to simulate an old failure
+        detector_state = detector.detectorstate_set.first()
+        assert detector_state is not None
+        detector_state.update(date_updated=timezone.now() - timedelta(days=8))
+
+        with (
+            self.tasks(),
+            mock.patch(
+                "sentry.uptime.subscriptions.subscriptions.disable_uptime_detector",
+                side_effect=Exception("Test exception"),
+            ),
+            mock.patch("sentry.uptime.subscriptions.tasks.logger") as logger,
+        ):
+            # Does not raise
+            broken_monitor_checker()
+            logger.exception.assert_called_once()
 
     def run_test(
         self,
-        mode: ProjectUptimeSubscriptionMode,
-        uptime_status: UptimeStatus,
+        mode: UptimeMonitorMode,
+        detector_state: DetectorPriorityLevel,
         update_date: datetime,
         expected_status: int,
-        expected_uptime_status: UptimeStatus,
+        expected_priority_level: DetectorPriorityLevel,
     ):
-        proj_sub = self.create_project_uptime_subscription(
+        detector = self.create_uptime_detector(
             mode=mode,
-            uptime_status=uptime_status,
-            uptime_status_update_date=update_date,
+            detector_state=detector_state,
         )
+
+        # Update detector state date to match the test scenario
+        state = detector.detectorstate_set.first()
+        assert state is not None
+        state.update(date_updated=update_date)
+
         with self.tasks():
             broken_monitor_checker()
 
-        proj_sub.refresh_from_db()
-        assert proj_sub.status == expected_status
-        assert proj_sub.uptime_subscription.uptime_status == expected_uptime_status
-
-        detector = get_detector(proj_sub.uptime_subscription)
-        assert detector
+        detector.refresh_from_db()
         if expected_status == ObjectStatus.ACTIVE:
             assert detector.enabled
         else:
             assert not detector.enabled
+
+        state = detector.detectorstate_set.first()
+        assert state is not None
+        assert state.priority_level == expected_priority_level
+        if expected_priority_level == DetectorPriorityLevel.HIGH:
+            assert state.is_triggered
+        else:
+            assert not state.is_triggered

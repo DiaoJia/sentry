@@ -1,22 +1,22 @@
-import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import Access from 'sentry/components/acl/access';
+import {Tag} from '@sentry/scraps/badge';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Flex, Grid, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {Access} from 'sentry/components/acl/access';
 import {useRole} from 'sentry/components/acl/useRole';
-import Confirm from 'sentry/components/confirm';
-import {Tag} from 'sentry/components/core/badge/tag';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import FileSize from 'sentry/components/fileSize';
-import Link from 'sentry/components/links/link';
-import TimeSince from 'sentry/components/timeSince';
+import {Confirm} from 'sentry/components/confirm';
+import {FileSize} from 'sentry/components/fileSize';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconClock, IconDelete, IconDownload} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {DebugFile} from 'sentry/types/debugFiles';
-import type {Project} from 'sentry/types/project';
+import type {DetailedProject} from 'sentry/types/project';
 
 import {getFeatureTooltip, getPrettyFileType} from './utils';
 
@@ -25,11 +25,11 @@ type Props = {
   downloadUrl: string;
   onDelete: (id: string) => void;
   orgSlug: string;
-  project: Project;
+  project: DetailedProject;
   showDetails: boolean;
 };
 
-function DebugFileRow({
+export function DebugFileRow({
   debugFile,
   showDetails,
   downloadUrl,
@@ -37,57 +37,81 @@ function DebugFileRow({
   orgSlug,
   project,
 }: Props) {
-  const {hasRole, roleRequired: downloadRole} = useRole({role: 'debugFilesRole'});
+  const {hasRole, roleRequired: downloadRole} = useRole({
+    role: 'debugFilesRole',
+    project,
+  });
   const {id, data, debugId, uuid, size, dateCreated, objectName, symbolType, codeId} =
     debugFile;
   const {features} = data || {};
 
   return (
-    <Fragment>
-      <Column>
-        <div>
-          <DebugId>{debugId || uuid}</DebugId>
-        </div>
-        <TimeAndSizeWrapper>
-          <StyledFileSize bytes={size} />
-          <TimeWrapper>
-            <IconClock size="xs" />
-            <TimeSince date={dateCreated} />
-          </TimeWrapper>
-        </TimeAndSizeWrapper>
-      </Column>
-      <Column>
-        <Name>
-          {symbolType === 'proguard' && objectName === 'proguard-mapping'
-            ? '\u2015'
-            : objectName}
-        </Name>
-        <Description>
-          <DescriptionText>{getPrettyFileType(debugFile)}</DescriptionText>
-
-          {features && (
-            <FeatureTags>
-              {features.map(feature => (
-                <Tooltip key={feature} title={getFeatureTooltip(feature)} skipWrapper>
-                  <StyledTag>{feature}</StyledTag>
-                </Tooltip>
-              ))}
-            </FeatureTags>
-          )}
-          {showDetails && (
-            <div>
-              {/* there will be more stuff here in the future */}
-              {codeId && (
-                <DetailsItem>
-                  {t('Code ID')}: {codeId}
-                </DetailsItem>
+    <SimpleTable.Row>
+      <SimpleTable.RowCell align="start">
+        <Stack align="stretch" width="100%">
+          <div>
+            <DebugId>{debugId || uuid}</DebugId>
+          </div>
+          <Text as="div" size="sm" variant="muted">
+            <Flex
+              direction={{zero: 'column', md: 'row'}}
+              align={{zero: 'start', md: 'center'}}
+              gap={{zero: 'xs', md: 'md'}}
+              marginTop="md"
+              width="100%"
+            >
+              <StyledFileSize bytes={size} />
+              <Grid
+                columns="min-content 1fr"
+                flex={1}
+                align="center"
+                gap="xs"
+                paddingLeft="xs"
+              >
+                <IconClock size="xs" />
+                <TimeSince date={dateCreated} />
+              </Grid>
+            </Flex>
+          </Text>
+        </Stack>
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell align="start">
+        <Stack align="start">
+          <Name>
+            {symbolType === 'proguard' && objectName === 'proguard-mapping'
+              ? '\u2015'
+              : objectName}
+          </Name>
+          <Text as="div" size="sm" variant="muted">
+            <Flex align="center" gap={{zero: 'md', '4xl': '0 md'}} wrap="wrap">
+              <Text as="span" size="sm" variant="muted">
+                {getPrettyFileType(debugFile)}
+              </Text>
+              {features && (
+                <Flex display="inline-flex" wrap="wrap" gap="xs">
+                  {features.map(feature => (
+                    <Tooltip key={feature} title={getFeatureTooltip(feature)} skipWrapper>
+                      <Tag variant="muted">{feature}</Tag>
+                    </Tooltip>
+                  ))}
+                </Flex>
               )}
-            </div>
-          )}
-        </Description>
-      </Column>
-      <RightColumn>
-        <ButtonBar gap={0.5}>
+            </Flex>
+            {showDetails && (
+              <div>
+                {/* there will be more stuff here in the future */}
+                {codeId && (
+                  <DetailsItem>
+                    {t('Code ID')}: {codeId}
+                  </DetailsItem>
+                )}
+              </div>
+            )}
+          </Text>
+        </Stack>
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end" align="start" marginTop="md">
+        <Grid flow="column" align="center" gap="xs">
           <Tooltip
             disabled={hasRole}
             title={tct(
@@ -122,7 +146,7 @@ function DebugFileRow({
                   disabled={!hasAccess}
                 >
                   <Button
-                    priority="danger"
+                    variant="danger"
                     icon={<IconDelete />}
                     size="xs"
                     disabled={!hasAccess}
@@ -133,83 +157,30 @@ function DebugFileRow({
               </Tooltip>
             )}
           </Access>
-        </ButtonBar>
-      </RightColumn>
-    </Fragment>
+        </Grid>
+      </SimpleTable.RowCell>
+    </SimpleTable.Row>
   );
 }
 
-const DescriptionText = styled('span')`
-  display: inline-flex;
-  margin: 0 ${space(1)} ${space(1)} 0;
-`;
-
-const FeatureTags = styled('div')`
-  display: inline-flex;
-  flex-wrap: wrap;
-  margin: -${space(0.5)};
-`;
-
-const StyledTag = styled(Tag)`
-  padding: ${space(0.5)};
-`;
-
-const Column = styled('div')`
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-`;
-
-const RightColumn = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  align-items: flex-start;
-  margin-top: ${space(1)};
-`;
-
 const DebugId = styled('code')`
-  font-size: ${p => p.theme.fontSize.sm};
-`;
-
-const TimeAndSizeWrapper = styled('div')`
-  width: 100%;
-  display: flex;
-  font-size: ${p => p.theme.fontSize.sm};
-  margin-top: ${space(1)};
-  color: ${p => p.theme.subText};
-  align-items: center;
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const StyledFileSize = styled(FileSize)`
-  flex: 1;
-  padding-left: ${space(0.5)};
-`;
-
-const TimeWrapper = styled('div')`
-  display: grid;
-  gap: ${space(0.5)};
-  grid-template-columns: min-content 1fr;
-  flex: 2;
-  align-items: center;
-  padding-left: ${space(0.5)};
+  padding-left: ${p => p.theme.space.xs};
 `;
 
 const Name = styled('div')`
-  font-size: ${p => p.theme.fontSize.md};
-  margin-bottom: ${space(1)};
-`;
-
-const Description = styled('div')`
-  font-size: ${p => p.theme.fontSize.sm};
-  color: ${p => p.theme.subText};
-  @media (max-width: ${p => p.theme.breakpoints.large}) {
-    line-height: 1.7;
-  }
+  font-size: ${p => p.theme.font.size.md};
+  margin-bottom: ${p => p.theme.space.md};
 `;
 
 const DetailsItem = styled('div')`
-  ${p => p.theme.overflowEllipsis}
-  margin-top: ${space(1)}
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: ${p => p.theme.space.md};
 `;
-
-export default DebugFileRow;

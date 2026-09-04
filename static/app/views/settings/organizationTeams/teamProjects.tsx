@@ -1,110 +1,119 @@
 import {Fragment, useMemo, useState} from 'react';
 import styled from '@emotion/styled';
+import {useMutation, useQuery} from '@tanstack/react-query';
+
+import {ProjectAvatar} from '@sentry/scraps/avatar';
+import {Button} from '@sentry/scraps/button';
+import {CompactSelect, type SelectOption} from '@sentry/scraps/compactSelect';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
 import {hasEveryAccess} from 'sentry/components/acl/access';
-import {ProjectAvatar} from 'sentry/components/core/avatar/projectAvatar';
-import {Button} from 'sentry/components/core/button';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import DropdownAutoComplete from 'sentry/components/dropdownAutoComplete';
-import DropdownButton from 'sentry/components/dropdownButton';
-import EmptyMessage from 'sentry/components/emptyMessage';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Pagination from 'sentry/components/pagination';
-import Panel from 'sentry/components/panels/panel';
-import PanelBody from 'sentry/components/panels/panelBody';
-import PanelHeader from 'sentry/components/panels/panelHeader';
-import PanelItem from 'sentry/components/panels/panelItem';
-import TextOverflow from 'sentry/components/textOverflow';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {PanelItem} from 'sentry/components/panels/panelItem';
 import {IconFlag, IconSubtract} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import ProjectsStore from 'sentry/stores/projectsStore';
-import {space} from 'sentry/styles/space';
-import type {RouteComponentProps} from 'sentry/types/legacyReactRouter';
-import type {Team} from 'sentry/types/organization';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
 import type {Project} from 'sentry/types/project';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {sortProjects} from 'sentry/utils/project/sortProjects';
-import {useApiQuery} from 'sentry/utils/queryClient';
-import useApi from 'sentry/utils/useApi';
-import useOrganization from 'sentry/utils/useOrganization';
-import ProjectListItem from 'sentry/views/settings/components/settingsProjectItem';
-import TextBlock from 'sentry/views/settings/components/text/textBlock';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {ProjectItem as ProjectListItem} from 'sentry/views/settings/components/settingsProjectItem';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
+import {useTeamDetailsOutlet} from 'sentry/views/settings/organizationTeams/teamDetails';
 
-interface TeamProjectsProps extends RouteComponentProps<{teamId: string}> {
-  team: Team;
-}
-
-function TeamProjects({team, location, params}: TeamProjectsProps) {
+export default function TeamProjects() {
+  const location = useLocation();
   const organization = useOrganization();
-  const api = useApi({persistInFlight: true});
-  const [query, setQuery] = useState<string>('');
-  const teamId = params.teamId;
+  const [query, setQuery] = useState('');
+  const {team} = useTeamDetailsOutlet();
   const {
-    data: linkedProjects,
+    data: linkedProjectsResponse,
     isError: linkedProjectsError,
     isPending: linkedProjectsLoading,
-    getResponseHeader: linkedProjectsHeaders,
     refetch: refetchLinkedProjects,
-  } = useApiQuery<Project[]>(
-    [
-      `/organizations/${organization.slug}/projects/`,
-      {
-        query: {
-          query: `team:${teamId}`,
-          cursor: location.query.cursor,
-        },
+  } = useQuery({
+    ...apiOptions.as<Project[]>()('/organizations/$organizationIdOrSlug/projects/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        query: `team:${team.slug}`,
+        cursor: location.query.cursor,
+        collapse: ['latestDeploys', 'unusedFeatures'],
       },
-    ],
-    {staleTime: 0}
-  );
+      staleTime: 0,
+    }),
+    select: selectJsonWithHeaders,
+  });
+  const linkedProjects = linkedProjectsResponse?.json;
   const {
     data: unlinkedProjects = [],
     isPending: loadingUnlinkedProjects,
     refetch: refetchUnlinkedProjects,
-  } = useApiQuery<Project[]>(
-    [
-      `/organizations/${organization.slug}/projects/`,
-      {
-        query: {query: query ? `!team:${teamId} ${query}` : `!team:${teamId}`},
+  } = useQuery(
+    apiOptions.as<Project[]>()('/organizations/$organizationIdOrSlug/projects/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {
+        query: query ? `!team:${team.slug} ${query}` : `!team:${team.slug}`,
+        collapse: ['latestDeploys', 'unusedFeatures'],
       },
-    ],
-    {staleTime: 0}
+      staleTime: 0,
+    })
   );
 
+  const {mutate: mutateLinkProject} = useMutation({
+    mutationFn: ({project, action}: {action: string; project: Project}) =>
+      fetchMutation<Project>({
+        url: getApiUrl(
+          '/projects/$organizationIdOrSlug/$projectIdOrSlug/teams/$teamIdOrSlug/',
+          {
+            path: {
+              organizationIdOrSlug: organization.slug,
+              projectIdOrSlug: project.slug,
+              teamIdOrSlug: team.slug,
+            },
+          }
+        ),
+        method: action === 'add' ? 'POST' : 'DELETE',
+      }),
+    onSuccess: (resp, {action}) => {
+      refetchLinkedProjects();
+      refetchUnlinkedProjects();
+      ProjectsStore.onUpdateSuccess(resp);
+      addSuccessMessage(
+        action === 'add'
+          ? t('Successfully added project to team.')
+          : t('Successfully removed project from team')
+      );
+    },
+    onError: () => {
+      addErrorMessage(t("Wasn't able to change project association."));
+    },
+  });
+
   const handleLinkProject = (project: Project, action: string) => {
-    api.request(`/projects/${organization.slug}/${project.slug}/teams/${teamId}/`, {
-      method: action === 'add' ? 'POST' : 'DELETE',
-      success: resp => {
-        refetchLinkedProjects();
-        refetchUnlinkedProjects();
-        ProjectsStore.onUpdateSuccess(resp);
-        addSuccessMessage(
-          action === 'add'
-            ? t('Successfully added project to team.')
-            : t('Successfully removed project from team')
-        );
-      },
-      error: () => {
-        addErrorMessage(t("Wasn't able to change project association."));
-      },
-    });
+    mutateLinkProject({project, action});
   };
 
-  const linkedProjectsPageLinks = linkedProjectsHeaders?.('Link');
+  const linkedProjectsPageLinks = linkedProjectsResponse?.headers.Link;
   const hasWriteAccess = hasEveryAccess(['team:write'], {organization, team});
   const otherProjects = useMemo(() => {
     return unlinkedProjects
       .filter(p => p.access.includes('project:write'))
-      .map(p => ({
+      .map<SelectOption<string>>(p => ({
         value: p.id,
-        searchKey: p.slug,
-        label: (
-          <ProjectListElement>
-            <ProjectAvatar project={p} size={16} />
-            <TextOverflow>{p.slug}</TextOverflow>
-          </ProjectListElement>
-        ),
+        leadingItems: <ProjectAvatar project={p} size={16} />,
+        label: p.slug,
+        hideCheck: true,
       }));
   }, [unlinkedProjects]);
 
@@ -118,28 +127,34 @@ function TeamProjects({team, location, params}: TeamProjectsProps) {
       <Panel>
         <PanelHeader hasButtons>
           <div>{t('Projects')}</div>
-          <div style={{textTransform: 'none', fontWeight: 'normal'}}>
-            <DropdownAutoComplete
-              items={otherProjects}
-              minWidth={300}
-              onChange={evt => setQuery(evt.target.value)}
-              onSelect={selection => {
+          <div>
+            <CompactSelect
+              size="xs"
+              menuWidth={300}
+              options={otherProjects}
+              value=""
+              disabled={false}
+              onClose={() => setQuery('')}
+              onChange={selection => {
                 const project = unlinkedProjects.find(p => p.id === selection.value);
                 if (project) {
                   handleLinkProject(project, 'add');
                 }
               }}
-              onClose={() => setQuery('')}
-              busy={loadingUnlinkedProjects}
-              emptyMessage={t('You are not an admin for any other projects')}
-              alignMenu="right"
-            >
-              {({isOpen}) => (
-                <DropdownButton isOpen={isOpen} size="xs">
+              menuTitle={t('Projects')}
+              trigger={triggerProps => (
+                <OverlayTrigger.Button {...triggerProps}>
                   {t('Add Project')}
-                </DropdownButton>
+                </OverlayTrigger.Button>
               )}
-            </DropdownAutoComplete>
+              search={{
+                placeholder: t('Search Projects'),
+                filter: false,
+                onChange: setQuery,
+              }}
+              emptyMessage={t('No projects')}
+              loading={loadingUnlinkedProjects}
+            />
           </div>
         </PanelHeader>
 
@@ -161,7 +176,7 @@ function TeamProjects({team, location, params}: TeamProjectsProps) {
                   <Button
                     size="sm"
                     disabled={!hasWriteAccess}
-                    icon={<IconSubtract isCircled />}
+                    icon={<IconSubtract />}
                     aria-label={t('Remove')}
                     onClick={() => {
                       handleLinkProject(project, 'remove');
@@ -173,7 +188,7 @@ function TeamProjects({team, location, params}: TeamProjectsProps) {
               </StyledPanelItem>
             ))
           ) : linkedProjectsLoading ? null : (
-            <EmptyMessage size="large" icon={<IconFlag size="xl" />}>
+            <EmptyMessage size="lg" icon={<IconFlag />}>
               {t("This team doesn't have access to any projects.")}
             </EmptyMessage>
           )}
@@ -188,15 +203,6 @@ const StyledPanelItem = styled(PanelItem)`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
   max-width: 100%;
 `;
-
-const ProjectListElement = styled('div')`
-  display: flex;
-  align-items: center;
-  gap: ${space(0.5)};
-  padding: ${space(0.25)} 0;
-`;
-
-export default TeamProjects;

@@ -1,25 +1,42 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from dataclasses import dataclass
+from datetime import timedelta
 from hashlib import sha1
 from io import BytesIO
 from typing import IO, Any
 
 import zstandard
 from django.core.cache import cache
-from django.db import models
+from django.db import models, router, transaction
+from django.db.models.expressions import DatabaseDefault
+from django.db.models.functions import Now
+from django.http import HttpRequest
 from django.utils import timezone
+from objectstore_client import TimeToLive
 
 from sentry.attachments.base import CachedAttachment
 from sentry.backup.scopes import RelocationScope
-from sentry.db.models import BoundedBigIntegerField, Model, region_silo_model, sane_repr
+from sentry.db.models import BoundedBigIntegerField, Model, cell_silo_model, sane_repr
 from sentry.db.models.fields.bounded import BoundedIntegerField
 from sentry.db.models.manager.base_query_set import BaseQuerySet
 from sentry.models.files.utils import get_size_and_checksum, get_storage
+from sentry.objectstore import (
+    UsecaseId,
+    default_attachment_retention,
+    get_download_redirect_url,
+    get_session,
+)
+from sentry.objectstore.metrics import measure_storage_operation
+from sentry.options.rollout import in_random_rollout
 
 # Attachment file types that are considered a crash report (PII relevant)
 CRASH_REPORT_TYPES = ("event.minidump", "event.applecrashreport")
+
+V1_PREFIX = "eventattachments/v1/"
+V2_PREFIX = "v2/"
 
 
 def get_crashreport_key(group_id: int) -> str:
@@ -34,6 +51,12 @@ def event_attachment_screenshot_filter(
     queryset: BaseQuerySet[EventAttachment],
 ) -> BaseQuerySet[EventAttachment]:
     return queryset.filter(models.Q(name__icontains="screenshot"))
+
+
+@dataclass(frozen=True)
+class BlobStream:
+    payload: IO[bytes]
+    encoding: str | None
 
 
 @dataclass(frozen=True)
@@ -54,9 +77,9 @@ def can_store_inline(data: bytes) -> bool:
     return len(data) < 192 and all(byte > 0x00 and byte < 0x7F for byte in data)
 
 
-@region_silo_model
-class EventAttachment(Model):
-    """Attachment Metadata and Storage
+class EventAttachmentBase(Model):
+    """
+    Attachment Metadata and Storage
 
     The actual attachment data can be saved in different backing stores:
     - When the attachment is empty (0-size), `blob_path is None`.
@@ -64,32 +87,89 @@ class EventAttachment(Model):
       It is saved inline in `blob_path` following the `:` prefix.
       This happens for "small" and ASCII-only (see `can_store_inline`) attachments.
     - When the `blob_path` field has a `eventattachments/v1/` prefix:
-      In this case, the default :func:`get_storage` is used as the backing store.
+      The default :func:`get_storage` is used as the backing store.
       The attachment data is not chunked or deduplicated in this case.
       However, it is `zstd` compressed.
     """
 
     __relocation_scope__ = RelocationScope.Excluded
 
+    # NOTE: `event_id`, `type` and `date_added` are indexed on `EventAttachment` but not
+    # on `PendingEventAttachment`, so they are declared on the concrete models instead.
+    # Django does not allow overriding a field inherited from an abstract base, so
+    # `db_index` cannot be varied per subclass.
+
     # the things we want to look up attachments by:
     project_id = BoundedBigIntegerField()
-    group_id = BoundedBigIntegerField(null=True, db_index=True)
-    event_id = models.CharField(max_length=32, db_index=True)
 
-    # attachment and file metadata
-    type = models.CharField(max_length=64, db_index=True)
+    # attachment and file metadata:
     name = models.TextField()
     content_type = models.TextField(null=True)
     size = BoundedIntegerField(null=True)
     sha1 = models.CharField(max_length=40, null=True)
 
-    date_added = models.DateTimeField(default=timezone.now, db_index=True)
+    date_expires = models.DateTimeField(
+        db_default=Now() + timedelta(days=30),
+        db_index=True,
+    )
 
-    # The `file_id` will be removed in a multi-part migration soon.
-    file_id = BoundedBigIntegerField(null=True, db_index=True)
+    # storage:
     blob_path = models.TextField(null=True)
 
+    # NOTE: when adding new fields with db index,
+    #       add them to `EventAttachment` and / or `PendingEventAttachment`,
+    #       not to the base class (unless the index is needed for both tables).
+
     class Meta:
+        abstract = True
+
+    def delete_blob(self) -> None:
+        """
+        Delete this attachment's payload from its backing store.
+
+        Only call this when no other row references the blob. Promoting a
+        `PendingEventAttachment` to an `EventAttachment` hands the blob over to the new
+        row, so the pending row must be deleted without touching the blob (a queryset
+        delete does that, since it does not run `Model.delete`).
+        """
+        if not self.blob_path:
+            return
+
+        if self.blob_path.startswith(":"):
+            pass  # nothing to do for inline-stored attachments
+
+        elif self.blob_path.startswith(V1_PREFIX):
+            storage = get_storage()
+            with measure_storage_operation("delete", "attachments"):
+                storage.delete(self.blob_path)
+
+        elif self.blob_path.startswith(V2_PREFIX):
+            # During cleanup, V2 objectstore blobs expire via TTL — skip the
+            # explicit delete to avoid unnecessary load on the objectstore service.
+            #
+            # We want to special-case pending attachments in a follow-up. See INGEST-1176.
+            if not os.environ.get("_SENTRY_CLEANUP"):
+                organization_id = _get_organization(self.project_id)
+                get_session(UsecaseId.ATTACHMENTS, self.project_id, org=organization_id).delete(
+                    self.blob_path.removeprefix(V2_PREFIX)
+                )
+
+        else:
+            raise NotImplementedError()
+
+
+@cell_silo_model
+class EventAttachment(EventAttachmentBase):
+    """
+    An attachment belonging to an event that has been ingested.
+    """
+
+    group_id = BoundedBigIntegerField(null=True, db_index=True)
+    event_id = models.CharField(max_length=32, db_index=True)
+    type = models.CharField(max_length=64, db_index=True)
+    date_added = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta(EventAttachmentBase.Meta):
         app_label = "sentry"
         db_table = "sentry_eventattachment"
         indexes = (
@@ -98,6 +178,13 @@ class EventAttachment(Model):
         )
 
     __repr__ = sane_repr("event_id", "name")
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # Computed here rather than as a field default to avoid freezing a callable
+        # reference into migrations, which would break if the function is ever renamed.
+        if self.date_expires is None or isinstance(self.date_expires, DatabaseDefault):  # type: ignore[unreachable]
+            self.date_expires = timezone.now() + timedelta(days=default_attachment_retention())  # type: ignore[unreachable]
+        super().save(*args, **kwargs)
 
     def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
         rv = super().delete(*args, **kwargs)
@@ -108,16 +195,31 @@ class EventAttachment(Model):
             # repopulated with the next incoming crash report.
             cache.delete(get_crashreport_key(self.group_id))
 
-        if self.blob_path:
-            if self.blob_path.startswith(":"):
-                pass  # nothing to do for inline-stored attachments
-            elif self.blob_path.startswith("eventattachments/v1/"):
-                storage = get_storage()
-                storage.delete(self.blob_path)
-            else:
-                raise NotImplementedError()
+        self.delete_blob()
 
         return rv
+
+    def uses_objectstore(self) -> bool:
+        """Whether this attachment's payload is stored in Objectstore."""
+        return self.blob_path is not None and self.blob_path.startswith(V2_PREFIX)
+
+    def get_objectstore_presigned_url(self, request: HttpRequest) -> str:
+        """
+        Returns the URL that `request` should be redirected to in order to download this
+        attachment directly from Objectstore.
+
+        This function should only be called if this attachment is Objectstore-backed, it
+        will raise an exception otherwise.
+        """
+        if not self.uses_objectstore():
+            raise ValueError("attachment is not stored in Objectstore")
+        assert self.blob_path is not None
+
+        organization_id = _get_organization(self.project_id)
+        session = get_session(UsecaseId.ATTACHMENTS, self.project_id, org=organization_id)
+        return get_download_redirect_url(
+            request, session, organization_id, self.blob_path.removeprefix(V2_PREFIX)
+        )
 
     def getfile(self) -> IO[bytes]:
         if not self.blob_path:
@@ -126,42 +228,146 @@ class EventAttachment(Model):
         if self.blob_path.startswith(":"):
             return BytesIO(self.blob_path[1:].encode())
 
-        elif self.blob_path.startswith("eventattachments/v1/"):
+        elif self.blob_path.startswith(V1_PREFIX):
             storage = get_storage()
-            compressed_blob = storage.open(self.blob_path)
+            with measure_storage_operation("get", "attachments", self.size) as metric_emitter:
+                compressed_blob = storage.open(self.blob_path)
+                # We want to log the compressed size here but we want to stream the payload.
+                # Accessing `.size` does additional metadata requests, for which we
+                # just swallow the costs.
+                metric_emitter.record_compressed_size(compressed_blob.size, "zstd")
+
             dctx = zstandard.ZstdDecompressor()
             return dctx.stream_reader(compressed_blob, read_across_frames=True)
 
+        elif self.blob_path.startswith(V2_PREFIX):
+            key = self.blob_path.removeprefix(V2_PREFIX)
+            organization_id = _get_organization(self.project_id)
+            response = get_session(UsecaseId.ATTACHMENTS, self.project_id, org=organization_id).get(
+                key
+            )
+            if response is None:
+                raise FileNotFoundError("Attachment does not exist in objectstore")
+            return response.payload
+
         raise NotImplementedError()
+
+    def get_blob_stream(self, accept_encoding: list[str]) -> BlobStream:
+        """Return a streamable blob, negotiating content-encoding for V2 blobs.
+
+        For V2 blobs, passes ``accept_encoding`` to the objectstore so compressed
+        bytes can be transferred directly to the client. For all other blob types
+        (inline, V1), delegates to :meth:`getfile`.
+        """
+        if self.uses_objectstore():
+            assert self.blob_path is not None
+            key = self.blob_path.removeprefix(V2_PREFIX)
+            session = get_session(
+                UsecaseId.ATTACHMENTS, self.project_id, org=_get_organization(self.project_id)
+            )
+            response = session.get(key, accept_encoding=accept_encoding or None)
+            if response is None:
+                raise FileNotFoundError("Attachment does not exist in objectstore")
+            return BlobStream(payload=response.payload, encoding=response.metadata.compression)
+        else:
+            return BlobStream(payload=self.getfile(), encoding=None)
 
     @classmethod
     def putfile(cls, project_id: int, attachment: CachedAttachment) -> PutfileResult:
-        from sentry.models.files import FileBlob
-
         content_type = normalize_content_type(attachment.content_type, attachment.name)
-        data = attachment.data
-
-        if len(data) == 0:
+        if attachment.size == 0:
             return PutfileResult(content_type=content_type, size=0, sha1=sha1().hexdigest())
+        if attachment.stored_id is not None:
+            checksum = sha1().hexdigest()  # TODO: can we just remove the checksum requirement?
+            blob_path = V2_PREFIX + attachment.stored_id
+            return PutfileResult(
+                content_type=content_type, size=attachment.size, sha1=checksum, blob_path=blob_path
+            )
 
+        data = attachment.load_data()
         blob = BytesIO(data)
         size, checksum = get_size_and_checksum(blob)
 
         if can_store_inline(data):
             blob_path = ":" + data.decode()
-        else:
-            blob_path = "eventattachments/v1/" + FileBlob.generate_unique_path()
+
+        elif not in_random_rollout("objectstore.enable_for.attachments"):
+            from sentry.models.files import FileBlob
+
+            object_key = FileBlob.generate_unique_path()
+            blob_path = V1_PREFIX + object_key
 
             storage = get_storage()
-            compressed_blob = BytesIO(zstandard.compress(data))
-            storage.save(blob_path, compressed_blob)
+            with measure_storage_operation("put", "attachments", size) as metric_emitter:
+                compressed_blob = zstandard.compress(data)
+                metric_emitter.record_compressed_size(len(compressed_blob), "zstd")
+                storage.save(blob_path, BytesIO(compressed_blob))
+
+        else:
+            organization_id = _get_organization(project_id)
+            session = get_session(UsecaseId.ATTACHMENTS, project_id, org=organization_id)
+            key = session.put(
+                data,
+                content_type=content_type,
+                filename=attachment.name,
+                expiration_policy=TimeToLive(timedelta(days=attachment.retention_days)),
+            )
+            blob_path = V2_PREFIX + key
 
         return PutfileResult(
             content_type=content_type, size=size, sha1=checksum, blob_path=blob_path
         )
 
 
+@cell_silo_model
+class PendingEventAttachment(EventAttachmentBase):
+    """
+    An attachment whose corresponding event has not been ingested (yet).
+
+    This model has the same fields as `EventAttachment` except `group_id`, which
+    is missing for pending attachments.
+    """
+
+    event_id = models.CharField(max_length=32)
+    type = models.CharField(max_length=64)
+    date_added = models.DateTimeField(default=timezone.now)
+
+    #: A non-indexed long-term expiry date for retention purposes. This will be copied into `EventAttachment.date_expires`.
+    date_expires_retention = models.DateTimeField(db_default=Now() + timedelta(days=30))
+
+    class Meta(EventAttachmentBase.Meta):
+        app_label = "sentry"
+        db_table = "sentry_pendingeventattachment"
+        indexes = (models.Index(fields=("project_id", "event_id")),)
+
+    __repr__ = sane_repr("event_id", "name")
+
+    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+        # A pending attachment that is deleted rather than promoted (its event never
+        # arrived, so `cleanup` reaped it once `date_expires` passed) still owns its blob.
+        #
+        # Lock the row for update to ensure that a `save_pending_attachment` call is not concurrently
+        # promoting the attachment to `EventAttachment`.
+        with transaction.atomic(router.db_for_write(PendingEventAttachment)):
+            is_owner = (
+                PendingEventAttachment.objects.filter(id=self.id).select_for_update().exists()
+            )
+            rv = super().delete(*args, **kwargs)
+
+        if is_owner:
+            self.delete_blob()
+        return rv
+
+
 def normalize_content_type(content_type: str | None, name: str) -> str:
     if content_type:
-        return content_type.split(";")[0].strip()
+        normalized = content_type.split(";")[0].strip()
+        if normalized.lower() != "application/octet-stream":
+            return normalized
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _get_organization(project_id: int) -> int:
+    from sentry.models.project import Project
+
+    return Project.objects.get_from_cache(id=project_id).organization_id

@@ -54,7 +54,7 @@ export class SentrySampledProfile extends Profile {
     const startedAt = samples[0]!.elapsed_since_start_ns;
     const endedAt = samples[samples.length - 1]!.elapsed_since_start_ns;
     if (Number.isNaN(startedAt) || Number.isNaN(endedAt)) {
-      throw TypeError('startedAt or endedAt is NaN');
+      throw new TypeError('startedAt or endedAt is NaN');
     }
 
     const {threadId, threadName} = getThreadData(sampledProfile);
@@ -138,10 +138,7 @@ export class SentrySampledProfile extends Profile {
       child.lock();
     }
 
-    node.frame.selfWeight += weight;
-
     for (const stackNode of framesInStack) {
-      stackNode.frame.totalWeight += weight;
       stackNode.count++;
     }
 
@@ -154,7 +151,7 @@ export class SentrySampledProfile extends Profile {
     }
   }
 
-  build(): Profile {
+  build(): this {
     this.duration = Math.max(
       this.duration,
       this.weights.reduce((a, b) => a + b, 0)

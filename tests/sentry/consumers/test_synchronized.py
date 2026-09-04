@@ -15,8 +15,11 @@ from arroyo.commit import Commit
 from arroyo.types import BrokerValue, Partition, Topic
 
 from sentry.consumers.synchronized import SynchronizedConsumer, commit_codec
+from sentry.testutils.thread_leaks.pytest import thread_leak_allowlist
 
 T = TypeVar("T")
+
+pytestmark = [thread_leak_allowlist(reason="synchronized consumer", issue=98806)]
 
 
 @contextmanager
@@ -27,16 +30,16 @@ def assert_changes(
     operator: Callable[[object, object], bool] = operator.eq,
 ) -> Iterator[None]:
     actual = callable()
-    assert operator(
-        actual, before
-    ), f"precondition ({operator}) on {callable} failed: expected: {before!r}, actual: {actual!r}"
+    assert operator(actual, before), (
+        f"precondition ({operator}) on {callable} failed: expected: {before!r}, actual: {actual!r}"
+    )
 
     yield
 
     actual = callable()
-    assert operator(
-        actual, after
-    ), f"postcondition ({operator}) on {callable} failed: expected: {after!r}, actual: {actual!r}"
+    assert operator(actual, after), (
+        f"postcondition ({operator}) on {callable} failed: expected: {after!r}, actual: {actual!r}"
+    )
 
 
 @contextmanager
@@ -46,16 +49,16 @@ def assert_does_not_change(
     operator: Callable[[object, object], bool] = operator.eq,
 ) -> Iterator[None]:
     actual = callable()
-    assert operator(
-        actual, value
-    ), f"precondition ({operator}) on {callable} failed: expected: {value!r}, actual: {actual!r}"
+    assert operator(actual, value), (
+        f"precondition ({operator}) on {callable} failed: expected: {value!r}, actual: {actual!r}"
+    )
 
     yield
 
     actual = callable()
-    assert operator(
-        actual, value
-    ), f"postcondition ({operator}) on {callable} failed: expected: {value!r}, actual: {actual!r}"
+    assert operator(actual, value), (
+        f"postcondition ({operator}) on {callable} failed: expected: {value!r}, actual: {actual!r}"
+    )
 
 
 def wait_for_consumer(consumer: Consumer[T], message: BrokerValue[T], attempts: int = 10) -> None:

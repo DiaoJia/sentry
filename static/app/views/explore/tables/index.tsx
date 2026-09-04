@@ -1,29 +1,26 @@
-import {Fragment, useCallback} from 'react';
-import styled from '@emotion/styled';
+import {Fragment, useEffect} from 'react';
 
-import {openModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
-import {TabList, Tabs} from 'sentry/components/core/tabs';
-import {Tooltip} from 'sentry/components/core/tooltip';
-import {IconTable} from 'sentry/icons/iconTable';
+import {FeatureBadge} from '@sentry/scraps/badge';
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {useModal} from '@sentry/scraps/modal';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {IconEdit} from 'sentry/icons/iconEdit';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {Confidence} from 'sentry/types/organization';
-import useOrganization from 'sentry/utils/useOrganization';
-import {
-  useExploreAggregateFields,
-  useExploreFields,
-  useExploreMode,
-  useSetExploreAggregateFields,
-  useSetExploreFields,
-  useSetExploreMode,
-} from 'sentry/views/explore/contexts/pageParamsContext';
+import {AttributeBreakdownsContent} from 'sentry/views/explore/components/attributeBreakdowns/content';
 import {Mode} from 'sentry/views/explore/contexts/pageParamsContext/mode';
-import {useTraceItemTags} from 'sentry/views/explore/contexts/spanTagsContext';
 import type {AggregatesTableResult} from 'sentry/views/explore/hooks/useExploreAggregatesTable';
 import type {SpansTableResult} from 'sentry/views/explore/hooks/useExploreSpansTable';
 import type {TracesTableResult} from 'sentry/views/explore/hooks/useExploreTracesTable';
 import {Tab} from 'sentry/views/explore/hooks/useTab';
+import {
+  useQueryParamsCrossEvents,
+  useSetQueryParamsAggregateFields,
+  useSetQueryParamsFields,
+} from 'sentry/views/explore/queryParams/context';
+import {useValidatedSpansTabColumns} from 'sentry/views/explore/spans/hooks/useValidatedSpansTabColumns';
 import {AggregateColumnEditorModal} from 'sentry/views/explore/tables/aggregateColumnEditorModal';
 import {AggregatesTable} from 'sentry/views/explore/tables/aggregatesTable';
 import {ColumnEditorModal} from 'sentry/views/explore/tables/columnEditorModal';
@@ -31,9 +28,8 @@ import {SpansTable} from 'sentry/views/explore/tables/spansTable';
 import {TracesTable} from 'sentry/views/explore/tables/tracesTable/index';
 
 interface BaseExploreTablesProps {
-  confidences: Confidence[];
-  samplesTab: Tab;
-  setSamplesTab: (tab: Tab) => void;
+  setTab: (tab: Mode | Tab, reason: 'click' | 'effect') => void;
+  tab: Mode | Tab;
 }
 
 interface ExploreTablesProps extends BaseExploreTablesProps {
@@ -43,83 +39,119 @@ interface ExploreTablesProps extends BaseExploreTablesProps {
 }
 
 export function ExploreTables(props: ExploreTablesProps) {
-  const organization = useOrganization();
+  const {openModal} = useModal();
 
-  const aggregateFields = useExploreAggregateFields();
-  const setAggregateFields = useSetExploreAggregateFields();
+  const {setTab, tab} = props;
+  const crossEvents = useQueryParamsCrossEvents();
+  const hasCrossEvents = !!crossEvents?.length;
+  const setAggregateFields = useSetQueryParamsAggregateFields();
+  const setFields = useSetQueryParamsFields();
 
-  const mode = useExploreMode();
-  const setMode = useSetExploreMode();
+  const {
+    aggregateFields: validatedAggregateFields,
+    attributes: {
+      boolean: validatedBooleanTags,
+      number: validatedNumberTags,
+      string: validatedStringTags,
+      array: validatedArrayTags,
+    },
+    fieldTypes: validatedFieldTypes,
+    fields: validatedFields,
+    isValidatingColumns,
+  } = useValidatedSpansTabColumns(tab);
 
-  const fields = useExploreFields();
-  const setFields = useSetExploreFields();
-
-  const {tags: numberTags} = useTraceItemTags('number');
-  const {tags: stringTags} = useTraceItemTags('string');
-
-  const openColumnEditor = useCallback(() => {
+  const openColumnEditor = () => {
     openModal(
       modalProps => (
         <ColumnEditorModal
           {...modalProps}
-          columns={fields}
+          columns={validatedFields}
           onColumnsChange={setFields}
-          stringTags={stringTags}
-          numberTags={numberTags}
+          stringTags={validatedStringTags}
+          numberTags={validatedNumberTags}
+          booleanTags={validatedBooleanTags}
+          arrayTags={validatedArrayTags}
+          requiredTags={['id']}
+          validatedFieldTypes={validatedFieldTypes}
         />
       ),
       {closeEvents: 'escape-key'}
     );
-  }, [fields, setFields, stringTags, numberTags]);
+  };
 
-  const openAggregateColumnEditor = useCallback(() => {
+  const openAggregateColumnEditor = () => {
     openModal(
       modalProps => (
         <AggregateColumnEditorModal
           {...modalProps}
-          columns={aggregateFields}
+          columns={validatedAggregateFields.slice()}
           onColumnsChange={setAggregateFields}
-          stringTags={stringTags}
-          numberTags={numberTags}
+          stringTags={validatedStringTags}
+          numberTags={validatedNumberTags}
+          booleanTags={validatedBooleanTags}
         />
       ),
       {closeEvents: 'escape-key'}
     );
-  }, [aggregateFields, setAggregateFields, stringTags, numberTags]);
+  };
 
-  // HACK: This is pretty gross but to not break anything in the
-  // short term, we avoid introducing/removing any fields on the
-  // query. So we continue using the existing `mode` value and
-  // coalesce it with the `tab` value` to create a single tab.
-  const tab = mode === Mode.AGGREGATE ? mode : props.samplesTab;
-  const setTab = useCallback(
-    (option: Tab | Mode) => {
-      if (option === Mode.AGGREGATE) {
-        setMode(Mode.AGGREGATE);
-      } else if (option === Tab.SPAN || option === Tab.TRACE) {
-        props.setSamplesTab(option);
-      }
-    },
-    [setMode, props]
-  );
+  useEffect(() => {
+    if ((tab === Tab.TRACE || tab === Tab.ATTRIBUTE_BREAKDOWNS) && hasCrossEvents) {
+      setTab(Tab.SPAN, 'effect');
+    }
+  }, [hasCrossEvents, setTab, tab]);
 
   return (
     <Fragment>
-      <SamplesTableHeader>
-        <Tabs value={tab} onChange={setTab} size="sm">
-          <TabList hideBorder variant="floating">
+      <Flex justify="between" marginBottom="md" gap="md" wrap="wrap">
+        <Tabs
+          value={tab}
+          onChange={newTab => setTab(newTab, 'click')}
+          size="sm"
+          disableOverflow
+        >
+          <TabList variant="floating">
             <TabList.Item key={Tab.SPAN}>{t('Span Samples')}</TabList.Item>
-            <TabList.Item key={Tab.TRACE}>{t('Trace Samples')}</TabList.Item>
+            <TabList.Item
+              key={Tab.TRACE}
+              disabled={hasCrossEvents}
+              tooltip={{
+                title: hasCrossEvents
+                  ? t(
+                      'Trace samples do not yet work with Cross-Event queries. Use the Spans tab instead.'
+                    )
+                  : undefined,
+              }}
+            >
+              {t('Trace Samples')}
+            </TabList.Item>
             <TabList.Item key={Mode.AGGREGATE}>{t('Aggregates')}</TabList.Item>
+            <TabList.Item
+              key={Tab.ATTRIBUTE_BREAKDOWNS}
+              textValue={t('Attribute Breakdowns')}
+              disabled={hasCrossEvents}
+            >
+              {t('Attribute Breakdowns')}
+              <FeatureBadge type="beta" />
+            </TabList.Item>
           </TabList>
         </Tabs>
         {tab === Tab.SPAN ? (
-          <Button onClick={openColumnEditor} icon={<IconTable />} size="sm">
+          <Button
+            disabled={isValidatingColumns}
+            onClick={openColumnEditor}
+            icon={<IconEdit />}
+            size="sm"
+          >
             {t('Edit Table')}
           </Button>
-        ) : tab === Mode.AGGREGATE &&
-          organization.features.includes('visibility-explore-aggregate-editor') ? (
-          <Button onClick={openAggregateColumnEditor} icon={<IconTable />} size="sm">
+        ) : tab === Mode.AGGREGATE ? (
+          <Button
+            disabled={isValidatingColumns}
+            onClick={openAggregateColumnEditor}
+            icon={<IconEdit />}
+            size="sm"
+          >
             {t('Edit Table')}
           </Button>
         ) : (
@@ -130,22 +162,32 @@ export function ExploreTables(props: ExploreTablesProps) {
                 : t('Use the Group By and Visualize controls to change table columns')
             }
           >
-            <Button disabled onClick={openColumnEditor} icon={<IconTable />} size="sm">
+            <Button disabled onClick={openColumnEditor} icon={<IconEdit />} size="sm">
               {t('Edit Table')}
             </Button>
           </Tooltip>
         )}
-      </SamplesTableHeader>
-      {tab === Tab.SPAN && <SpansTable {...props} />}
+      </Flex>
+      {tab === Tab.SPAN && (
+        <SpansTable
+          {...props}
+          stringTags={validatedStringTags}
+          numberTags={validatedNumberTags}
+          booleanTags={validatedBooleanTags}
+          validatedFieldTypes={validatedFieldTypes}
+        />
+      )}
       {tab === Tab.TRACE && <TracesTable {...props} />}
-      {tab === Mode.AGGREGATE && <AggregatesTable {...props} />}
+      {tab === Mode.AGGREGATE && (
+        <AggregatesTable
+          {...props}
+          stringTags={validatedStringTags}
+          numberTags={validatedNumberTags}
+          booleanTags={validatedBooleanTags}
+          validatedFieldTypes={validatedFieldTypes}
+        />
+      )}
+      {tab === Tab.ATTRIBUTE_BREAKDOWNS && <AttributeBreakdownsContent />}
     </Fragment>
   );
 }
-
-const SamplesTableHeader = styled('div')`
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-  margin-bottom: ${space(1)};
-`;

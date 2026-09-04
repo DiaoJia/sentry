@@ -9,11 +9,17 @@ import type {
 } from 'sentry/components/searchSyntax/parser';
 import {
   BooleanOperator,
+  FilterType,
   InvalidReason,
   parseSearch,
+  TermOperator,
   Token,
 } from 'sentry/components/searchSyntax/parser';
-import {treeTransformer} from 'sentry/components/searchSyntax/utils';
+import {
+  getKeyLabel,
+  getKeyName,
+  stringifyToken,
+} from 'sentry/components/searchSyntax/utils';
 
 type TestCase = {
   /**
@@ -33,6 +39,92 @@ type TestCase = {
    */
   raisesError?: boolean;
 };
+
+type TreeTransformerOpts = {
+  /**
+   * The function used to transform each node
+   */
+  transform: (token: TokenResult<Token>) => any;
+  /**
+   * The tree to transform
+   */
+  tree: Array<TokenResult<Token>>;
+};
+
+/**
+ * Utility function to visit every Token node within an AST tree and apply
+ * a transform to those nodes.
+ */
+function treeTransformer({tree, transform}: TreeTransformerOpts) {
+  const nodeVisitor = (token: TokenResult<Token> | null): any => {
+    if (token === null) {
+      return null;
+    }
+
+    switch (token.type) {
+      case Token.FILTER:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+          value: nodeVisitor(token.value),
+        });
+      case Token.KEY_EXPLICIT_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_AGGREGATE:
+        return transform({
+          ...token,
+          name: nodeVisitor(token.name),
+          args: token.args ? nodeVisitor(token.args) : token.args,
+          argsSpaceBefore: nodeVisitor(token.argsSpaceBefore),
+          argsSpaceAfter: nodeVisitor(token.argsSpaceAfter),
+        });
+      case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_NUMBER_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_STRING_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_ARRAY_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.LOGIC_GROUP:
+        return transform({
+          ...token,
+          inner: token.inner.map(nodeVisitor),
+        });
+      case Token.KEY_AGGREGATE_ARGS:
+        return transform({
+          ...token,
+          args: token.args.map(v => ({...v, value: nodeVisitor(v.value)})),
+        });
+      case Token.VALUE_NUMBER_LIST:
+      case Token.VALUE_TEXT_LIST:
+        return transform({
+          ...token,
+          items: token.items.map(v => ({...v, value: nodeVisitor(v.value)})),
+        });
+
+      default:
+        return transform(token);
+    }
+  };
+
+  return tree.map(nodeVisitor);
+}
 
 /**
  * Normalize results to match the json test cases
@@ -78,7 +170,7 @@ const normalizeResult = (tokens: Array<TokenResult<Token>>) =>
     },
   });
 
-describe('searchSyntax/parser', function () {
+describe('searchSyntax/parser', () => {
   const testData = loadFixtures('search-syntax') as unknown as Record<string, TestCase[]>;
 
   const registerTestCase = (
@@ -104,10 +196,49 @@ describe('searchSyntax/parser', function () {
     });
 
   Object.entries(testData).map(([name, cases]) =>
-    describe(`${name}`, () => {
+    // https://github.com/jest-community/eslint-plugin-jest/issues/1940
+    // eslint-disable-next-line jest/valid-title
+    describe(name, () => {
       cases.map(c => registerTestCase(c, {parse: true}));
     })
   );
+
+  it('handles no-argument aggregate filters after free text', () => {
+    const result = parseSearch('TypeError count():>10');
+
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+
+    expect(result.map(token => token.type)).toEqual([
+      Token.SPACES,
+      Token.FREE_TEXT,
+      Token.SPACES,
+      Token.FILTER,
+      Token.SPACES,
+    ]);
+
+    expect(result[1]).toMatchObject({
+      type: Token.FREE_TEXT,
+      value: 'TypeError ',
+    });
+
+    const filter = result[3] as TokenResult<Token.FILTER>;
+    expect(filter).toMatchObject({
+      type: Token.FILTER,
+      filter: 'aggregateNumeric',
+      operator: '>',
+      key: {
+        type: Token.KEY_AGGREGATE,
+        name: {type: Token.KEY_SIMPLE, value: 'count'},
+        args: null,
+      },
+      value: {
+        type: Token.VALUE_NUMBER,
+        value: '10',
+      },
+    });
+  });
 
   it('returns token warnings', () => {
     const result = parseSearch('foo:bar bar:baz tags[foo]:bar tags[bar]:baz', {
@@ -358,6 +489,118 @@ describe('searchSyntax/parser', function () {
         }),
         expect.objectContaining({type: Token.SPACES}),
       ]);
+    });
+  });
+
+  describe('array membership filters', () => {
+    it('parses an explicit array typed tag with the [*] membership suffix', () => {
+      const result = parseSearch('tags[csv_headers,array][*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          negated: false,
+          operator: TermOperator.DEFAULT,
+          key: expect.objectContaining({
+            type: Token.KEY_ARRAY_INCLUDES,
+            index: '*',
+            key: expect.objectContaining({
+              type: Token.KEY_EXPLICIT_ARRAY_TAG,
+              text: 'tags[csv_headers,array]',
+              key: expect.objectContaining({
+                type: Token.KEY_SIMPLE,
+                value: 'csv_headers',
+              }),
+            }),
+          }),
+          value: expect.objectContaining({type: Token.VALUE_TEXT, value: 'foo'}),
+        })
+      );
+
+      // Identity keeps the backend tag form (so the query stays annotated); the
+      // label prettifies to the root name; the query text carries the `[*]`.
+      expect(getKeyName(filter.key)).toBe('tags[csv_headers,array]');
+      expect(getKeyLabel(filter.key)).toBe('csv_headers');
+      expect(stringifyToken(filter.key)).toBe('tags[csv_headers,array][*]');
+      // The whole filter round-trips without an operator sentinel.
+      expect(stringifyToken(filter)).toBe('tags[csv_headers,array][*]:foo');
+    });
+
+    it('does not treat the tags[...,array] form without [*] as membership', () => {
+      // `[*]` is the required membership operator; without it the key is not an
+      // array-includes filter (it falls through to an ordinary text filter).
+      const result = parseSearch('tags[csv_headers,array]:foo');
+
+      const filter = result?.find(token => token.type === Token.FILTER);
+
+      expect(filter?.filter).not.toBe(FilterType.ARRAY_INCLUDES);
+    });
+
+    it('parses a plain attribute key with the [*] membership suffix', () => {
+      const result = parseSearch('csv_headers[*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          operator: TermOperator.DEFAULT,
+          key: expect.objectContaining({
+            type: Token.KEY_ARRAY_INCLUDES,
+            index: '*',
+            key: expect.objectContaining({type: Token.KEY_SIMPLE, value: 'csv_headers'}),
+          }),
+          value: expect.objectContaining({type: Token.VALUE_TEXT, value: 'foo'}),
+        })
+      );
+
+      expect(getKeyName(filter.key)).toBe('csv_headers');
+      expect(getKeyLabel(filter.key)).toBe('csv_headers');
+      expect(stringifyToken(filter.key)).toBe('csv_headers[*]');
+      expect(stringifyToken(filter)).toBe('csv_headers[*]:foo');
+    });
+
+    it('marks a negated membership filter as does-not-include', () => {
+      const result = parseSearch('!csv_headers[*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          negated: true,
+          operator: TermOperator.DEFAULT,
+        })
+      );
+
+      // Negation round-trips as `!…[*]`, not a DoesNotInclude sentinel.
+      expect(stringifyToken(filter)).toBe('!csv_headers[*]:foo');
     });
   });
 });

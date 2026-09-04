@@ -6,9 +6,11 @@ import {
   makeCloseButton,
   ModalBody,
   ModalFooter,
-} from 'sentry/components/globalModal/components';
-import platforms from 'sentry/data/platforms';
+} from '@sentry/scraps/modal';
+
+import {allPlatforms as platforms} from 'sentry/data/platforms';
 import type {OnboardingSelectedSDK} from 'sentry/types/onboarding';
+import * as analytics from 'sentry/utils/analytics';
 
 import {
   FrameworkSuggestionModal,
@@ -18,7 +20,7 @@ import {
 
 jest.unmock('lodash/debounce');
 
-describe('Framework suggestion modal', function () {
+describe('Framework suggestion modal', () => {
   const {organization} = initializeOrg();
   const selectedPlatform: OnboardingSelectedSDK = {
     key: 'javascript',
@@ -29,7 +31,7 @@ describe('Framework suggestion modal', function () {
     name: 'JavaScript',
   };
 
-  it('render default components', async function () {
+  it('render default components', async () => {
     const closeModal = jest.fn();
 
     render(
@@ -52,7 +54,7 @@ describe('Framework suggestion modal', function () {
 
     expect(screen.getByText(languageDescriptions.javascript!)).toBeInTheDocument();
 
-    expect(screen.getByRole('radio', {name: `Nope, Vanilla`})).toBeChecked();
+    expect(screen.getByRole('radio', {name: 'Nope, Vanilla'})).toBeChecked();
 
     const frameworks = platforms.filter(
       platform => platform.type === 'framework' && platform.language === 'javascript'
@@ -75,7 +77,8 @@ describe('Framework suggestion modal', function () {
     expect(screen.getByRole('button', {name: 'Configure SDK'})).toBeEnabled();
   });
 
-  it('should only call handleConfigure once on rapid multiple clicks', async function () {
+  it('should only call handleConfigure once on rapid multiple clicks', async () => {
+    const trackAnalyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
     const handleSkip = jest.fn();
 
     render(
@@ -99,5 +102,35 @@ describe('Framework suggestion modal', function () {
     await userEvent.click(button);
 
     expect(handleSkip).toHaveBeenCalledTimes(1);
+
+    expect(trackAnalyticsSpy).toHaveBeenCalledWith(
+      'project_creation.select_framework_modal_skip_button_clicked',
+      expect.objectContaining({variant: 'legacy'})
+    );
+  });
+
+  it('adds the legacy variant to framework configuration analytics', async () => {
+    const trackAnalyticsSpy = jest.spyOn(analytics, 'trackAnalytics');
+    render(
+      <FrameworkSuggestionModal
+        Body={ModalBody}
+        Header={makeClosableHeader(jest.fn())}
+        closeModal={jest.fn()}
+        CloseButton={makeCloseButton(jest.fn())}
+        Footer={ModalFooter}
+        onConfigure={jest.fn()}
+        onSkip={jest.fn()}
+        organization={organization}
+        selectedPlatform={selectedPlatform}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('radio', {name: 'React'}));
+    await userEvent.click(screen.getByRole('button', {name: 'Configure SDK'}));
+
+    expect(trackAnalyticsSpy).toHaveBeenCalledWith(
+      'project_creation.select_framework_modal_configure_sdk_button_clicked',
+      expect.objectContaining({variant: 'legacy'})
+    );
   });
 });

@@ -6,7 +6,7 @@ from hashlib import md5
 from typing import TYPE_CHECKING, TypedDict, Union
 
 if TYPE_CHECKING:
-    from sentry.eventstore.models import BaseEvent
+    from sentry.services.eventstore.models import BaseEvent
 
 
 class EventLinkKafkaMessage(TypedDict):
@@ -69,7 +69,6 @@ def get_level_key(
     level: str | None,
     event_id: str,
 ) -> PayloadUnionType:
-
     if level == "debug":
         return EventLinkPayloadDebugId(
             type=type,

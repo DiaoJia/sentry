@@ -1,10 +1,13 @@
 from datetime import datetime, timezone
+from typing import Any
+
+import pytest
 
 from sentry.flags.models import PROVIDER_MAP
 from sentry.flags.providers import DeserializationError, GenericProvider
 
 
-def test_handle():
+def test_handle() -> None:
     items = GenericProvider(123, None).handle(
         {
             "data": [
@@ -39,7 +42,7 @@ def test_handle():
     assert items[0]["tags"] == {}
 
 
-def test_handle_dedupe():
+def test_handle_dedupe() -> None:
     items = GenericProvider(123, None).handle(
         {
             "data": [
@@ -73,7 +76,7 @@ def test_handle_dedupe():
     assert items[0]["tags"] == {}
 
 
-def test_blank():
+def test_blank() -> None:
     try:
         GenericProvider(123, None).handle({})
     except DeserializationError as exc:
@@ -82,14 +85,14 @@ def test_blank():
         assert exc.errors["meta"][0].code == "required"
 
 
-def test_partial_fill():
+def test_partial_fill() -> None:
     try:
         GenericProvider(123, None).handle({"data": [], "meta": {}})
     except DeserializationError as exc:
         assert exc.errors["meta"]["version"][0].code == "required"
 
 
-def test_empty_data_item():
+def test_empty_data_item() -> None:
     try:
         GenericProvider(123, None).handle({"data": [{}], "meta": {"version": 1}})
     except DeserializationError as exc:
@@ -99,3 +102,30 @@ def test_empty_data_item():
         assert exc.errors["data"][0]["created_at"][0].code == "required"
         assert exc.errors["data"][0]["created_by"][0].code == "required"
         assert exc.errors["data"][0]["flag"][0].code == "required"
+
+
+def _make_flag_request(flag: str) -> dict[str, Any]:
+    return {
+        "data": [
+            {
+                "action": "created",
+                "change_id": 93899375123,
+                "created_at": "2024-12-12T00:00:00+00:00",
+                "created_by": {"id": "user", "type": "name"},
+                "flag": flag,
+            }
+        ],
+        "meta": {"version": 1},
+    }
+
+
+def test_accepts_max_length_flag_name() -> None:
+    items = GenericProvider(123, None).handle(_make_flag_request("a" * 256))
+    assert len(items) == 1
+    assert items[0]["flag"] == "a" * 256
+
+
+def test_rejects_over_max_length_flag_name() -> None:
+    with pytest.raises(DeserializationError) as excinfo:
+        GenericProvider(123, None).handle(_make_flag_request("a" * 257))
+    assert excinfo.value.errors["data"][0]["flag"][0].code == "max_length"

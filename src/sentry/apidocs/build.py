@@ -105,6 +105,16 @@ OPENAPI_TAGS = [
         },
     },
     {
+        "name": "Explore",
+        "x-sidebar-name": "Explore",
+        "description": "Explore allow you to slice and dice your events",
+        "x-display-description": True,
+        "externalDocs": {
+            "description": "Found an error? Let us know.",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/integration-platform/&template=api_error_template.md",
+        },
+    },
+    {
         "name": "Dashboards",
         "x-sidebar-name": "Dashboards",
         "description": "Endpoints for Dashboards",
@@ -135,13 +145,23 @@ OPENAPI_TAGS = [
         },
     },
     {
-        "name": "Alerts",
-        "x-sidebar-name": "Alerts & Notifications",
-        "description": "Endpoints for Alerts and Notifications",
+        "name": "Spike Protection",
+        "x-sidebar-name": "Spike Protection Notifications",
+        "description": "Endpoints for Spike Protection Notifications",
         "x-display-description": False,
         "externalDocs": {
             "description": "Found an error? Let us know.",
             "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/integration-platform/&template=api_error_template.md",
+        },
+    },
+    {
+        "name": "Monitors",
+        "x-sidebar-name": "Monitors & Alerts",
+        "description": "Endpoints for Monitors and Alerts",
+        "x-display-description": False,
+        "externalDocs": {
+            "description": "Found an error? Let us know.",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/monitors/&template=api_error_template.md",
         },
     },
     {
@@ -175,13 +195,39 @@ OPENAPI_TAGS = [
         },
     },
     {
-        "name": "Prevent",
-        "x-sidebar-name": "Prevent",
-        "description": "Endpoints for Prevent",
+        "name": "Seer",
+        "description": "Endpoints for Seer features",
         "x-display-description": False,
         "externalDocs": {
             "description": "Found an error? Let us know.",
-            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/prevent/&template=api_error_template.md",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/seer/&template=api_error_template.md",
+        },
+    },
+    {
+        "name": "Mobile Builds",
+        "description": "Endpoints for mobile build analysis",
+        "x-display-description": False,
+        "externalDocs": {
+            "description": "Found an error? Let us know.",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/organizations/preprodartifacts/size-analysis/&template=api_error_template.md",
+        },
+    },
+    {
+        "name": "Snapshots",
+        "description": "Endpoints for snapshot testing",
+        "x-display-description": False,
+        "externalDocs": {
+            "description": "Found an error? Let us know.",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/snapshots/&template=api_error_template.md",
+        },
+    },
+    {
+        "name": "Profiling",
+        "description": "Endpoints for retrieving profiling data, flamegraphs, and profile chunks",
+        "x-display-description": False,
+        "externalDocs": {
+            "description": "Found an error? Let us know.",
+            "url": "https://github.com/getsentry/sentry-docs/issues/new/?title=API%20Documentation%20Error:%20/api/profiling/&template=api_error_template.md",
         },
     },
 ]

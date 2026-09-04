@@ -1,26 +1,31 @@
 import styled from '@emotion/styled';
 import {OrganizationFixture} from 'sentry-fixture/organization';
+import {TeamFixture} from 'sentry-fixture/team';
 
 import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
 
-import {createTeam} from 'sentry/actionCreators/teams';
-import {makeCloseButton} from 'sentry/components/globalModal/components';
+import {makeCloseButton} from '@sentry/scraps/modal';
+
 import CreateTeamModal from 'sentry/components/modals/createTeamModal';
 
-jest.mock('sentry/actionCreators/teams', () => ({
-  createTeam: jest.fn((...args: any[]) => new Promise(resolve => resolve(args))),
-}));
-
-describe('CreateTeamModal', function () {
+describe('CreateTeamModal', () => {
   const org = OrganizationFixture();
   const closeModal = jest.fn();
   const onClose = jest.fn();
 
-  beforeEach(function () {
-    onClose.mockReset();
+  beforeEach(() => {
+    jest.clearAllMocks();
+    MockApiClient.clearMockResponses();
   });
 
-  it('calls createTeam action creator on submit', async function () {
+  it('creates a team and closes the modal on submit', async () => {
+    const team = TeamFixture({slug: 'new-team'});
+    const createRequest = MockApiClient.addMockResponse({
+      url: `/organizations/${org.slug}/teams/`,
+      method: 'POST',
+      body: team,
+    });
+
     const styledWrapper = styled<any>((c: {children: React.ReactNode}) => c.children);
     render(
       <CreateTeamModal
@@ -34,11 +39,15 @@ describe('CreateTeamModal', function () {
       />
     );
 
-    await userEvent.type(screen.getByText('Team Name'), 'new-team');
+    await userEvent.type(screen.getByRole('textbox', {name: 'Team Slug'}), 'new-team');
     await userEvent.click(screen.getByLabelText('Create Team'));
 
-    await waitFor(() => expect(createTeam).toHaveBeenCalledTimes(1));
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(createRequest).toHaveBeenCalledTimes(1));
+    expect(createRequest).toHaveBeenCalledWith(
+      `/organizations/${org.slug}/teams/`,
+      expect.objectContaining({data: {slug: 'new-team'}})
+    );
+    expect(onClose).toHaveBeenCalledWith(team);
     expect(closeModal).toHaveBeenCalled();
   });
 });

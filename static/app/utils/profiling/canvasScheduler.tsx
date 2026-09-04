@@ -32,22 +32,22 @@ export interface FlamegraphEvents {
 type EventStore = {[K in keyof FlamegraphEvents]: Set<FlamegraphEvents[K]>};
 
 export class CanvasScheduler {
-  beforeFrameCallbacks: Set<DrawFn> = new Set();
-  afterFrameCallbacks: Set<DrawFn> = new Set();
+  beforeFrameCallbacks = new Set<DrawFn>();
+  afterFrameCallbacks = new Set<DrawFn>();
 
-  onDisposeCallbacks: Set<() => void> = new Set();
+  onDisposeCallbacks = new Set<() => void>();
   requestAnimationFrame: number | null = null;
 
   events: EventStore = {
-    ['show in table view']: new Set<FlamegraphEvents['show in table view']>(),
-    ['reset zoom']: new Set<FlamegraphEvents['reset zoom']>(),
-    ['highlight frame']: new Set<FlamegraphEvents['highlight frame']>(),
-    ['highlight span']: new Set<FlamegraphEvents['highlight span']>(),
-    ['highlight ui frame']: new Set<FlamegraphEvents['highlight ui frame']>(),
-    ['set config view']: new Set<FlamegraphEvents['set config view']>(),
-    ['transform config view']: new Set<FlamegraphEvents['transform config view']>(),
-    ['zoom at frame']: new Set<FlamegraphEvents['zoom at frame']>(),
-    ['zoom at span']: new Set<FlamegraphEvents['zoom at span']>(),
+    'show in table view': new Set<FlamegraphEvents['show in table view']>(),
+    'reset zoom': new Set<FlamegraphEvents['reset zoom']>(),
+    'highlight frame': new Set<FlamegraphEvents['highlight frame']>(),
+    'highlight span': new Set<FlamegraphEvents['highlight span']>(),
+    'highlight ui frame': new Set<FlamegraphEvents['highlight ui frame']>(),
+    'set config view': new Set<FlamegraphEvents['set config view']>(),
+    'transform config view': new Set<FlamegraphEvents['transform config view']>(),
+    'zoom at frame': new Set<FlamegraphEvents['zoom at frame']>(),
+    'zoom at span': new Set<FlamegraphEvents['zoom at span']>(),
   };
 
   onDispose(cb: () => void): void {
@@ -150,7 +150,7 @@ export class CanvasScheduler {
 }
 
 export class CanvasPoolManager {
-  schedulers: Set<CanvasScheduler> = new Set();
+  schedulers = new Set<CanvasScheduler>();
 
   registerScheduler(scheduler: CanvasScheduler): void {
     if (this.schedulers.has(scheduler)) {

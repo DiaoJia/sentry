@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import tempfile
 import uuid
 from datetime import datetime
 from typing import IO, TYPE_CHECKING, NamedTuple
@@ -9,10 +10,11 @@ from typing import IO, TYPE_CHECKING, NamedTuple
 import orjson
 import sentry_sdk
 from django.conf import settings
-from django.db import router
+from django.db import router, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from sentry import features
 from sentry.api.serializers import serialize
 from sentry.constants import ObjectStatus
 from sentry.debug_files.artifact_bundles import (
@@ -22,6 +24,7 @@ from sentry.debug_files.artifact_bundles import (
 )
 from sentry.debug_files.tasks import backfill_artifact_bundle_db_indexing
 from sentry.models.artifactbundle import (
+    MAX_SOURCE_FILE_SIZE,
     NULL_STRING,
     ArtifactBundle,
     ArtifactBundleArchive,
@@ -36,16 +39,16 @@ from sentry.models.organization import Organization
 from sentry.models.project import Project
 from sentry.silo.base import SiloMode
 from sentry.tasks.base import instrumented_task
-from sentry.taskworker.config import TaskworkerConfig
 from sentry.taskworker.namespaces import attachments_tasks
 from sentry.utils import metrics, redis
 from sentry.utils.db import atomic_transaction
 from sentry.utils.sdk import bind_organization_context
+from sentry.utils.tracing import trace
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from rediscluster import RedisCluster
+    from sentry_redis_tools.clients import RedisCluster
 
 
 class ChunkFileState:
@@ -61,32 +64,28 @@ class AssembleTask:
     RELEASE_BUNDLE = "organization.artifacts"  # Release file upload
     ARTIFACT_BUNDLE = "organization.artifact_bundle"  # Artifact bundle upload
     PREPROD_ARTIFACT = "organization.preprod_artifact_bundle"  # Preprod artifact upload
+    PREPROD_ARTIFACT_SIZE_ANALYSIS = (
+        "organization.preprod_artifact_size_analysis"  # Preprod artifact size analysis upload
+    )
+    PREPROD_ARTIFACT_INSTALLABLE_APP = (
+        "organization.preprod_artifact_installable_app"  # Preprod artifact installable app upload
+    )
 
 
 class AssembleResult(NamedTuple):
     # File object stored in the database.
     bundle: File
     # Temporary in-memory object representing the file used for efficiency.
-    bundle_temp_file: IO
+    bundle_temp_file: IO[bytes]
 
     def delete_bundle(self):
         self.bundle.delete()
         self.bundle_temp_file.close()
 
 
-@sentry_sdk.tracing.trace
-def assemble_file(task, org_or_project, name, checksum, chunks, file_type) -> AssembleResult | None:
-    """
-    Verifies and assembles a file model from chunks.
-
-    This downloads all chunks from blob store to verify their integrity and
-    associates them with a created file model. Additionally, it assembles the
-    full file in a temporary location and verifies the complete content hash.
-
-    Returns a tuple ``(File, TempFile)`` on success, or ``None`` on error.
-    """
+def _get_assemble_file_blob_ids(task, org_or_project, name, checksum, chunks) -> list[int] | None:
+    """Validates uploaded chunks and returns their IDs in assembly order."""
     from sentry.models.files.fileblob import FileBlob
-    from sentry.models.files.utils import AssembleChecksumMismatch
 
     if isinstance(org_or_project, Project):
         organization = org_or_project.organization
@@ -136,7 +135,25 @@ def assemble_file(task, org_or_project, name, checksum, chunks, file_type) -> As
     # Ensure blobs are in the order and duplication in which they were
     # transmitted. Otherwise, we would assemble the file in the wrong order.
     ids_by_checksum = {chks: id for id, chks, _ in file_blobs}
-    file_blob_ids = [ids_by_checksum[c] for c in chunks]
+    return [ids_by_checksum[c] for c in chunks]
+
+
+@trace
+def assemble_file(task, org_or_project, name, checksum, chunks, file_type) -> AssembleResult | None:
+    """
+    Verifies and assembles a file model from chunks.
+
+    This downloads all chunks from blob store to verify their integrity and
+    associates them with a created file model. Additionally, it assembles the
+    full file in a temporary location and verifies the complete content hash.
+
+    Returns a tuple ``(File, TempFile)`` on success, or ``None`` on error.
+    """
+    from sentry.models.files.utils import AssembleChecksumMismatch
+
+    file_blob_ids = _get_assemble_file_blob_ids(task, org_or_project, name, checksum, chunks)
+    if file_blob_ids is None:
+        return None
 
     file = File.objects.create(name=name, checksum=checksum, type=file_type)
     try:
@@ -153,6 +170,50 @@ def assemble_file(task, org_or_project, name, checksum, chunks, file_type) -> As
         return None
 
     return AssembleResult(bundle=file, bundle_temp_file=temp_file)
+
+
+@trace
+def assemble_file_blobs(task, org_or_project, name, checksum, chunks) -> IO[bytes] | None:
+    """Assembles uploaded chunks into a temporary file without creating a ``File``."""
+    from sentry.models.files.fileblob import FileBlob
+
+    file_blob_ids = _get_assemble_file_blob_ids(task, org_or_project, name, checksum, chunks)
+    if file_blob_ids is None:
+        return None
+
+    blobs_by_id = FileBlob.objects.in_bulk(file_blob_ids)
+    try:
+        file_blobs = [blobs_by_id[blob_id] for blob_id in file_blob_ids]
+    except KeyError:
+        logger.exception("`FileBlob` disappeared during `assemble_file_blobs`")
+        raise
+
+    temp_file = tempfile.NamedTemporaryFile()
+    assembled_checksum = hashlib.sha1()
+    try:
+        for blob in file_blobs:
+            with blob.getfile() as blobfile:
+                for chunk in blobfile.chunks():
+                    assembled_checksum.update(chunk)
+                    temp_file.write(chunk)
+    except Exception:
+        temp_file.close()
+        raise
+
+    if checksum != assembled_checksum.hexdigest():
+        temp_file.close()
+        set_assemble_status(
+            task,
+            org_or_project.id,
+            checksum,
+            ChunkFileState.ERROR,
+            detail="Reported checksum mismatch",
+        )
+        return None
+
+    temp_file.flush()
+    temp_file.seek(0)
+    return temp_file
 
 
 def _get_cache_key(task, scope, checksum):
@@ -180,10 +241,10 @@ def _get_cache_key(task, scope, checksum):
 
 def _get_redis_cluster_for_assemble() -> RedisCluster:
     cluster_key = settings.SENTRY_ASSEMBLE_CLUSTER
-    return redis.redis_clusters.get(cluster_key)  # type: ignore[return-value]
+    return redis.redis_clusters.get(cluster_key)
 
 
-@sentry_sdk.tracing.trace
+@trace
 def get_assemble_status(task, scope, checksum):
     """
     Checks the current status of an assembling task.
@@ -203,7 +264,7 @@ def get_assemble_status(task, scope, checksum):
     return tuple(orjson.loads(rv))
 
 
-@sentry_sdk.tracing.trace
+@trace
 def set_assemble_status(task, scope, checksum, state, detail=None):
     """
     Updates the status of an assembling task. It is cached for 10 minutes.
@@ -213,7 +274,7 @@ def set_assemble_status(task, scope, checksum, state, detail=None):
     redis_client.set(name=cache_key, value=orjson.dumps([state, detail]), ex=600)
 
 
-@sentry_sdk.tracing.trace
+@trace
 def delete_assemble_status(task, scope, checksum):
     """
     Deletes the status of an assembling task.
@@ -225,63 +286,74 @@ def delete_assemble_status(task, scope, checksum):
 
 @instrumented_task(
     name="sentry.tasks.assemble.assemble_dif",
-    queue="assemble",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=attachments_tasks,
-        processing_deadline_duration=30,
-    ),
+    namespace=attachments_tasks,
+    processing_deadline_duration=60 * 3,
+    silo_mode=SiloMode.CELL,
 )
 def assemble_dif(project_id, name, checksum, chunks, debug_id=None, **kwargs):
     """
     Assembles uploaded chunks into a ``ProjectDebugFile``.
     """
     from sentry.lang.native.sources import record_last_upload
-    from sentry.models.debugfile import BadDif, create_dif_from_id, detect_dif_from_path
+    from sentry.models.debugfile import (
+        BadDif,
+        create_dif_from_file,
+        create_dif_from_fileobj,
+        detect_single_dif_from_path,
+    )
     from sentry.models.project import Project
 
-    sentry_sdk.get_isolation_scope().set_tag("project", project_id)
+    sentry_sdk.set_tag("project", project_id)
+    sentry_sdk.set_attribute("project", project_id)
 
+    file: File | None = None
     delete_file = False
 
     try:
         project = Project.objects.filter(id=project_id).get()
         set_assemble_status(AssembleTask.DIF, project_id, checksum, ChunkFileState.ASSEMBLING)
 
-        # Assemble the chunks into a temporary file
-        rv = assemble_file(
-            AssembleTask.DIF, project, name, checksum, chunks, file_type="project.dif"
-        )
+        if features.has(
+            "organizations:objectstore-debugfiles-exclusive-write", project.organization
+        ):
+            temp_file = assemble_file_blobs(AssembleTask.DIF, project, name, checksum, chunks)
+            if temp_file is None:
+                return
+        else:
+            # Assemble the chunks into a legacy File and temporary file.
+            rv = assemble_file(
+                AssembleTask.DIF, project, name, checksum, chunks, file_type="project.dif"
+            )
 
-        # If not file has been created this means that the file failed to
-        # assemble because of bad input data. In this case, assemble_file
-        # has set the assemble status already.
-        if rv is None:
-            return
+            # If no file has been created this means that the file failed to
+            # assemble because of bad input data. In this case, assemble_file
+            # has set the assemble status already.
+            if rv is None:
+                return
 
-        file, temp_file = rv
-        delete_file = True
+            file, temp_file = rv
+            delete_file = True
 
         with temp_file:
             # We only permit split difs to hit this endpoint.
             # The client is required to split them up first or we error.
             try:
-                result = detect_dif_from_path(temp_file.name, name=name, debug_id=debug_id)
+                meta = detect_single_dif_from_path(temp_file.name, name=name, debug_id=debug_id)
+                if file is None:
+                    temp_file.seek(0)
+                    dif, created = create_dif_from_fileobj(project, meta, temp_file)
+                else:
+                    dif, created = create_dif_from_file(project, meta, file)
             except BadDif as e:
                 set_assemble_status(
                     AssembleTask.DIF, project_id, checksum, ChunkFileState.ERROR, detail=e.args[0]
                 )
                 return
 
-            if len(result) != 1:
-                detail = "Object contains %s architectures (1 expected)" % len(result)
-                set_assemble_status(
-                    AssembleTask.DIF, project_id, checksum, ChunkFileState.ERROR, detail=detail
-                )
-                return
-
-            dif, created = create_dif_from_id(project, result[0], file=file)
-            delete_file = False
+            # We can delete the temporary file when either the new DIF is objectstore-backed (i.e. `dif.file is None`),
+            # or when the new DIF references an already existing underlying `File` that's not this temporary one.
+            # Only if `dif.file is file` we want to avoid the deletion, given that the new DIF will be backed by `File` that up until now we considered temporary.
+            delete_file = file is not None and dif.file is not file
 
             if created:
                 record_last_upload(project)
@@ -299,11 +371,15 @@ def assemble_dif(project_id, name, checksum, chunks, debug_id=None, **kwargs):
             AssembleTask.DIF, project_id, checksum, ChunkFileState.OK, detail=serialize(dif)
         )
     finally:
-        if delete_file:
+        if delete_file and file is not None:
             file.delete()
 
 
 class AssembleArtifactsError(Exception):
+    pass
+
+
+class AssembleArtifactsTooLargeError(AssembleArtifactsError):
     pass
 
 
@@ -329,11 +405,11 @@ class ArtifactBundlePostAssembler:
     def _validate_bundle_guarded(self):
         try:
             self._validate_bundle()
+        except AssembleArtifactsTooLargeError:
+            self._cleanup_invalid_bundle()
+            raise
         except Exception:
-            metrics.incr("tasks.assemble.invalid_bundle")
-            # In case the bundle is invalid, we want to delete the actual `File` object created in the database, to
-            # avoid orphan entries.
-            self.delete_bundle_file_object()
+            self._cleanup_invalid_bundle()
             raise AssembleArtifactsError("the bundle is invalid")
 
     def _validate_bundle(self):
@@ -341,6 +417,19 @@ class ArtifactBundlePostAssembler:
         metrics.incr(
             "tasks.assemble.artifact_bundle.artifact_count", amount=self.archive.artifact_count
         )
+        for info in self.archive.infolist():
+            if info.file_size > MAX_SOURCE_FILE_SIZE:
+                metrics.incr("tasks.assemble.artifact_bundle.file_size_exceeded")
+                raise AssembleArtifactsTooLargeError(
+                    f"file {info.filename} exceeds the maximum uncompressed file size "
+                    f"({info.file_size} > {MAX_SOURCE_FILE_SIZE} bytes)"
+                )
+
+    def _cleanup_invalid_bundle(self):
+        metrics.incr("tasks.assemble.invalid_bundle")
+        # In case the bundle is invalid, we want to delete the actual `File` object created in the database, to
+        # avoid orphan entries.
+        self.delete_bundle_file_object()
 
     def __enter__(self):
         return self
@@ -364,16 +453,16 @@ class ArtifactBundlePostAssembler:
         with metrics.timer("tasks.assemble.artifact_bundle"):
             self._create_artifact_bundle()
 
-    @sentry_sdk.tracing.trace
+    @trace
     def _create_artifact_bundle(self) -> None:
         # We want to give precedence to the request fields and only if they are unset fallback to the manifest's
         # contents.
         self.release = self.release or self.archive.manifest.get("release")
         self.dist = self.dist or self.archive.manifest.get("dist")
 
-        # In case we have a release bundle migration, we are fetching *all*
-        # the projects associated with a release, which can be quite a lot.
-        # We rather use the `project` of the bundle manifest instead.
+        # In case we have a release bundle migration, we are fetching *all* the projects associated with a release,
+        # which can be quite a lot. We rather use the `project` of the bundle manifest instead, but ONLY if that
+        # project is already in the authorized project_ids list to prevent an IDOR.
         if len(self.project_ids) > 2 and self.is_release_bundle_migration:
             if project_in_manifest := self.archive.manifest.get("project"):
                 project_ids = list(
@@ -381,6 +470,7 @@ class ArtifactBundlePostAssembler:
                         organization=self.organization,
                         status=ObjectStatus.ACTIVE,
                         slug=project_in_manifest,
+                        id__in=self.project_ids,
                     ).values_list("id", flat=True)
                 )
                 if len(project_ids) > 0:
@@ -408,8 +498,6 @@ class ArtifactBundlePostAssembler:
         # We take a snapshot in time in order to have consistent values in the database.
         date_snapshot = timezone.now()
 
-        # We have to add this dictionary to both `values` and `defaults` since we want to update the date_added in
-        # case of a re-upload because the `date_added` of the ArtifactBundle is also updated.
         new_date_added = {"date_added": date_snapshot}
 
         # We want to run everything in a transaction, since we don't want the database to be in an inconsistent
@@ -429,23 +517,21 @@ class ArtifactBundlePostAssembler:
 
             # If a release version is passed, we want to create the weak association between a bundle and a release.
             if self.release:
-                ReleaseArtifactBundle.objects.create_or_update(
+                ReleaseArtifactBundle.objects.update_or_create(
                     organization_id=self.organization.id,
                     release_name=self.release,
                     # In case no dist is provided, we will fall back to "" which is the NULL equivalent for our
                     # tables.
                     dist_name=self.dist or NULL_STRING,
                     artifact_bundle=artifact_bundle,
-                    values=new_date_added,
                     defaults=new_date_added,
                 )
 
             for project_id in self.project_ids:
-                ProjectArtifactBundle.objects.create_or_update(
+                ProjectArtifactBundle.objects.update_or_create(
                     organization_id=self.organization.id,
                     project_id=project_id,
                     artifact_bundle=artifact_bundle,
-                    values=new_date_added,
                     defaults=new_date_added,
                 )
 
@@ -490,69 +576,87 @@ class ArtifactBundlePostAssembler:
                 dist=(self.dist or NULL_STRING),
             )
 
-    @sentry_sdk.tracing.trace
+    @trace
     def _create_or_update_artifact_bundle(
         self, bundle_id: str, date_added: datetime
     ) -> tuple[ArtifactBundle, bool]:
-        existing_artifact_bundles = list(
-            ArtifactBundle.objects.filter(organization_id=self.organization.id, bundle_id=bundle_id)
-        )
-
-        if len(existing_artifact_bundles) == 0:
-            existing_artifact_bundle = None
-        else:
-            existing_artifact_bundle = existing_artifact_bundles.pop()
-            # We want to remove all the duplicate artifact bundles that have the same bundle_id.
-            self._remove_duplicate_artifact_bundles(
-                ids=list(map(lambda value: value.id, existing_artifact_bundles))
+        with transaction.atomic(using=router.db_for_write(ArtifactBundle)):
+            existing_artifact_bundles = list(
+                ArtifactBundle.objects.filter(
+                    organization_id=self.organization.id, bundle_id=bundle_id
+                ).select_for_update()
             )
 
-        # In case there is not ArtifactBundle with a specific bundle_id, we just create it and return.
-        if existing_artifact_bundle is None:
-            artifact_bundle = ArtifactBundle.objects.create(
-                organization_id=self.organization.id,
-                bundle_id=bundle_id,
-                file=self.assemble_result.bundle,
-                artifact_count=self.archive.artifact_count,
-                # By default, a bundle is not indexed.
-                indexing_state=ArtifactBundleIndexingState.NOT_INDEXED.value,
-                # "date_added" and "date_uploaded" will have the same value, but they will diverge once renewal is
-                # performed by other parts of Sentry. Renewal is required since we want to expire unused bundles
-                # after ~90 days.
-                date_added=date_added,
-                date_uploaded=date_added,
-                # When creating a new bundle by default its last modified date corresponds to the creation date.
-                date_last_modified=date_added,
-            )
+            if len(existing_artifact_bundles) == 0:
+                existing_artifact_bundle = None
+            else:
+                existing_artifact_bundle = existing_artifact_bundles.pop()
+                # We want to remove all the duplicate artifact bundles that have the same bundle_id.
+                self._remove_duplicate_artifact_bundles(
+                    ids=list(map(lambda value: value.id, existing_artifact_bundles))
+                )
 
-            return artifact_bundle, True
-        else:
-            # We store a reference to the previous file to which the bundle was pointing to.
-            existing_file = existing_artifact_bundle.file
+            # In case there is not ArtifactBundle with a specific bundle_id, we just create it and return.
+            if existing_artifact_bundle is None:
+                file = self.assemble_result.bundle
 
-            # FIXME: We might want to get this error, but it currently blocks deploys
-            # if existing_file.checksum != self.assemble_result.bundle.checksum:
-            #    logger.error("Detected duplicated `ArtifactBundle` with differing checksums")
+                metrics.distribution(
+                    "storage.put.size",
+                    file.size,
+                    tags={"usecase": "artifact-bundles", "compression": "none"},
+                    unit="byte",
+                )
 
-            # Only if the file objects are different we want to update the database, otherwise we will end up deleting
-            # a newly bound file.
-            if existing_file != self.assemble_result.bundle:
-                # In case there is an ArtifactBundle with a specific bundle_id, we want to change its underlying File
-                # model with its corresponding artifact count and also update the dates.
-                existing_artifact_bundle.update(
-                    file=self.assemble_result.bundle,
+                artifact_bundle = ArtifactBundle.objects.create(
+                    organization_id=self.organization.id,
+                    bundle_id=bundle_id,
+                    file=file,
                     artifact_count=self.archive.artifact_count,
+                    # By default, a bundle is not indexed.
+                    indexing_state=ArtifactBundleIndexingState.NOT_INDEXED.value,
+                    # "date_added" and "date_uploaded" will have the same value, but they will diverge once renewal is
+                    # performed by other parts of Sentry. Renewal is required since we want to expire unused bundles
+                    # after ~90 days.
                     date_added=date_added,
-                    # If you upload a bundle which already exists, we track this as a modification since our goal is
-                    # to show first all the bundles that have had the most recent activity.
+                    date_uploaded=date_added,
+                    # When creating a new bundle by default its last modified date corresponds to the creation date.
                     date_last_modified=date_added,
                 )
 
-                # We now delete that file, in order to avoid orphan files in the database.
-                existing_file.delete()
-            # else: are we leaking the `assemble_result.bundle` in this case?
+                return artifact_bundle, True
+            else:
+                # We store a reference to the previous file to which the bundle was pointing to.
+                # Guard against a race where a concurrent worker already deleted this file.
+                try:
+                    existing_file = existing_artifact_bundle.file
+                except File.DoesNotExist:
+                    # File was already deleted by a concurrent worker; nothing to clean up.
+                    existing_file = None
 
-            return existing_artifact_bundle, False
+                # FIXME: We might want to get this error, but it currently blocks deploys
+                # if existing_file.checksum != self.assemble_result.bundle.checksum:
+                #    logger.error("Detected duplicated `ArtifactBundle` with differing checksums")
+
+                # Only if the file objects are different we want to update the database, otherwise we will end up
+                # deleting a newly bound file.
+                if existing_file != self.assemble_result.bundle:
+                    # In case there is an ArtifactBundle with a specific bundle_id, we want to change its underlying
+                    # File model with its corresponding artifact count and also update the dates.
+                    existing_artifact_bundle.update(
+                        file=self.assemble_result.bundle,
+                        artifact_count=self.archive.artifact_count,
+                        date_added=date_added,
+                        # If you upload a bundle which already exists, we track this as a modification since our goal
+                        # is to show first all the bundles that have had the most recent activity.
+                        date_last_modified=date_added,
+                    )
+
+                    if existing_file is not None:
+                        # We now delete that file, in order to avoid orphan files in the database.
+                        existing_file.delete()
+                # else: are we leaking the `assemble_result.bundle` in this case?
+
+                return existing_artifact_bundle, False
 
     def _remove_duplicate_artifact_bundles(self, ids: list[int]):
         # In case there are no ids to delete, we don't want to run the query, otherwise it will result in a deletion of
@@ -564,7 +668,7 @@ class ArtifactBundlePostAssembler:
         # fire the on_delete signal.
         ArtifactBundle.objects.filter(Q(id__in=ids), organization_id=self.organization.id).delete()
 
-    @sentry_sdk.tracing.trace
+    @trace
     def _index_bundle_if_needed(self, artifact_bundle: ArtifactBundle, release: str, dist: str):
         # We collect how many times we tried to perform indexing.
         metrics.incr("tasks.assemble.artifact_bundle.try_indexing")
@@ -595,12 +699,9 @@ class ArtifactBundlePostAssembler:
 
 @instrumented_task(
     name="sentry.tasks.assemble.assemble_artifacts",
-    queue="assemble",
-    silo_mode=SiloMode.REGION,
-    taskworker_config=TaskworkerConfig(
-        namespace=attachments_tasks,
-        processing_deadline_duration=30,
-    ),
+    namespace=attachments_tasks,
+    processing_deadline_duration=30,
+    silo_mode=SiloMode.CELL,
 )
 def assemble_artifacts(
     org_id,

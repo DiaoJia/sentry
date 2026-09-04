@@ -33,11 +33,6 @@ interface UseResizableOptions {
    * Triggered when the user finishes dragging the resize handle.
    */
   onResizeEnd?: (newWidth: number) => void;
-
-  /**
-   * Triggered when the user starts dragging the resize handle.
-   */
-  onResizeStart?: () => void;
 }
 
 /**
@@ -45,22 +40,17 @@ interface UseResizableOptions {
  *
  * Currently only supports resizing width and not height.
  */
-const useResizable = ({
+export const useResizable = ({
   ref,
   initialSize = RESIZABLE_DEFAULT_WIDTH,
   maxWidth = RESIZABLE_MAX_WIDTH,
   minWidth = RESIZABLE_MIN_WIDTH,
   onResizeEnd,
-  onResizeStart,
 }: UseResizableOptions): {
   /**
    * Whether the drag handle is held.
    */
   isHeld: boolean;
-  /**
-   * Apply this to the drag handle element to include 'reset' functionality.
-   */
-  onDoubleClick: () => void;
   /**
    * Attach this to the drag handle element's onMouseDown handler.
    */
@@ -73,9 +63,9 @@ const useResizable = ({
 } => {
   const [isHeld, setIsHeld] = useState(false);
 
-  const isDraggingRef = useRef<boolean>(false);
-  const startXRef = useRef<number>(0);
-  const startWidthRef = useRef<number>(0);
+  const isDraggingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
 
   useEffect(() => {
     if (ref.current) {
@@ -85,6 +75,11 @@ const useResizable = ({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      // Only allow left mouse button (button 0) to start resizing
+      if (e.button !== 0) {
+        return;
+      }
+
       setIsHeld(true);
       e.preventDefault();
 
@@ -98,14 +93,15 @@ const useResizable = ({
 
       document.body.style.cursor = 'ew-resize';
       document.body.style.userSelect = 'none';
-      onResizeStart?.();
     },
-    [ref, onResizeStart]
+    [ref]
   );
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
-      if (!isDraggingRef.current) return;
+      if (!isDraggingRef.current) {
+        return;
+      }
 
       const deltaX = e.clientX - startXRef.current;
       const newWidth = Math.max(
@@ -139,18 +135,9 @@ const useResizable = ({
     };
   }, [handleMouseMove, handleMouseUp]);
 
-  const onDoubleClick = useCallback(() => {
-    if (ref.current) {
-      ref.current.style.width = `${initialSize}px`;
-    }
-  }, [ref, initialSize]);
-
   return {
     isHeld,
     size: ref.current?.offsetWidth ?? initialSize,
     onMouseDown: handleMouseDown,
-    onDoubleClick,
   };
 };
-
-export default useResizable;

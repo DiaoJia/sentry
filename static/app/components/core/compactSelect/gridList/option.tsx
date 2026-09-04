@@ -1,4 +1,4 @@
-import {Fragment, useMemo, useRef, useState} from 'react';
+import {Fragment, useContext, useMemo, useRef, useState} from 'react';
 import styled from '@emotion/styled';
 import type {AriaGridListItemOptions} from '@react-aria/gridlist';
 import {useGridListItem, useGridListSelectionCheckbox} from '@react-aria/gridlist';
@@ -7,16 +7,23 @@ import {mergeProps} from '@react-aria/utils';
 import type {ListState} from '@react-stately/list';
 import type {Node} from '@react-types/shared';
 
-import {Checkbox} from 'sentry/components/core/checkbox';
-import {CheckWrap} from 'sentry/components/core/compactSelect/styles';
-import {InnerWrap, MenuListItem} from 'sentry/components/core/menuListItem';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {ControlContext, HighlightText, LeadWrap} from '@sentry/scraps/compactSelect';
+import type {ListItemBase} from '@sentry/scraps/compactSelect/types';
+import {
+  InnerWrap,
+  MenuListItem,
+  type MenuListItemProps,
+} from '@sentry/scraps/menuListItem';
+
 import {IconCheckmark} from 'sentry/icons';
-import {space} from 'sentry/styles/space';
 import type {FormSize} from 'sentry/utils/theme';
 
-interface GridListOptionProps extends AriaGridListItemOptions {
-  listState: ListState<any>;
-  node: Node<any>;
+export interface GridListOptionProps<
+  T extends ListItemBase,
+> extends AriaGridListItemOptions {
+  listState: ListState<T>;
+  node: Node<T>;
   size: FormSize;
 }
 
@@ -24,12 +31,15 @@ interface GridListOptionProps extends AriaGridListItemOptions {
  * A <li /> element with accessibile behaviors & attributes.
  * https://react-spectrum.adobe.com/react-aria/useGridList.html
  */
-export function GridListOption({node, listState, size}: GridListOptionProps) {
+export function GridListOption<T extends ListItemBase>({
+  node,
+  listState,
+  size,
+}: GridListOptionProps<T>) {
   const ref = useRef<HTMLLIElement>(null);
   const {
     label,
     details,
-    leadingItems,
     trailingItems,
     priority,
     hideCheck,
@@ -44,6 +54,14 @@ export function GridListOption({node, listState, size}: GridListOptionProps) {
   const {rowProps, gridCellProps, isSelected, isDisabled, isPressed, isFocused} =
     useGridListItem({node, shouldSelectOnPressUp: true}, listState, ref);
 
+  const {search, highlightSearch} = useContext(ControlContext);
+  const renderedLabel =
+    highlightSearch && search && typeof label === 'string' ? (
+      <HighlightText text={label} query={search} />
+    ) : (
+      label
+    );
+
   const {
     checkboxProps: {
       isDisabled: _isDisabled,
@@ -54,75 +72,69 @@ export function GridListOption({node, listState, size}: GridListOptionProps) {
   } = useGridListSelectionCheckbox({key: node.key}, listState);
 
   // Move focus to this item on hover
-  const {hoverProps} = useHover({onHoverStart: () => ref.current?.focus()});
+  const {hoverProps} = useHover({
+    // We rely on these props for styling the focus and hover effect
+    onHoverStart: () => ref.current?.focus({preventScroll: true}),
+  });
 
   // Show focus effect when document focus is on or inside the item
   const [isFocusWithin, setFocusWithin] = useState(false);
   const {focusWithinProps} = useFocusWithin({onFocusWithinChange: setFocusWithin});
 
-  const rowPropsMemo = useMemo(
-    () => mergeProps(rowProps, focusWithinProps, hoverProps),
-    // Only update optionProps when a relevant state (selection/focus/disable) changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isSelected, isDisabled]
-  );
-
-  const gridCellPropsMemo = useMemo(
-    () => gridCellProps,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isSelected, isDisabled]
-  );
+  const rowPropsMerged = mergeProps(rowProps, hoverProps, focusWithinProps);
 
   const labelPropsMemo = useMemo(
     () => ({as: typeof label === 'string' ? 'p' : 'div'}) as const,
     [label]
   );
 
+  const leadingItems = (node.props as MenuListItemProps).leadingItems;
   const leadingItemsMemo = useMemo(() => {
     const checkboxSize = size === 'xs' ? 'xs' : 'sm';
 
-    if (hideCheck && !leadingItems) {
-      return null;
+    const leading =
+      typeof leadingItems === 'function'
+        ? leadingItems({disabled: isDisabled, isFocused, isSelected})
+        : leadingItems;
+
+    if (hideCheck) {
+      return leading;
     }
 
     return (
       <Fragment>
-        {!hideCheck && (
-          <CheckWrap multiple={multiple} isSelected={isSelected} role="presentation">
-            {multiple ? (
-              <Checkbox
-                {...checkboxProps}
-                size={checkboxSize}
-                checked={isSelected}
-                disabled={isDisabled}
-                readOnly
-              />
-            ) : (
-              isSelected && <IconCheckmark size={checkboxSize} {...checkboxProps} />
-            )}
-          </CheckWrap>
-        )}
-        {typeof leadingItems === 'function'
-          ? leadingItems({disabled: isDisabled, isFocused, isSelected})
-          : leadingItems}
+        <LeadWrap role="presentation">
+          {multiple ? (
+            <Checkbox
+              {...checkboxProps}
+              size={checkboxSize}
+              checked={isSelected}
+              disabled={isDisabled}
+              readOnly
+            />
+          ) : (
+            isSelected && <IconCheckmark size={checkboxSize} {...checkboxProps} />
+          )}
+        </LeadWrap>
+        {leading ? <LeadWrap role="presentation">{leading}</LeadWrap> : null}
       </Fragment>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [multiple, isSelected, isDisabled, size, leadingItems, hideCheck]);
+  }, [multiple, isSelected, isDisabled, isFocused, size, leadingItems, hideCheck]);
 
   return (
     <StyledMenuListItem
-      {...rowPropsMemo}
+      {...rowPropsMerged}
       ref={ref}
       size={size}
-      label={label}
+      label={renderedLabel}
       details={details}
       disabled={isDisabled}
       isSelected={isSelected}
       isPressed={isPressed}
       isFocused={isFocusWithin}
       priority={(priority ?? (isSelected && !multiple)) ? 'primary' : 'default'}
-      innerWrapProps={gridCellPropsMemo}
+      innerWrapProps={gridCellProps}
       labelProps={labelPropsMemo}
       leadingItems={leadingItemsMemo}
       trailingItems={trailingItems}
@@ -135,6 +147,6 @@ export function GridListOption({node, listState, size}: GridListOptionProps) {
 
 const StyledMenuListItem = styled(MenuListItem)`
   > ${InnerWrap} {
-    padding-left: ${space(1)};
+    padding-left: ${p => p.theme.space.md};
   }
 `;

@@ -4,8 +4,8 @@ import {ReplayRecordFixture} from 'sentry-fixture/replayRecord';
 
 import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
 
-import BreadcrumbItem from 'sentry/components/replays/breadcrumbs/breadcrumbItem';
-import hydrateBreadcrumbs from 'sentry/utils/replays/hydrateBreadcrumbs';
+import {BreadcrumbItem} from 'sentry/components/replays/breadcrumbs/breadcrumbItem';
+import {hydrateBreadcrumbs} from 'sentry/utils/replays/hydrateBreadcrumbs';
 
 const [MOCK_FRAME] = hydrateBreadcrumbs(ReplayRecordFixture(), [
   ReplayClickFrameFixture({
@@ -13,10 +13,10 @@ const [MOCK_FRAME] = hydrateBreadcrumbs(ReplayRecordFixture(), [
   }),
 ]);
 
-describe('BreadcrumbItem', function () {
+describe('BreadcrumbItem', () => {
   const organization = OrganizationFixture();
 
-  it('displays the breadcrumb item', async function () {
+  it('displays the breadcrumb item', async () => {
     const mockClick = jest.fn();
     const mockMouseEnter = jest.fn();
     const mockMouseLeave = jest.fn();

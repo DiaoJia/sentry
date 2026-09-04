@@ -1,10 +1,11 @@
 import {useLayoutEffect} from 'react';
-import type Fuse from 'fuse.js';
+import type {RangeTuple} from 'fuse.js/basic';
 import {mat3, vec2} from 'gl-matrix';
 
 import type {CanvasPoolManager} from 'sentry/utils/profiling/canvasScheduler';
 import type {CanvasView} from 'sentry/utils/profiling/canvasView';
-import {clamp, colorComponentsToRGBA} from 'sentry/utils/profiling/colors/utils';
+import {clamp} from 'sentry/utils/profiling/colors/clamp';
+import {colorComponentsToRGBA} from 'sentry/utils/profiling/colors/utils';
 import type {ColorChannels} from 'sentry/utils/profiling/flamegraph/flamegraphTheme';
 import type {FlamegraphCanvas} from 'sentry/utils/profiling/flamegraphCanvas';
 import type {FlamegraphFrame} from 'sentry/utils/profiling/flamegraphFrame';
@@ -19,6 +20,7 @@ import type {
 } from 'sentry/utils/profiling/renderers/UIFramesRenderer';
 import type {SpanChartNode} from 'sentry/utils/profiling/spanChart';
 import {Rect} from 'sentry/utils/profiling/speedscope';
+import type {TrimTextCenter} from 'sentry/utils/string/trimTextCenter';
 
 export function initializeFlamegraphRenderer(
   renderers: FlamegraphRendererConstructor[],
@@ -314,10 +316,9 @@ export function safeGetContext(
   return ctx;
 }
 
-export const ELLIPSIS = '\u2026';
 export function measureText(string: string, ctx?: CanvasRenderingContext2D): Rect {
   if (!string) {
-    return Rect.Empty();
+    return Rect.empty();
   }
 
   const context = ctx || getContext(document.createElement('canvas'), '2d');
@@ -474,13 +475,6 @@ export function formatColorForFrame(
   return `rgba(${color.map(n => n * 255).join(',')}, 1.0)`;
 }
 
-export interface TrimTextCenter {
-  end: number;
-  length: number;
-  start: number;
-  text: string;
-}
-
 export function hexToColorChannels(color: string, alpha: number): ColorChannels {
   return [
     parseInt(color.slice(1, 3), 16) / 255,
@@ -516,9 +510,9 @@ export function computeClampedConfigView(
  * or shifted based on the results of a trim operation
  */
 export function computeHighlightedBounds(
-  bounds: Fuse.RangeTuple,
+  bounds: RangeTuple,
   trim: TrimTextCenter
-): Fuse.RangeTuple {
+): RangeTuple {
   if (!trim.length) {
     return bounds;
   }
@@ -694,15 +688,16 @@ export function getTranslationMatrixFromPhysicalSpace(
   deltaX: number,
   deltaY: number,
   view: CanvasView<any>,
-  canvas: FlamegraphCanvas,
-  multiplierX = 0.8,
-  multiplierY = 1
+  canvas: FlamegraphCanvas
 ) {
-  const physicalDelta = vec2.fromValues(deltaX * multiplierX, deltaY * multiplierY);
+  const physicalDelta = vec2.fromValues(deltaX * 0.8, deltaY * 1);
   const physicalToConfig = mat3.invert(
     mat3.create(),
     view.fromConfigView(canvas.physicalSpace)
   );
+  if (!physicalToConfig) {
+    return getTranslationMatrixFromConfigSpace(0, 0);
+  }
   const [m00, m01, m02, m10, m11, m12] = physicalToConfig;
 
   const configDelta = vec2.transformMat3(vec2.create(), physicalDelta, [
@@ -725,13 +720,10 @@ export function getConfigViewTranslationBetweenVectors(
   offsetY: number,
   start: vec2,
   view: CanvasView<any>,
-  canvas: FlamegraphCanvas,
-  invert?: boolean
+  canvas: FlamegraphCanvas
 ): mat3 | null {
   const physicalMousePos = getPhysicalSpacePositionFromOffset(offsetX, offsetY);
-  const physicalDelta = invert
-    ? vec2.subtract(vec2.create(), physicalMousePos, start)
-    : vec2.subtract(vec2.create(), start, physicalMousePos);
+  const physicalDelta = vec2.subtract(vec2.create(), start, physicalMousePos);
 
   if (physicalDelta[0] === 0 && physicalDelta[1] === 0) {
     return null;
@@ -741,6 +733,9 @@ export function getConfigViewTranslationBetweenVectors(
     mat3.create(),
     view.fromConfigView(canvas.physicalSpace)
   );
+  if (!physicalToConfig) {
+    return null;
+  }
   const [m00, m01, m02, m10, m11, m12] = physicalToConfig;
 
   const configDelta = vec2.transformMat3(vec2.create(), physicalDelta, [
@@ -779,6 +774,9 @@ export function getConfigSpaceTranslationBetweenVectors(
     mat3.create(),
     view.fromConfigSpace(canvas.physicalSpace)
   );
+  if (!physicalToConfig) {
+    return null;
+  }
   const [m00, m01, m02, m10, m11, m12] = physicalToConfig;
   const configDelta = vec2.transformMat3(vec2.create(), physicalDelta, [
     m00!,
@@ -828,11 +826,11 @@ export function useResizeCanvasObserver(
 ) {
   useLayoutEffect(() => {
     if (!canvas || !canvases.length) {
-      return undefined;
+      return;
     }
 
     if (canvases.includes(null)) {
-      return undefined;
+      return;
     }
 
     const observer = watchForResize(canvases as HTMLCanvasElement[], () => {

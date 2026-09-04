@@ -14,7 +14,7 @@ from sentry.integrations.types import ExternalProviders
 from sentry.notifications.helpers import get_reason_context
 from sentry.notifications.notifications.base import ProjectNotification
 from sentry.notifications.types import NotificationSettingEnum, UnsubscribeContext
-from sentry.notifications.utils import send_activity_notification
+from sentry.notifications.utils import get_suspect_commits_by_group_id, send_activity_notification
 from sentry.notifications.utils.avatar import avatar_as_html
 from sentry.notifications.utils.participants import ParticipantMap, get_participants_for_group
 from sentry.types.actor import Actor
@@ -79,6 +79,7 @@ class GroupActivityNotification(ActivityNotification, abc.ABC):
 
     def __init__(self, activity: Activity) -> None:
         super().__init__(activity)
+        assert activity.group is not None
         self.group = activity.group
 
     def get_description(self) -> tuple[str, str | None, Mapping[str, Any]]:
@@ -129,11 +130,21 @@ class GroupActivityNotification(ActivityNotification, abc.ABC):
         should_add_url = provider is not None
         text_description = self.description_as_text(text_template, params, should_add_url, provider)
         html_description = self.description_as_html(html_template or text_template, params)
-        return {
+        enhanced_privacy = self.group.organization.flags.enhanced_privacy
+
+        context = {
             **self.get_base_context(),
             "text_description": text_description,
             "html_description": html_description,
+            "enhanced_privacy": enhanced_privacy,
         }
+
+        if self.group:
+            context["commits"] = get_suspect_commits_by_group_id(
+                project=self.project, group_id=self.group.id
+            )
+
+        return context
 
     def get_group_context(self) -> MutableMapping[str, Any]:
         group_link = self.get_group_link()
@@ -156,7 +167,10 @@ class GroupActivityNotification(ActivityNotification, abc.ABC):
         return self.description_as_text(description, params, True, provider)
 
     def get_subject(self, context: Mapping[str, Any] | None = None) -> str:
-        return f"{self.group.qualified_short_id} - {self.group.title}"
+        subject = f"{self.group.qualified_short_id}"
+        if not self.group.organization.flags.enhanced_privacy:
+            subject += f" - {self.group.title}"
+        return subject
 
     def description_as_text(
         self,

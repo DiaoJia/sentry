@@ -16,15 +16,15 @@ from sentry.db.models import Model
 from sentry.models.files.control_file import ControlFile
 from sentry.models.files.file import File
 from sentry.silo.base import SiloMode
-from sentry.types.region import get_local_region
+from sentry.types.cell import get_local_locality
 from sentry.utils.cache import cache
 from sentry.utils.db import atomic_transaction
 
 
 class AvatarBase(Model):
     """
-    Base class for UserAvatar, OrganizationAvatar, and SentryAppAvatar models. Associates those entities with their
-    avatar preferences/files. If extending this class, ensure the model has avatar_type.
+    Base class for UserAvatar, OrganizationAvatar, TeamAvatar, and SentryAppAvatar models. Associates those
+    entities with their avatar preferences/files. If extending this class, ensure the model has avatar_type.
     """
 
     __relocation_scope__ = RelocationScope.Excluded
@@ -84,8 +84,7 @@ class AvatarBase(Model):
         cache_key = self.get_cache_key(size)
         photo = cache.get(cache_key)
         if photo is None:
-            photo_file = file.getfile()
-            with Image.open(photo_file) as image:
+            with file.getfile() as photo_file, Image.open(photo_file) as image:
                 image = image.resize((size, size), Image.LANCZOS)
                 image_file = BytesIO()
                 image.save(image_file, "PNG")
@@ -121,8 +120,8 @@ class AvatarBase(Model):
 
         url_base = options.get("system.url-prefix")
         silo_limit = getattr(cls._meta, "silo_limit", None)
-        if silo_limit is not None and SiloMode.REGION in silo_limit.modes:
-            url_base = get_local_region().to_url("")
+        if silo_limit is not None and SiloMode.CELL in silo_limit.modes:
+            url_base = get_local_locality().to_url("")
 
         return urljoin(url_base, f"/{self.url_path}/{self.ident}/")
 

@@ -1,13 +1,10 @@
-import 'echarts/lib/component/grid';
-import 'echarts/lib/component/graphic';
-import 'echarts/lib/component/toolbox';
-import 'echarts/lib/component/brush';
-import 'zrender/lib/svg/svg';
+import 'echarts/theme/v5.js';
 
-import {useId, useMemo} from 'react';
+import {useEffect, useId, useMemo, useRef} from 'react';
 import type {Theme} from '@emotion/react';
 import {css, Global, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {mergeRefs} from '@react-aria/utils';
 import type {
   AxisPointerComponentOption,
   ECharts,
@@ -22,13 +19,37 @@ import type {
   XAXisComponentOption,
   YAXisComponentOption,
 } from 'echarts';
-import {AriaComponent} from 'echarts/components';
-import * as echarts from 'echarts/core';
-import type {CallbackDataParams} from 'echarts/types/dist/shared';
 import ReactEchartsCore from 'echarts-for-react/lib/core';
+import {
+  BarChart,
+  CustomChart,
+  HeatmapChart,
+  LineChart,
+  PieChart,
+  ScatterChart,
+  TreemapChart,
+} from 'echarts/charts';
+import {
+  AriaComponent,
+  AxisPointerComponent,
+  BrushComponent,
+  DataZoomInsideComponent,
+  GraphicComponent,
+  GridComponent,
+  LegendComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  MarkPointComponent,
+  ToolboxComponent,
+  TooltipComponent,
+  VisualMapComponent,
+} from 'echarts/components';
+import * as echarts from 'echarts/core';
+import {LegacyGridContainLabel} from 'echarts/features';
+import {CanvasRenderer, SVGRenderer} from 'echarts/renderers';
+import type {CallbackDataParams} from 'echarts/types/dist/shared';
 
-import MarkLine from 'sentry/components/charts/components/markLine';
-import {space} from 'sentry/styles/space';
+import {markLine} from 'sentry/components/charts/components/markLine';
 import type {
   EChartBrushEndHandler,
   EChartBrushSelectedHandler,
@@ -37,28 +58,27 @@ import type {
   EChartClickHandler,
   EChartDataZoomHandler,
   EChartDownplayHandler,
-  EChartEventHandler,
   EChartFinishedHandler,
   EChartHighlightHandler,
+  EChartLegendSelectChangeHandler,
   EChartMouseOutHandler,
   EChartMouseOverHandler,
   EChartRenderedHandler,
   EChartRestoreHandler,
   Series,
 } from 'sentry/types/echarts';
-import {defined} from 'sentry/utils';
-import {isChonkTheme} from 'sentry/utils/theme/withChonk';
+import {defined} from 'sentry/utils/defined';
 
-import Grid from './components/grid';
-import Legend from './components/legend';
+import {Grid} from './components/grid';
+import {legend as makeLegend} from './components/legend';
 import {
   CHART_TOOLTIP_VIEWPORT_OFFSET,
   computeChartTooltip,
   type TooltipSubLabel,
 } from './components/tooltip';
-import XAxis from './components/xAxis';
-import YAxis from './components/yAxis';
-import LineSeries from './series/lineSeries';
+import {XAxis} from './components/xAxis';
+import {YAxis} from './components/yAxis';
+import {lineSeries} from './series/lineSeries';
 import {
   computeEchartsAriaLabels,
   getDiffInMinutes,
@@ -81,7 +101,34 @@ const handleClick = (clickSeries: any, instance: ECharts) => {
   }
 };
 
-echarts.use(AriaComponent);
+// Keep registrations explicit so importing a small API such as `connect` never
+// pulls in ECharts' all-inclusive, side-effectful entry point. The legacy grid
+// layout preserves the containLabel behavior from the previous full import.
+echarts.use([
+  AriaComponent,
+  AxisPointerComponent,
+  BarChart,
+  BrushComponent,
+  CanvasRenderer,
+  CustomChart,
+  DataZoomInsideComponent,
+  GraphicComponent,
+  GridComponent,
+  HeatmapChart,
+  LegacyGridContainLabel,
+  LegendComponent,
+  LineChart,
+  MarkAreaComponent,
+  MarkLineComponent,
+  MarkPointComponent,
+  PieChart,
+  ScatterChart,
+  SVGRenderer,
+  ToolboxComponent,
+  TooltipComponent,
+  TreemapChart,
+  VisualMapComponent,
+]);
 
 type ReactEchartProps = React.ComponentProps<typeof ReactEchartsCore>;
 type ReactEChartOpts = NonNullable<ReactEchartProps['opts']>;
@@ -97,9 +144,8 @@ type Truncateable = {
   truncate?: number | boolean;
 };
 
-interface TooltipOption
-  extends Omit<TooltipComponentOption, 'valueFormatter'>,
-    Truncateable {
+export interface TooltipOption
+  extends Omit<TooltipComponentOption, 'valueFormatter'>, Truncateable {
   filter?: (value: number, seriesParam: TooltipComponentOption['formatter']) => boolean;
   formatAxisLabel?: (
     value: number,
@@ -110,8 +156,15 @@ interface TooltipOption
     bucketSize: number | undefined,
     seriesParamsOrParam: TooltipComponentFormatterCallbackParams
   ) => string;
+  formatter?: TooltipComponentOption['formatter'];
   markerFormatter?: (marker: string, label?: string) => string;
   nameFormatter?: (name: string, seriesParams?: CallbackDataParams) => string;
+  /**
+   * Extra HTML appended to the series block, e.g. a legend for abbreviated series
+   * names. Receives the names of the series in the tooltip. Called on each tooltip
+   * render, so it can render a React tree to a string.
+   */
+  renderSeriesDetails?: (seriesNames: string[]) => string;
   /**
    * If true does not display sublabels with a value of 0.
    */
@@ -133,6 +186,10 @@ export interface BaseChartProps {
    * This is to pass series to BaseChart bypassing the wrappers like LineChart, AreaChart etc.
    */
   additionalSeries?: SeriesOption[];
+  /**
+   * Whether animations are enabled for the entire chart. If animations are enabled overall, this will cause ZRender to occasionally attempt to run animations and call `requestAnimationFrame` which might cause UI stutter.
+   */
+  animation?: boolean;
   /**
    * If true, ignores height value and auto-scales chart to fit container height.
    */
@@ -217,11 +274,7 @@ export interface BaseChartProps {
   onDownplay?: EChartDownplayHandler;
   onFinished?: EChartFinishedHandler;
   onHighlight?: EChartHighlightHandler;
-  onLegendSelectChanged?: EChartEventHandler<{
-    name: string;
-    selected: Record<string, boolean>;
-    type: 'legendselectchanged';
-  }>;
+  onLegendSelectChanged?: EChartLegendSelectChangeHandler;
   onMouseOut?: EChartMouseOutHandler;
   onMouseOver?: EChartMouseOverHandler;
   onRendered?: EChartRenderedHandler;
@@ -246,6 +299,7 @@ export interface BaseChartProps {
    * See: https://ecomfe.github.io/echarts-doc/public/en/tutorial.html#Render%20by%20Canvas%20or%20SVG
    */
   renderer?: ReactEChartOpts['renderer'];
+  replaceMerge?: string[];
   /**
    * Chart Series
    * This is different than the interface to higher level charts, these need to
@@ -269,9 +323,9 @@ export interface BaseChartProps {
    */
   toolBox?: EChartsOption['toolbox'];
   /**
-   * Tooltip options
+   * Tooltip options. Pass `null` to disable tooltip.
    */
-  tooltip?: TooltipOption;
+  tooltip?: TooltipOption | null;
   /**
    * If true and there's only one datapoint in series.data, we show a bar chart to increase the visibility.
    * Especially useful with line / area charts, because you can't draw line with single data point and one alone point is hard to spot.
@@ -333,7 +387,8 @@ const DEFAULT_ADDITIONAL_SERIES: LineSeriesOption[] = [];
 const DEFAULT_Y_AXIS = {};
 const DEFAULT_X_AXIS = {};
 
-function BaseChart({
+export function BaseChart({
+  animation,
   brush,
   colors,
   grid,
@@ -342,6 +397,7 @@ function BaseChart({
   dataZoom,
   toolBox,
   graphic,
+  visualMap,
   axisPointer,
   previousPeriod,
   echartsTheme,
@@ -386,6 +442,7 @@ function BaseChart({
   width,
   renderer = 'svg',
   notMerge = true,
+  replaceMerge,
   lazyUpdate = false,
   isGroupedByDate = false,
   transformSinglePointToBar = false,
@@ -402,7 +459,7 @@ function BaseChart({
     resolveColors ||
     (series.length
       ? theme.chart.getColorPalette(series.length)
-      : theme.chart.getColorPalette(theme.chart.colors.length));
+      : theme.chart.getColorPalette('all'));
 
   const resolvedSeries = useMemo(() => {
     const previousPeriodColors =
@@ -416,7 +473,7 @@ function BaseChart({
       (hasSinglePoints && transformSinglePointToBar
         ? (series as LineSeriesOption[] | undefined)?.map(s => ({
             ...s,
-            type: 'bar',
+            type: 'bar' as const,
             barWidth: 40,
             barGap: 0,
             itemStyle: {...s.areaStyle},
@@ -424,12 +481,12 @@ function BaseChart({
         : hasSinglePoints && transformSinglePointToLine
           ? (series as LineSeriesOption[] | undefined)?.map(s => ({
               ...s,
-              type: 'line',
+              type: 'line' as const,
               itemStyle: {...s.lineStyle},
               markLine:
                 (s?.data?.[0] as any)?.[1] === undefined
                   ? undefined
-                  : MarkLine({
+                  : markLine({
                       silent: true,
                       lineStyle: {
                         type: 'solid',
@@ -445,23 +502,19 @@ function BaseChart({
 
     const transformedPreviousPeriod =
       previousPeriod?.map((previous, seriesIndex) =>
-        LineSeries({
+        lineSeries({
           name: previous.seriesName,
           data: previous.data.map(({name, value}) => [name, value]),
           lineStyle: {
             color: previousPeriodColors
               ? previousPeriodColors[seriesIndex]
-              : isChonkTheme(theme)
-                ? theme.colors.gray400
-                : theme.gray200,
+              : theme.tokens.dataviz.semantic.neutral,
             type: 'dotted',
           },
           itemStyle: {
             color: previousPeriodColors
               ? previousPeriodColors[seriesIndex]
-              : isChonkTheme(theme)
-                ? theme.colors.gray400
-                : theme.gray200,
+              : theme.tokens.dataviz.semantic.neutral,
           },
           stack: 'previous',
           animation: false,
@@ -566,11 +619,12 @@ function BaseChart({
 
     return {
       ...options,
+      animation,
       useUTC: utc,
-      color,
+      color: color as string[],
       grid: Array.isArray(grid) ? grid.map(Grid) : Grid(grid),
       tooltip: tooltipOrNone,
-      legend: legend ? Legend({theme, ...legend}) : undefined,
+      legend: legend ? makeLegend({theme, ...legend}) : undefined,
       yAxis: yAxisOrCustom,
       xAxis: xAxisOrCustom,
       series: resolvedSeries,
@@ -578,10 +632,12 @@ function BaseChart({
       axisPointer,
       dataZoom,
       graphic,
+      visualMap,
       aria,
       brush,
     };
   }, [
+    animation,
     chartId,
     color,
     resolvedSeries,
@@ -600,6 +656,7 @@ function BaseChart({
     axisPointer,
     dataZoom,
     graphic,
+    visualMap,
     isGroupedByDate,
     useShortDate,
     useMultilineDate,
@@ -619,31 +676,30 @@ function BaseChart({
   // We use React.useMemo to keep the value across renders
   //
   const eventsMap = useMemo(
-    () =>
-      ({
-        click: (props: any, instance: ECharts) => {
-          handleClick(props, instance);
-          onClick?.(props, instance);
-        },
+    () => ({
+      click: (props: any, instance: ECharts) => {
+        handleClick(props, instance);
+        onClick?.(props, instance);
+      },
 
-        highlight: (props: any, instance: ECharts) => onHighlight?.(props, instance),
-        downplay: (props: any, instance: ECharts) => onDownplay?.(props, instance),
-        mouseout: (props: any, instance: ECharts) => onMouseOut?.(props, instance),
-        mouseover: (props: any, instance: ECharts) => onMouseOver?.(props, instance),
-        datazoom: (props: any, instance: ECharts) => onDataZoom?.(props, instance),
-        restore: (props: any, instance: ECharts) => onRestore?.(props, instance),
-        finished: (props: any, instance: ECharts) => onFinished?.(props, instance),
-        rendered: (props: any, instance: ECharts) => onRendered?.(props, instance),
+      highlight: (props: any, instance: ECharts) => onHighlight?.(props, instance),
+      downplay: (props: any, instance: ECharts) => onDownplay?.(props, instance),
+      mouseout: (props: any, instance: ECharts) => onMouseOut?.(props, instance),
+      mouseover: (props: any, instance: ECharts) => onMouseOver?.(props, instance),
+      datazoom: (props: any, instance: ECharts) => onDataZoom?.(props, instance),
+      restore: (props: any, instance: ECharts) => onRestore?.(props, instance),
+      finished: (props: any, instance: ECharts) => onFinished?.(props, instance),
+      rendered: (props: any, instance: ECharts) => onRendered?.(props, instance),
 
-        legendselectchanged: (props: any, instance: ECharts) =>
-          onLegendSelectChanged?.(props, instance),
+      legendselectchanged: (props: any, instance: ECharts) =>
+        onLegendSelectChanged?.(props, instance),
 
-        brush: (props: any, instance: ECharts) => onBrushStart?.(props, instance),
-        brushend: (props: any, instance: ECharts) => onBrushEnd?.(props, instance),
+      brush: (props: any, instance: ECharts) => onBrushStart?.(props, instance),
+      brushend: (props: any, instance: ECharts) => onBrushEnd?.(props, instance),
 
-        brushselected: (props: any, instance: ECharts) =>
-          onBrushSelected?.(props, instance),
-      }) as ReactEchartProps['onEvents'],
+      brushselected: (props: any, instance: ECharts) =>
+        onBrushSelected?.(props, instance),
+    }),
     [
       onClick,
       onHighlight,
@@ -678,19 +734,88 @@ function BaseChart({
     };
   }, [style, autoHeightResize, height, width]);
 
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const echartsInstanceRef = useRef<ReactEchartsCore | null>(null);
+  const mergedEchartsInstanceRef = useMemo(
+    () => mergeRefs(ref, echartsInstanceRef),
+    [ref]
+  );
+
+  // Adds a resize observer to handle echarts instance resizing when container size changes.
+  // We use our own resize handler because echarts native autoResize has edge cases caused
+  // by debounce where chart instances can be mis-sized too big or too small.
+  useEffect(() => {
+    const container = chartContainerRef.current;
+    if (!container || window.ResizeObserver === undefined) {
+      return () => {};
+    }
+
+    let resizeFrame: number | null = null;
+    let lastResizedHeight = 0;
+    let lastResizedWidth = 0;
+
+    const handleResize = () => {
+      resizeFrame = null;
+
+      const instance = echartsInstanceRef.current?.getEchartsInstance();
+      if (!instance || instance.isDisposed()) {
+        return;
+      }
+
+      const dom = instance.getDom();
+      if (!dom) {
+        return;
+      }
+
+      const {clientWidth, clientHeight} = dom;
+      if (!clientWidth && !clientHeight) {
+        return;
+      }
+
+      // Only resize if the size has changed
+      if (clientWidth === lastResizedWidth && clientHeight === lastResizedHeight) {
+        return;
+      }
+
+      lastResizedHeight = clientHeight;
+      lastResizedWidth = clientWidth;
+      instance.resize({width: 'auto', height: 'auto'});
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      // Only schedule one resize frame at a time
+      if (resizeFrame === null) {
+        resizeFrame = window.requestAnimationFrame(handleResize);
+      }
+    });
+
+    resizeObserver.observe(container);
+
+    // Destroy observer and cancel pending resize on unmount
+    return () => {
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+      resizeObserver.disconnect();
+    };
+  }, []);
+
   return (
     <ChartContainer
+      ref={chartContainerRef}
       id={isTooltipPortalled ? chartId : undefined}
       autoHeightResize={autoHeightResize}
       data-test-id={dataTestId}
     >
       {isTooltipPortalled && <Global styles={getPortalledTooltipStyles({theme})} />}
       <ReactEchartsCore
-        ref={ref}
+        ref={mergedEchartsInstanceRef}
+        autoResize={false}
         echarts={echarts}
         notMerge={notMerge}
+        replaceMerge={replaceMerge}
         lazyUpdate={lazyUpdate}
-        theme={echartsTheme}
+        theme={echartsTheme ?? 'v5'}
         onChartReady={onChartReady}
         onEvents={eventsMap}
         style={chartStyles}
@@ -702,44 +827,50 @@ function BaseChart({
 }
 
 // Tooltip styles shared for regular and portalled tooltips
-export const getTooltipStyles = (p: {theme: Theme}) => css`
+const getTooltipStyles = (p: {theme: Theme}) => css`
   /* Tooltip styling */
   .tooltip-series,
   .tooltip-footer {
-    color: ${p.theme.subText};
-    font-family: ${p.theme.text.family};
+    color: ${p.theme.tokens.content.secondary};
+    font-family: ${p.theme.font.family.sans};
     font-variant-numeric: tabular-nums;
-    padding: ${space(1)} ${space(2)};
-    border-radius: ${p.theme.borderRadius} ${p.theme.borderRadius} 0 0;
+    padding: ${p.theme.space.md} ${p.theme.space.xl};
+    border-radius: ${p.theme.radius.md} ${p.theme.radius.md} 0 0;
+    cursor: pointer;
+    font-size: ${p.theme.font.size.sm};
   }
   .tooltip-release.tooltip-series > div,
   .tooltip-release.tooltip-footer {
     justify-content: center;
   }
   .tooltip-release.tooltip-series {
-    color: ${p.theme.textColor};
+    color: ${p.theme.tokens.content.primary};
   }
   .tooltip-release-timerange {
-    font-size: ${p.theme.fontSize.xs};
-    color: ${p.theme.textColor};
+    font-size: ${p.theme.font.size.xs};
+    color: ${p.theme.tokens.content.primary};
   }
   .tooltip-series {
     border-bottom: none;
     max-width: calc(100vw - 2 * ${CHART_TOOLTIP_VIEWPORT_OFFSET}px);
   }
   .tooltip-series-solo {
-    border-radius: ${p.theme.borderRadius};
+    border-radius: ${p.theme.radius.md};
   }
   .tooltip-label {
-    margin-right: ${space(1)};
-    ${p.theme.overflowEllipsis};
+    margin-right: ${p.theme.space.md};
+    display: block;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tooltip-label strong {
-    font-weight: ${p.theme.fontWeightNormal};
-    color: ${p.theme.textColor};
+    font-weight: ${p.theme.font.weight.sans.regular};
+    color: ${p.theme.tokens.content.primary};
   }
   .tooltip-label-value {
-    color: ${p.theme.textColor};
+    color: ${p.theme.tokens.content.primary};
   }
   .tooltip-label-indent {
     margin-left: 18px;
@@ -754,20 +885,25 @@ export const getTooltipStyles = (p: {theme: Theme}) => css`
     justify-content: flex-start;
     align-items: baseline;
   }
+  .tooltip-label-centered {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
   .tooltip-code-no-margin {
     padding-left: 0;
     margin-left: 0;
-    color: ${p.theme.subText};
+    color: ${p.theme.tokens.content.secondary};
   }
   .tooltip-footer {
-    border-top: solid 1px ${p.theme.innerBorder};
+    border-top: solid 1px ${p.theme.tokens.border.secondary};
     text-align: center;
     position: relative;
     width: auto;
-    border-radius: 0 0 ${p.theme.borderRadius} ${p.theme.borderRadius};
+    border-radius: 0 0 ${p.theme.radius.md} ${p.theme.radius.md};
     display: flex;
     justify-content: space-between;
-    gap: ${space(3)};
+    gap: ${p.theme.space['2xl']};
   }
 
   .tooltip-footer-centered {
@@ -779,11 +915,12 @@ export const getTooltipStyles = (p: {theme: Theme}) => css`
     &.arrow-top {
       bottom: 100%;
       top: auto;
-      border-bottom: 8px solid ${p.theme.backgroundElevated};
+      /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+      border-bottom: 8px solid ${p.theme.tokens.background.primary};
       border-top: none;
       &:before {
         border-top: none;
-        border-bottom: 8px solid ${p.theme.translucentBorder};
+        border-bottom: 8px solid ${p.theme.tokens.border.transparent.neutral.muted};
         bottom: -7px;
         top: auto;
       }
@@ -795,12 +932,13 @@ export const getTooltipStyles = (p: {theme: Theme}) => css`
     pointer-events: none;
     border-left: 8px solid transparent;
     border-right: 8px solid transparent;
-    border-top: 8px solid ${p.theme.backgroundElevated};
+    /* eslint-disable-next-line @sentry/scraps/use-semantic-token */
+    border-top: 8px solid ${p.theme.tokens.background.primary};
     margin-left: -8px;
     &:before {
       border-left: 8px solid transparent;
       border-right: 8px solid transparent;
-      border-top: 8px solid ${p.theme.translucentBorder};
+      border-top: 8px solid ${p.theme.tokens.border.transparent.neutral.muted};
       content: '';
       display: block;
       position: absolute;
@@ -812,16 +950,16 @@ export const getTooltipStyles = (p: {theme: Theme}) => css`
 
   /* Tooltip description styling */
   .tooltip-description {
-    color: ${p.theme.white};
-    border-radius: ${p.theme.borderRadius};
+    color: ${p.theme.colors.white};
+    border-radius: ${p.theme.radius.md};
     background: #000;
     opacity: 0.9;
     padding: 5px 10px;
     position: relative;
-    font-weight: ${p.theme.fontWeightBold};
-    font-size: ${p.theme.fontSize.sm};
+    font-weight: ${p.theme.font.weight.sans.medium};
+    font-size: ${p.theme.font.size.sm};
     line-height: 1.4;
-    font-family: ${p.theme.text.family};
+    font-family: ${p.theme.font.family.sans};
     max-width: 230px;
     min-width: 230px;
     white-space: normal;
@@ -854,6 +992,19 @@ const ChartContainer = styled('div')<{autoHeightResize: boolean}>`
     font-variant-numeric: tabular-nums !important;
   }
 
+  /*
+   * Desktop Safari runs heuristics to determine whether an incoming trackpad
+   action is going to be a drag or a select. An SVG that contains text like our
+   charts is _ambiguous_ so Safari will wait for 500ms before determining that a
+   pointer action is a drag, which stalls box selection on Heat Maps for half a
+   second, creating major jank. We need to turn off user selection manually.
+   ECharts already does this, but unprefixed, which is not supported in Safari.
+   */
+  .echarts-for-react svg {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   ${p => getTooltipStyles(p)}
 `;
 
@@ -862,5 +1013,3 @@ const getPortalledTooltipStyles = (p: {theme: Theme}) => css`
     ${getTooltipStyles(p)};
   }
 `;
-
-export default BaseChart;

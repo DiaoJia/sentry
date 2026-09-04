@@ -2,21 +2,19 @@ import {OrganizationFixture} from 'sentry-fixture/organization';
 import {ProjectFixture} from 'sentry-fixture/project';
 import {ProjectKeysFixture} from 'sentry-fixture/projectKeys';
 
-import {initializeOrg} from 'sentry-test/initializeOrg';
 import {
   render,
   renderGlobalModal,
   screen,
   userEvent,
+  waitFor,
 } from 'sentry-test/reactTestingLibrary';
 
 import type {Organization} from 'sentry/types/organization';
 import type {Project, ProjectKey} from 'sentry/types/project';
 import ProjectKeyDetails from 'sentry/views/settings/project/projectKeys/details';
 
-describe('ProjectKeyDetails', function () {
-  const {routerProps} = initializeOrg();
-
+describe('ProjectKeyDetails', () => {
   let org: Organization;
   let project: Project;
   let deleteMock: jest.Mock;
@@ -25,33 +23,32 @@ describe('ProjectKeyDetails', function () {
   let projectKeys: ProjectKey[];
 
   function renderProjectKeyDetails() {
-    render(
-      <ProjectKeyDetails
-        {...routerProps}
-        organization={org}
-        project={project}
-        params={{
-          keyId: projectKeys[0]!.id,
-          projectId: project.slug,
-        }}
-      />
-    );
+    render(<ProjectKeyDetails />, {
+      organization: org,
+      outletContext: {project},
+      initialRouterConfig: {
+        location: {
+          pathname: `/settings/${org.slug}/projects/${project.slug}/keys/${projectKeys[0]!.id}/`,
+        },
+        route: '/settings/:orgId/projects/:projectId/keys/:keyId/',
+      },
+    });
   }
 
-  beforeEach(function () {
-    org = OrganizationFixture();
-    project = ProjectFixture();
-    projectKeys = ProjectKeysFixture();
-
+  function mockProjectKeyDetailsResponses(
+    projectKey: ProjectKey = projectKeys[0]!,
+    putBody: ProjectKey = projectKey
+  ) {
     MockApiClient.clearMockResponses();
     MockApiClient.addMockResponse({
       url: `/projects/${org.slug}/${project.slug}/keys/${projectKeys[0]!.id}/`,
       method: 'GET',
-      body: projectKeys[0],
+      body: projectKey,
     });
     putMock = MockApiClient.addMockResponse({
       url: `/projects/${org.slug}/${project.slug}/keys/${projectKeys[0]!.id}/`,
       method: 'PUT',
+      body: putBody,
     });
     statsMock = MockApiClient.addMockResponse({
       url: `/projects/${org.slug}/${project.slug}/keys/${projectKeys[0]!.id}/stats/`,
@@ -94,15 +91,23 @@ describe('ProjectKeyDetails', function () {
       url: `/projects/${org.slug}/${project.slug}/keys/${projectKeys[0]!.id}/`,
       method: 'DELETE',
     });
+  }
+
+  beforeEach(() => {
+    org = OrganizationFixture();
+    project = ProjectFixture();
+    projectKeys = ProjectKeysFixture();
+
+    mockProjectKeyDetailsResponses();
   });
 
-  it('has stats box', async function () {
+  it('has stats box', async () => {
     renderProjectKeyDetails();
-    expect(await screen.findByText('Key Details')).toBeInTheDocument();
+    expect(await screen.findByTestId('key-details')).toBeInTheDocument();
     expect(statsMock).toHaveBeenCalled();
   });
 
-  it('changes name', async function () {
+  it('changes name', async () => {
     renderProjectKeyDetails();
     await userEvent.clear(await screen.findByRole('textbox', {name: 'Name'}));
     await userEvent.type(await screen.findByRole('textbox', {name: 'Name'}), 'New Name');
@@ -118,7 +123,7 @@ describe('ProjectKeyDetails', function () {
     );
   });
 
-  it('disable and enables key', async function () {
+  it('disable and enables key', async () => {
     renderProjectKeyDetails();
     await userEvent.click(await screen.findByRole('checkbox', {name: 'Enabled'}));
 
@@ -139,11 +144,53 @@ describe('ProjectKeyDetails', function () {
     );
   });
 
-  it('revokes a key', async function () {
+  it('revokes a key', async () => {
     renderProjectKeyDetails();
     await userEvent.click(await screen.findByRole('button', {name: 'Revoke Key'}));
     renderGlobalModal();
     await userEvent.click(await screen.findByTestId('confirm-button'));
     expect(deleteMock).toHaveBeenCalled();
+  });
+
+  it('does not resubmit a rate limit after the API canonicalizes it to null', async () => {
+    project = ProjectFixture({features: ['rate-limits']});
+    projectKeys = [
+      {
+        ...ProjectKeysFixture()[0],
+        rateLimit: {count: 5, window: 60},
+      },
+    ];
+
+    mockProjectKeyDetailsResponses(projectKeys[0], {
+      ...projectKeys[0]!,
+      rateLimit: null,
+    });
+
+    renderProjectKeyDetails();
+
+    const countInput = await screen.findByRole('spinbutton', {name: 'Count'});
+
+    // Change count to a different value
+    await userEvent.clear(countInput);
+    await userEvent.type(countInput, '10');
+
+    // Click Save to submit the form
+    await userEvent.click(screen.getByRole('button', {name: 'Save'}));
+
+    await waitFor(() => {
+      expect(putMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(putMock).toHaveBeenLastCalledWith(
+      `/projects/${org.slug}/${project.slug}/keys/${projectKeys[0]!.id}/`,
+      expect.objectContaining({
+        data: {rateLimit: {count: 10, window: 60}},
+      })
+    );
+
+    // After API responds with null, the form resets — Reset should be disabled (pristine)
+    await waitFor(() => {
+      expect(screen.getByRole('button', {name: 'Reset'})).toBeDisabled();
+    });
   });
 });

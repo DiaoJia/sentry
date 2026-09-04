@@ -1,19 +1,39 @@
+from typing import Any
+
+import sentry_sdk
 from django.http import HttpResponse
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers
 from rest_framework.exceptions import ParseError
 from rest_framework.request import Request
 from rest_framework.response import Response
-from snuba_sdk import Column, Condition, Limit, Op, Query
+from snuba_sdk import Column, Condition, Limit, Op, Query, Storage
 from snuba_sdk import Request as SnqlRequest
-from snuba_sdk import Storage
 
 from sentry import features
 from sentry.api.api_owners import ApiOwner
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import region_silo_endpoint
-from sentry.api.bases import NoProjects, OrganizationEventsV2EndpointBase
+from sentry.api.base import cell_silo_endpoint
+from sentry.api.bases import NoProjects, OrganizationEventsEndpointBase
+from sentry.api.paginator import OffsetPaginator
+from sentry.api.serializers import serialize
+from sentry.api.serializers.models.profilechunkattachment import (
+    ProfileChunkAttachmentSerializer,
+    ProfileChunkAttachmentSerializerResponse,
+)
 from sentry.api.utils import handle_query_errors
+from sentry.apidocs.constants import (
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_FORBIDDEN,
+    RESPONSE_NOT_FOUND,
+    RESPONSE_UNAUTHORIZED,
+)
+from sentry.apidocs.examples.profiling_examples import ProfilingExamples
+from sentry.apidocs.parameters import GlobalParams, OrganizationParams
+from sentry.apidocs.response_types import ValidationErrorResponse, as_validation_errors
+from sentry.apidocs.utils import inline_sentry_response_serializer
 from sentry.models.organization import Organization
+from sentry.models.profilechunkattachment import ProfileChunkAttachment
 from sentry.profiles.flamegraph import FlamegraphExecutor
 from sentry.profiles.profile_chunks import get_chunk_ids
 from sentry.profiles.utils import proxy_profiling_service
@@ -21,8 +41,46 @@ from sentry.snuba.dataset import Dataset, StorageKey
 from sentry.snuba.referrer import Referrer
 from sentry.utils.snuba import raw_snql_query
 
+FLAMEGRAPH_DATA_SOURCE_PARAM = OpenApiParameter(
+    name="dataSource",
+    location="query",
+    required=False,
+    type=str,
+    enum=["transactions", "profiles", "functions", "spans"],
+    description=(
+        "Source dataset to build the flamegraph from. Defaults to `functions` when "
+        "`fingerprint` is set and `transactions` otherwise."
+    ),
+)
 
-class OrganizationProfilingBaseEndpoint(OrganizationEventsV2EndpointBase):
+FLAMEGRAPH_FINGERPRINT_PARAM = OpenApiParameter(
+    name="fingerprint",
+    location="query",
+    required=False,
+    type=int,
+    description="A UInt32 function fingerprint. Only valid when `dataSource=functions`.",
+)
+
+FLAMEGRAPH_QUERY_PARAM = OpenApiParameter(
+    name="query",
+    location="query",
+    required=False,
+    type=str,
+    description="Sentry [search syntax](https://docs.sentry.io/concepts/search/) to filter the candidate profiles.",
+)
+
+FLAMEGRAPH_EXPAND_PARAM = OpenApiParameter(
+    name="expand",
+    location="query",
+    required=False,
+    many=True,
+    type=str,
+    enum=["metrics"],
+    description="Optional expansions. Pass `metrics` to include flamegraph metric aggregates in the response.",
+)
+
+
+class OrganizationProfilingBaseEndpoint(OrganizationEventsEndpointBase):
     owner = ApiOwner.PROFILING
     publish_status = {
         "GET": ApiPublishStatus.PRIVATE,
@@ -62,9 +120,49 @@ class OrganizationProfilingFlamegraphSerializer(serializers.Serializer):
         return attrs
 
 
-@region_silo_endpoint
+@extend_schema(tags=["Profiling"])
+@cell_silo_endpoint
 class OrganizationProfilingFlamegraphEndpoint(OrganizationProfilingBaseEndpoint):
-    def get(self, request: Request, organization: Organization) -> HttpResponse:
+    publish_status = {
+        "GET": ApiPublishStatus.PUBLIC,
+    }
+
+    @extend_schema(
+        operation_id="getOrganizationProfilingFlamegraph",
+        summary="Retrieve a Flamegraph for an Organization",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            OrganizationParams.PROJECT,
+            GlobalParams.ENVIRONMENT,
+            GlobalParams.STATS_PERIOD,
+            GlobalParams.START,
+            GlobalParams.END,
+            FLAMEGRAPH_DATA_SOURCE_PARAM,
+            FLAMEGRAPH_FINGERPRINT_PARAM,
+            FLAMEGRAPH_QUERY_PARAM,
+            FLAMEGRAPH_EXPAND_PARAM,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "OrganizationProfilingFlamegraphResponse", dict[str, Any]
+            ),
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=ProfilingExamples.FLAMEGRAPH,
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[None] | Response[ValidationErrorResponse] | HttpResponse:
+        """
+        Retrieve an aggregated flamegraph for the organization, built from the
+        requested data source (transactions, profiles, functions, or spans).
+
+        Pass `expand=metrics` to include aggregated function metrics in the response.
+
+        Requires profiling to be enabled for the organization.
+        """
         if not features.has("organizations:profiling", organization, actor=request.user):
             return Response(status=404)
 
@@ -75,8 +173,11 @@ class OrganizationProfilingFlamegraphEndpoint(OrganizationProfilingBaseEndpoint)
 
         serializer = OrganizationProfilingFlamegraphSerializer(data=request.GET)
         if not serializer.is_valid():
-            return Response(serializer.errors, status=400)
+            return Response(as_validation_errors(serializer), status=400)
         serialized = serializer.validated_data
+
+        sentry_sdk.set_tag("query.dataSource", serialized["dataSource"])
+        sentry_sdk.set_attribute("query.dataSource", serialized["dataSource"])
 
         with handle_query_errors():
             executor = FlamegraphExecutor(
@@ -100,9 +201,61 @@ class OrganizationProfilingFlamegraphEndpoint(OrganizationProfilingBaseEndpoint)
         )
 
 
-@region_silo_endpoint
+CHUNKS_PROJECT_PARAM = OpenApiParameter(
+    name="project",
+    location="query",
+    required=True,
+    type=str,
+    description="The ID or slug of the project to fetch chunks for. Exactly one project must be specified.",
+)
+
+
+class OrganizationProfilingChunksQuerySerializer(serializers.Serializer):
+    profiler_id = serializers.UUIDField(
+        format="hex",
+        help_text="The continuous-profiler ID to fetch chunks for.",
+    )
+
+
+@extend_schema(tags=["Profiling"])
+@cell_silo_endpoint
 class OrganizationProfilingChunksEndpoint(OrganizationProfilingBaseEndpoint):
-    def get(self, request: Request, organization: Organization) -> HttpResponse:
+    publish_status = {
+        "GET": ApiPublishStatus.PUBLIC,
+    }
+
+    @extend_schema(
+        operation_id="listOrganizationProfilingChunks",
+        summary="Retrieve Profile Chunks for an Organization",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            CHUNKS_PROJECT_PARAM,
+            GlobalParams.STATS_PERIOD,
+            GlobalParams.START,
+            GlobalParams.END,
+            OrganizationProfilingChunksQuerySerializer,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "OrganizationProfilingChunksResponse", dict[str, Any]
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+        examples=ProfilingExamples.PROFILE_CHUNKS,
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[None] | Response[ValidationErrorResponse] | HttpResponse:
+        """
+        Retrieve continuous profiling data for a profiler over a time range.
+
+        Exactly one project must be specified via the `project` query parameter.
+
+        Requires continuous profiling to be enabled for the organization.
+        """
         if not features.has("organizations:continuous-profiling", organization, actor=request.user):
             return Response(status=404)
 
@@ -113,9 +266,10 @@ class OrganizationProfilingChunksEndpoint(OrganizationProfilingBaseEndpoint):
         if project_ids is None or len(project_ids) != 1:
             raise ParseError(detail="one project_id must be specified.")
 
-        profiler_id = request.query_params.get("profiler_id")
-        if profiler_id is None:
-            raise ParseError(detail="profiler_id must be specified.")
+        serializer = OrganizationProfilingChunksQuerySerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(as_validation_errors(serializer), status=400)
+        profiler_id = serializer.validated_data["profiler_id"].hex
 
         chunk_ids = get_chunk_ids(snuba_params, profiler_id, project_ids[0])
 
@@ -131,7 +285,101 @@ class OrganizationProfilingChunksEndpoint(OrganizationProfilingBaseEndpoint):
         )
 
 
-@region_silo_endpoint
+CHUNK_ID_QUERY_PARAM = OpenApiParameter(
+    name="chunk_id",
+    location="query",
+    required=False,
+    type=str,
+    description=(
+        "A specific chunk ID to fetch attachments for. When omitted, attachments "
+        "for every chunk in the given time range are returned."
+    ),
+)
+
+
+@extend_schema(tags=["Profiling"])
+@cell_silo_endpoint
+class OrganizationProfilingChunkAttachmentsEndpoint(OrganizationProfilingBaseEndpoint):
+    publish_status = {
+        "GET": ApiPublishStatus.PRIVATE,
+    }
+
+    @extend_schema(
+        operation_id="listOrganizationProfilingChunkAttachments",
+        summary="List Attachments for Profile Chunks",
+        parameters=[
+            GlobalParams.ORG_ID_OR_SLUG,
+            CHUNKS_PROJECT_PARAM,
+            GlobalParams.STATS_PERIOD,
+            GlobalParams.START,
+            GlobalParams.END,
+            OrganizationProfilingChunksQuerySerializer,
+            CHUNK_ID_QUERY_PARAM,
+        ],
+        responses={
+            200: inline_sentry_response_serializer(
+                "OrganizationProfilingChunkAttachmentsResponse",
+                list[ProfileChunkAttachmentSerializerResponse],
+            ),
+            400: RESPONSE_BAD_REQUEST,
+            401: RESPONSE_UNAUTHORIZED,
+            403: RESPONSE_FORBIDDEN,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[ValidationErrorResponse] | HttpResponse:
+        """
+        List attachments (e.g. Perfetto traces) for a profiler's chunks.
+
+        The visible chunks are resolved from the `profiler_id` and time range
+        using the same logic as the flamegraph, so the result matches what is
+        rendered. Pass `chunk_id` to scope the lookup to a single chunk.
+        """
+        if not features.has(
+            "organizations:continuous-profiling-perfetto", organization, actor=request.user
+        ):
+            return Response(status=404)
+
+        # We disable date quantizing here because we need the timestamps to be
+        # precise enough to resolve the exact chunks in view.
+        snuba_params = self.get_snuba_params(request, organization, quantize_date_params=False)
+
+        project_ids = snuba_params.project_ids
+        if project_ids is None or len(project_ids) != 1:
+            raise ParseError(detail="one project_id must be specified.")
+
+        serializer = OrganizationProfilingChunksQuerySerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(as_validation_errors(serializer), status=400)
+        profiler_id = serializer.validated_data["profiler_id"].hex
+
+        chunk_id = request.query_params.get("chunk_id")
+        if chunk_id is not None:
+            chunk_ids = [chunk_id]
+        else:
+            with handle_query_errors():
+                chunk_ids = get_chunk_ids(snuba_params, profiler_id, project_ids[0])
+
+        queryset = ProfileChunkAttachment.objects.filter(
+            project_id=project_ids[0],
+            profiler_id=profiler_id,
+            chunk_id__in=chunk_ids,
+        )
+
+        return self.paginate(
+            request=request,
+            queryset=queryset,
+            order_by="id",
+            on_results=lambda results: serialize(
+                results, request.user, ProfileChunkAttachmentSerializer()
+            ),
+            paginator_cls=OffsetPaginator,
+        )
+
+
+@cell_silo_endpoint
 class OrganizationProfilingHasChunksEndpoint(OrganizationProfilingBaseEndpoint):
     def get(self, request: Request, organization: Organization) -> HttpResponse:
         if not features.has("organizations:profiling", organization, actor=request.user):

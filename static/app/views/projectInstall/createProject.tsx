@@ -1,78 +1,80 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import styled from '@emotion/styled';
-import * as Sentry from '@sentry/react';
+import {useQuery} from '@tanstack/react-query';
 import debounce from 'lodash/debounce';
 import omit from 'lodash/omit';
-import startCase from 'lodash/startCase';
 import {PlatformIcon} from 'platformicons';
 
+import {Button} from '@sentry/scraps/button';
+import {Input} from '@sentry/scraps/input';
+import {Grid} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {useModal} from '@sentry/scraps/modal';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
-import {openModal} from 'sentry/actionCreators/modal';
-import {removeProject} from 'sentry/actionCreators/projects';
-import Access from 'sentry/components/acl/access';
-import {Alert} from 'sentry/components/core/alert';
-import {Button} from 'sentry/components/core/button';
-import {Input} from 'sentry/components/core/input';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {openConsoleModal} from 'sentry/actionCreators/modal';
+import {Access} from 'sentry/components/acl/access';
 import * as Layout from 'sentry/components/layouts/thirds';
-import ExternalLink from 'sentry/components/links/externalLink';
-import List from 'sentry/components/list';
-import ListItem from 'sentry/components/list/listItem';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
+import {captureProjectCreationFailure} from 'sentry/components/onboarding/captureProjectCreationFailure';
 import {SupportedLanguages} from 'sentry/components/onboarding/frameworkSuggestionModal';
+import {ProjectCreationErrorAlert} from 'sentry/components/onboarding/projectCreationErrorAlert';
 import {useCreateProjectAndRules} from 'sentry/components/onboarding/useCreateProjectAndRules';
-import type {Platform} from 'sentry/components/platformPicker';
-import PlatformPicker from 'sentry/components/platformPicker';
-import TeamSelector from 'sentry/components/teamSelector';
+import type {CreatedProjectRule} from 'sentry/components/onboarding/useCreateProjectRules';
+import {PlatformPicker, type Platform} from 'sentry/components/platformPicker';
+import {TeamSelector} from 'sentry/components/teamSelector';
+import {categoryList} from 'sentry/data/platformPickerCategories';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
-import type {IssueAlertRule} from 'sentry/types/alerts';
 import type {OnboardingSelectedSDK} from 'sentry/types/onboarding';
 import type {Team} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
+import {isDisabledGamingPlatform} from 'sentry/utils/platform';
 import {decodeScalar} from 'sentry/utils/queryString';
-import useRouteAnalyticsEventNames from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
-import slugify from 'sentry/utils/slugify';
-import normalizeUrl from 'sentry/utils/url/normalizeUrl';
-import useApi from 'sentry/utils/useApi';
+import {useRouteAnalyticsEventNames} from 'sentry/utils/routeAnalytics/useRouteAnalyticsEventNames';
+import {useRouteAnalyticsParams} from 'sentry/utils/routeAnalytics/useRouteAnalyticsParams';
+import {slugify} from 'sentry/utils/slugify';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 import {useCanCreateProject} from 'sentry/utils/useCanCreateProject';
 import {useLocalStorageState} from 'sentry/utils/useLocalStorageState';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useTeams} from 'sentry/utils/useTeams';
 import {
   MultipleCheckboxOptions,
   useCreateNotificationAction,
+  type IntegrationChannel,
 } from 'sentry/views/projectInstall/issueAlertNotificationOptions';
 import type {
   AlertRuleOptions,
   RequestDataFragment,
 } from 'sentry/views/projectInstall/issueAlertOptions';
-import IssueAlertOptions, {
+import {
   getRequestDataFragment,
+  IssueAlertOptions,
+  RuleAction,
 } from 'sentry/views/projectInstall/issueAlertOptions';
+import {useProjectCreationPageOrigin} from 'sentry/views/projectInstall/projectCreationOrigin';
+import {validateChannelQueryOptions} from 'sentry/views/projectInstall/useValidateChannel';
 import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
 type FormData = {
   projectName: string;
   alertRule?: Partial<AlertRuleOptions>;
-  platform?: Partial<OnboardingSelectedSDK>;
+  platform?: OnboardingSelectedSDK;
   team?: string;
 };
 
 type CreatedProject = Pick<Project, 'name' | 'id'> & {
   platform: OnboardingSelectedSDK;
   alertRule?: Partial<AlertRuleOptions>;
-  notificationRule?: IssueAlertRule;
+  notificationRule?: CreatedProjectRule;
   team?: string;
+  wasNameManuallyModified?: boolean;
 };
-
-function isNotPartialPlatform(
-  platform: Partial<OnboardingSelectedSDK> | undefined
-): platform is OnboardingSelectedSDK {
-  return !!platform?.key;
-}
 
 function getMissingValues({
   team,
@@ -82,14 +84,16 @@ function getMissingValues({
   shouldCreateRule,
   shouldCreateCustomRule,
   isOrgMemberWithNoAccess,
+  platform,
 }: {
   isOrgMemberWithNoAccess: boolean;
   notificationProps: {
     actions?: string[];
-    channel?: string;
+    channel?: IntegrationChannel;
   };
   projectName: string;
   team: string | undefined;
+  platform?: OnboardingSelectedSDK;
 } & Partial<
   Pick<RequestDataFragment, 'conditions' | 'shouldCreateCustomRule' | 'shouldCreateRule'>
 >) {
@@ -105,6 +109,7 @@ function getMissingValues({
       shouldCreateRule &&
       notificationProps.actions?.includes(MultipleCheckboxOptions.INTEGRATION) &&
       !notificationProps.channel,
+    isMissingPlatform: !platform,
   };
 }
 
@@ -112,6 +117,7 @@ function getSubmitTooltipText({
   isMissingProjectName,
   isMissingAlertThreshold,
   isMissingMessagingIntegrationChannel,
+  isMissingPlatform,
   formErrorCount,
 }: ReturnType<typeof getMissingValues> & {
   formErrorCount: number;
@@ -120,7 +126,7 @@ function getSubmitTooltipText({
     return t('Please fill out all the required fields');
   }
   if (isMissingProjectName) {
-    return t('Please provide a project name');
+    return t('Please provide a project slug');
   }
   if (isMissingAlertThreshold) {
     return t('Please provide an alert threshold');
@@ -128,24 +134,21 @@ function getSubmitTooltipText({
   if (isMissingMessagingIntegrationChannel) {
     return t('Please provide an integration channel for alert notifications');
   }
+  if (isMissingPlatform) {
+    return t('Please select a platform');
+  }
 
   return t('Please select a team');
 }
 
-const keyToErrorText: Record<string, string> = {
-  actions: t('Notify via integration'),
-  conditions: t('Alert conditions'),
-  name: t('Alert name'),
-  detail: t('Project details'),
-};
-
 export function CreateProject() {
-  const api = useApi();
+  const {openModal, visible: isModalVisible} = useModal();
   const navigate = useNavigate();
   const organization = useOrganization();
   const location = useLocation();
   const canUserCreateProject = useCanCreateProject();
   const createProjectAndRules = useCreateProjectAndRules();
+
   const {teams} = useTeams();
   const accessTeams = teams.filter((team: Team) => team.access.includes('team:admin'));
   const referrer = decodeScalar(location.query.referrer);
@@ -154,20 +157,34 @@ export function CreateProject() {
     'created-project-context',
     null
   );
-
   const autoFill = useMemo(() => {
     return referrer === 'getting-started' && projectId === createdProject?.id;
   }, [referrer, projectId, createdProject?.id]);
 
-  const createNotificationActionParam = useMemo(() => {
+  const notificationActionParam = useMemo(() => {
     return autoFill && createdProject?.notificationRule?.actions
       ? {actions: createdProject.notificationRule.actions}
       : undefined;
   }, [autoFill, createdProject?.notificationRule?.actions]);
 
-  const {createNotificationAction, notificationProps} = useCreateNotificationAction(
-    createNotificationActionParam
+  const {getIntegrationAction, notificationProps} = useCreateNotificationAction(
+    notificationActionParam
   );
+
+  const validateChannel = useQuery({
+    ...validateChannelQueryOptions({
+      organizationSlug: organization.slug,
+      channel: notificationProps.channel,
+      integrationId: notificationProps.integration?.id,
+    }),
+    enabled: false,
+  });
+  const validateChannelError =
+    validateChannel.data?.valid === false
+      ? (validateChannel.data.detail ?? t('Channel not found or restricted'))
+      : validateChannel.error
+        ? t('Unexpected integration channel validation error')
+        : undefined;
 
   const defaultTeam = accessTeams?.[0]?.slug;
 
@@ -188,7 +205,25 @@ export function CreateProject() {
     };
   }, [autoFill, defaultTeam, createdProject]);
 
-  const [formData, setFormData] = useState<FormData>(initialData);
+  const [formData, setFormData] = useState(initialData);
+  const pickerKeyRef = useRef<'create-project' | 'auto-fill'>('create-project');
+  const hasUserModifiedProjectName = useRef(false);
+
+  // Sync the ref when autoFill data becomes available.
+  // useRef only initializes once, but the component may first mount without
+  // query params (e.g. browser back fires a POP before router.replace adds them),
+  // so autoFill can transition from false → true after the initial render.
+  // When that happens we also need to populate the projectName since useState
+  // would have initialized with the non-autoFill (empty) value.
+  useEffect(() => {
+    if (autoFill && createdProject?.name) {
+      hasUserModifiedProjectName.current = createdProject.wasNameManuallyModified ?? true;
+      setFormData(prev => ({
+        ...prev,
+        projectName: createdProject.name ?? prev.projectName,
+      }));
+    }
+  }, [autoFill, createdProject?.name, createdProject?.wasNameManuallyModified]);
 
   const canCreateTeam = organization.access.includes('project:admin');
   const isOrgMemberWithNoAccess = accessTeams.length === 0 && !canCreateTeam;
@@ -206,19 +241,29 @@ export function CreateProject() {
     shouldCreateCustomRule: alertRuleConfig.shouldCreateCustomRule,
     shouldCreateRule: alertRuleConfig.shouldCreateRule,
     conditions: alertRuleConfig.conditions,
+    platform: formData.platform,
   });
 
+  const isNotifyingViaIntegration =
+    alertRuleConfig.shouldCreateRule &&
+    notificationProps.actions?.includes(MultipleCheckboxOptions.INTEGRATION);
+
   const formErrorCount = [
+    missingValues.isMissingPlatform,
     missingValues.isMissingTeam,
     missingValues.isMissingProjectName,
     missingValues.isMissingAlertThreshold,
     missingValues.isMissingMessagingIntegrationChannel,
-  ].filter(value => value).length;
+    isNotifyingViaIntegration && validateChannelError,
+  ].filter(Boolean).length;
 
-  const submitTooltipText = getSubmitTooltipText({
-    ...missingValues,
-    formErrorCount,
-  });
+  const submitTooltipText =
+    isNotifyingViaIntegration && validateChannelError
+      ? validateChannelError
+      : getSubmitTooltipText({
+          ...missingValues,
+          formErrorCount,
+        });
 
   const updateFormData = useCallback(
     <K extends keyof FormData>(field: K, value: FormData[K]) => {
@@ -232,6 +277,9 @@ export function CreateProject() {
 
   useEffect(() => {
     (Object.keys(initialData) as Array<keyof typeof initialData>).forEach(key => {
+      if (key === 'projectName' && hasUserModifiedProjectName.current) {
+        return;
+      }
       updateFormData(key, initialData[key]);
     });
   }, [initialData, updateFormData]);
@@ -240,6 +288,11 @@ export function CreateProject() {
     'project_creation_page.viewed',
     'Project Create: Creation page viewed'
   );
+  // Journey origin is sticky (sessionStorage seeded by
+  // ?projectCreationOrigin=org_creation from org-create). Orthogonal to
+  // `variant` and to `referrer=getting-started` autofill — back-from-docs
+  // must not reclassify an org-activation visit as existing_org.
+  useRouteAnalyticsParams({variant: 'legacy', origin: useProjectCreationPageOrigin()});
 
   const configurePlatform = useCallback(
     async ({
@@ -253,44 +306,41 @@ export function CreateProject() {
       }) => {
       const selectedPlatform = selectedFramework ?? platform;
 
-      if (!selectedPlatform) {
-        addErrorMessage(t('Please select a platform in Step 1'));
-        return;
-      }
-
-      let projectToRollback: Project | undefined;
+      // Not in handleProjectCreation: every path into configurePlatform goes on
+      // to POST, so an abandoned framework modal stays out of the denominator.
+      trackAnalytics('project_creation.project_details_create_clicked', {
+        organization,
+        variant: 'legacy',
+      });
 
       try {
-        const {project, notificationRule, ruleIds} =
+        const {project, notificationRule, workflowIds} =
           await createProjectAndRules.mutateAsync({
             projectName,
             platform: selectedPlatform,
             team,
             alertRuleConfig,
-            createNotificationAction,
+            getIntegrationAction,
           });
-        projectToRollback = project;
 
         trackAnalytics('project_creation_page.created', {
           organization,
           issue_alert: alertRuleConfig.shouldCreateCustomRule
             ? 'Custom'
-            : alertRuleConfig.shouldCreateRule === false
-              ? 'No Rule'
-              : 'Default',
+            : alertRuleConfig.shouldCreateRule
+              ? 'Default'
+              : 'No Rule',
           project_id: project.id,
           platform: selectedPlatform.key,
-          rule_ids: ruleIds,
+          workflow_ids: workflowIds,
+          notification_rule_created: !!notificationRule,
+          variant: 'legacy',
         });
 
         addSuccessMessage(
           team
-            ? t('Created project %s', `${project.slug}`)
-            : t(
-                'Created %s under new team %s',
-                `${project.slug}`,
-                `#${project.team.slug}`
-              )
+            ? t('Created project %s', project.slug)
+            : t('Created %s under new team %s', project.slug, `#${project.team.slug}`)
         );
 
         setCreatedProject({
@@ -300,95 +350,79 @@ export function CreateProject() {
           platform: selectedPlatform,
           alertRule,
           notificationRule,
+          wasNameManuallyModified: hasUserModifiedProjectName.current,
         });
 
-        navigate(
-          normalizeUrl(
+        navigate({
+          pathname: normalizeUrl(
             makeProjectsPathname({
               path: `/${project.slug}/getting-started/`,
               organization,
             })
-          )
-        );
-      } catch (error) {
-        addErrorMessage(t('Failed to create project %s', `${projectName}`));
+          ),
+          query: {projectCreationVariant: 'legacy'},
+        });
+      } catch (error: any) {
+        addErrorMessage(t('Failed to create project %s', projectName));
 
-        // Only log this if the error is something other than:
-        // * The user not having access to create a project, or,
-        // * A project with that slug already exists
-        if (error.status !== 403 && error.status !== 409) {
-          Sentry.withScope(scope => {
-            scope.setExtra('err', error);
-            Sentry.captureMessage('Project creation failed');
-          });
-        }
+        // Unfiltered, unlike captureProjectCreationFailure below: both variants
+        // count every caught failure, so filtering here would skew the rate.
+        trackAnalytics('project_creation.project_details_create_failed', {
+          organization,
+          variant: 'legacy',
+        });
 
-        if (projectToRollback) {
-          Sentry.logger.error('Rolling back project', {
-            projectToRollback,
-          });
-          try {
-            // Rolling back the project also deletes its associated alert rules
-            // due to the cascading delete constraint.
-            await removeProject({
-              api,
-              orgSlug: organization.slug,
-              projectSlug: projectToRollback.slug,
-              origin: 'getting_started',
-            });
-          } catch (err) {
-            Sentry.withScope(scope => {
-              scope.setExtra('error', err);
-              Sentry.captureMessage('Failed to rollback project');
-            });
-          }
-        }
+        captureProjectCreationFailure({
+          error,
+          organization,
+          team,
+          accessTeams,
+          variant: 'legacy',
+        });
       }
     },
     [
       organization,
       setCreatedProject,
       navigate,
-      api,
       createProjectAndRules,
-      createNotificationAction,
+      getIntegrationAction,
       alertRuleConfig,
+      accessTeams,
     ]
   );
 
   const handleProjectCreation = useCallback(
-    async (data: FormData) => {
-      const selectedPlatform = data.platform;
-
-      if (!isNotPartialPlatform(selectedPlatform)) {
-        addErrorMessage(t('Please select a platform in Step 1'));
+    async ({platform, ...data}: FormData) => {
+      // At this point, platform should be defined
+      // otherwise the submit button would be disabled.
+      if (!platform) {
         return;
       }
 
       if (
-        selectedPlatform.type !== 'language' ||
+        platform.type !== 'language' ||
         !Object.values(SupportedLanguages).includes(
-          selectedPlatform.language as SupportedLanguages
+          platform.language as SupportedLanguages
         )
       ) {
-        configurePlatform({...data, platform: selectedPlatform});
+        configurePlatform({...data, platform});
         return;
       }
 
-      const {FrameworkSuggestionModal, modalCss} = await import(
-        'sentry/components/onboarding/frameworkSuggestionModal'
-      );
+      const {FrameworkSuggestionModal, modalCss} =
+        await import('sentry/components/onboarding/frameworkSuggestionModal');
 
       openModal(
         deps => (
           <FrameworkSuggestionModal
             {...deps}
             organization={organization}
-            selectedPlatform={selectedPlatform}
+            selectedPlatform={platform}
             onConfigure={selectedFramework => {
-              configurePlatform({...data, platform: selectedPlatform, selectedFramework});
+              configurePlatform({...data, platform, selectedFramework});
             }}
-            onSkip={() => configurePlatform({...data, platform: selectedPlatform})}
+            onSkip={() => configurePlatform({...data, platform})}
           />
         ),
         {
@@ -397,15 +431,16 @@ export function CreateProject() {
             trackAnalytics(
               'project_creation.select_framework_modal_close_button_clicked',
               {
-                platform: selectedPlatform.key,
+                platform: platform.key,
                 organization,
+                variant: 'legacy',
               }
             );
           },
         }
       );
     },
-    [configurePlatform, organization]
+    [configurePlatform, organization, openModal]
   );
 
   const debounceHandleProjectCreation = useMemo(
@@ -416,37 +451,56 @@ export function CreateProject() {
   const handlePlatformChange = useCallback(
     (value: Platform | null) => {
       if (!value) {
-        updateFormData('platform', {
-          // By unselecting a platform, we don't want to jump to another category
-          category: formData.platform?.category,
+        updateFormData('platform', undefined);
+        return;
+      }
+
+      if (
+        isDisabledGamingPlatform({
+          platform: value,
+          enabledConsolePlatforms: organization.enabledConsolePlatforms,
+        })
+      ) {
+        openConsoleModal({
+          organization,
+          selectedPlatform: {
+            key: value.id,
+            name: value.name,
+            type: value.type,
+            language: value.language,
+            category: value.category,
+            link: value.link,
+          },
+          origin: 'project-creation',
         });
         return;
       }
 
-      updateFormData('platform', {
-        ...omit(value, 'id'),
-        key: value.id,
-      });
-
-      const userModifiedName =
-        !!formData.projectName && formData.projectName !== formData.platform?.key;
-      const newName = userModifiedName ? formData.projectName : value.id;
-
-      updateFormData('projectName', newName);
+      setFormData(prev => ({
+        ...prev,
+        platform: {...omit(value, 'id'), key: value.id},
+        projectName: hasUserModifiedProjectName.current ? prev.projectName : value.id,
+      }));
     },
-    [
-      updateFormData,
-      formData.projectName,
-      formData.platform?.key,
-      formData.platform?.category,
-    ]
+    [updateFormData, organization]
   );
+
+  const platform = formData.platform?.key;
+  const defaultCategory = platform
+    ? categoryList.find(({platforms}) => platforms.has(platform))?.id
+    : 'popular';
+
+  // Workaround to force PlatformPicker to re-render when users go back in the flow and fields should be pre-filled.
+  // Without this, the selected platform might not be visible depending on the active tab.
+  if (autoFill && platform && pickerKeyRef.current === 'create-project') {
+    pickerKeyRef.current = 'auto-fill';
+  }
 
   return (
     <Access access={canUserCreateProject ? ['project:read'] : ['project:admin']}>
       <div data-test-id="onboarding-info">
         <List symbol="colored-numeric">
-          <Layout.Title withMargins>{t('Create a new project in 3 steps')}</Layout.Title>
+          <Layout.Title>{t('Create a new project in 3 steps')}</Layout.Title>
           <HelpText>
             {tct(
               'Set up a separate project for each part of your application (for example, your API server and frontend client), to quickly pinpoint which part of your application errors are coming from. [link: Read the docs].',
@@ -459,11 +513,13 @@ export function CreateProject() {
           </HelpText>
           <StyledListItem>{t('Choose your platform')}</StyledListItem>
           <PlatformPicker
-            platform={formData.platform?.key}
-            defaultCategory={formData.platform?.category}
+            key={pickerKeyRef.current}
+            platform={platform}
+            defaultCategory={defaultCategory}
             setPlatform={handlePlatformChange}
             organization={organization}
-            showOther
+            source="project-creation"
+            variant="legacy"
             noAutoFilter
           />
           <StyledListItem>{t('Set your alert frequency')}</StyledListItem>
@@ -478,12 +534,46 @@ export function CreateProject() {
                 ...formData.alertRule,
                 [field]: value,
               });
+              if (field === 'alertSetting') {
+                const optionMap: Record<number, string> = {
+                  [RuleAction.DEFAULT_ALERT]: 'high_priority',
+                  [RuleAction.CUSTOMIZED_ALERTS]: 'custom',
+                  [RuleAction.CREATE_ALERT_LATER]: 'create_later',
+                };
+                trackAnalytics('project_creation.project_details_alert_selected', {
+                  organization,
+                  option: optionMap[value as number] ?? String(value),
+                  variant: 'legacy',
+                });
+              } else if (
+                (field === 'threshold' || field === 'metric' || field === 'interval') &&
+                formData.alertRule?.alertSetting === RuleAction.CUSTOMIZED_ALERTS
+              ) {
+                trackAnalytics('project_creation.alert_threshold_edited', {
+                  organization,
+                  field,
+                  variant: 'legacy',
+                });
+              }
             }}
           />
-          <StyledListItem>{t('Name your project and assign it a team')}</StyledListItem>
-          <FormFieldGroup>
+          <StyledListItem>
+            {isOrgMemberWithNoAccess
+              ? t('Name your project')
+              : t('Name your project and assign it a team')}
+          </StyledListItem>
+          <Grid
+            columns={{
+              zero: 'minmax(0, 1fr)',
+              lg: 'minmax(0, 300px) minmax(250px, 1fr) max-content',
+            }}
+            gap="xl"
+            align="end"
+            padding="2xl 0"
+            background="primary"
+          >
             <div>
-              <FormLabel>{t('Project name')}</FormLabel>
+              <FormLabel>{t('Project slug')}</FormLabel>
               <ProjectNameInputWrap>
                 <StyledPlatformIcon
                   platform={formData.platform?.key ?? 'other'}
@@ -492,10 +582,16 @@ export function CreateProject() {
                 <ProjectNameInput
                   type="text"
                   name="name"
-                  placeholder={t('project-name')}
+                  placeholder={t('project-slug')}
                   autoComplete="off"
                   value={formData.projectName}
-                  onChange={e => updateFormData('projectName', slugify(e.target.value))}
+                  onChange={e => {
+                    const slugified = slugify(e.target.value);
+                    // Track whether the user has intentionally set a custom name.
+                    // Reset if they clear the field so platform selection can fill it in again.
+                    hasUserModifiedProjectName.current = slugified !== '';
+                    updateFormData('projectName', slugified);
+                  }}
                 />
               </ProjectNameInputWrap>
             </div>
@@ -507,7 +603,6 @@ export function CreateProject() {
                     allowCreate
                     name="team"
                     aria-label={t('Select a Team')}
-                    menuPlacement="auto"
                     clearable={false}
                     placeholder={t('Select a Team')}
                     teamFilter={(tm: Team) => tm.access.includes('team:admin')}
@@ -521,30 +616,43 @@ export function CreateProject() {
               </div>
             )}
             <div>
-              <Tooltip title={submitTooltipText} disabled={formErrorCount === 0}>
+              <Tooltip
+                title={
+                  canUserCreateProject
+                    ? isNotifyingViaIntegration && validateChannel.isFetching
+                      ? t('Validating integration channel\u2026')
+                      : submitTooltipText
+                    : t('You do not have permission to create projects')
+                }
+                disabled={
+                  formErrorCount === 0 &&
+                  canUserCreateProject &&
+                  !(isNotifyingViaIntegration && validateChannel.isFetching)
+                }
+              >
                 <Button
                   data-test-id="create-project"
-                  priority="primary"
-                  disabled={!(canUserCreateProject && formErrorCount === 0)}
-                  busy={createProjectAndRules.isPending}
+                  variant="primary"
+                  disabled={
+                    !(
+                      canUserCreateProject &&
+                      formErrorCount === 0 &&
+                      !(isNotifyingViaIntegration && validateChannel.isFetching)
+                    )
+                  }
+                  busy={
+                    createProjectAndRules.isPending ||
+                    (isNotifyingViaIntegration && validateChannel.isFetching)
+                  }
                   onClick={() => debounceHandleProjectCreation(formData)}
                 >
                   {t('Create Project')}
                 </Button>
               </Tooltip>
             </div>
-          </FormFieldGroup>
-          {createProjectAndRules.isError && createProjectAndRules.error.responseJSON && (
-            <Alert.Container>
-              <Alert type="error">
-                {Object.keys(createProjectAndRules.error.responseJSON).map(key => (
-                  <div key={key}>
-                    <strong>{keyToErrorText[key] ?? startCase(key)}</strong>:{' '}
-                    {(createProjectAndRules.error.responseJSON as any)[key]}
-                  </div>
-                ))}
-              </Alert>
-            </Alert.Container>
+          </Grid>
+          {!isModalVisible && (
+            <ProjectCreationErrorAlert error={createProjectAndRules.error} />
           )}
         </List>
       </div>
@@ -553,22 +661,13 @@ export function CreateProject() {
 }
 
 const StyledListItem = styled(ListItem)`
-  margin: ${space(2)} 0 ${space(1)} 0;
-  font-size: ${p => p.theme.fontSize.xl};
-`;
-
-const FormFieldGroup = styled('div')`
-  display: grid;
-  grid-template-columns: 300px minmax(250px, max-content) max-content;
-  gap: ${space(2)};
-  align-items: end;
-  padding: ${space(3)} 0;
-  background: ${p => p.theme.background};
+  margin: ${p => p.theme.space.xl} 0 ${p => p.theme.space.md} 0;
+  font-size: ${p => p.theme.font.size.xl};
 `;
 
 const FormLabel = styled('div')`
-  font-size: ${p => p.theme.fontSize.xl};
-  margin-bottom: ${space(1)};
+  font-size: ${p => p.theme.font.size.xl};
+  margin-bottom: ${p => p.theme.space.md};
 `;
 
 const ProjectNameInputWrap = styled('div')`
@@ -576,24 +675,24 @@ const ProjectNameInputWrap = styled('div')`
 `;
 
 const ProjectNameInput = styled(Input)`
-  padding-left: calc(${p => p.theme.formPadding.md.paddingLeft}px * 1.5 + 20px);
+  padding-left: calc(${p => p.theme.form.md.paddingLeft}px * 1.5 + 20px);
 `;
 
 const StyledPlatformIcon = styled(PlatformIcon)`
   position: absolute;
   top: 50%;
-  left: ${p => p.theme.formPadding.md.paddingLeft}px;
+  left: ${p => p.theme.form.md.paddingLeft}px;
   transform: translateY(-50%);
 `;
 
 const TeamSelectInput = styled('div')`
   display: grid;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   grid-template-columns: 1fr min-content;
   align-items: center;
 `;
 
 const HelpText = styled('p')`
-  color: ${p => p.theme.subText};
+  color: ${p => p.theme.tokens.content.secondary};
   max-width: 760px;
 `;

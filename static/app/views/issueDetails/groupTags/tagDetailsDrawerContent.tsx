@@ -1,34 +1,44 @@
 import {Fragment, useState} from 'react';
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 import type {LocationDescriptor} from 'history';
 
-import {useFetchIssueTag, useFetchIssueTagValues} from 'sentry/actionCreators/group';
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Text} from '@sentry/scraps/text';
+
+import {
+  issueTagValuesApiOptions,
+  fetchIssueTagApiOptions,
+} from 'sentry/actionCreators/group';
 import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
-import {Button} from 'sentry/components/core/button';
 import {DeviceName} from 'sentry/components/deviceName';
 import {DropdownMenu} from 'sentry/components/dropdownMenu';
 import {getContextIcon} from 'sentry/components/events/contexts/utils';
-import Link from 'sentry/components/links/link';
-import LoadingError from 'sentry/components/loadingError';
-import LoadingIndicator from 'sentry/components/loadingIndicator';
-import Pagination from 'sentry/components/pagination';
-import TimeSince from 'sentry/components/timeSince';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
+import {TimeSince} from 'sentry/components/timeSince';
 import {IconArrow, IconEllipsis, IconOpen} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Group, Tag, TagValue} from 'sentry/types/group';
-import {escapeIssueTagKey, generateQueryWithTag, percent} from 'sentry/utils';
+import {percent} from 'sentry/utils';
+import {selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
 import {SavedQueryDatasets} from 'sentry/utils/discover/types';
-import {isUrl} from 'sentry/utils/string/isUrl';
-import useCopyToClipboard from 'sentry/utils/useCopyToClipboard';
+import {escapeIssueTagKey, generateQueryWithTag} from 'sentry/utils/queryString';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
+import {useCopyToClipboard} from 'sentry/utils/useCopyToClipboard';
 import {useLocation} from 'sentry/utils/useLocation';
 import {useNavigate} from 'sentry/utils/useNavigate';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useParams} from 'sentry/utils/useParams';
 import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
 import {TagBar} from 'sentry/views/issueDetails/groupTags/tagDistribution';
-import {useIssueDetailsEventView} from 'sentry/views/issueDetails/streamline/hooks/useIssueDetailsDiscoverQuery';
+import {useIssueDetailsEventView} from 'sentry/views/issueDetails/hooks/useIssueDetailsDiscoverQuery';
 import {getUserTagValue} from 'sentry/views/issueDetails/utils';
 
 type TagSort = 'date' | 'count';
@@ -39,33 +49,31 @@ export function TagDetailsDrawerContent({group}: {group: Group}) {
   const navigate = useNavigate();
   const organization = useOrganization();
   const {tagKey} = useParams<{tagKey: string}>();
-  const sortArrow = <IconArrow color="gray300" size="xs" direction="down" />;
+  const sortArrow = <IconArrow variant="muted" size="xs" direction="down" />;
 
-  const sort: TagSort =
-    (location.query.tagDrawerSort as TagSort | undefined) ?? DEFAULT_SORT;
+  const sort = (location.query.tagDrawerSort as TagSort | undefined) ?? DEFAULT_SORT;
 
   const {
-    data: tagValues,
+    data: tagValuesResponse,
     isError: tagValuesIsError,
     isPending: tagValuesIsPending,
-    getResponseHeader,
-  } = useFetchIssueTagValues({
-    orgSlug: organization.slug,
-    groupId: group.id,
-    tagKey,
-    sort,
-    cursor: location.query.tagDrawerCursor as string | undefined,
+  } = useQuery({
+    ...issueTagValuesApiOptions({
+      organization,
+      groupId: group.id,
+      tagKey,
+      sort,
+      cursor: location.query.tagDrawerCursor as string | undefined,
+    }),
+    select: selectJsonWithHeaders,
   });
+  const tagValues = tagValuesResponse?.json;
 
   const {
     data: tag,
     isError: tagIsError,
     isPending: tagIsPending,
-  } = useFetchIssueTag({
-    orgSlug: organization.slug,
-    groupId: group.id,
-    tagKey,
-  });
+  } = useQuery(fetchIssueTagApiOptions({organization, groupId: group.id, tagKey}));
 
   const isError = tagValuesIsError || tagIsError;
   const isPending = tagValuesIsPending || tagIsPending;
@@ -86,7 +94,7 @@ export function TagDetailsDrawerContent({group}: {group: Group}) {
   return (
     <Fragment>
       {tag && tagValues?.length && (
-        <Table>
+        <Table data-test-id="group-tag-value">
           <Header>
             <ColumnTitle>{t('Value')}</ColumnTitle>
             <ColumnSort
@@ -141,7 +149,7 @@ export function TagDetailsDrawerContent({group}: {group: Group}) {
           })
         }
         size="xs"
-        pageLinks={getResponseHeader?.('Link')}
+        pageLinks={tagValuesResponse?.headers.Link}
       />
     </Fragment>
   );
@@ -156,6 +164,7 @@ function TagDetailsRow({
   tag: Tag;
   tagValue: TagValue;
 }) {
+  const theme = useTheme();
   const organization = useOrganization();
   const location = useLocation();
 
@@ -178,7 +187,15 @@ function TagDetailsRow({
     },
   };
   const percentage = Math.round(percent(tagValue.count ?? 0, tag.totalValues ?? 0));
-  const displayPercentage = percentage < 1 ? '<1%' : `${percentage.toFixed(0)}%`;
+  // Ensure no item shows 100% when there are multiple tag values
+  const hasMultipleItems = (tag.uniqueValues ?? 0) > 1;
+  const cappedPercentage = hasMultipleItems && percentage >= 100 ? 99 : percentage;
+  const displayPercentage =
+    cappedPercentage < 1
+      ? '<1%'
+      : hasMultipleItems && percentage >= 100
+        ? '>99%'
+        : `${cappedPercentage.toFixed(0)}%`;
 
   return (
     <Row>
@@ -191,7 +208,7 @@ function TagDetailsRow({
       <RightAlignedValue>{tagValue.count.toLocaleString()}</RightAlignedValue>
       <RightAlignedValue>{displayPercentage}</RightAlignedValue>
       {tag.totalValues ? (
-        <TagBar percentage={percentage} style={{height: space(1.5)}} />
+        <TagBar percentage={percentage} style={{height: theme.space.lg}} />
       ) : (
         '--'
       )}
@@ -211,38 +228,47 @@ function TagDetailsValue({
 }) {
   const theme = useTheme();
   const userValues = getUserTagValue(tagValue);
-  const valueComponent =
-    tagKey === 'user' ? (
-      <UserValue>
-        {getContextIcon({
-          alias: 'user',
-          type: 'user',
-          value: tagValue,
-          contextIconProps: {
-            size: 'md',
-          },
-          theme,
-        })}
-        <div>{userValues.title}</div>
-        {userValues.subtitle && <UserSubtitle>{userValues.subtitle}</UserSubtitle>}
-      </UserValue>
-    ) : (
-      <DeviceName value={tagValue.value} />
-    );
+  const value =
+    tagValue.value === '' ? <Text variant="muted">{t('(empty)')}</Text> : tagValue.value;
+  let valueComponent: React.ReactNode = value;
+  if (tagValue.value !== '') {
+    if (tagKey === 'user') {
+      valueComponent = (
+        <Flex align="center" gap="sm" minWidth={0} overflow="hidden">
+          {getContextIcon({
+            alias: 'user',
+            type: 'user',
+            value: tagValue,
+            contextIconProps: {
+              size: 'md',
+            },
+            theme,
+          })}
+          <Flex wrap="wrap" gap="xs" minWidth={0}>
+            <Text>{userValues.title}</Text>
+            {userValues.subtitle && <Text variant="muted">{userValues.subtitle}</Text>}
+          </Flex>
+        </Flex>
+      );
+    } else if (tagKey === 'device') {
+      valueComponent = <DeviceName value={tagValue.value} />;
+    }
+  }
 
   return (
-    <Value>
+    <Flex gap="xs" align="center" minWidth={0} overflow="hidden">
       <ValueLink to={valueLocation}>{valueComponent}</ValueLink>
-      {isUrl(tagValue.value) && (
+      {isValidUrl(tagValue.value) && (
         <ExternalLinkbutton
-          priority="link"
+          variant="link"
           icon={<IconOpen />}
           aria-label="Open link"
+          data-test-id="group-tag-url"
           size="xs"
           onClick={() => openNavigateToExternalLinkModal({linkText: tagValue.value})}
         />
       )}
-    </Value>
+    </Flex>
   );
 }
 
@@ -256,9 +282,9 @@ function TagValueActionsMenu({
   tagValue: TagValue;
 }) {
   const organization = useOrganization();
-  const {onClick: handleCopy} = useCopyToClipboard({
-    text: tagValue.value,
-  });
+  const location = useLocation();
+  const {copy} = useCopyToClipboard();
+
   const referrer = 'tag-details-drawer';
   const key = escapeIssueTagKey(tagValue.key ?? tag.key);
   const query = tagValue.query
@@ -266,6 +292,7 @@ function TagValueActionsMenu({
         query: tagValue.query,
       }
     : generateQueryWithTag({referrer}, {key, value: tagValue.value});
+  const globalSelectionParams = extractSelectionParameters(location.query);
   const eventView = useIssueDetailsEventView({group, queryProps: query});
   const [isVisible, setIsVisible] = useState(false);
 
@@ -283,7 +310,9 @@ function TagValueActionsMenu({
       items={[
         {
           key: 'open-in-discover',
-          label: t('Open in Discover'),
+          label: getDiscoverDeprecation(organization)
+            ? t('Open in Explore')
+            : t('Open in Discover'),
           to: eventView.getResultsViewUrlTarget(
             organization,
             false,
@@ -296,7 +325,7 @@ function TagValueActionsMenu({
           label: t('View other events with this tag value'),
           to: {
             pathname: `/organizations/${organization.slug}/issues/${group.id}/events/`,
-            query,
+            query: {...globalSelectionParams, ...query},
           },
         },
         {
@@ -304,13 +333,15 @@ function TagValueActionsMenu({
           label: t('Search issues with this tag value'),
           to: {
             pathname: `/organizations/${organization.slug}/issues/`,
-            query,
+            query: {...globalSelectionParams, ...query},
           },
         },
         {
           key: 'copy-value',
           label: t('Copy tag value to clipboard'),
-          onAction: handleCopy,
+          onAction: () =>
+            copy(tagValue.value, {successMessage: t('Copied tag value to clipboard')}),
+          hidden: tagValue.value === '',
         },
       ]}
     />
@@ -320,19 +351,19 @@ function TagValueActionsMenu({
 const Table = styled('div')`
   display: grid;
   grid-template-columns: 1fr 0.22fr min-content min-content 45px min-content;
-  column-gap: ${space(1)};
-  row-gap: ${space(0.5)};
-  margin: 0 -${space(1)};
+  column-gap: ${p => p.theme.space.md};
+  row-gap: ${p => p.theme.space.xs};
+  margin: 0 -${p => p.theme.space.md};
 
-  @media (min-width: ${p => p.theme.breakpoints.xlarge}) {
-    column-gap: ${space(2)};
+  @media (min-width: ${p => p.theme.breakpoints.xl}) {
+    column-gap: ${p => p.theme.space.xl};
   }
 `;
 
 const ColumnTitle = styled('div')`
   white-space: nowrap;
-  color: ${p => p.theme.subText};
-  font-weight: ${p => p.theme.fontWeightBold};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
 const ShareColumnTitle = styled(ColumnTitle)`
@@ -341,16 +372,16 @@ const ShareColumnTitle = styled(ColumnTitle)`
 
 const ColumnSort = styled(Link)`
   display: flex;
-  gap: ${space(0.5)};
+  gap: ${p => p.theme.space.xs};
   align-items: center;
   white-space: nowrap;
-  color: ${p => p.theme.subText};
-  font-weight: ${p => p.theme.fontWeightBold};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
   text-decoration: underline;
   text-decoration-style: dotted;
-  text-decoration-color: ${p => p.theme.textColor};
+  text-decoration-color: ${p => p.theme.tokens.content.primary};
   &:hover {
-    color: ${p => p.theme.subText};
+    color: ${p => p.theme.tokens.content.secondary};
   }
 `;
 
@@ -361,17 +392,17 @@ const Body = styled('div')`
 `;
 
 const Header = styled(Body)`
-  border-bottom: 1px solid ${p => p.theme.border};
-  margin: 0 ${space(1)};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.primary};
+  margin: 0 ${p => p.theme.space.md};
 `;
 
 const Row = styled(Body)`
   &:nth-child(even) {
-    background: ${p => p.theme.backgroundSecondary};
+    background: ${p => p.theme.tokens.background.tertiary};
   }
   align-items: center;
-  border-radius: 4px;
-  padding: ${space(0.25)} ${space(1)};
+  border-radius: ${p => p.theme.radius.md};
+  padding: ${p => p.theme.space['2xs']} ${p => p.theme.space.md};
 
   .invisible {
     visibility: hidden;
@@ -384,36 +415,24 @@ const Row = styled(Body)`
   }
 `;
 
-const Value = styled('div')`
-  display: flex;
-  gap: ${space(0.5)};
-  align-items: center;
-`;
-
 const RightAlignedValue = styled('div')`
   text-align: right;
 `;
 
-const UserSubtitle = styled('div')`
-  color: ${p => p.theme.subText};
-  display: inline-block; /* Prevent inheriting text decoration */
-`;
-
 const ValueLink = styled(Link)`
-  color: ${p => p.theme.textColor};
-  word-break: break-all;
+  color: ${p => p.theme.tokens.content.primary};
+  min-width: 0;
+  overflow: hidden;
 `;
 
 const OverflowTimeSince = styled(TimeSince)`
-  ${p => p.theme.overflowEllipsis};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const ExternalLinkbutton = styled(Button)`
-  color: ${p => p.theme.subText};
-`;
-
-const UserValue = styled('div')`
-  display: flex;
-  gap: ${space(0.75)};
-  font-size: ${p => p.theme.fontSize.md};
+  color: ${p => p.theme.tokens.content.secondary};
 `;

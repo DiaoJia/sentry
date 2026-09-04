@@ -6,8 +6,8 @@ const MILLION = 10 ** 6;
 const BILLION = 10 ** 9;
 const GIGABYTE = 10 ** 9;
 
-describe('formatUsageWithUnits', function () {
-  it('returns correct strings for Errors', function () {
+describe('formatUsageWithUnits', () => {
+  it('returns correct strings for Errors', () => {
     expect(formatUsageWithUnits(0, DATA_CATEGORY_INFO.error.plural)).toBe('0');
     expect(formatUsageWithUnits(1000, DATA_CATEGORY_INFO.error.plural)).toBe('1,000');
     expect(formatUsageWithUnits(MILLION, DATA_CATEGORY_INFO.error.plural)).toBe(
@@ -40,7 +40,7 @@ describe('formatUsageWithUnits', function () {
     ).toBe('1.23B');
   });
 
-  it('returns correct strings for Transactions', function () {
+  it('returns correct strings for Transactions', () => {
     expect(formatUsageWithUnits(0, DATA_CATEGORY_INFO.transaction.plural)).toBe('0');
     expect(formatUsageWithUnits(1000, DATA_CATEGORY_INFO.transaction.plural)).toBe(
       '1,000'
@@ -79,82 +79,52 @@ describe('formatUsageWithUnits', function () {
     ).toBe('1.23B');
   });
 
-  it('returns correct strings for Attachments', function () {
-    expect(formatUsageWithUnits(0, DATA_CATEGORY_INFO.attachment.plural)).toBe('0 GB');
-    expect(formatUsageWithUnits(MILLION, DATA_CATEGORY_INFO.attachment.plural)).toBe(
+  it.each([
+    ['Attachments', DATA_CATEGORY_INFO.attachment.plural],
+    ['Log Bytes', DATA_CATEGORY_INFO.log_byte.plural],
+    ['Trace Metric Bytes', DATA_CATEGORY_INFO.trace_metric_byte.plural],
+  ])('returns correct byte formatting for %s', (_label, dataCategory) => {
+    expect(formatUsageWithUnits(0, dataCategory)).toBe('0 GB');
+    expect(formatUsageWithUnits(MILLION, dataCategory)).toBe('0 GB');
+    expect(formatUsageWithUnits(BILLION, dataCategory)).toBe('1 GB');
+    expect(formatUsageWithUnits(1.234 * BILLION, dataCategory)).toBe('1.23 GB');
+    expect(formatUsageWithUnits(1234 * GIGABYTE, dataCategory)).toBe('1,234 GB');
+
+    expect(formatUsageWithUnits(0, dataCategory, {isAbbreviated: true})).toBe('0 GB');
+    expect(formatUsageWithUnits(MILLION, dataCategory, {isAbbreviated: true})).toBe(
       '0 GB'
     );
-    expect(formatUsageWithUnits(BILLION, DATA_CATEGORY_INFO.attachment.plural)).toBe(
+    expect(formatUsageWithUnits(BILLION, dataCategory, {isAbbreviated: true})).toBe(
       '1 GB'
     );
     expect(
-      formatUsageWithUnits(1.234 * BILLION, DATA_CATEGORY_INFO.attachment.plural)
-    ).toBe('1.23 GB');
-    expect(
-      formatUsageWithUnits(1234 * GIGABYTE, DATA_CATEGORY_INFO.attachment.plural)
-    ).toBe('1,234 GB');
-
-    expect(
-      formatUsageWithUnits(0, DATA_CATEGORY_INFO.attachment.plural, {isAbbreviated: true})
-    ).toBe('0 GB');
-    expect(
-      formatUsageWithUnits(MILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        isAbbreviated: true,
-      })
-    ).toBe('0 GB');
-    expect(
-      formatUsageWithUnits(BILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        isAbbreviated: true,
-      })
+      formatUsageWithUnits(1.234 * BILLION, dataCategory, {isAbbreviated: true})
     ).toBe('1 GB');
     expect(
-      formatUsageWithUnits(1.234 * BILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        isAbbreviated: true,
-      })
-    ).toBe('1 GB');
-    expect(
-      formatUsageWithUnits(1234 * BILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        isAbbreviated: true,
-      })
+      formatUsageWithUnits(1234 * BILLION, dataCategory, {isAbbreviated: true})
     ).toBe('1.2K GB');
 
+    expect(formatUsageWithUnits(0, dataCategory, {useUnitScaling: true})).toBe('0 B');
+    expect(formatUsageWithUnits(1000, dataCategory, {useUnitScaling: true})).toBe('1 kB');
+    expect(formatUsageWithUnits(MILLION, dataCategory, {useUnitScaling: true})).toBe(
+      '1 MB'
+    );
     expect(
-      formatUsageWithUnits(0, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
-    ).toBe('0 B');
-    expect(
-      formatUsageWithUnits(1000, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
-    ).toBe('1 KB');
-    expect(
-      formatUsageWithUnits(MILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
-    ).toBe('1 MB');
-    expect(
-      formatUsageWithUnits(1.234 * MILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
+      formatUsageWithUnits(1.234 * MILLION, dataCategory, {useUnitScaling: true})
     ).toBe('1.23 MB');
     expect(
-      formatUsageWithUnits(1.234 * BILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
+      formatUsageWithUnits(1.234 * BILLION, dataCategory, {useUnitScaling: true})
     ).toBe('1.23 GB');
     expect(
-      formatUsageWithUnits(1234 * BILLION, DATA_CATEGORY_INFO.attachment.plural, {
-        useUnitScaling: true,
-      })
+      formatUsageWithUnits(1234 * BILLION, dataCategory, {useUnitScaling: true})
     ).toBe('1.23 TB');
   });
 
-  it('should format continuous profiling correctly', function () {
+  it('should format continuous profiling correctly', () => {
     const hourInMs = 1000 * 60 * 60;
     [
-      DATA_CATEGORY_INFO.profileDuration.plural,
-      DATA_CATEGORY_INFO.profileDurationUI.plural,
+      DATA_CATEGORY_INFO.profile_duration.plural,
+      DATA_CATEGORY_INFO.profile_duration_ui.plural,
     ].forEach(dataCategory => {
       expect(formatUsageWithUnits(0, dataCategory)).toBe('0');
       expect(formatUsageWithUnits(7.6 * hourInMs, dataCategory)).toBe('7.6');
@@ -165,7 +135,7 @@ describe('formatUsageWithUnits', function () {
     });
   });
 
-  it('Correctly groups invalid outcome reasons', function () {
+  it('Correctly groups invalid outcome reasons', () => {
     expect(getReasonGroupName('invalid', 'duplicate_item')).toBe('invalid_request');
     expect(getReasonGroupName('invalid', 'too_large')).toBe('too_large_other');
     expect(getReasonGroupName('invalid', 'some_other_reason')).toBe('internal');

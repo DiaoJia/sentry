@@ -1,14 +1,350 @@
-from typing import Any
+import logging
+from collections.abc import Sequence
+from typing import Any, Literal
 
+from django.db import router, transaction
+from django.db.models import QuerySet
 from django.forms import ValidationError
 from jsonschema import ValidationError as JsonValidationError
 from jsonschema import validate
+from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.request import Request
 
+from sentry import audit_log, features
 from sentry.issues import grouptype
 from sentry.models.organization import Organization
+from sentry.models.project import Project
+from sentry.types.actor import Actor
+from sentry.users.models.user import User
+from sentry.users.services.user import RpcUser
+from sentry.utils import metrics
+from sentry.utils.audit import create_audit_entry
+from sentry.workflow_engine.models import Detector, DetectorWorkflow, Workflow
+from sentry.workflow_engine.types import DetectorId, WorkflowId
+from sentry.workflow_engine.typings.grouptype import IssueStreamGroupType
+
+logger = logging.getLogger(__name__)
+
+# Only those with organization write permissions can edit system-created detectors (e.g. error detectors).
+SYSTEM_CREATED_DETECTOR_REQUIRED_SCOPES = {"org:write"}
+USER_CREATED_DETECTOR_REQUIRED_SCOPES = {"org:write", "alerts:write"}
 
 
-def validate_json_schema(value, schema):
+def is_system_created_detector(detector: Detector) -> bool:
+    # Lazy imports to avoid circular imports: grouptype imports from validators/base
+    # which imports from this module.
+    from sentry.grouping.grouptype import ErrorGroupType
+    from sentry.issue_detection.performance_detection import PERFORMANCE_WFE_DETECTOR_TYPES
+
+    return (
+        detector.type in (ErrorGroupType.slug, IssueStreamGroupType.slug)
+        or detector.type in PERFORMANCE_WFE_DETECTOR_TYPES
+    )
+
+
+def can_edit_system_created_detectors(request: Request, detector: Detector) -> bool:
+    if detector.type == IssueStreamGroupType.slug:
+        return False
+
+    return request.access.has_any_project_scope(
+        detector.linked_project, SYSTEM_CREATED_DETECTOR_REQUIRED_SCOPES
+    )
+
+
+def can_edit_user_created_detectors(request: Request, project: Project) -> bool:
+    return request.access.has_any_project_scope(project, USER_CREATED_DETECTOR_REQUIRED_SCOPES)
+
+
+def can_edit_detectors(detectors: QuerySet[Detector], request: Request) -> bool:
+    """
+    Determine if the requesting user has access to edit the given detectors.
+    System created detectors lock edit access to org:write, while user created detectors
+    are more permissive.
+    """
+    required_scopes = (
+        SYSTEM_CREATED_DETECTOR_REQUIRED_SCOPES
+        if any(is_system_created_detector(detector) for detector in detectors)
+        else USER_CREATED_DETECTOR_REQUIRED_SCOPES
+    )
+
+    projects = Project.objects.filter(
+        id__in=detectors.values_list("project_id", flat=True).distinct()
+    )
+
+    return all(
+        request.access.has_any_project_scope(project, required_scopes) for project in projects
+    )
+
+
+def can_edit_detector(detector: Detector, request: Request) -> bool:
+    """
+    Determine if the requesting user has access to detector edit. If the request does not have the "alerts:write"
+    permission, then we must verify that the user is a team admin with "alerts:write" access to the project(s)
+    in their request.
+    """
+    if is_system_created_detector(detector) and not can_edit_system_created_detectors(
+        request, detector
+    ):
+        return False
+
+    return can_edit_user_created_detectors(request, detector.linked_project)
+
+
+def can_delete_detectors(detectors: QuerySet[Detector], request: Request) -> bool:
+    """
+    Determine if the requesting user has access to delete the given detectors.
+    Only user-created detectors can be deleted, and require "alerts:write" permission.
+    """
+    if any(is_system_created_detector(detector) for detector in detectors):
+        return False
+
+    projects = Project.objects.filter(
+        id__in=detectors.values_list("project_id", flat=True).distinct()
+    )
+    return all(can_edit_user_created_detectors(request, project) for project in projects)
+
+
+def can_delete_detector(detector: Detector, request: Request) -> bool:
+    """
+    Determine if the requesting user has access to delete the given detector.
+    Only user-created detectors can be deleted, and require "alerts:write" permission.
+    """
+    if is_system_created_detector(detector):
+        return False
+
+    return can_edit_user_created_detectors(request, detector.linked_project)
+
+
+def can_edit_detector_workflow_connections(detector: Detector, request: Request) -> bool:
+    """
+    Anyone with alert write access to the project can connect/disconnect detectors of any type,
+    which is slightly different from full edit access which differs by detector type.
+    The only exception is the all project detector, which requires system-created detector scopes.
+    """
+    if not detector.project:
+        return can_edit_all_project_detector_workflow_connections(request)
+
+    return request.access.has_any_project_scope(
+        detector.linked_project, USER_CREATED_DETECTOR_REQUIRED_SCOPES
+    )
+
+
+def validate_detectors_exist_and_have_permissions(
+    detector_ids: list[DetectorId], organization: Organization, request: Request
+) -> list[Detector]:
+    detectors = list(
+        Detector.objects.by_organization(organization.id)
+        .filter(id__in=detector_ids)
+        .select_related("project")
+    )
+    found_detector_ids = {detector.id for detector in detectors}
+    missing_detector_ids = set(detector_ids) - found_detector_ids
+
+    if not features.has("organizations:workflow-engine-all-projects-detector", organization):
+        missing_detector_ids |= {detector.id for detector in detectors if detector.project is None}
+
+    if missing_detector_ids:
+        raise serializers.ValidationError(f"Some detectors do not exist: {missing_detector_ids}")
+
+    if not all(can_edit_detector_workflow_connections(detector, request) for detector in detectors):
+        raise PermissionDenied
+
+    return detectors
+
+
+def validate_workflows_exist(
+    workflow_ids: list[int], organization: Organization
+) -> QuerySet[Workflow]:
+    workflows = Workflow.objects.filter(organization=organization, id__in=workflow_ids)
+    found_workflow_ids = set(workflows.values_list("id", flat=True))
+    missing_workflow_ids = set(workflow_ids) - found_workflow_ids
+
+    if missing_workflow_ids:
+        raise serializers.ValidationError(f"Some workflows do not exist: {missing_workflow_ids}")
+
+    return workflows
+
+
+def connect_workflows_to_detectors(
+    request: Request,
+    organization: Organization,
+    workflow_id: int,
+    detector_ids: list[DetectorId] | None,
+    update: bool = False,
+) -> None:
+    if detector_ids is not None:
+        validate_detectors_exist_and_have_permissions(detector_ids, organization, request)
+
+        def get_detector_workflows_to_add(
+            workflow_id: WorkflowId, detector_ids: set[DetectorId]
+        ) -> list[dict[Literal["detector_id", "workflow_id"], int]]:
+            detector_workflows_to_add: list[dict[Literal["detector_id", "workflow_id"], int]] = [
+                {"detector_id": detector_id, "workflow_id": workflow_id}
+                for detector_id in detector_ids
+            ]
+            return detector_workflows_to_add
+
+        if update:
+            existing_detector_workflows = list(
+                DetectorWorkflow.objects.filter(
+                    workflow_id=workflow_id,
+                    workflow__organization=organization,
+                ).select_related("detector", "detector__project")
+            )
+            new_detector_ids = set(detector_ids) - {
+                dw.detector_id for dw in existing_detector_workflows
+            }
+
+            detector_workflows_to_add = get_detector_workflows_to_add(workflow_id, new_detector_ids)
+            detector_workflows_to_remove = [
+                dw for dw in existing_detector_workflows if dw.detector_id not in detector_ids
+            ]
+            if not all(
+                can_edit_detector_workflow_connections(detector_workflow.detector, request)
+                for detector_workflow in detector_workflows_to_remove
+            ):
+                raise PermissionDenied
+        else:
+            detector_workflows_to_add = get_detector_workflows_to_add(
+                workflow_id, set(detector_ids)
+            )
+            detector_workflows_to_remove = []
+
+        perform_bulk_detector_workflow_operations(
+            detector_workflows_to_add=detector_workflows_to_add,
+            detector_workflows_to_remove=detector_workflows_to_remove,
+            request=request,
+            organization=organization,
+        )
+
+
+def connect_detectors_to_workflows(
+    request: Request,
+    organization: Organization,
+    detector_id: DetectorId,
+    workflow_ids: list[int] | None,
+    update: bool = False,
+) -> None:
+    if workflow_ids is not None:
+        validate_workflows_exist(workflow_ids, organization)
+
+        def get_detector_workflows_to_add(
+            detector_id: DetectorId, workflow_ids: set[WorkflowId]
+        ) -> list[dict[Literal["detector_id", "workflow_id"], int]]:
+            detector_workflows_to_add: list[dict[Literal["detector_id", "workflow_id"], int]] = [
+                {"detector_id": detector_id, "workflow_id": workflow_id}
+                for workflow_id in workflow_ids
+            ]
+            return detector_workflows_to_add
+
+        if update:
+            existing_detector_workflows = list(
+                DetectorWorkflow.objects.filter(
+                    detector_id=detector_id,
+                    detector__in=Detector.objects.by_organization(organization.id),
+                )
+            )
+            new_workflow_ids = set(workflow_ids) - {
+                dw.workflow_id for dw in existing_detector_workflows
+            }
+
+            detector_workflows_to_add = get_detector_workflows_to_add(detector_id, new_workflow_ids)
+            detector_workflows_to_remove = [
+                dw for dw in existing_detector_workflows if dw.workflow_id not in workflow_ids
+            ]
+        else:
+            detector_workflows_to_add = get_detector_workflows_to_add(
+                detector_id, set(workflow_ids)
+            )
+            detector_workflows_to_remove = []
+
+        perform_bulk_detector_workflow_operations(
+            detector_workflows_to_add=detector_workflows_to_add,
+            detector_workflows_to_remove=detector_workflows_to_remove,
+            request=request,
+            organization=organization,
+        )
+
+
+def perform_bulk_detector_workflow_operations(
+    detector_workflows_to_add: list[dict[Literal["detector_id", "workflow_id"], int]],
+    detector_workflows_to_remove: Sequence[DetectorWorkflow],
+    request: Request,
+    organization: Organization,
+) -> list[DetectorWorkflow]:
+    created_detector_workflows: list[DetectorWorkflow] = []
+
+    with transaction.atomic(router.db_for_write(DetectorWorkflow)):
+        if detector_workflows_to_remove:
+            DetectorWorkflow.objects.filter(
+                id__in=[detector_workflow.id for detector_workflow in detector_workflows_to_remove]
+            ).delete()
+
+        if detector_workflows_to_add:
+            created_detector_workflows = DetectorWorkflow.objects.bulk_create(
+                [
+                    DetectorWorkflow(
+                        detector_id=pair["detector_id"], workflow_id=pair["workflow_id"]
+                    )
+                    for pair in detector_workflows_to_add
+                ]
+            )
+
+    for detector_workflow in detector_workflows_to_remove:
+        create_audit_entry(
+            request=request,
+            organization=organization,
+            target_object=detector_workflow.id,
+            event=audit_log.get_event_id("DETECTOR_WORKFLOW_REMOVE"),
+            data=detector_workflow.get_audit_log_data(),
+        )
+
+    for detector_workflow in created_detector_workflows:
+        create_audit_entry(
+            request=request,
+            organization=organization,
+            target_object=detector_workflow.id,
+            event=audit_log.get_event_id("DETECTOR_WORKFLOW_ADD"),
+            data=detector_workflow.get_audit_log_data(),
+        )
+
+    return created_detector_workflows
+
+
+def update_owner(owner: Actor | None) -> tuple[int | None, int | None]:
+    if owner:
+        if owner.is_user:
+            owner_user_id = owner.id
+            owner_team_id = None
+        elif owner.is_team:
+            owner_user_id = None
+            owner_team_id = owner.id
+    else:
+        # Clear owner if None is passed
+        owner_user_id = None
+        owner_team_id = None
+
+    return owner_user_id, owner_team_id
+
+
+def log_alerting_quota_hit(
+    object_type: str, organization: Organization, actor: User | RpcUser | None
+) -> None:
+    """Call when a create request is rejected because an org has reached its quota for object_type."""
+    logger.info(
+        "workflow_engine.quota.limit_hit",
+        extra={
+            "object_type": object_type,
+            "organization_id": organization.id,
+            "organization_slug": organization.slug,
+            "actor_id": actor.id if actor is not None else None,
+        },
+    )
+    metrics.incr("workflow_engine.quota.limit_hit", tags={"object_type": object_type})
+
+
+def validate_json_schema(value: Any, schema: Any) -> Any:
     try:
         validate(value, schema)
     except JsonValidationError as e:
@@ -17,7 +353,7 @@ def validate_json_schema(value, schema):
     return value
 
 
-def validate_json_primitive(value):
+def validate_json_primitive(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         raise ValidationError(
             f"Invalid json primitive value: {value}. Must be a string, number, or boolean."
@@ -51,3 +387,38 @@ def get_unknown_detector_type_error(bad_value: str, organization: Organization) 
         return f"Unknown detector type '{bad_value}'. Must be one of: {available_str}"
     else:
         return f"Unknown detector type '{bad_value}'. No detector types are available."
+
+
+def is_workflow_connected_to_all_projects_detector(workflow: Workflow) -> bool:
+    from sentry.workflow_engine.processors.detector import get_all_projects_detector
+
+    all_projects_detector = get_all_projects_detector(workflow.organization_id)
+    if not all_projects_detector:
+        return False
+    return DetectorWorkflow.objects.filter(
+        detector_id=all_projects_detector.id, workflow_id=workflow.id
+    ).exists()
+
+
+def can_edit_all_project_detector_workflow_connections(request: Request) -> bool:
+    return request.access.has_scope("org:write")
+
+
+def should_include_all_projects_detector(request: Request, organization: Organization) -> bool:
+    return (
+        features.has("organizations:workflow-engine-all-projects-detector", organization)
+        and request.method == "GET"
+    )
+
+
+def should_include_all_projects_detector_workflows(
+    request: Request, organization: Organization
+) -> bool:
+    """
+    The flag is always required to show these workflows, but if it isn't a GET request, also check
+    that the caller has org:write. alerts:write is not sufficient to connect an all projects detector.
+    """
+    return features.has("organizations:workflow-engine-all-projects-detector", organization) and (
+        request.method == "GET"
+        or can_edit_all_project_detector_workflow_connections(request=request)
+    )

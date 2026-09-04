@@ -13,12 +13,12 @@ from sentry.constants import ObjectStatus
 from sentry.db.models import (
     BoundedPositiveIntegerField,
     FlexibleForeignKey,
-    GzippedDictField,
     Model,
-    region_silo_model,
+    cell_silo_model,
     sane_repr,
 )
 from sentry.db.models.fields.hybrid_cloud_foreign_key import HybridCloudForeignKey
+from sentry.db.models.fields.jsonfield import LegacyTextJSONField
 from sentry.db.models.manager.base import BaseManager
 from sentry.types.actor import Actor
 from sentry.utils.cache import cache
@@ -36,7 +36,7 @@ class RuleSource(IntEnum):
         )
 
 
-@region_silo_model
+@cell_silo_model
 class Rule(Model):
     __relocation_scope__ = RelocationScope.Organization
 
@@ -48,7 +48,7 @@ class Rule(Model):
     environment_id = BoundedPositiveIntegerField(null=True)
     label = models.CharField(max_length=256)
     # `data` contain all the specifics of the rule - conditions, actions, frequency, etc.
-    data: models.Field[dict[str, Any], dict[str, Any]] = GzippedDictField()
+    data = LegacyTextJSONField(default=dict)
     status = BoundedPositiveIntegerField(
         default=ObjectStatus.ACTIVE,
         choices=((ObjectStatus.ACTIVE, "Active"), (ObjectStatus.DISABLED, "Disabled")),
@@ -171,7 +171,7 @@ class RuleActivityType(Enum):
     DISABLED = 5
 
 
-@region_silo_model
+@cell_silo_model
 class RuleActivity(Model):
     __relocation_scope__ = RelocationScope.Organization
 
@@ -183,15 +183,3 @@ class RuleActivity(Model):
     class Meta:
         app_label = "sentry"
         db_table = "sentry_ruleactivity"
-
-
-@region_silo_model
-class NeglectedRule(Model):
-    __relocation_scope__ = RelocationScope.Organization
-
-    rule = FlexibleForeignKey("sentry.Rule")
-    organization = FlexibleForeignKey("sentry.Organization")
-    disable_date = models.DateTimeField()
-    opted_out = models.BooleanField(default=False)
-    sent_initial_email_date = models.DateTimeField(null=True)
-    sent_final_email_date = models.DateTimeField(null=True)

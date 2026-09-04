@@ -1,27 +1,27 @@
 import {Fragment, useState} from 'react';
 
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
 import {
   EventDrawerBody,
   EventNavigator,
-  EventStickyControls,
+  Header,
 } from 'sentry/components/events/eventDrawer';
-import SuspectTable from 'sentry/components/issues/suspect/suspectTable';
 import {IconSort} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
 import type {Group} from 'sentry/types/group';
 import type {Organization} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import {useParams} from 'sentry/utils/useParams';
-import GroupDistributionsSearchInput from 'sentry/views/issueDetails/groupDistributions/groupDistributionsSearchInput';
-import HeaderTitle from 'sentry/views/issueDetails/groupDistributions/headerTitle';
-import TagExportDropdown from 'sentry/views/issueDetails/groupDistributions/tagExportDropdown';
-import TagFlagPicker from 'sentry/views/issueDetails/groupDistributions/tagFlagPicker';
+import {GroupDistributionsSearchInput} from 'sentry/views/issueDetails/groupDistributions/groupDistributionsSearchInput';
+import {TagExportDropdown} from 'sentry/views/issueDetails/groupDistributions/tagExportDropdown';
+import {TagFlagPicker} from 'sentry/views/issueDetails/groupDistributions/tagFlagPicker';
 import {DrawerTab} from 'sentry/views/issueDetails/groupDistributions/types';
 import {TagDetailsDrawerContent} from 'sentry/views/issueDetails/groupTags/tagDetailsDrawerContent';
-import TagDrawerContent from 'sentry/views/issueDetails/groupTags/tagDrawerContent';
+import {TagDrawerContent} from 'sentry/views/issueDetails/groupTags/tagDrawerContent';
 import {useEnvironmentsFromUrl} from 'sentry/views/issueDetails/utils';
 
 interface Props {
@@ -32,7 +32,7 @@ interface Props {
   setTab: (value: DrawerTab) => void;
 }
 
-export default function TagsDistributionDrawer({
+export function TagsDistributionDrawer({
   group,
   organization,
   project,
@@ -42,19 +42,18 @@ export default function TagsDistributionDrawer({
   const environments = useEnvironmentsFromUrl();
   const {tagKey} = useParams<{tagKey: string}>();
 
-  // If we're showing the suspect section at all
-  const enableSuspectFlags = organization.features.includes('feature-flag-suspect-flags');
-
   const [search, setSearch] = useState('');
 
   return (
     <Fragment>
       <EventNavigator>
-        <HeaderTitle
-          tagKey={tagKey}
-          tab={DrawerTab.TAGS}
-          includeFeatureFlagsTab={includeFeatureFlagsTab}
-        />
+        <Header>
+          {tagKey
+            ? tct('Tag Details - [tagKey]', {tagKey})
+            : includeFeatureFlagsTab
+              ? t('Tags & Feature Flags')
+              : t('All Tags')}
+        </Header>
 
         {tagKey ? (
           <TagExportDropdown
@@ -63,40 +62,31 @@ export default function TagsDistributionDrawer({
             group={group}
             tagKey={tagKey}
           />
-        ) : null}
+        ) : (
+          <Grid flow="column" align="center" gap="md" marginLeft="auto">
+            {includeFeatureFlagsTab ? (
+              <TagFlagPicker setTab={setTab} tab={DrawerTab.TAGS} />
+            ) : null}
+            <GroupDistributionsSearchInput
+              includeFeatureFlagsTab={includeFeatureFlagsTab}
+              search={search}
+              onChange={value => {
+                setSearch(value);
+                trackAnalytics('tags.drawer.action', {
+                  control: 'search',
+                  organization,
+                });
+              }}
+            />
+            {includeFeatureFlagsTab ? (
+              <Tooltip title="Highlighted tags are shown first">
+                <Button aria-label="" disabled size="xs" icon={<IconSort />} />
+              </Tooltip>
+            ) : null}
+          </Grid>
+        )}
       </EventNavigator>
       <EventDrawerBody>
-        {!tagKey && enableSuspectFlags ? (
-          <SuspectTable environments={environments} group={group} />
-        ) : null}
-
-        {tagKey ? null : (
-          <EventStickyControls>
-            <TagFlagPicker setTab={setTab} tab={DrawerTab.TAGS} />
-
-            <ButtonBar gap={1}>
-              <GroupDistributionsSearchInput
-                includeFeatureFlagsTab={includeFeatureFlagsTab}
-                search={search}
-                onChange={value => {
-                  setSearch(value);
-                  trackAnalytics('tags.drawer.action', {
-                    control: 'search',
-                    organization,
-                  });
-                }}
-              />
-              {includeFeatureFlagsTab ? (
-                <Fragment>
-                  <Tooltip title="Highlighted tags are shown first">
-                    <Button aria-label="" disabled size="xs" icon={<IconSort />} />
-                  </Tooltip>
-                </Fragment>
-              ) : null}
-            </ButtonBar>
-          </EventStickyControls>
-        )}
-
         {tagKey ? (
           <TagDetailsDrawerContent group={group} />
         ) : (

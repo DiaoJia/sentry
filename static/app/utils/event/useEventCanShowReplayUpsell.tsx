@@ -2,12 +2,12 @@ import {useMemo} from 'react';
 
 import type {Event} from 'sentry/types/event';
 import type {Group} from 'sentry/types/group';
-import type {PlatformKey} from 'sentry/types/project';
+import type {PlatformKey} from 'sentry/types/platform';
 import {getConfigForIssueType} from 'sentry/utils/issueTypeConfig';
 import {projectCanUpsellReplay} from 'sentry/utils/replays/projectSupportsReplay';
-import useOrganization from 'sentry/utils/useOrganization';
-import useProjectFromSlug from 'sentry/utils/useProjectFromSlug';
-import useProjects from 'sentry/utils/useProjects';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjectFromSlug} from 'sentry/utils/useProjectFromSlug';
+import {useProjects} from 'sentry/utils/useProjects';
 
 interface Props {
   event: Event;
@@ -27,11 +27,7 @@ type Result =
       upsellProjectId: string;
     };
 
-export default function useEventCanShowReplayUpsell({
-  event,
-  group,
-  projectSlug,
-}: Props): Result {
+export function useEventCanShowReplayUpsell({event, group, projectSlug}: Props): Result {
   const organization = useOrganization();
   const hasReplaysFeature = organization.features.includes('session-replay');
 

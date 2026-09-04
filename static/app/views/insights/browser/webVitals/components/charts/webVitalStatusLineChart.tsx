@@ -1,25 +1,26 @@
 import styled from '@emotion/styled';
 
-import {space} from 'sentry/styles/space';
+import {useFetchSpanTimeSeries} from 'sentry/utils/timeSeries/useFetchEventsTimeSeries';
 import {MutableSearch} from 'sentry/utils/tokenizeSearch';
 import type {Plottable} from 'sentry/views/dashboards/widgets/timeSeriesWidget/plottables/plottable';
 import {Thresholds} from 'sentry/views/dashboards/widgets/timeSeriesWidget/plottables/thresholds';
 import {WEB_VITAL_FULL_NAME_MAP} from 'sentry/views/insights/browser/webVitals/components/webVitalDescription';
 import {Referrer} from 'sentry/views/insights/browser/webVitals/referrers';
-import {FIELD_ALIASES} from 'sentry/views/insights/browser/webVitals/settings';
+import {
+  DEFAULT_QUERY_FILTER,
+  FIELD_ALIASES,
+} from 'sentry/views/insights/browser/webVitals/settings';
 import type {WebVitals} from 'sentry/views/insights/browser/webVitals/types';
+import {WEB_VITAL_TO_FIELD} from 'sentry/views/insights/browser/webVitals/types';
 import type {BrowserType} from 'sentry/views/insights/browser/webVitals/utils/queryParameterDecoders/browserType';
 import {
   PERFORMANCE_SCORE_MEDIANS,
   PERFORMANCE_SCORE_P90S,
 } from 'sentry/views/insights/browser/webVitals/utils/scoreThresholds';
-import {useDefaultWebVitalsQuery} from 'sentry/views/insights/browser/webVitals/utils/useDefaultQuery';
 // eslint-disable-next-line no-restricted-imports
 import {InsightsLineChartWidget} from 'sentry/views/insights/common/components/insightsLineChartWidget';
-import type {DiscoverSeries} from 'sentry/views/insights/common/queries/useDiscoverSeries';
-import {useMetricsSeries} from 'sentry/views/insights/common/queries/useDiscoverSeries';
 import type {SubregionCode} from 'sentry/views/insights/types';
-import {SpanIndexedField} from 'sentry/views/insights/types';
+import {SpanFields} from 'sentry/views/insights/types';
 
 interface Props {
   webVital: WebVitals | null;
@@ -34,45 +35,45 @@ export function WebVitalStatusLineChart({
   browserTypes,
   subregions,
 }: Props) {
-  const defaultQuery = useDefaultWebVitalsQuery();
   const webVitalP90 = webVital ? PERFORMANCE_SCORE_P90S[webVital] : 0;
   const webVitalMedian = webVital ? PERFORMANCE_SCORE_MEDIANS[webVital] : 0;
 
-  const search = new MutableSearch(defaultQuery);
+  const search = new MutableSearch(DEFAULT_QUERY_FILTER);
   const referrer = Referrer.WEB_VITAL_STATUS_LINE_CHART;
 
   if (transaction) {
     search.addFilterValue('transaction', transaction);
   }
   if (browserTypes) {
-    search.addDisjunctionFilterValues(SpanIndexedField.BROWSER_NAME, browserTypes);
+    search.addDisjunctionFilterValues(SpanFields.BROWSER_NAME, browserTypes);
   }
   if (subregions) {
-    search.addDisjunctionFilterValues(SpanIndexedField.USER_GEO_SUBREGION, subregions);
+    search.addDisjunctionFilterValues(SpanFields.USER_GEO_SUBREGION, subregions);
   }
 
   const {
     data: timeseriesData,
     isLoading: isTimeseriesLoading,
     error: timeseriesError,
-  } = useMetricsSeries(
+  } = useFetchSpanTimeSeries(
     {
-      search,
-      yAxis: webVital ? [`p75(measurements.${webVital})`] : [],
+      query: search,
+      yAxis: webVital ? [`p75(${WEB_VITAL_TO_FIELD[webVital]})`] : [],
       enabled: !!webVital,
     },
     referrer
   );
 
-  const webVitalSeries: DiscoverSeries = webVital
-    ? timeseriesData?.[`p75(measurements.${webVital})`]
-    : {data: [], meta: {fields: {}, units: {}}, seriesName: ''};
+  const timeSeries = timeseriesData?.timeSeries || [];
+  const webVitalTimeSeries = webVital
+    ? timeSeries.find(ts => ts.yAxis === `p75(${WEB_VITAL_TO_FIELD[webVital]})`)
+    : undefined;
 
-  const includePoorThreshold = webVitalSeries.data?.some(
-    ({value}) => value > webVitalMedian
+  const includePoorThreshold = webVitalTimeSeries?.values.some(
+    ({value}) => (value || 0) > webVitalMedian
   );
-  const includeMehThreshold = webVitalSeries.data?.some(
-    ({value}) => value >= webVitalP90
+  const includeMehThreshold = webVitalTimeSeries?.values.some(
+    ({value}) => (value || 0) >= webVitalP90
   );
 
   const thresholdsPlottable = new Thresholds({
@@ -83,6 +84,7 @@ export function WebVitalStatusLineChart({
       },
       unit: 'ms',
     },
+    showLabels: true,
   });
 
   const extraPlottables: Plottable[] = isTimeseriesLoading ? [] : [thresholdsPlottable];
@@ -97,7 +99,7 @@ export function WebVitalStatusLineChart({
           showLegend="never"
           isLoading={isTimeseriesLoading}
           error={timeseriesError}
-          series={[webVitalSeries]}
+          timeSeries={webVitalTimeSeries ? [webVitalTimeSeries] : []}
           extraPlottables={extraPlottables}
           queryInfo={{
             search,
@@ -112,6 +114,5 @@ export function WebVitalStatusLineChart({
 
 const ChartContainer = styled('div')`
   position: relative;
-  flex: 1;
-  padding-bottom: ${space(2)};
+  padding-bottom: ${p => p.theme.space.xl};
 `;

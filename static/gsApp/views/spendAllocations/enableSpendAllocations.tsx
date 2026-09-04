@@ -1,11 +1,12 @@
 import type {Dispatch} from 'react';
-import styled from '@emotion/styled';
+
+import {Button} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
 
 import type {Client} from 'sentry/api';
-import {Button} from 'sentry/components/core/button';
-import Panel from 'sentry/components/panels/panel';
+import {Panel} from 'sentry/components/panels/panel';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 
 type Props = {
   api: Client;
@@ -15,7 +16,7 @@ type Props = {
   setErrors: Dispatch<string | null>;
 };
 
-function EnableSpendAllocations({
+export function EnableSpendAllocations({
   hasScope,
   fetchSpendAllocations,
   api,
@@ -25,14 +26,24 @@ function EnableSpendAllocations({
   const enableAction = async () => {
     try {
       // Toggle option; TODO: make sure this is actually redundant before removing this
-      await api.requestPromise(`/organizations/${orgSlug}/spend-allocations/toggle/`, {
-        method: 'POST',
-      });
+      await api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/spend-allocations/toggle/', {
+          path: {organizationIdOrSlug: orgSlug},
+        }),
+        {
+          method: 'POST',
+        }
+      );
       // Create root allocations
-      await api.requestPromise(`/organizations/${orgSlug}/spend-allocations/index/`, {
-        method: 'POST',
-      });
-    } catch (err) {
+      await api.requestPromise(
+        getApiUrl('/organizations/$organizationIdOrSlug/spend-allocations/index/', {
+          path: {organizationIdOrSlug: orgSlug},
+        }),
+        {
+          method: 'POST',
+        }
+      );
+    } catch (err: any) {
       if (err.status === 409) {
         setErrors('Spend Allocations are already enabled');
       }
@@ -41,38 +52,33 @@ function EnableSpendAllocations({
   };
 
   return (
-    <EnablePanel>
-      <p>{t('Enable the Spend Allocation feature for your organization')}</p>
-      {hasScope && (
-        <Button
-          aria-label="Get started"
-          priority="primary"
-          size="sm"
-          disabled={!hasScope}
-          onClick={enableAction}
-        >
-          {t('Get Started')}
-        </Button>
-      )}
-      {!hasScope && (
-        <p>
-          <strong>
-            {t('Chat with your organization owner to enable spend allocations')}
-          </strong>
-        </p>
-      )}
-    </EnablePanel>
+    <Panel>
+      <Stack
+        justify="center"
+        align="center"
+        padding="3xl"
+        style={{minHeight: '200px', textAlign: 'center'}}
+      >
+        <p>{t('Enable the Spend Allocation feature for your organization')}</p>
+        {hasScope && (
+          <Button
+            aria-label={t('Get started')}
+            variant="primary"
+            size="sm"
+            disabled={!hasScope}
+            onClick={enableAction}
+          >
+            {t('Get Started')}
+          </Button>
+        )}
+        {!hasScope && (
+          <p>
+            <strong>
+              {t('Chat with your organization owner to enable spend allocations')}
+            </strong>
+          </p>
+        )}
+      </Stack>
+    </Panel>
   );
 }
-
-export default EnableSpendAllocations;
-
-const EnablePanel = styled(Panel)`
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  min-height: 200px;
-  padding: ${space(4)};
-  text-align: center;
-`;

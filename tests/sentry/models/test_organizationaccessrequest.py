@@ -8,7 +8,7 @@ from sentry.testutils.helpers.features import with_feature
 
 
 class SendRequestEmailTest(TestCase):
-    def test_sends_email_to_everyone(self):
+    def test_sends_email_to_everyone(self) -> None:
         owner = self.create_user("owner@example.com")
         team_admin = self.create_user("team-admin@example.com")
         non_team_admin = self.create_user("non-team-admin@example.com")
@@ -42,7 +42,7 @@ class SendRequestEmailTest(TestCase):
         assert sorted(m.to[0] for m in mail.outbox) == sorted([owner.email, team_admin.email])
 
     @with_feature("system:multi-region")
-    def test_sends_no_email_to_invited_member(self):
+    def test_sends_no_email_to_invited_member(self) -> None:
         owner = self.create_user("owner@example.com")
 
         org = self.create_organization(owner=owner)
@@ -60,7 +60,7 @@ class SendRequestEmailTest(TestCase):
         assert len(mail.outbox) == 0
 
     @with_feature("system:multi-region")
-    def test_sends_email_with_link(self):
+    def test_sends_email_with_link(self) -> None:
         owner = self.create_user("owner@example.com")
         requesting_user = self.create_user("requesting@example.com")
 
@@ -79,3 +79,25 @@ class SendRequestEmailTest(TestCase):
 
         assert len(mail.outbox) == 1
         assert org.absolute_url("/settings/teams/") in mail.outbox[0].body
+
+    @with_feature("system:multi-region")
+    def test_sanitizes_periods_in_display_name(self) -> None:
+        owner = self.create_user("owner@example.com")
+        requesting_user = self.create_user("requesting@example.com", name="Visit evil.com now")
+
+        org = self.create_organization(owner=owner)
+        team = self.create_team(organization=org)
+        self.create_team_membership(team=team, user=owner)
+
+        requesting_member = self.create_member(
+            organization=org, user=requesting_user, role="member", teams=[]
+        )
+
+        request = OrganizationAccessRequest.objects.create(member=requesting_member, team=team)
+
+        with self.tasks():
+            request.send_request_email()
+
+        assert len(mail.outbox) == 1
+        assert "evil.com" not in mail.outbox[0].body
+        assert "evil\u2060.com" in mail.outbox[0].body

@@ -1,10 +1,11 @@
 import {ProjectFixture} from 'sentry-fixture/project';
 
 import {filterSupportedTasks} from 'sentry/components/onboardingWizard/filterSupportedTasks';
-import {type OnboardingTask, OnboardingTaskKey} from 'sentry/types/onboarding';
-import type {PlatformKey, Project} from 'sentry/types/project';
+import {OnboardingTaskKey, type OnboardingTask} from 'sentry/types/onboarding';
+import type {PlatformKey} from 'sentry/types/platform';
+import type {Project} from 'sentry/types/project';
 
-describe('filterSupportedTasks', function () {
+describe('filterSupportedTasks', () => {
   const onboardingTasks: OnboardingTask[] = [
     {
       task: OnboardingTaskKey.FIRST_PROJECT,
@@ -35,7 +36,7 @@ describe('filterSupportedTasks', function () {
     },
   ];
 
-  it('filters out nothing if any supported platform', function () {
+  it('filters out nothing if any supported platform', () => {
     const supportedProject = ProjectFixture({
       platform: 'javascript-react',
     }) as Project & {platform: PlatformKey};
@@ -49,7 +50,7 @@ describe('filterSupportedTasks', function () {
     expect(supportedTasks).toHaveLength(3);
   });
 
-  it('filters out for unsupported platform', function () {
+  it('filters out for unsupported platform', () => {
     const project = ProjectFixture({
       platform: 'nintendo-switch',
       firstTransactionEvent: false,
@@ -58,7 +59,7 @@ describe('filterSupportedTasks', function () {
     expect(supportedTasks).toHaveLength(1);
   });
 
-  it('filters out performance only if all projects are without support', function () {
+  it('filters out performance only if all projects are without support', () => {
     const project1 = ProjectFixture({
       platform: 'nintendo-switch',
       firstTransactionEvent: false,

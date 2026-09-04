@@ -4,7 +4,6 @@ import logging
 from typing import Any, TypedDict
 
 from django.db import router, transaction
-from django.http import Http404
 
 from sentry.incidents.models.incident import IncidentStatus
 from sentry.incidents.typings.metric_detector import (
@@ -26,6 +25,7 @@ from sentry.utils import metrics
 logger = logging.getLogger("sentry.integrations.pagerduty")
 
 PAGERDUTY_CUSTOM_PRIORITIES = {
+    "default",
     "critical",
     "warning",
     "error",
@@ -96,10 +96,9 @@ def build_incident_attachment(
     alert_context: AlertContext,
     metric_issue_context: MetricIssueContext,
     organization: Organization,
-    integration_key,
+    integration_key: str,
     notification_uuid: str | None = None,
 ) -> dict[str, Any]:
-
     data = incident_attachment_info(
         organization=organization,
         alert_context=alert_context,
@@ -178,7 +177,7 @@ def send_incident_alert_notification(
                 "organization_id": organization_id,
             },
         )
-        raise Http404
+        return False
 
     org_integration_id: int | None = None
     if org_integration:

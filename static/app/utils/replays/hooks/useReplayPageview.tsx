@@ -1,15 +1,18 @@
 import {useEffect, useRef} from 'react';
 
 import {trackAnalytics} from 'sentry/utils/analytics';
-import useOrganization from 'sentry/utils/useOrganization';
+import {useOrganization} from 'sentry/utils/useOrganization';
 import {useUser} from 'sentry/utils/useUser';
 
-function useReplayPageview(type: 'replay.details-time-spent' | 'replay.list-time-spent') {
+export function useReplayPageview(
+  type: 'replay.details-time-spent' | 'replay.list-time-spent'
+) {
   const user = useUser();
   const organization = useOrganization();
-  const startTimeRef = useRef(Date.now());
+  const startTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
+    startTimeRef.current = Date.now();
     const startTime = startTimeRef.current;
 
     return () => {
@@ -22,5 +25,3 @@ function useReplayPageview(type: 'replay.details-time-spent' | 'replay.list-time
     };
   }, [organization, type, user.email]);
 }
-
-export default useReplayPageview;

@@ -15,8 +15,9 @@ interface RouteWithName extends PlainRoute {
   name?: string;
 }
 
-interface PartialInjectedRouter<P>
-  extends Partial<Omit<InjectedRouter<P>, 'location' | 'routes'>> {
+interface PartialInjectedRouter<P> extends Partial<
+  Omit<InjectedRouter<P>, 'location' | 'routes'>
+> {
   location?: Partial<Location>;
   routes?: RouteWithName[];
 }
@@ -25,6 +26,9 @@ interface InitializeOrgOptions<RouterParams> {
   organization?: Partial<Organization>;
   project?: Partial<Project>;
   projects?: Array<Partial<Project>>;
+  /**
+   * @deprecated Use `initialRouterConfig` and the router returned from `render` instead.
+   */
   router?: PartialInjectedRouter<RouterParams>;
 }
 
@@ -66,7 +70,7 @@ export function initializeOrg<RouterParams = {orgId: string; projectId: string}>
    */
   const routerProps: RouteComponentProps<RouterParams> = {
     params: router.params as any,
-    routeParams: router.params as any,
+    routeParams: router.params,
     router,
     route: router.routes[0]!,
     routes: router.routes,
@@ -77,7 +81,6 @@ export function initializeOrg<RouterParams = {orgId: string; projectId: string}>
     organization,
     project: project!,
     projects,
-    router,
     routerProps,
   };
 }

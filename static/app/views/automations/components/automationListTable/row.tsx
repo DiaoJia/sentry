@@ -1,49 +1,64 @@
 import styled from '@emotion/styled';
 
-import Placeholder from 'sentry/components/placeholder';
-import {ProjectList} from 'sentry/components/projectList';
+import {Checkbox} from '@sentry/scraps/checkbox';
+import {Flex} from '@sentry/scraps/layout';
+
+import {Placeholder} from 'sentry/components/placeholder';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {ActionCell} from 'sentry/components/workflowEngine/gridCell/actionCell';
-import AutomationTitleCell from 'sentry/components/workflowEngine/gridCell/automationTitleCell';
+import {AutomationTitleCell} from 'sentry/components/workflowEngine/gridCell/automationTitleCell';
 import {TimeAgoCell} from 'sentry/components/workflowEngine/gridCell/timeAgoCell';
-import {SimpleTable} from 'sentry/components/workflowEngine/simpleTable';
-import ProjectsStore from 'sentry/stores/projectsStore';
 import type {Automation} from 'sentry/types/workflowEngine/automations';
 import {AutomationListConnectedDetectors} from 'sentry/views/automations/components/automationListTable/connectedDetectors';
-import {
-  getAutomationActions,
-  useAutomationProjectIds,
-} from 'sentry/views/automations/hooks/utils';
+import {ProjectsCell} from 'sentry/views/automations/components/automationListTable/projectsCell';
+import {useCanEditAutomation} from 'sentry/views/automations/hooks/useCanEditAutomation';
+import {getAutomationActions} from 'sentry/views/automations/hooks/utils';
 
 type AutomationListRowProps = {
   automation: Automation;
+  onSelect: (id: string) => void;
+  selected: boolean;
 };
 
-export function AutomationListRow({automation}: AutomationListRowProps) {
+export function AutomationListRow({
+  automation,
+  selected,
+  onSelect,
+}: AutomationListRowProps) {
+  const canEditAutomations = useCanEditAutomation();
+
   const actions = getAutomationActions(automation);
-  const {disabled, lastTriggered, detectorIds = []} = automation;
-  const projectIds = useAutomationProjectIds(automation);
-  const projectSlugs = projectIds.map(
-    projectId => ProjectsStore.getById(projectId)?.slug
-  ) as string[];
+  const {enabled, lastTriggered, detectorIds} = automation;
 
   return (
     <AutomationSimpleTableRow
-      variant={disabled ? 'faded' : 'default'}
+      variant={enabled ? 'default' : 'faded'}
       data-test-id="automation-list-row"
     >
-      <SimpleTable.RowCell name="name">
-        <AutomationTitleCell automation={automation} />
+      <SimpleTable.RowCell>
+        <Flex gap="md" align="center">
+          {canEditAutomations && (
+            <Flex align="center" flexShrink={0} width="20px" height="20px">
+              <Checkbox
+                checked={selected}
+                onChange={() => onSelect(automation.id)}
+                className="select-row"
+              />
+            </Flex>
+          )}
+          <AutomationTitleCell automation={automation} />
+        </Flex>
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="last-triggered">
+      <SimpleTable.RowCell data-column-name="last-triggered">
         <TimeAgoCell date={lastTriggered} />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="action">
-        <ActionCell actions={actions} disabled={disabled} />
+      <SimpleTable.RowCell data-column-name="action">
+        <ActionCell actions={actions} disabled={!enabled} />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="projects">
-        <ProjectList projectSlugs={projectSlugs} />
+      <SimpleTable.RowCell data-column-name="projects">
+        <ProjectsCell automation={automation} />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="connected-monitors">
+      <SimpleTable.RowCell data-column-name="connected-monitors">
         <AutomationListConnectedDetectors detectorIds={detectorIds} />
       </SimpleTable.RowCell>
     </AutomationSimpleTableRow>
@@ -53,19 +68,19 @@ export function AutomationListRow({automation}: AutomationListRowProps) {
 export function AutomationListRowSkeleton() {
   return (
     <AutomationSimpleTableRow>
-      <SimpleTable.RowCell name="name">
+      <SimpleTable.RowCell>
         <Placeholder height="20px" />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="last-triggered">
+      <SimpleTable.RowCell data-column-name="last-triggered">
         <Placeholder height="20px" />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="action">
+      <SimpleTable.RowCell data-column-name="action">
         <Placeholder height="20px" />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="projects">
+      <SimpleTable.RowCell data-column-name="projects">
         <Placeholder height="20px" />
       </SimpleTable.RowCell>
-      <SimpleTable.RowCell name="connected-monitors">
+      <SimpleTable.RowCell data-column-name="connected-monitors">
         <Placeholder height="20px" />
       </SimpleTable.RowCell>
     </AutomationSimpleTableRow>
@@ -74,4 +89,17 @@ export function AutomationListRowSkeleton() {
 
 const AutomationSimpleTableRow = styled(SimpleTable.Row)`
   min-height: 54px;
+
+  &:hover {
+    background-color: ${p =>
+      p.theme.tokens.interactive.transparent.neutral.background.hover};
+  }
+
+  @media (hover: hover) {
+    &:not(:has(:hover)):not(:has(input:checked)) {
+      .select-row {
+        ${p => p.theme.visuallyHidden}
+      }
+    }
+  }
 `;

@@ -1,28 +1,28 @@
-import {Fragment} from 'react';
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 import round from 'lodash/round';
 
-import MiniBarChart from 'sentry/components/charts/miniBarChart';
+import {LinkButton} from '@sentry/scraps/button';
+import {EmptyState} from '@sentry/scraps/emptyState';
+import {Text} from '@sentry/scraps/text';
+
+import {MiniBarChart} from 'sentry/components/charts/miniBarChart';
 import type {DateTimeObject} from 'sentry/components/charts/utils';
-import {LinkButton} from 'sentry/components/core/button/linkButton';
-import LoadingError from 'sentry/components/loadingError';
-import {normalizeDateTimeParams} from 'sentry/components/organizations/pageFilters/parse';
-import {PanelTable} from 'sentry/components/panels/panelTable';
-import Placeholder from 'sentry/components/placeholder';
+import {LoadingError} from 'sentry/components/loadingError';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {Placeholder} from 'sentry/components/placeholder';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
 import {IconArrow} from 'sentry/icons';
 import {t, tct} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization, SessionApiResponse} from 'sentry/types/organization';
 import {SessionFieldWithOperation, SessionStatus} from 'sentry/types/organization';
 import type {Project} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 import {formatFloat} from 'sentry/utils/number/formatFloat';
 import {useApiQuery} from 'sentry/utils/queryClient';
 import {getCountSeries, getCrashFreeRate, getSeriesSum} from 'sentry/utils/sessions';
-import type {ColorOrAlias} from 'sentry/utils/theme';
-import {displayCrashFreePercent} from 'sentry/views/releases/utils';
+import {displayCrashFreePercent} from 'sentry/views/explore/releases/utils';
 
-import {ProjectBadge, ProjectBadgeContainer} from './styles';
+import {ProjectBadge, ProjectBadgeContainer, TeamInsightsTable} from './styles';
 import {groupByTrend} from './utils';
 
 interface TeamStabilityProps extends DateTimeObject {
@@ -30,7 +30,7 @@ interface TeamStabilityProps extends DateTimeObject {
   projects: Project[];
 }
 
-function TeamStability({
+export function TeamStability({
   organization,
   projects,
   period,
@@ -55,7 +55,9 @@ function TeamStability({
     refetch: refetchPeriodSessions,
   } = useApiQuery<SessionApiResponse>(
     [
-      `/organizations/${organization.slug}/sessions/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/sessions/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           ...commonQuery,
@@ -73,7 +75,9 @@ function TeamStability({
     refetch: refetchWeekSessions,
   } = useApiQuery<SessionApiResponse>(
     [
-      `/organizations/${organization.slug}/sessions/`,
+      getApiUrl('/organizations/$organizationIdOrSlug/sessions/', {
+        path: {organizationIdOrSlug: organization.slug},
+      }),
       {
         query: {
           ...commonQuery,
@@ -135,12 +139,16 @@ function TeamStability({
     );
 
     const sumSessionsCount = Math.floor(sumSessions.length / 7);
-    const countSeriesWeeklyTotals: number[] = new Array(sumSessionsCount).fill(0);
+    const countSeriesWeeklyTotals = Array.from<number>({length: sumSessionsCount}).fill(
+      0
+    );
     countSeries.forEach(
       (s, idx) => (countSeriesWeeklyTotals[Math.floor(idx / 7)]! += s.value)
     );
 
-    const sumSessionsWeeklyTotals: number[] = new Array(sumSessionsCount).fill(0);
+    const sumSessionsWeeklyTotals = Array.from<number>({length: sumSessionsCount}).fill(
+      0
+    );
     sumSessions.forEach((s, idx) => (sumSessionsWeeklyTotals[Math.floor(idx / 7)]! += s));
 
     const data = countSeriesWeeklyTotals.map((value, idx) => ({
@@ -187,10 +195,10 @@ function TeamStability({
     }
 
     return (
-      <SubText color={trend >= 0 ? 'successText' : 'errorText'}>
+      <Text variant={trend >= 0 ? 'success' : 'danger'}>
         {`${round(Math.abs(trend), 3)}\u0025`}
         <PaddedIconArrow direction={trend >= 0 ? 'up' : 'down'} size="xs" />
-      </SubText>
+      </Text>
     );
   }
 
@@ -201,92 +209,87 @@ function TeamStability({
   const groupedProjects = groupByTrend(sortedProjects);
 
   return (
-    <StyledPanelTable
-      isEmpty={projects.length === 0}
-      emptyMessage={t('No projects with release health enabled')}
-      emptyAction={
-        <LinkButton
-          size="sm"
-          external
-          href="https://docs.sentry.io/platforms/dotnet/guides/nlog/configuration/releases/#release-health"
-        >
-          {t('Learn More')}
-        </LinkButton>
+    <StyledSimpleTable
+      header={
+        <SimpleTable.HeaderRow>
+          <SimpleTable.HeaderCell>{t('Project')}</SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>
+            <RightAligned>{tct('Last [period]', {period})}</RightAligned>
+          </SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>
+            <RightAligned>{tct('[period] Avg', {period})}</RightAligned>
+          </SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>
+            <RightAligned>{t('Last 7 Days')}</RightAligned>
+          </SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>
+            <RightAligned>{t('Difference')}</RightAligned>
+          </SimpleTable.HeaderCell>
+        </SimpleTable.HeaderRow>
       }
-      headers={[
-        t('Project'),
-        <RightAligned key="last">{tct('Last [period]', {period})}</RightAligned>,
-        <RightAligned key="avg">{tct('[period] Avg', {period})}</RightAligned>,
-        <RightAligned key="curr">{t('Last 7 Days')}</RightAligned>,
-        <RightAligned key="diff">{t('Difference')}</RightAligned>,
-      ]}
     >
-      {groupedProjects.map(({project}) => (
-        <Fragment key={project.id}>
-          <ProjectBadgeContainer>
-            <ProjectBadge avatarSize={18} project={project} />
-          </ProjectBadgeContainer>
-
-          <div>
-            {periodSessions && weekSessions && !isLoading && (
-              <MiniBarChart
-                isGroupedByDate
-                showTimeInTooltip
-                series={getMiniBarChartSeries(project, periodSessions)}
-                height={25}
-                tooltipFormatter={(value: number) => `${value.toLocaleString()}%`}
-              />
-            )}
-          </div>
-          <ScoreWrapper>{renderScore(project.id, 'period')}</ScoreWrapper>
-          <ScoreWrapper>{renderScore(project.id, 'week')}</ScoreWrapper>
-          <ScoreWrapper>{renderTrend(project.id)}</ScoreWrapper>
-        </Fragment>
-      ))}
-    </StyledPanelTable>
+      {projects.length === 0 ? (
+        <SimpleTable.Empty>
+          <EmptyState
+            title={t('No projects with release health enabled')}
+            action={
+              <LinkButton
+                size="sm"
+                external
+                href="https://docs.sentry.io/platforms/dotnet/guides/nlog/configuration/releases/#release-health"
+              >
+                {t('Learn More')}
+              </LinkButton>
+            }
+          />
+        </SimpleTable.Empty>
+      ) : (
+        groupedProjects.map(({project}) => (
+          <SimpleTable.Row key={project.id}>
+            <SimpleTable.RowCell>
+              <ProjectBadgeContainer>
+                <ProjectBadge avatarSize={18} project={project} />
+              </ProjectBadgeContainer>
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell>
+              {periodSessions && weekSessions && !isLoading && (
+                <MiniBarChart
+                  isGroupedByDate
+                  showTimeInTooltip
+                  series={getMiniBarChartSeries(project, periodSessions)}
+                  height={25}
+                  tooltip={{
+                    appendToBody: true,
+                    trigger: 'axis',
+                    valueFormatter: value => `${Number(value).toLocaleString()}%`,
+                  }}
+                />
+              )}
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell justify="end">
+              {renderScore(project.id, 'period')}
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell justify="end">
+              {renderScore(project.id, 'week')}
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell justify="end">
+              {renderTrend(project.id)}
+            </SimpleTable.RowCell>
+          </SimpleTable.Row>
+        ))
+      )}
+    </StyledSimpleTable>
   );
 }
 
-export default TeamStability;
-
-const StyledPanelTable = styled(PanelTable)<{isEmpty: boolean}>`
+const StyledSimpleTable = styled(TeamInsightsTable)`
   grid-template-columns: 1fr 0.2fr 0.2fr 0.2fr 0.2fr;
-  font-size: ${p => p.theme.fontSize.md};
-  white-space: nowrap;
-  margin-bottom: 0;
-  border: 0;
-  box-shadow: unset;
-  /* overflow when bar chart tooltip gets cutoff for the top row */
-  overflow: visible;
-
-  & > div {
-    padding: ${space(1)} ${space(2)};
-  }
-
-  ${p =>
-    p.isEmpty &&
-    css`
-      & > div:last-child {
-        padding: 48px ${space(2)};
-      }
-    `}
 `;
 
 const RightAligned = styled('span')`
   text-align: right;
 `;
 
-const ScoreWrapper = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  text-align: right;
-`;
-
 const PaddedIconArrow = styled(IconArrow)`
-  margin: 0 ${space(0.5)};
-`;
-
-const SubText = styled('div')<{color: ColorOrAlias}>`
-  color: ${p => p.theme[p.color]};
+  margin: 0 ${p => p.theme.space.xs};
 `;

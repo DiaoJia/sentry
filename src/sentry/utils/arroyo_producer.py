@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import atexit
+import os
 from collections import deque
 from collections.abc import Callable
-from typing import Deque
 
 from arroyo.backends.abstract import ProducerFuture
-from arroyo.backends.kafka import KafkaPayload, KafkaProducer
-from arroyo.types import BrokerValue, Partition, Topic
+from arroyo.backends.kafka import (
+    FutureTrackingProducer,
+    KafkaPayload,
+    KafkaProducer,
+    build_kafka_producer_configuration,
+)
+from arroyo.backends.kafka.producer import CloseableProducerProtocol
+from arroyo.types import BrokerValue, Partition
+from arroyo.types import Topic as ArroyoTopic
+
+from sentry import options
+from sentry.conf.types.kafka_definition import Topic
+from sentry.utils.kafka_config import get_kafka_producer_cluster_options, get_topic_definition
 
 _ProducerFuture = ProducerFuture[BrokerValue[KafkaPayload]]
 
@@ -17,7 +28,7 @@ class SingletonProducer:
     A Kafka producer that can be instantiated as a global
     variable/singleton/service.
 
-    It is supposed to be used in Celery tasks, where we want to flush the
+    It is supposed to be used in tasks, where we want to flush the
     producer on process shutdown.
     """
 
@@ -26,10 +37,22 @@ class SingletonProducer:
     ) -> None:
         self._producer: KafkaProducer | None = None
         self._factory = kafka_producer_factory
-        self._futures: Deque[_ProducerFuture] = deque()
+        self._futures: deque[_ProducerFuture] = deque()
         self.max_futures = max_futures
 
-    def produce(self, destination: Topic | Partition, payload: KafkaPayload) -> _ProducerFuture:
+        # This fixes a shutdown-ordering bug with OutcomeAggregator, which
+        # flushes buffered outcomes into a producer from its own atexit handler.
+        # atexit runs handlers in reverse registration order. When we registered
+        # our shutdown lazily (on the first produce), it ran after the
+        # aggregator's, so the producer was closed before that flush could run
+        # and the flush failed with "producer has been closed". Registering here,
+        # at construction (import time), makes our close run after the flush.
+        # _shutdown is a no-op when the producer was never created.
+        atexit.register(self._shutdown)
+
+    def produce(
+        self, destination: ArroyoTopic | Partition, payload: KafkaPayload
+    ) -> _ProducerFuture:
         future = self._get().produce(destination, payload)
         self._track_futures(future)
         return future
@@ -37,7 +60,6 @@ class SingletonProducer:
     def _get(self) -> KafkaProducer:
         if self._producer is None:
             self._producer = self._factory()
-            atexit.register(self._shutdown)
 
         return self._producer
 
@@ -60,3 +82,76 @@ class SingletonProducer:
 
         if self._producer:
             self._producer.close()
+
+
+def get_arroyo_producer(
+    name: str,
+    topic: Topic | str,
+    additional_config: dict | None = None,
+    exclude_config_keys: list[str] | None = None,
+    **kafka_producer_kwargs,
+) -> KafkaProducer:
+    """
+    Get an arroyo producer for a given topic.
+
+    Args:
+        name: Unique identifier for this producer (used as client.id, for metrics and killswitches)
+        topic: The Kafka topic this producer will write to
+        additional_config: Additional Kafka configuration to merge with defaults
+        exclude_config_keys: List of config keys to exclude from the default configuration
+        **kafka_producer_kwargs: Additional keyword arguments passed to KafkaProducer
+
+    Returns:
+        KafkaProducer
+    """
+    topic_definition = get_topic_definition(topic)
+
+    producer_config = get_kafka_producer_cluster_options(topic_definition["cluster"])
+
+    # temp(benmckerry): roll out poll metrics to our producers
+    poll_metrics_map = options.get("arroyo.producer.record_poll_metrics") or []
+    record_poll_metrics = False
+    if name in poll_metrics_map or "all" in poll_metrics_map:
+        record_poll_metrics = True
+    poll_metric_frequency = options.get("arroyo.producer.poll_metric_frequency")
+
+    # Remove any excluded config keys
+    if exclude_config_keys:
+        for key in exclude_config_keys:
+            producer_config.pop(key, None)
+
+    # Apply additional config
+    if additional_config:
+        producer_config.update(additional_config)
+
+    producer_config["client.id"] = name
+
+    return KafkaProducer(
+        build_kafka_producer_configuration(default_config=producer_config),
+        record_poll_metrics=record_poll_metrics,
+        poll_metric_frequency=poll_metric_frequency,
+        **kafka_producer_kwargs,
+    )
+
+
+def get_future_tracking_producer(
+    producer_name: str,
+    producer_factory: Callable[[], CloseableProducerProtocol],
+) -> FutureTrackingProducer:
+    """
+    Helper function to get a FutureTrackingProducer instance.
+    This producer:
+    - Applies backpressure on produces if the librdkafka produce buffer is filling up
+    - Optionally tracks producer futures if the `ARROYO_TRACK_PRODUCER_FUTURES` env var
+      is configured
+      - This is used by taskworkers to guarantee at-least-once delivery for messages
+        produced from tasks
+
+    For more information please see the `FutureTrackingProducer` docstring.
+    """
+
+    return FutureTrackingProducer(
+        name=producer_name,
+        producer_factory=producer_factory,
+        should_track_futures=os.getenv("ARROYO_TRACK_PRODUCER_FUTURES", "").lower() == "true",
+    )

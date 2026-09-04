@@ -1,24 +1,33 @@
-import {render, screen, userEvent, waitFor} from 'sentry-test/reactTestingLibrary';
-import selectEvent from 'sentry-test/selectEvent';
+import {ApiTokenFixture} from 'sentry-fixture/apiToken';
 
+import {
+  render,
+  renderGlobalModal,
+  screen,
+  userEvent,
+  waitFor,
+} from 'sentry-test/reactTestingLibrary';
+import {selectEvent} from 'sentry-test/selectEvent';
+
+import * as indicators from 'sentry/actionCreators/indicator';
 import ApiNewToken from 'sentry/views/settings/account/apiNewToken';
 
-describe('ApiNewToken', function () {
-  it('renders', function () {
+describe('ApiNewToken', () => {
+  it('renders', () => {
     render(<ApiNewToken />);
   });
 
-  it('renders with disabled "Create Token" button', function () {
+  it('renders with disabled "Create Token" button', () => {
     render(<ApiNewToken />);
 
     expect(screen.getByRole('button', {name: 'Create Token'})).toBeDisabled();
   });
 
-  it('submits with correct hierarchical scopes', async function () {
+  it('submits with correct hierarchical scopes', async () => {
     MockApiClient.clearMockResponses();
     const assignMock = MockApiClient.addMockResponse({
       method: 'POST',
-      url: `/api-tokens/`,
+      url: '/api-tokens/',
     });
 
     render(<ApiNewToken />);
@@ -67,11 +76,11 @@ describe('ApiNewToken', function () {
     );
   });
 
-  it('creates token with optional name', async function () {
+  it('creates token with optional name', async () => {
     MockApiClient.clearMockResponses();
     const assignMock = MockApiClient.addMockResponse({
       method: 'POST',
-      url: `/api-tokens/`,
+      url: '/api-tokens/',
     });
 
     render(<ApiNewToken />);
@@ -105,11 +114,11 @@ describe('ApiNewToken', function () {
     );
   });
 
-  it('creates token without name', async function () {
+  it('creates token without name', async () => {
     MockApiClient.clearMockResponses();
     const assignMock = MockApiClient.addMockResponse({
       method: 'POST',
-      url: `/api-tokens/`,
+      url: '/api-tokens/',
     });
 
     render(<ApiNewToken />);
@@ -139,5 +148,61 @@ describe('ApiNewToken', function () {
         })
       )
     );
+  });
+
+  it('shows new token modal after successful creation', async () => {
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      method: 'POST',
+      url: '/api-tokens/',
+      body: ApiTokenFixture({token: 'sntrys_test_token_123'}),
+    });
+
+    render(<ApiNewToken />);
+    renderGlobalModal();
+
+    await selectEvent.select(screen.getByRole('textbox', {name: 'Project'}), 'Read');
+
+    await userEvent.click(screen.getByRole('button', {name: 'Create Token'}));
+
+    expect(await screen.findByLabelText('Generated token')).toHaveValue(
+      'sntrys_test_token_123'
+    );
+  });
+
+  it('displays permissions preview when scopes are selected', async () => {
+    render(<ApiNewToken />);
+
+    await selectEvent.select(screen.getByRole('textbox', {name: 'Project'}), 'Read');
+    expect(screen.getByText(/project:read/)).toBeInTheDocument();
+
+    await selectEvent.select(screen.getByRole('textbox', {name: 'Team'}), 'Admin');
+    expect(screen.getByText(/team:admin/)).toBeInTheDocument();
+  });
+
+  it('shows error message when token creation fails', async () => {
+    jest.spyOn(indicators, 'addErrorMessage');
+
+    MockApiClient.clearMockResponses();
+    MockApiClient.addMockResponse({
+      method: 'POST',
+      url: '/api-tokens/',
+      statusCode: 400,
+    });
+
+    render(<ApiNewToken />);
+
+    await selectEvent.select(screen.getByRole('textbox', {name: 'Project'}), 'Read');
+
+    await userEvent.click(screen.getByRole('button', {name: 'Create Token'}));
+
+    await waitFor(() => expect(indicators.addErrorMessage).toHaveBeenCalled());
+  });
+
+  it('does not render CI-only permissions for personal tokens', () => {
+    render(<ApiNewToken />);
+    expect(
+      screen.queryByRole('checkbox', {name: 'Continuous Integration (CI)'})
+    ).not.toBeInTheDocument();
   });
 });

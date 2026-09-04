@@ -1,40 +1,35 @@
-import {Component, createRef, Fragment} from 'react';
+import {Fragment, useCallback, useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
-import {css, type Theme, withTheme} from '@emotion/react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
+
+import {Button} from '@sentry/scraps/button';
+import {Grid, type GridProps} from '@sentry/scraps/layout';
 
 import {parseArithmetic} from 'sentry/components/arithmeticInput/parser';
 import {SectionHeading} from 'sentry/components/charts/styles';
-import {Button} from 'sentry/components/core/button';
-import {ButtonBar} from 'sentry/components/core/button/buttonBar';
-import {Input} from 'sentry/components/core/input';
-import {Tooltip} from 'sentry/components/core/tooltip';
+import {DragReorderButton} from 'sentry/components/dnd/dragReorderButton';
 import {getOffsetOfElement} from 'sentry/components/performance/waterfall/utils';
-import {IconAdd, IconDelete, IconGrabbable, IconWarning} from 'sentry/icons';
+import {IconAdd, IconDelete} from 'sentry/icons';
 import {t} from 'sentry/locale';
-import {space} from 'sentry/styles/space';
 import type {Organization} from 'sentry/types/organization';
 import {trackAnalytics} from 'sentry/utils/analytics';
 import type {Column} from 'sentry/utils/discover/fields';
 import {
   AGGREGATIONS,
-  generateFieldAsString,
+  generateEquationFieldAsString,
   hasDuplicate,
   isLegalEquationColumn,
 } from 'sentry/utils/discover/fields';
 import {getPointerPosition} from 'sentry/utils/touch';
 import type {UserSelectValues} from 'sentry/utils/userselect';
 import {setBodyUserSelect} from 'sentry/utils/userselect';
-import {WidgetType} from 'sentry/views/dashboards/types';
-import {FieldKey} from 'sentry/views/dashboards/widgetBuilder/issueWidget/fields';
 import {SESSIONS_OPERATIONS} from 'sentry/views/dashboards/widgetBuilder/releaseWidget/fields';
 import type {generateFieldOptions} from 'sentry/views/discover/utils';
 
 import type {FieldValueOption} from './queryField';
 import {QueryField} from './queryField';
 import {FieldValueKind} from './types';
-
-type Sources = WidgetType;
 
 type Props = {
   // Input columns
@@ -43,14 +38,9 @@ type Props = {
   // Fired when columns are added/removed/modified
   onChange: (columns: Column[]) => void;
   organization: Organization;
-  theme: Theme;
   className?: string;
   filterAggregateParameters?: (option: FieldValueOption) => boolean;
   filterPrimaryOptions?: (option: FieldValueOption) => boolean;
-  isOnDemandWidget?: boolean;
-  noFieldsMessage?: string;
-  showAliasField?: boolean;
-  source?: Sources;
   supportsEquations?: boolean;
 };
 
@@ -64,6 +54,8 @@ type State = {
   top: undefined | number;
 };
 
+type DragState = Omit<State, 'error'>;
+
 const DRAG_CLASS = 'draggable-item';
 const GHOST_PADDING = 4;
 const MAX_COL_COUNT = 20;
@@ -73,112 +65,137 @@ enum PlaceholderPosition {
   BOTTOM = 1,
 }
 
-class ColumnEditCollection extends Component<Props, State> {
-  state: State = {
-    isDragging: false,
-    draggingIndex: void 0,
-    draggingTargetIndex: void 0,
-    draggingGrabbedOffset: void 0,
-    error: new Map(),
-    left: void 0,
-    top: void 0,
-  };
+function ColumnEditCollection({
+  columns,
+  fieldOptions,
+  filterAggregateParameters,
+  filterPrimaryOptions,
+  onChange,
+  organization,
+  className,
+  supportsEquations,
+}: Props) {
+  const theme = useTheme();
 
-  componentDidMount() {
-    if (!this.portal) {
+  const [error, setError] = useState<State['error']>(() => new Map());
+  const [dragState, setDragState] = useState<DragState>({
+    isDragging: false,
+    draggingIndex: undefined,
+    draggingTargetIndex: undefined,
+    draggingGrabbedOffset: undefined,
+    left: undefined,
+    top: undefined,
+  });
+
+  const portalRef = useRef<HTMLElement | null>(null);
+  const previousUserSelectRef = useRef<UserSelectValues | null>(null);
+  const dragGhostRef = useRef<HTMLDivElement>(null);
+
+  // Hold the latest drag move/end logic so the window listeners always run
+  // against current props/state without being re-attached on every render.
+  const onDragMoveRef = useRef<(event: MouseEvent | TouchEvent) => void>(() => {});
+  const onDragEndRef = useRef<(event: MouseEvent | TouchEvent) => void>(() => {});
+
+  // Stable wrappers so addEventListener/removeEventListener match.
+  const handleDragMove = useCallback((event: MouseEvent | TouchEvent) => {
+    onDragMoveRef.current(event);
+  }, []);
+  const handleDragEnd = useCallback((event: MouseEvent | TouchEvent) => {
+    onDragEndRef.current(event);
+  }, []);
+
+  const cleanUpListeners = useCallback(() => {
+    window.removeEventListener('mousemove', handleDragMove);
+    window.removeEventListener('touchmove', handleDragMove);
+    window.removeEventListener('mouseup', handleDragEnd);
+    window.removeEventListener('touchend', handleDragEnd);
+  }, [handleDragMove, handleDragEnd]);
+
+  const checkColumnErrors = useCallback((cols: Column[]) => {
+    const newError = new Map();
+    for (let i = 0; i < cols.length; i += 1) {
+      const column = cols[i]!;
+      if (column.kind === 'equation') {
+        const result = parseArithmetic(column.field);
+        if (result.error) {
+          newError.set(i, result.error);
+        }
+      }
+    }
+    setError(newError);
+  }, []);
+
+  // Set up the drag ghost portal and run the initial error check on mount.
+  useEffect(() => {
+    if (!portalRef.current) {
       const portal = document.createElement('div');
 
       portal.style.position = 'absolute';
       portal.style.top = '0';
       portal.style.left = '0';
-      portal.style.zIndex = String(this.props.theme.zIndex.modal);
+      portal.style.zIndex = String(theme.zIndex.modal);
 
-      this.portal = portal;
+      portalRef.current = portal;
 
-      document.body.appendChild(this.portal);
+      document.body.appendChild(portal);
     }
-    this.checkColumnErrors(this.props.columns);
-  }
+    checkColumnErrors(columns);
 
-  componentWillUnmount() {
-    if (this.portal) {
-      document.body.removeChild(this.portal);
-    }
-    this.cleanUpListeners();
-  }
-
-  checkColumnErrors(columns: Column[]) {
-    const error = new Map();
-    for (let i = 0; i < columns.length; i += 1) {
-      const column = columns[i]!;
-      if (column.kind === 'equation') {
-        const result = parseArithmetic(column.field);
-        if (result.error) {
-          error.set(i, result.error);
-        }
+    return () => {
+      if (portalRef.current) {
+        document.body.removeChild(portalRef.current);
+        portalRef.current = null;
       }
-    }
-    this.setState({error});
-  }
+      cleanUpListeners();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  previousUserSelect: UserSelectValues | null = null;
-  portal: HTMLElement | null = null;
-  dragGhostRef = createRef<HTMLDivElement>();
-
-  keyForColumn(column: Column, isGhost: boolean): string {
+  const keyForColumn = (column: Column, isGhost: boolean): string => {
     if (column.kind === 'function') {
       return [...column.function, isGhost].join(':');
     }
     return [...column.field, isGhost].join(':');
-  }
-
-  cleanUpListeners() {
-    if (this.state.isDragging) {
-      window.removeEventListener('mousemove', this.onDragMove);
-      window.removeEventListener('touchmove', this.onDragMove);
-      window.removeEventListener('mouseup', this.onDragEnd);
-      window.removeEventListener('touchend', this.onDragEnd);
-    }
-  }
+  };
 
   // Signal to the parent that a new column has been added.
-  handleAddColumn = () => {
+  const handleAddColumn = () => {
     const newColumn: Column = {kind: 'field', field: ''};
-    this.props.onChange([...this.props.columns, newColumn]);
+    onChange([...columns, newColumn]);
   };
 
-  handleAddEquation = () => {
-    const {organization} = this.props;
+  const handleAddEquation = () => {
     const newColumn: Column = {kind: FieldValueKind.EQUATION, field: ''};
     trackAnalytics('discover_v2.add_equation', {organization});
-    this.props.onChange([...this.props.columns, newColumn]);
+    onChange([...columns, newColumn]);
   };
 
-  handleUpdateColumn = (index: number, updatedColumn: Column) => {
-    const newColumns = [...this.props.columns];
+  const handleUpdateColumn = (index: number, updatedColumn: Column) => {
+    const newColumns = [...columns];
 
     if (updatedColumn.kind === 'equation') {
-      this.setState(prevState => {
-        const error = new Map(prevState.error);
-        error.set(index, parseArithmetic(updatedColumn.field).error);
-        return {
-          ...prevState,
-          error,
-        };
+      setError(prevError => {
+        const newError = new Map(prevError);
+        newError.set(index, parseArithmetic(updatedColumn.field).error);
+        return newError;
       });
     } else {
       // Update any equations that contain the existing column
-      this.updateEquationFields(newColumns, index, updatedColumn);
+      updateEquationFields(newColumns, index, updatedColumn);
     }
 
     newColumns.splice(index, 1, updatedColumn);
-    this.props.onChange(newColumns);
+    onChange(newColumns);
   };
 
-  updateEquationFields = (newColumns: Column[], index: number, updatedColumn: Column) => {
+  const updateEquationFields = (
+    newColumns: Column[],
+    index: number,
+    updatedColumn: Column
+  ) => {
     const oldColumn = newColumns[index]!;
-    const existingColumn = generateFieldAsString(newColumns[index]!);
-    const updatedColumnString = generateFieldAsString(updatedColumn);
+    const existingColumn = generateEquationFieldAsString(newColumns[index]!);
+    const updatedColumnString = generateEquationFieldAsString(updatedColumn);
     if (!isLegalEquationColumn(updatedColumn) || hasDuplicate(newColumns, oldColumn)) {
       return;
     }
@@ -220,18 +237,18 @@ class ColumnEditCollection extends Component<Props, State> {
     }
   };
 
-  removeColumn(index: number) {
-    const newColumns = [...this.props.columns];
+  const removeColumn = (index: number) => {
+    const newColumns = [...columns];
     newColumns.splice(index, 1);
-    this.checkColumnErrors(newColumns);
-    this.props.onChange(newColumns);
-  }
+    checkColumnErrors(newColumns);
+    onChange(newColumns);
+  };
 
-  startDrag(
+  const startDrag = (
     event: React.MouseEvent<HTMLElement> | React.TouchEvent<HTMLElement>,
     index: number
-  ) {
-    const isDragging = this.state.isDragging;
+  ) => {
+    const isDragging = dragState.isDragging;
     if (isDragging || !['mousedown', 'touchstart'].includes(event.type)) {
       return;
     }
@@ -254,7 +271,7 @@ class ColumnEditCollection extends Component<Props, State> {
     };
 
     // prevent the user from selecting things when dragging a column.
-    this.previousUserSelect = setBodyUserSelect({
+    previousUserSelectRef.current = setBodyUserSelect({
       userSelect: 'none',
       MozUserSelect: 'none',
       msUserSelect: 'none',
@@ -262,12 +279,12 @@ class ColumnEditCollection extends Component<Props, State> {
     });
 
     // attach event listeners so that the mouse cursor can drag anywhere
-    window.addEventListener('mousemove', this.onDragMove);
-    window.addEventListener('touchmove', this.onDragMove);
-    window.addEventListener('mouseup', this.onDragEnd);
-    window.addEventListener('touchend', this.onDragEnd);
+    window.addEventListener('mousemove', handleDragMove);
+    window.addEventListener('touchmove', handleDragMove);
+    window.addEventListener('mouseup', handleDragEnd);
+    window.addEventListener('touchend', handleDragEnd);
 
-    this.setState({
+    setDragState({
       isDragging: true,
       draggingIndex: index,
       draggingTargetIndex: index,
@@ -275,10 +292,10 @@ class ColumnEditCollection extends Component<Props, State> {
       top,
       left,
     });
-  }
+  };
 
-  onDragMove = (event: MouseEvent | TouchEvent) => {
-    const {isDragging, draggingTargetIndex, draggingGrabbedOffset} = this.state;
+  const onDragMove = (event: MouseEvent | TouchEvent) => {
+    const {isDragging, draggingTargetIndex, draggingGrabbedOffset} = dragState;
 
     if (!isDragging || !['mousemove', 'touchmove'].includes(event.type)) {
       return;
@@ -292,9 +309,9 @@ class ColumnEditCollection extends Component<Props, State> {
     const dragOffsetX = draggingGrabbedOffset?.x ?? 0;
     const dragOffsetY = draggingGrabbedOffset?.y ?? 0;
 
-    if (this.dragGhostRef.current) {
+    if (dragGhostRef.current) {
       // move the ghost box
-      const ghostDOM = this.dragGhostRef.current;
+      const ghostDOM = dragGhostRef.current;
       // Adjust so cursor is over the grab handle.
       ghostDOM.style.left = `${pointerX - dragOffsetX}px`;
       ghostDOM.style.top = `${pointerY - dragOffsetY}px`;
@@ -313,75 +330,40 @@ class ColumnEditCollection extends Component<Props, State> {
     });
 
     // Issue column in Issue widgets are fixed (cannot be moved or deleted)
-    if (
-      targetIndex >= 0 &&
-      targetIndex !== draggingTargetIndex &&
-      !this.isFixedMetricsColumn(targetIndex)
-    ) {
-      this.setState({draggingTargetIndex: targetIndex});
+    if (targetIndex >= 0 && targetIndex !== draggingTargetIndex) {
+      setDragState(prev => ({...prev, draggingTargetIndex: targetIndex}));
     }
   };
+  onDragMoveRef.current = onDragMove;
 
-  isFixedIssueColumn = (columnIndex: number) => {
-    const {source, columns} = this.props;
-    const column = columns[columnIndex]!;
-    const issueFieldColumnCount = columns.filter(
-      col => col.kind === 'field' && col.field === FieldKey.ISSUE
-    ).length;
-    return (
-      issueFieldColumnCount <= 1 &&
-      source === WidgetType.ISSUE &&
-      column.kind === 'field' &&
-      column.field === FieldKey.ISSUE
-    );
-  };
-
-  isFixedMetricsColumn = (columnIndex: number) => {
-    const {source} = this.props;
-    return source === WidgetType.METRICS && columnIndex === 0;
-  };
-
-  isRemainingReleaseHealthAggregate = (columnIndex: number) => {
-    const {source, columns} = this.props;
-    const column = columns[columnIndex]!;
-    const aggregateCount = columns.filter(
-      col => col.kind === FieldValueKind.FUNCTION
-    ).length;
-    return (
-      aggregateCount <= 1 &&
-      source === WidgetType.RELEASE &&
-      column.kind === FieldValueKind.FUNCTION
-    );
-  };
-
-  onDragEnd = (event: MouseEvent | TouchEvent) => {
-    if (!this.state.isDragging || !['mouseup', 'touchend'].includes(event.type)) {
+  const onDragEnd = (event: MouseEvent | TouchEvent) => {
+    if (!dragState.isDragging || !['mouseup', 'touchend'].includes(event.type)) {
       return;
     }
 
-    const sourceIndex = this.state.draggingIndex;
-    const targetIndex = this.state.draggingTargetIndex;
+    const sourceIndex = dragState.draggingIndex;
+    const targetIndex = dragState.draggingTargetIndex;
     if (typeof sourceIndex !== 'number' || typeof targetIndex !== 'number') {
       return;
     }
 
     // remove listeners that were attached in startColumnDrag
-    this.cleanUpListeners();
+    cleanUpListeners();
 
     // restore body user-select values
-    if (this.previousUserSelect) {
-      setBodyUserSelect(this.previousUserSelect);
-      this.previousUserSelect = null;
+    if (previousUserSelectRef.current) {
+      setBodyUserSelect(previousUserSelectRef.current);
+      previousUserSelectRef.current = null;
     }
 
     // Reorder columns and trigger change.
-    const newColumns = [...this.props.columns];
+    const newColumns = [...columns];
     const removed = newColumns.splice(sourceIndex, 1);
     newColumns.splice(targetIndex, 0, removed[0]!);
-    this.checkColumnErrors(newColumns);
-    this.props.onChange(newColumns);
+    checkColumnErrors(newColumns);
+    onChange(newColumns);
 
-    this.setState({
+    setDragState({
       isDragging: false,
       left: undefined,
       top: undefined,
@@ -390,75 +372,63 @@ class ColumnEditCollection extends Component<Props, State> {
       draggingGrabbedOffset: undefined,
     });
   };
+  onDragEndRef.current = onDragEnd;
 
-  renderGhost({gridColumns, singleColumn}: {gridColumns: number; singleColumn: boolean}) {
-    const {isDragging, draggingIndex, draggingGrabbedOffset} = this.state;
+  const renderGhost = ({gridColumns}: {gridColumns: number}) => {
+    const {isDragging, draggingIndex, draggingGrabbedOffset} = dragState;
 
     const index = draggingIndex;
-    if (typeof index !== 'number' || !isDragging || !this.portal) {
+    if (typeof index !== 'number' || !isDragging || !portalRef.current) {
       return null;
     }
     const dragOffsetX = draggingGrabbedOffset?.x ?? 0;
     const dragOffsetY = draggingGrabbedOffset?.y ?? 0;
 
-    const top = Number(this.state.top) - dragOffsetY;
-    const left = Number(this.state.left) - dragOffsetX;
-    const col = this.props.columns[index]!;
+    const top = Number(dragState.top) - dragOffsetY;
+    const left = Number(dragState.left) - dragOffsetX;
+    const col = columns[index]!;
 
     const style = {
       top: `${top}px`,
       left: `${left}px`,
     };
     const ghost = (
-      <Ghost ref={this.dragGhostRef} style={style}>
-        {this.renderItem(col, index, {
-          singleColumn,
+      <Ghost ref={dragGhostRef} style={style}>
+        {renderItem(col, index, {
           isGhost: true,
           gridColumns,
         })}
       </Ghost>
     );
 
-    return createPortal(ghost, this.portal);
-  }
+    return createPortal(ghost, portalRef.current);
+  };
 
-  renderItem(
+  const renderItem = (
     col: Column,
     i: number,
     {
-      singleColumn = false,
       canDelete = true,
       canDrag = true,
       isGhost = false,
-      gridColumns = 2,
+      gridColumns,
       disabled = false,
     }: {
       gridColumns: number;
-      singleColumn: boolean;
       canDelete?: boolean;
       canDrag?: boolean;
       disabled?: boolean;
       isGhost?: boolean;
     }
-  ) {
-    const {
-      columns,
-      fieldOptions,
-      filterAggregateParameters,
-      filterPrimaryOptions,
-      noFieldsMessage,
-      showAliasField,
-      // source,
-      isOnDemandWidget,
-    } = this.props;
-    const {isDragging, draggingTargetIndex, draggingIndex} = this.state;
+  ) => {
+    const {isDragging, draggingTargetIndex, draggingIndex} = dragState;
 
     let placeholder: React.ReactNode = null;
     // Add a placeholder above the target row.
-    if (isDragging && isGhost === false && draggingTargetIndex === i) {
+    if (isDragging && !isGhost && draggingTargetIndex === i) {
       placeholder = (
         <DragPlaceholder
-          key={`placeholder:${this.keyForColumn(col, isGhost)}`}
+          key={`placeholder:${keyForColumn(col, isGhost)}`}
           className={DRAG_CLASS}
         />
       );
@@ -466,7 +436,7 @@ class ColumnEditCollection extends Component<Props, State> {
 
     // If the current row is the row in the drag ghost return the placeholder
     // or a hole if the placeholder is elsewhere.
-    if (isDragging && isGhost === false && draggingIndex === i) {
+    if (isDragging && !isGhost && draggingIndex === i) {
       return placeholder;
     }
 
@@ -476,255 +446,149 @@ class ColumnEditCollection extends Component<Props, State> {
         : PlaceholderPosition.BOTTOM;
 
     return (
-      <Fragment key={`${i}:${this.keyForColumn(col, isGhost)}`}>
+      <Fragment key={`${i}:${keyForColumn(col, isGhost)}`}>
         {position === PlaceholderPosition.TOP && placeholder}
-        <RowContainer
-          showAliasField={showAliasField}
-          singleColumn={singleColumn}
-          className={isGhost ? '' : DRAG_CLASS}
-        >
+        <RowContainer className={isGhost ? '' : DRAG_CLASS}>
           {canDrag ? (
-            <DragAndReorderButton
-              aria-label={t('Drag to reorder')}
-              onMouseDown={event => this.startDrag(event, i)}
-              onTouchStart={event => this.startDrag(event, i)}
-              icon={<IconGrabbable size="xs" />}
-              size="zero"
-              borderless
+            <StyledDragReorderButton
+              onMouseDown={event => startDrag(event, i)}
+              onTouchStart={event => startDrag(event, i)}
             />
-          ) : singleColumn && showAliasField ? null : (
+          ) : (
             <span />
           )}
           <QueryField
             fieldOptions={fieldOptions}
             gridColumns={gridColumns}
             fieldValue={col}
-            onChange={value => this.handleUpdateColumn(i, value)}
-            error={this.state.error.get(i)}
-            takeFocus={i === this.props.columns.length - 1}
+            onChange={value => handleUpdateColumn(i, value)}
+            error={error.get(i)}
+            takeFocus={i === columns.length - 1}
             otherColumns={columns}
             shouldRenderTag
             disabled={disabled}
             filterPrimaryOptions={filterPrimaryOptions}
             filterAggregateParameters={filterAggregateParameters}
-            noFieldsMessage={noFieldsMessage}
-            skipParameterPlaceholder={showAliasField}
           />
-          {showAliasField && (
-            <AliasField singleColumn={singleColumn}>
-              <AliasInput
-                name="alias"
-                placeholder={t('Alias')}
-                value={col.alias ?? ''}
-                onChange={value => {
-                  this.handleUpdateColumn(i, {
-                    ...col,
-                    alias: value.target.value,
-                  });
-                }}
-              />
-            </AliasField>
-          )}
           {canDelete || col.kind === 'equation' ? (
-            showAliasField ? (
-              <RemoveButton
-                data-test-id={`remove-column-${i}`}
-                aria-label={t('Remove column')}
-                title={t('Remove column')}
-                onClick={() => this.removeColumn(i)}
-                icon={<IconDelete />}
-                borderless
-              />
-            ) : (
-              <RemoveButton
-                data-test-id={`remove-column-${i}`}
-                aria-label={t('Remove column')}
-                onClick={() => this.removeColumn(i)}
-                icon={<IconDelete />}
-                borderless
-              />
-            )
-          ) : singleColumn && showAliasField ? null : (
+            <RemoveButton
+              data-test-id={`remove-column-${i}`}
+              aria-label={t('Remove column')}
+              onClick={() => removeColumn(i)}
+              icon={<IconDelete />}
+              variant="transparent"
+            />
+          ) : (
             <span />
           )}
-
-          {isOnDemandWidget && col.kind === 'equation' ? (
-            <OnDemandEquationsWarning />
-          ) : null}
         </RowContainer>
         {position === PlaceholderPosition.BOTTOM && placeholder}
       </Fragment>
     );
-  }
+  };
 
-  render() {
-    const {className, columns, showAliasField, source, supportsEquations} = this.props;
-    const canDelete = columns.filter(field => field.kind !== 'equation').length > 1;
-    const canDrag = columns.length > 1;
-    const canAdd = columns.length < MAX_COL_COUNT;
-    const title = canAdd
-      ? undefined
-      : t(
-          `Sorry, you've reached the maximum number of columns (%d). Delete columns to add more.`,
-          MAX_COL_COUNT
-        );
+  const canDelete = columns.filter(field => field.kind !== 'equation').length > 1;
+  const canDrag = columns.length > 1;
+  const canAdd = columns.length < MAX_COL_COUNT;
+  const title = canAdd
+    ? undefined
+    : t(
+        "Sorry, you've reached the maximum number of columns (%d). Delete columns to add more.",
+        MAX_COL_COUNT
+      );
 
-    const singleColumn = columns.length === 1;
+  // Get the longest number of columns so we can layout the rows.
+  // We always want at least 2 columns.
+  const gridColumns = Math.max(
+    ...columns.map(col => {
+      if (col.kind !== 'function') {
+        return 2;
+      }
+      const operation =
+        // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+        AGGREGATIONS[col.function[0]] ?? SESSIONS_OPERATIONS[col.function[0]];
+      if (!operation?.parameters) {
+        // Operation should be in the look-up table, but not all operations are (eg. private). This should be changed at some point.
+        return 3;
+      }
+      return operation.parameters.length === 2 ? 3 : 2;
+    })
+  );
 
-    // Get the longest number of columns so we can layout the rows.
-    // We always want at least 2 columns.
-    const gridColumns =
-      source === WidgetType.ISSUE
-        ? 1
-        : Math.max(
-            ...columns.map(col => {
-              if (col.kind !== 'function') {
-                return 2;
-              }
-              const operation =
-                // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
-                AGGREGATIONS[col.function[0]] ?? SESSIONS_OPERATIONS[col.function[0]];
-              if (!operation?.parameters) {
-                // Operation should be in the look-up table, but not all operations are (eg. private). This should be changed at some point.
-                return 3;
-              }
-              return operation.parameters.length === 2 ? 3 : 2;
-            })
-          );
-
-    return (
-      <div className={className}>
-        {this.renderGhost({gridColumns, singleColumn})}
-        {!showAliasField && source !== WidgetType.ISSUE && (
-          <RowContainer showAliasField={showAliasField} singleColumn={singleColumn}>
-            <Heading gridColumns={gridColumns}>
-              <StyledSectionHeading>{t('Tag / Field / Function')}</StyledSectionHeading>
-              <StyledSectionHeading>{t('Field Parameter')}</StyledSectionHeading>
-            </Heading>
-          </RowContainer>
-        )}
-        {columns.map((col: Column, i: number) => {
-          // Issue column in Issue widgets are fixed (cannot be changed or deleted)
-          if (this.isFixedIssueColumn(i)) {
-            return this.renderItem(col, i, {
-              singleColumn,
-              canDelete: false,
-              canDrag,
-              gridColumns,
-              disabled: true,
-            });
-          }
-          if (this.isRemainingReleaseHealthAggregate(i)) {
-            return this.renderItem(col, i, {
-              singleColumn,
-              canDelete: false,
-              canDrag,
-              gridColumns,
-            });
-          }
-          if (this.isFixedMetricsColumn(i)) {
-            return this.renderItem(col, i, {
-              singleColumn,
-              canDelete: false,
-              canDrag: false,
-              gridColumns,
-            });
-          }
-          return this.renderItem(col, i, {
-            singleColumn,
-            canDelete,
-            canDrag,
-            gridColumns,
-          });
-        })}
-        <RowContainer showAliasField={showAliasField} singleColumn={singleColumn}>
-          <Actions gap={1} showAliasField={showAliasField}>
+  return (
+    <div className={className}>
+      {renderGhost({gridColumns})}
+      <RowContainer>
+        <Heading gridColumns={gridColumns}>
+          <StyledSectionHeading>{t('Tag / Field / Function')}</StyledSectionHeading>
+          <StyledSectionHeading>{t('Field Parameter')}</StyledSectionHeading>
+        </Heading>
+      </RowContainer>
+      {columns.map((col: Column, i: number) => {
+        return renderItem(col, i, {
+          canDelete,
+          canDrag,
+          gridColumns,
+        });
+      })}
+      <RowContainer>
+        <Actions>
+          <Button
+            size="sm"
+            aria-label={t('Add a Column')}
+            onClick={handleAddColumn}
+            tooltipProps={{title}}
+            disabled={!canAdd}
+            icon={<IconAdd />}
+          >
+            {t('Add a Column')}
+          </Button>
+          {supportsEquations && (
             <Button
               size="sm"
-              aria-label={t('Add a Column')}
-              onClick={this.handleAddColumn}
-              title={title}
+              aria-label={t('Add an Equation')}
+              onClick={handleAddEquation}
+              tooltipProps={{title}}
               disabled={!canAdd}
-              icon={<IconAdd isCircled />}
+              icon={<IconAdd />}
             >
-              {t('Add a Column')}
+              {t('Add an Equation')}
             </Button>
-            {supportsEquations && (
-              <Button
-                size="sm"
-                aria-label={t('Add an Equation')}
-                onClick={this.handleAddEquation}
-                title={title}
-                disabled={!canAdd}
-                icon={<IconAdd isCircled />}
-              >
-                {t('Add an Equation')}
-              </Button>
-            )}
-          </Actions>
-        </RowContainer>
-      </div>
-    );
-  }
-}
-
-function OnDemandEquationsWarning() {
-  return (
-    <OnDemandContainer>
-      <Tooltip
-        containerDisplayMode="inline-flex"
-        title={t(
-          `This is using indexed data because we don't routinely collect metrics for equations.`
-        )}
-      >
-        <IconWarning color="warningText" />
-      </Tooltip>
-    </OnDemandContainer>
+          )}
+        </Actions>
+      </RowContainer>
+    </div>
   );
 }
 
-const Actions = styled(ButtonBar)<{showAliasField?: boolean}>`
-  grid-column: ${p => (p.showAliasField ? '1/-1' : ' 2/3')};
+const Actions = styled((props: GridProps) => (
+  <Grid flow="column" align="center" gap="md" {...props} />
+))`
+  grid-column: 2/3;
   justify-content: flex-start;
 `;
 
-const RowContainer = styled('div')<{
-  singleColumn: boolean;
-  showAliasField?: boolean;
-}>`
+const RowContainer = styled('div')`
   display: grid;
-  grid-template-columns: ${space(3)} 1fr 40px 40px;
+  grid-template-columns: ${p => p.theme.space['2xl']} 1fr 40px 40px;
   justify-content: center;
   align-items: center;
   width: 100%;
   touch-action: none;
-  padding-bottom: ${space(1)};
-
-  ${p =>
-    p.showAliasField &&
-    css`
-      align-items: flex-start;
-      grid-template-columns: ${p.singleColumn ? `1fr` : `${space(3)} 1fr 40px 40px`};
-
-      @media (min-width: ${p.theme.breakpoints.small}) {
-        grid-template-columns: ${p.singleColumn
-          ? `1fr calc(200px + ${space(1)})`
-          : `${space(3)} 1fr calc(200px + ${space(1)}) 40px 40px`};
-      }
-    `};
+  padding-bottom: ${p => p.theme.space.md};
 `;
 
 const Ghost = styled('div')`
-  background: ${p => p.theme.background};
+  background: ${p => p.theme.tokens.background.primary};
   display: block;
   position: absolute;
   padding: ${GHOST_PADDING}px;
-  border-radius: ${p => p.theme.borderRadius};
+  border-radius: ${p => p.theme.radius.md};
   box-shadow: 0 0 15px rgba(0, 0, 0, 0.15);
   width: 710px;
   opacity: 0.8;
   cursor: grabbing;
-  padding-right: ${space(2)};
+  padding-right: ${p => p.theme.space.xl};
 
   & > ${RowContainer} {
     padding-bottom: 0;
@@ -735,17 +599,11 @@ const Ghost = styled('div')`
   }
 `;
 
-const OnDemandContainer = styled('div')`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-`;
-
 const DragPlaceholder = styled('div')`
-  margin: 0 ${space(3)} ${space(1)} ${space(3)};
-  border: 2px dashed ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
+  margin: 0 ${p => p.theme.space['2xl']} ${p => p.theme.space.md}
+    ${p => p.theme.space['2xl']};
+  border: 2px dashed ${p => p.theme.tokens.border.primary};
+  border-radius: ${p => p.theme.radius.md};
   height: ${p => p.theme.form.md.height};
 `;
 
@@ -755,38 +613,20 @@ const Heading = styled('div')<{gridColumns: number}>`
   /* Emulate the grid used in the column editor rows */
   display: grid;
   grid-template-columns: repeat(${p => p.gridColumns}, 1fr);
-  grid-column-gap: ${space(1)};
+  grid-column-gap: ${p => p.theme.space.md};
 `;
 
 const StyledSectionHeading = styled(SectionHeading)`
   margin: 0;
 `;
 
-const AliasInput = styled(Input)`
-  min-width: 50px;
-`;
-
-const AliasField = styled('div')<{singleColumn: boolean}>`
-  margin-top: ${space(1)};
-  @media (min-width: ${p => p.theme.breakpoints.small}) {
-    margin-top: 0;
-    margin-left: ${space(1)};
-  }
-
-  @media (max-width: ${p => p.theme.breakpoints.small}) {
-    grid-row: 2/2;
-    grid-column: ${p => (p.singleColumn ? '1/-1' : '2/2')};
-  }
-`;
-
 const RemoveButton = styled(Button)`
-  margin-left: ${space(1)};
+  margin-left: ${p => p.theme.space.md};
   height: ${p => p.theme.form.md.height};
 `;
 
-const DragAndReorderButton = styled(Button)`
+const StyledDragReorderButton = styled(DragReorderButton)`
   height: ${p => p.theme.form.md.height};
 `;
 
-const ColumnEditCollectionWithTheme = withTheme(ColumnEditCollection);
-export {ColumnEditCollectionWithTheme as ColumnEditCollection};
+export {ColumnEditCollection};
